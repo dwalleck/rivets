@@ -1,0 +1,25 @@
+[package]
+name = "rivets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "A Rust-based issue tracking system using JSONL storage"
+repository = "https://github.com/yourusername/rivets"
+keywords = ["issue-tracker", "project-management", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "rivets"
+path = "src/main.rs"
+
+[dependencies]
+rivets-jsonl = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# Test-specific dependencies can be added here

@@ -1,0 +1,47 @@
+#!/bin/sh
+#
+# Pre-commit hook combining beads sync and cargo quality gates
+#
+
+set -e
+
+echo "Running pre-commit checks..."
+
+# 1. Beads sync (if in a beads workspace)
+if command -v bd >/dev/null 2>&1 && [ -d .beads ]; then
+    echo "  → Flushing beads changes..."
+    if ! bd sync --flush-only >/dev/null 2>&1; then
+        echo "Error: Failed to flush bd changes to JSONL" >&2
+        echo "Run 'bd sync --flush-only' manually to diagnose" >&2
+        exit 1
+    fi
+
+    # Stage the JSONL file if it was modified
+    if [ -f .beads/issues.jsonl ]; then
+        git add .beads/issues.jsonl 2>/dev/null || true
+    fi
+fi
+
+# 2. Cargo format check
+echo "  → Checking code formatting..."
+if ! cargo fmt -- --check; then
+    echo "Error: Code formatting check failed. Run 'cargo fmt' to fix." >&2
+    exit 1
+fi
+
+# 3. Cargo clippy (linting)
+echo "  → Running clippy..."
+if ! cargo clippy --all-targets --all-features -- -D warnings; then
+    echo "Error: Clippy found issues. Please fix them." >&2
+    exit 1
+fi
+
+# 4. Cargo test
+echo "  → Running tests..."
+if ! cargo test --quiet; then
+    echo "Error: Tests failed. Please fix them." >&2
+    exit 1
+fi
+
+echo "✓ All pre-commit checks passed!"
+exit 0

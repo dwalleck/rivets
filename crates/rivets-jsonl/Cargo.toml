@@ -1,0 +1,18 @@
+[package]
+name = "rivets-jsonl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "A high-performance JSONL (JSON Lines) library for Rust"
+repository = "https://github.com/yourusername/rivets"
+keywords = ["jsonl", "json-lines", "streaming", "parser"]
+categories = ["parsing", "encoding"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# Test-specific dependencies can be added here

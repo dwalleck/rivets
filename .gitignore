@@ -1,0 +1,28 @@
+# Rust build artifacts
+/target/
+**/target/
+
+# Cargo.lock for libraries (keep for binaries)
+# We keep it since rivets is a binary application
+
+# Debug files
+**/*.pdb
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Cargo-husky user hooks directory
+/.cargo-husky/
+
+# Beads left-side files (internal state)
+.beads/beads.left.jsonl
+.beads/beads.left.meta.json
+.beads/metadata.json
+
+# OS files
+Thumbs.db
