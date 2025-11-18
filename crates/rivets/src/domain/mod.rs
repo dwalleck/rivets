@@ -91,6 +91,12 @@ pub struct Issue {
     /// **Note**: This field is maintained for JSONL serialization. The dependency
     /// graph in storage (petgraph) is the source of truth for internal operations.
     /// This field should be kept in sync with the graph.
+    ///
+    /// **Ordering**: Dependencies are stored in insertion-order (the order they were
+    /// added via `add_dependency()`). This means that adding and removing the same
+    /// dependency can result in different orderings in the serialized JSONL, causing
+    /// spurious diffs in version control. Future versions may sort dependencies before
+    /// serialization to ensure deterministic output.
     pub dependencies: Vec<Dependency>,
 
     /// Creation timestamp

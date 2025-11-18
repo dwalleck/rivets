@@ -10,11 +10,19 @@
 //!
 //! # Persistence
 //!
-//! **Important**: This backend does NOT persist data to disk. The `save()` method
-//! is a no-op and exists only to satisfy the `IssueStorage` trait contract.
+//! This backend supports **optional JSONL persistence** via the `load_from_jsonl()` and
+//! `save_to_jsonl()` functions. Data can be loaded from and saved to disk while maintaining
+//! fast in-memory operations.
 //!
-//! For persistent storage, use:
-//! - `StorageBackend::Jsonl` - File-based storage using JSON Lines format
+//! - **In-memory only**: Use `new_in_memory_storage()` for ephemeral storage
+//! - **With persistence**: Use `load_from_jsonl()` to load from disk, then periodically
+//!   call `save_to_jsonl()` to persist changes
+//!
+//! The trait's `save()` method is a no-op for in-memory storage. Use `save_to_jsonl()`
+//! directly for file-based persistence.
+//!
+//! For future backends:
+//! - `StorageBackend::Jsonl` - Dedicated JSONL backend (future)
 //! - `StorageBackend::PostgreSQL` - Production-ready database backend (future)
 //!
 //! # Architecture
@@ -203,6 +211,20 @@ pub fn new_in_memory_storage(prefix: String) -> Box<dyn IssueStorage> {
 /// - **Malformed JSON**: Skips the line and adds a warning
 /// - **Orphaned dependencies**: Skips the dependency edge and adds a warning
 /// - **Circular dependencies**: Skips the dependency edge and adds a warning
+///
+/// # Memory Considerations
+///
+/// This function loads the entire JSONL file into memory during parsing. The three-pass
+/// loading algorithm requires all issues to be held in memory simultaneously.
+///
+/// **Expected limits**:
+/// - Small databases (< 1,000 issues): Negligible memory usage (~1-2 MB)
+/// - Medium databases (1,000 - 10,000 issues): ~10-20 MB memory spike during load
+/// - Large databases (> 10,000 issues): Consider the file size; expect memory usage
+///   approximately 2-3x the JSONL file size during loading
+///
+/// For databases with tens of thousands of issues, monitor memory usage during load.
+/// Future versions may implement streaming or chunked loading for very large databases.
 ///
 /// # Returns
 ///
@@ -558,6 +580,23 @@ impl IssueStorage for InMemoryStorage {
                 from: from.clone(),
                 to: to.clone(),
             });
+        }
+
+        // Check for duplicate dependency
+        let issue = inner
+            .issues
+            .get(from)
+            .ok_or_else(|| Error::IssueNotFound(from.clone()))?;
+
+        if issue
+            .dependencies
+            .iter()
+            .any(|dep| dep.depends_on_id == *to)
+        {
+            return Err(Error::Storage(format!(
+                "Dependency already exists: {} -> {}",
+                from, to
+            )));
         }
 
         // Add edge to graph
@@ -1547,6 +1586,111 @@ mod tests {
 
         // Verify final file exists
         assert!(file_path.exists(), "Final file should exist");
+
+        temp_dir.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_load_jsonl_with_circular_dependency() {
+        use tempfile::tempdir;
+
+        // Create two issues with circular dependencies manually
+        let temp_dir = tempdir().unwrap();
+        let file_path = temp_dir.path().join("circular.jsonl");
+
+        let issue1 = Issue {
+            id: IssueId::new("test-1"),
+            title: "Issue 1".to_string(),
+            description: "Test".to_string(),
+            status: IssueStatus::Open,
+            priority: 1,
+            issue_type: IssueType::Task,
+            assignee: None,
+            labels: vec![],
+            design: None,
+            acceptance_criteria: None,
+            notes: None,
+            external_ref: None,
+            dependencies: vec![Dependency {
+                depends_on_id: IssueId::new("test-2"),
+                dep_type: DependencyType::Blocks,
+            }],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            closed_at: None,
+        };
+
+        let issue2 = Issue {
+            id: IssueId::new("test-2"),
+            title: "Issue 2".to_string(),
+            description: "Test".to_string(),
+            status: IssueStatus::Open,
+            priority: 1,
+            issue_type: IssueType::Task,
+            assignee: None,
+            labels: vec![],
+            design: None,
+            acceptance_criteria: None,
+            notes: None,
+            external_ref: None,
+            dependencies: vec![Dependency {
+                depends_on_id: IssueId::new("test-1"),
+                dep_type: DependencyType::Blocks,
+            }],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            closed_at: None,
+        };
+
+        // Write both issues to JSONL
+        let json1 = serde_json::to_string(&issue1).unwrap();
+        let json2 = serde_json::to_string(&issue2).unwrap();
+        tokio::fs::write(&file_path, format!("{}\n{}\n", json1, json2))
+            .await
+            .unwrap();
+
+        // Load - should skip circular dependency and add warning
+        let (loaded_storage, warnings) = super::load_from_jsonl(&file_path, "test".to_string())
+            .await
+            .unwrap();
+
+        // Should have 1 warning for circular dependency
+        // (one of the edges will be skipped to break the cycle)
+        assert_eq!(warnings.len(), 1);
+        match &warnings[0] {
+            super::LoadWarning::CircularDependency { from, to } => {
+                // One of the dependencies should be flagged
+                assert!(
+                    (from.as_str() == "test-1" && to.as_str() == "test-2")
+                        || (from.as_str() == "test-2" && to.as_str() == "test-1")
+                );
+            }
+            _ => panic!(
+                "Expected CircularDependency warning, got: {:?}",
+                warnings[0]
+            ),
+        }
+
+        // Both issues should be loaded
+        let loaded_issues = loaded_storage.export_all().await.unwrap();
+        assert_eq!(loaded_issues.len(), 2);
+
+        // Dependency graph should have only one edge (cycle broken)
+        let deps1 = loaded_storage
+            .get_dependencies(&IssueId::new("test-1"))
+            .await
+            .unwrap();
+        let deps2 = loaded_storage
+            .get_dependencies(&IssueId::new("test-2"))
+            .await
+            .unwrap();
+
+        // Total dependencies should be 1 (cycle broken)
+        assert_eq!(
+            deps1.len() + deps2.len(),
+            1,
+            "Cycle should be broken, only one dependency edge should exist"
+        );
 
         temp_dir.close().unwrap();
     }
