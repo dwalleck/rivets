@@ -10,11 +10,19 @@
 //!
 //! # Persistence
 //!
-//! **Important**: This backend does NOT persist data to disk. The `save()` method
-//! is a no-op and exists only to satisfy the `IssueStorage` trait contract.
+//! This backend supports **optional JSONL persistence** via the `load_from_jsonl()` and
+//! `save_to_jsonl()` functions. Data can be loaded from and saved to disk while maintaining
+//! fast in-memory operations.
 //!
-//! For persistent storage, use:
-//! - `StorageBackend::Jsonl` - File-based storage using JSON Lines format
+//! - **In-memory only**: Use `new_in_memory_storage()` for ephemeral storage
+//! - **With persistence**: Use `load_from_jsonl()` to load from disk, then periodically
+//!   call `save_to_jsonl()` to persist changes
+//!
+//! The trait's `save()` method is a no-op for in-memory storage. Use `save_to_jsonl()`
+//! directly for file-based persistence.
+//!
+//! For future backends:
+//! - `StorageBackend::Jsonl` - Dedicated JSONL backend (future)
 //! - `StorageBackend::PostgreSQL` - Production-ready database backend (future)
 //!
 //! # Architecture
@@ -53,8 +61,27 @@ use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 use petgraph::Direction;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::Path;
 use std::sync::Arc;
+use tokio::fs::File;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::Mutex;
+
+/// Warnings that can occur during JSONL file loading.
+///
+/// These are non-fatal issues that don't prevent loading but indicate
+/// data quality problems in the JSONL file.
+#[derive(Debug, Clone)]
+pub enum LoadWarning {
+    /// Malformed JSON line that couldn't be parsed
+    MalformedJson { line_number: usize, error: String },
+
+    /// Dependency references an issue that doesn't exist in the file
+    OrphanedDependency { from: IssueId, to: IssueId },
+
+    /// Adding a dependency would create a circular reference
+    CircularDependency { from: IssueId, to: IssueId },
+}
 
 /// Inner storage structure (not thread-safe).
 ///
@@ -174,6 +201,191 @@ pub fn new_in_memory_storage(prefix: String) -> Box<dyn IssueStorage> {
     Box::new(Arc::new(Mutex::new(InMemoryStorageInner::new(prefix))))
 }
 
+/// Load storage from a JSONL file.
+///
+/// This function reads a JSONL (JSON Lines) file where each line is a serialized `Issue`.
+/// It reconstructs both the issues and their dependency graph.
+///
+/// # Error Handling
+///
+/// - **Malformed JSON**: Skips the line and adds a warning
+/// - **Orphaned dependencies**: Skips the dependency edge and adds a warning
+/// - **Circular dependencies**: Skips the dependency edge and adds a warning
+///
+/// # Memory Considerations
+///
+/// This function loads the entire JSONL file into memory during parsing. The three-pass
+/// loading algorithm requires all issues to be held in memory simultaneously.
+///
+/// **Expected limits**:
+/// - Small databases (< 1,000 issues): Negligible memory usage (~1-2 MB)
+/// - Medium databases (1,000 - 10,000 issues): ~10-20 MB memory spike during load
+/// - Large databases (> 10,000 issues): Consider the file size; expect memory usage
+///   approximately 2-3x the JSONL file size during loading
+///
+/// For databases with tens of thousands of issues, monitor memory usage during load.
+/// Future versions may implement streaming or chunked loading for very large databases.
+///
+/// # Returns
+///
+/// Returns a tuple of `(storage, warnings)` where warnings contains all non-fatal
+/// issues encountered during loading.
+///
+/// # Example
+///
+/// ```no_run
+/// use rivets::storage::in_memory::load_from_jsonl;
+/// use std::path::Path;
+///
+/// #[tokio::main(flavor = "current_thread")]
+/// async fn main() -> anyhow::Result<()> {
+///     let (storage, warnings) = load_from_jsonl(
+///         Path::new(".rivets/issues.jsonl"),
+///         "rivets".to_string()
+///     ).await?;
+///
+///     if !warnings.is_empty() {
+///         eprintln!("Loaded with {} warnings", warnings.len());
+///     }
+///
+///     Ok(())
+/// }
+/// ```
+pub async fn load_from_jsonl(
+    path: &Path,
+    prefix: String,
+) -> Result<(Box<dyn IssueStorage>, Vec<LoadWarning>)> {
+    let file = File::open(path).await.map_err(Error::Io)?;
+    let reader = BufReader::new(file);
+    let mut lines = reader.lines();
+
+    let mut issues = Vec::new();
+    let mut warnings = Vec::new();
+    let mut line_number = 0;
+
+    // First pass: Parse all issues from JSONL
+    while let Some(line) = lines.next_line().await.map_err(Error::Io)? {
+        line_number += 1;
+
+        match serde_json::from_str::<Issue>(&line) {
+            Ok(issue) => {
+                issues.push(issue);
+            }
+            Err(e) => {
+                warnings.push(LoadWarning::MalformedJson {
+                    line_number,
+                    error: e.to_string(),
+                });
+            }
+        }
+    }
+
+    // Create storage and import issues
+    let storage = Arc::new(Mutex::new(InMemoryStorageInner::new(prefix)));
+    let mut inner = storage.lock().await;
+
+    // Second pass: Import issues and create graph nodes
+    for issue in &issues {
+        let node = inner.graph.add_node(issue.id.clone());
+        inner.node_map.insert(issue.id.clone(), node);
+        inner.issues.insert(issue.id.clone(), issue.clone());
+        inner
+            .id_generator
+            .register_id(issue.id.as_str().to_string());
+    }
+
+    // Third pass: Reconstruct dependencies with cycle detection
+    for issue in &issues {
+        for dep in &issue.dependencies {
+            // Check if dependency target exists
+            if !inner.node_map.contains_key(&dep.depends_on_id) {
+                warnings.push(LoadWarning::OrphanedDependency {
+                    from: issue.id.clone(),
+                    to: dep.depends_on_id.clone(),
+                });
+                continue;
+            }
+
+            // Check for cycles before adding edge
+            if inner.has_cycle_impl(&issue.id, &dep.depends_on_id)? {
+                warnings.push(LoadWarning::CircularDependency {
+                    from: issue.id.clone(),
+                    to: dep.depends_on_id.clone(),
+                });
+                continue;
+            }
+
+            // Safe to add edge
+            let from_node = inner.node_map[&issue.id];
+            let to_node = inner.node_map[&dep.depends_on_id];
+            inner.graph.add_edge(from_node, to_node, dep.dep_type);
+        }
+    }
+
+    // Release lock before returning
+    drop(inner);
+
+    Ok((Box::new(storage), warnings))
+}
+
+/// Save storage to a JSONL file with atomic writes.
+///
+/// This function writes all issues to a JSONL file, with each issue on its own line.
+/// The write is atomic: it writes to a temporary file first, then renames it.
+///
+/// # Atomicity
+///
+/// The function uses a write-then-rename pattern which is atomic on POSIX systems.
+/// If the process crashes or is interrupted, the original file remains unchanged.
+///
+/// # Example
+///
+/// ```no_run
+/// use rivets::storage::in_memory::new_in_memory_storage;
+/// use rivets::storage::in_memory::save_to_jsonl;
+/// use std::path::Path;
+///
+/// #[tokio::main(flavor = "current_thread")]
+/// async fn main() -> anyhow::Result<()> {
+///     let storage = new_in_memory_storage("rivets".to_string());
+///     // ... create some issues ...
+///
+///     save_to_jsonl(storage.as_ref(), Path::new(".rivets/issues.jsonl")).await?;
+///     Ok(())
+/// }
+/// ```
+pub async fn save_to_jsonl(storage: &dyn IssueStorage, path: &Path) -> Result<()> {
+    // Create temp file path
+    let temp_path = path.with_extension("tmp");
+
+    // Open temp file
+    let file = File::create(&temp_path).await.map_err(Error::Io)?;
+    let mut writer = BufWriter::new(file);
+
+    // Export all issues
+    let issues = storage.export_all().await?;
+
+    // Write each issue as a JSON line
+    for issue in issues {
+        let json = serde_json::to_string(&issue)
+            .map_err(|e| Error::Storage(format!("JSON serialization failed: {}", e)))?;
+
+        writer.write_all(json.as_bytes()).await.map_err(Error::Io)?;
+
+        writer.write_all(b"\n").await.map_err(Error::Io)?;
+    }
+
+    // Flush and close
+    writer.flush().await.map_err(Error::Io)?;
+
+    // Atomic rename
+    tokio::fs::rename(&temp_path, path)
+        .await
+        .map_err(Error::Io)?;
+
+    Ok(())
+}
+
 #[async_trait]
 impl IssueStorage for InMemoryStorage {
     async fn create(&mut self, new_issue: NewIssue) -> Result<Issue> {
@@ -215,6 +427,17 @@ impl IssueStorage for InMemoryStorage {
 
         // All validations passed - now it's safe to add the issue
         let now = Utc::now();
+
+        // Convert dependencies from tuples to Dependency structs
+        let dependencies: Vec<Dependency> = new_issue
+            .dependencies
+            .iter()
+            .map(|(depends_on_id, dep_type)| Dependency {
+                depends_on_id: depends_on_id.clone(),
+                dep_type: *dep_type,
+            })
+            .collect();
+
         let issue = Issue {
             id: id.clone(),
             title: new_issue.title,
@@ -228,6 +451,7 @@ impl IssueStorage for InMemoryStorage {
             acceptance_criteria: new_issue.acceptance_criteria,
             notes: new_issue.notes,
             external_ref: new_issue.external_ref,
+            dependencies: dependencies.clone(),
             created_at: now,
             updated_at: now,
             closed_at: None,
@@ -358,10 +582,37 @@ impl IssueStorage for InMemoryStorage {
             });
         }
 
+        // Check for duplicate dependency
+        let issue = inner
+            .issues
+            .get(from)
+            .ok_or_else(|| Error::IssueNotFound(from.clone()))?;
+
+        if issue
+            .dependencies
+            .iter()
+            .any(|dep| dep.depends_on_id == *to)
+        {
+            return Err(Error::Storage(format!(
+                "Dependency already exists: {} -> {}",
+                from, to
+            )));
+        }
+
         // Add edge to graph
         let from_node = inner.node_map[from];
         let to_node = inner.node_map[to];
         inner.graph.add_edge(from_node, to_node, dep_type);
+
+        // Also add to issue's dependencies vector for JSONL serialization
+        let issue = inner
+            .issues
+            .get_mut(from)
+            .ok_or_else(|| Error::IssueNotFound(from.clone()))?;
+        issue.dependencies.push(Dependency {
+            depends_on_id: to.clone(),
+            dep_type,
+        });
 
         Ok(())
     }
@@ -387,6 +638,13 @@ impl IssueStorage for InMemoryStorage {
         })?;
 
         inner.graph.remove_edge(edge);
+
+        // Also remove from issue's dependencies vector for JSONL serialization
+        let issue = inner
+            .issues
+            .get_mut(from)
+            .ok_or_else(|| Error::IssueNotFound(from.clone()))?;
+        issue.dependencies.retain(|dep| dep.depends_on_id != *to);
 
         Ok(())
     }
@@ -643,18 +901,24 @@ impl IssueStorage for InMemoryStorage {
                 .register_id(issue.id.as_str().to_string());
         }
 
-        // TODO: Dependency reconstruction
-        //
-        // The current implementation only imports issues, not their dependencies.
-        // This is because the `Issue` struct doesn't contain dependency information
-        // (dependencies are stored separately in the graph to avoid duplication).
-        //
-        // To support full import/export with dependencies, we need to:
-        // 1. Export dependencies separately (e.g., as a Vec<(IssueId, IssueId, DependencyType)>)
-        // 2. Import dependencies in a second pass after all issues are loaded
-        // 3. Update the trait signature to support this pattern
-        //
-        // For now, callers must use `add_dependency()` separately to restore dependencies.
+        // Second pass: Reconstruct dependency edges
+        // Now that all issues are loaded, we can safely add edges
+        for issue in &issues {
+            for dep in &issue.dependencies {
+                // Verify the dependency target exists
+                if !inner.node_map.contains_key(&dep.depends_on_id) {
+                    // Skip orphaned dependencies (target doesn't exist)
+                    // This provides resilience for corrupted JSONL files
+                    continue;
+                }
+
+                let from_node = inner.node_map[&issue.id];
+                let to_node = inner.node_map[&dep.depends_on_id];
+
+                // Add edge to graph
+                inner.graph.add_edge(from_node, to_node, dep.dep_type);
+            }
+        }
 
         Ok(())
     }
@@ -1100,5 +1364,334 @@ mod tests {
             "Creating 1000 issues took {:?}, expected < 100ms",
             duration
         );
+    }
+
+    #[tokio::test]
+    async fn test_save_load_jsonl_round_trip() {
+        use tempfile::tempdir;
+
+        // Create storage with some issues
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let issue1 = storage.create(create_test_issue("Issue 1")).await.unwrap();
+        let issue2 = storage.create(create_test_issue("Issue 2")).await.unwrap();
+        let issue3 = storage.create(create_test_issue("Issue 3")).await.unwrap();
+
+        // Add dependencies
+        storage
+            .add_dependency(&issue2.id, &issue1.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+        storage
+            .add_dependency(&issue3.id, &issue2.id, DependencyType::Related)
+            .await
+            .unwrap();
+
+        // Save to JSONL
+        let temp_dir = tempdir().unwrap();
+        let file_path = temp_dir.path().join("test.jsonl");
+
+        super::save_to_jsonl(storage.as_ref(), &file_path)
+            .await
+            .unwrap();
+
+        // Load from JSONL
+        let (loaded_storage, warnings) = super::load_from_jsonl(&file_path, "test".to_string())
+            .await
+            .unwrap();
+
+        // Verify no warnings
+        assert!(
+            warnings.is_empty(),
+            "Expected no warnings, got: {:?}",
+            warnings
+        );
+
+        // Verify all issues loaded
+        let loaded_issues = loaded_storage.export_all().await.unwrap();
+        assert_eq!(loaded_issues.len(), 3);
+
+        // Verify issues match
+        let loaded_issue1 = loaded_storage.get(&issue1.id).await.unwrap().unwrap();
+        assert_eq!(loaded_issue1.title, issue1.title);
+        assert_eq!(loaded_issue1.dependencies.len(), 0);
+
+        let loaded_issue2 = loaded_storage.get(&issue2.id).await.unwrap().unwrap();
+        assert_eq!(loaded_issue2.title, issue2.title);
+        assert_eq!(loaded_issue2.dependencies.len(), 1);
+        assert_eq!(loaded_issue2.dependencies[0].depends_on_id, issue1.id);
+        assert_eq!(
+            loaded_issue2.dependencies[0].dep_type,
+            DependencyType::Blocks
+        );
+
+        let loaded_issue3 = loaded_storage.get(&issue3.id).await.unwrap().unwrap();
+        assert_eq!(loaded_issue3.title, issue3.title);
+        assert_eq!(loaded_issue3.dependencies.len(), 1);
+        assert_eq!(loaded_issue3.dependencies[0].depends_on_id, issue2.id);
+        assert_eq!(
+            loaded_issue3.dependencies[0].dep_type,
+            DependencyType::Related
+        );
+
+        // Verify dependency graph is correctly reconstructed
+        let deps = loaded_storage.get_dependencies(&issue2.id).await.unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].depends_on_id, issue1.id);
+
+        temp_dir.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_load_jsonl_with_malformed_json() {
+        use tempfile::tempdir;
+
+        let temp_dir = tempdir().unwrap();
+        let file_path = temp_dir.path().join("malformed.jsonl");
+
+        // Create a JSONL file with one valid and one malformed line
+        let mut storage = new_in_memory_storage("test".to_string());
+        let issue1 = storage
+            .create(create_test_issue("Valid Issue"))
+            .await
+            .unwrap();
+
+        super::save_to_jsonl(storage.as_ref(), &file_path)
+            .await
+            .unwrap();
+
+        // Append malformed JSON (without extra newlines)
+        let existing_content = tokio::fs::read_to_string(&file_path).await.unwrap();
+        let new_content = format!(
+            "{}{{\"invalid\": \"json\", \"missing\": \"fields\"}}\n",
+            existing_content
+        );
+        tokio::fs::write(&file_path, new_content).await.unwrap();
+
+        // Load - should skip malformed line and add warning
+        let (loaded_storage, warnings) = super::load_from_jsonl(&file_path, "test".to_string())
+            .await
+            .unwrap();
+
+        // Should have 1 warning for malformed JSON
+        assert_eq!(warnings.len(), 1, "Warnings: {:?}", warnings);
+        match &warnings[0] {
+            super::LoadWarning::MalformedJson {
+                line_number,
+                error: _,
+            } => {
+                assert_eq!(*line_number, 2);
+            }
+            _ => panic!("Expected MalformedJson warning"),
+        }
+
+        // Valid issue should still be loaded
+        let loaded_issues = loaded_storage.export_all().await.unwrap();
+        assert_eq!(loaded_issues.len(), 1);
+        assert_eq!(loaded_issues[0].id, issue1.id);
+
+        temp_dir.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_load_jsonl_with_orphaned_dependency() {
+        use tempfile::tempdir;
+
+        // Create an issue with a dependency that doesn't exist
+        let temp_dir = tempdir().unwrap();
+        let file_path = temp_dir.path().join("orphaned.jsonl");
+
+        // Manually create JSONL with orphaned dependency
+        let issue = Issue {
+            id: IssueId::new("test-1"),
+            title: "Issue with orphaned dep".to_string(),
+            description: "Test".to_string(),
+            status: IssueStatus::Open,
+            priority: 1,
+            issue_type: IssueType::Task,
+            assignee: None,
+            labels: vec![],
+            design: None,
+            acceptance_criteria: None,
+            notes: None,
+            external_ref: None,
+            dependencies: vec![Dependency {
+                depends_on_id: IssueId::new("nonexistent-issue"),
+                dep_type: DependencyType::Blocks,
+            }],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            closed_at: None,
+        };
+
+        let json = serde_json::to_string(&issue).unwrap();
+        tokio::fs::write(&file_path, format!("{}\n", json))
+            .await
+            .unwrap();
+
+        // Load - should skip orphaned dependency and add warning
+        let (loaded_storage, warnings) = super::load_from_jsonl(&file_path, "test".to_string())
+            .await
+            .unwrap();
+
+        // Should have 1 warning for orphaned dependency
+        assert_eq!(warnings.len(), 1);
+        match &warnings[0] {
+            super::LoadWarning::OrphanedDependency { from, to } => {
+                assert_eq!(from.as_str(), "test-1");
+                assert_eq!(to.as_str(), "nonexistent-issue");
+            }
+            _ => panic!("Expected OrphanedDependency warning"),
+        }
+
+        // Issue should be loaded but without the dependency
+        let loaded_issue = loaded_storage
+            .get(&IssueId::new("test-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded_issue.title, "Issue with orphaned dep");
+
+        // Dependency graph should be empty
+        let deps = loaded_storage
+            .get_dependencies(&IssueId::new("test-1"))
+            .await
+            .unwrap();
+        assert_eq!(deps.len(), 0);
+
+        temp_dir.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_save_jsonl_atomic_write() {
+        use tempfile::tempdir;
+
+        let temp_dir = tempdir().unwrap();
+        let file_path = temp_dir.path().join("atomic.jsonl");
+
+        // Create initial file
+        let mut storage = new_in_memory_storage("test".to_string());
+        storage.create(create_test_issue("Issue 1")).await.unwrap();
+
+        super::save_to_jsonl(storage.as_ref(), &file_path)
+            .await
+            .unwrap();
+
+        // Verify temp file doesn't exist after successful write
+        let temp_path = file_path.with_extension("tmp");
+        assert!(
+            !temp_path.exists(),
+            "Temp file should be removed after atomic rename"
+        );
+
+        // Verify final file exists
+        assert!(file_path.exists(), "Final file should exist");
+
+        temp_dir.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_load_jsonl_with_circular_dependency() {
+        use tempfile::tempdir;
+
+        // Create two issues with circular dependencies manually
+        let temp_dir = tempdir().unwrap();
+        let file_path = temp_dir.path().join("circular.jsonl");
+
+        let issue1 = Issue {
+            id: IssueId::new("test-1"),
+            title: "Issue 1".to_string(),
+            description: "Test".to_string(),
+            status: IssueStatus::Open,
+            priority: 1,
+            issue_type: IssueType::Task,
+            assignee: None,
+            labels: vec![],
+            design: None,
+            acceptance_criteria: None,
+            notes: None,
+            external_ref: None,
+            dependencies: vec![Dependency {
+                depends_on_id: IssueId::new("test-2"),
+                dep_type: DependencyType::Blocks,
+            }],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            closed_at: None,
+        };
+
+        let issue2 = Issue {
+            id: IssueId::new("test-2"),
+            title: "Issue 2".to_string(),
+            description: "Test".to_string(),
+            status: IssueStatus::Open,
+            priority: 1,
+            issue_type: IssueType::Task,
+            assignee: None,
+            labels: vec![],
+            design: None,
+            acceptance_criteria: None,
+            notes: None,
+            external_ref: None,
+            dependencies: vec![Dependency {
+                depends_on_id: IssueId::new("test-1"),
+                dep_type: DependencyType::Blocks,
+            }],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            closed_at: None,
+        };
+
+        // Write both issues to JSONL
+        let json1 = serde_json::to_string(&issue1).unwrap();
+        let json2 = serde_json::to_string(&issue2).unwrap();
+        tokio::fs::write(&file_path, format!("{}\n{}\n", json1, json2))
+            .await
+            .unwrap();
+
+        // Load - should skip circular dependency and add warning
+        let (loaded_storage, warnings) = super::load_from_jsonl(&file_path, "test".to_string())
+            .await
+            .unwrap();
+
+        // Should have 1 warning for circular dependency
+        // (one of the edges will be skipped to break the cycle)
+        assert_eq!(warnings.len(), 1);
+        match &warnings[0] {
+            super::LoadWarning::CircularDependency { from, to } => {
+                // One of the dependencies should be flagged
+                assert!(
+                    (from.as_str() == "test-1" && to.as_str() == "test-2")
+                        || (from.as_str() == "test-2" && to.as_str() == "test-1")
+                );
+            }
+            _ => panic!(
+                "Expected CircularDependency warning, got: {:?}",
+                warnings[0]
+            ),
+        }
+
+        // Both issues should be loaded
+        let loaded_issues = loaded_storage.export_all().await.unwrap();
+        assert_eq!(loaded_issues.len(), 2);
+
+        // Dependency graph should have only one edge (cycle broken)
+        let deps1 = loaded_storage
+            .get_dependencies(&IssueId::new("test-1"))
+            .await
+            .unwrap();
+        let deps2 = loaded_storage
+            .get_dependencies(&IssueId::new("test-2"))
+            .await
+            .unwrap();
+
+        // Total dependencies should be 1 (cycle broken)
+        assert_eq!(
+            deps1.len() + deps2.len(),
+            1,
+            "Cycle should be broken, only one dependency edge should exist"
+        );
+
+        temp_dir.close().unwrap();
     }
 }
