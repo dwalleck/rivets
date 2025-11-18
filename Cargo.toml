@@ -16,9 +16,20 @@ authors = ["Rivets Contributors"]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
+# Date/time handling
+chrono = { version = "0.4", features = ["serde"] }
+
 # Error handling
 thiserror = "2.0"
 anyhow = "1.0"
+
+# Async runtime
+tokio = { version = "1.0", features = ["rt", "macros", "io-util", "fs"] }
+async-trait = "0.1"
+
+# Graph algorithms
+# TODO(rivets-6op): Used for dependency graph cycle detection and traversal
+petgraph = "0.6"
 
 # Logging and tracing
 tracing = "0.1"

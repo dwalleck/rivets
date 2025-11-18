@@ -5,14 +5,10 @@
 # Deny crates with security vulnerabilities
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
-vulnerability = "deny"
-unmaintained = "warn"
-yanked = "warn"
-notice = "warn"
+ignore = []
 
 [licenses]
 # Allow common open-source licenses
-unlicensed = "deny"
 allow = [
     "MIT",
     "Apache-2.0",
