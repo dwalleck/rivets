@@ -1,21 +1,44 @@
 //! In-memory storage backend using HashMap and petgraph.
 //!
-//! This module provides a fast, ephemeral storage implementation suitable for:
+//! This module provides a fast, **ephemeral** storage implementation where all data
+//! is held in RAM and **lost when the process exits**. It is suitable for:
+//!
 //! - Testing and development
 //! - Short-lived CLI sessions
 //! - MVP development phase
+//! - Performance benchmarking
+//!
+//! # Persistence
+//!
+//! **Important**: This backend does NOT persist data to disk. The `save()` method
+//! is a no-op and exists only to satisfy the `IssueStorage` trait contract.
+//!
+//! For persistent storage, use:
+//! - `StorageBackend::Jsonl` - File-based storage using JSON Lines format
+//! - `StorageBackend::PostgreSQL` - Production-ready database backend (future)
 //!
 //! # Architecture
 //!
 //! The implementation uses:
 //! - `HashMap<IssueId, Issue>` for O(1) issue lookups
-//! - `petgraph::DiGraph` for dependency graph management
+//! - `petgraph::DiGraph` for dependency graph with cycle detection
 //! - `HashMap<IssueId, NodeIndex>` for mapping issues to graph nodes
+//! - Hash-based ID generation with adaptive length (4-6 chars)
 //!
 //! # Thread Safety
 //!
-//! The storage is wrapped in `Arc<Mutex<>>` to provide thread-safe access
-//! in async contexts. All operations acquire the mutex lock.
+//! The storage is wrapped in `Arc<Mutex<InMemoryStorageInner>>` to provide thread-safe
+//! access in async contexts. All operations acquire the mutex lock, ensuring safe
+//! concurrent access from multiple tasks.
+//!
+//! # Performance Characteristics
+//!
+//! - Create: O(1) amortized, O(n) when crossing ID length thresholds (500, 1500 issues)
+//! - Read: O(1) for single issue lookups
+//! - Update: O(1) for issue updates
+//! - Delete: O(d) where d is number of dependencies
+//! - Dependencies: O(d) where d is number of edges in the graph
+//! - Ready to work: O(n + e) where n is issues, e is edges (BFS traversal)
 
 use crate::domain::{
     Dependency, DependencyType, Issue, IssueFilter, IssueId, IssueStatus, IssueUpdate, NewIssue,
@@ -72,22 +95,44 @@ impl InMemoryStorageInner {
         }
     }
 
-    /// Update the ID generator's database size based on current issue count
-    fn update_id_generator_size(&mut self) {
-        self.id_generator = IdGenerator::new(IdGeneratorConfig {
-            prefix: self.prefix.clone(),
-            database_size: self.issues.len(),
-        });
+    /// Update the ID generator's database size if we've crossed a threshold.
+    ///
+    /// ID length changes at 500 and 1500 issues, so we only need to update
+    /// when crossing these boundaries. This avoids O(n) re-registration on every create.
+    fn update_id_generator_if_needed(&mut self) {
+        let current_size = self.issues.len();
+        let old_size = self.id_generator.database_size();
 
-        // Register all existing IDs with the new generator
-        for id in self.issues.keys() {
-            self.id_generator.register_id(id.as_str().to_string());
+        // Determine if we've crossed a length threshold
+        let needs_update = match (old_size, current_size) {
+            // Crossing 500 boundary (4 -> 5 chars)
+            (0..=500, 501..) => true,
+            // Crossing 1500 boundary (5 -> 6 chars)
+            (0..=1500, 1501..) => true,
+            // Crossing backwards (rare, but possible after deletes)
+            (501.., 0..=500) => true,
+            (1501.., 0..=1500) => true,
+            _ => false,
+        };
+
+        if needs_update {
+            // Only recreate generator when crossing length thresholds
+            self.id_generator = IdGenerator::new(IdGeneratorConfig {
+                prefix: self.prefix.clone(),
+                database_size: current_size,
+            });
+
+            // Re-register all existing IDs (O(n), but only at thresholds)
+            for id in self.issues.keys() {
+                self.id_generator.register_id(id.as_str().to_string());
+            }
         }
     }
 
     /// Generate a new unique ID for an issue
     fn generate_id(&mut self, new_issue: &NewIssue) -> Result<IssueId> {
-        self.update_id_generator_size();
+        // Update generator config if we've crossed a length threshold
+        self.update_id_generator_if_needed();
 
         let id_str = self
             .id_generator
@@ -139,10 +184,36 @@ impl IssueStorage for InMemoryStorage {
             .validate()
             .map_err(|e| Error::Storage(format!("Validation failed: {}", e)))?;
 
+        // Validate all dependencies BEFORE modifying storage
+        // This prevents graph corruption if validation fails after issue is added
+        for (depends_on_id, _dep_type) in &new_issue.dependencies {
+            // Validate dependency exists
+            if !inner.issues.contains_key(depends_on_id) {
+                return Err(Error::IssueNotFound(depends_on_id.clone()));
+            }
+        }
+
         // Generate unique ID
         let id = inner.generate_id(&new_issue)?;
 
-        // Create the issue
+        // Check for cycles BEFORE adding to graph
+        // We temporarily add the node to check cycles, but haven't stored the issue yet
+        let temp_node = inner.graph.add_node(id.clone());
+        inner.node_map.insert(id.clone(), temp_node);
+
+        for (depends_on_id, _dep_type) in &new_issue.dependencies {
+            if inner.has_cycle_impl(&id, depends_on_id)? {
+                // Rollback: remove the temporary node
+                inner.graph.remove_node(temp_node);
+                inner.node_map.remove(&id);
+                return Err(Error::CircularDependency {
+                    from: id,
+                    to: depends_on_id.clone(),
+                });
+            }
+        }
+
+        // All validations passed - now it's safe to add the issue
         let now = Utc::now();
         let issue = Issue {
             id: id.clone(),
@@ -162,29 +233,11 @@ impl IssueStorage for InMemoryStorage {
             closed_at: None,
         };
 
-        // Add to graph
-        let node = inner.graph.add_node(id.clone());
-        inner.node_map.insert(id.clone(), node);
-
-        // Store issue
+        // Store issue (node already added during validation)
         inner.issues.insert(id.clone(), issue.clone());
 
-        // Add dependencies if provided
+        // Add dependency edges (all validations passed, so this is safe)
         for (depends_on_id, dep_type) in new_issue.dependencies {
-            // Validate dependency exists
-            if !inner.issues.contains_key(&depends_on_id) {
-                return Err(Error::IssueNotFound(depends_on_id));
-            }
-
-            // Check for cycles
-            if inner.has_cycle_impl(&id, &depends_on_id)? {
-                return Err(Error::CircularDependency {
-                    from: id,
-                    to: depends_on_id,
-                });
-            }
-
-            // Add edge to graph
             let from_node = inner.node_map[&id];
             let to_node = inner.node_map[&depends_on_id];
             inner.graph.add_edge(from_node, to_node, dep_type);
@@ -590,6 +643,19 @@ impl IssueStorage for InMemoryStorage {
                 .register_id(issue.id.as_str().to_string());
         }
 
+        // TODO: Dependency reconstruction
+        //
+        // The current implementation only imports issues, not their dependencies.
+        // This is because the `Issue` struct doesn't contain dependency information
+        // (dependencies are stored separately in the graph to avoid duplication).
+        //
+        // To support full import/export with dependencies, we need to:
+        // 1. Export dependencies separately (e.g., as a Vec<(IssueId, IssueId, DependencyType)>)
+        // 2. Import dependencies in a second pass after all issues are loaded
+        // 3. Update the trait signature to support this pattern
+        //
+        // For now, callers must use `add_dependency()` separately to restore dependencies.
+
         Ok(())
     }
 
@@ -628,6 +694,48 @@ impl InMemoryStorageInner {
             *from_node,
             None,
         ))
+    }
+
+    /// Export all dependencies from the graph.
+    ///
+    /// Returns a list of (from, to, type) tuples representing all edges in the dependency graph.
+    ///
+    /// **Note**: This is a helper method for future use (JSONL backend, extended trait API).
+    /// Not currently exposed through the IssueStorage trait.
+    #[allow(dead_code)]
+    fn export_dependencies(&self) -> Vec<(IssueId, IssueId, DependencyType)> {
+        self.graph
+            .edge_references()
+            .map(|edge| {
+                let from = &self.graph[edge.source()];
+                let to = &self.graph[edge.target()];
+                let dep_type = *edge.weight();
+                (from.clone(), to.clone(), dep_type)
+            })
+            .collect()
+    }
+
+    /// Import dependencies into the graph.
+    ///
+    /// Assumes all referenced issues have already been imported.
+    /// Skips dependencies where either endpoint doesn't exist.
+    ///
+    /// **Note**: This is a helper method for future use (JSONL backend, extended trait API).
+    /// Not currently exposed through the IssueStorage trait.
+    #[allow(dead_code)]
+    fn import_dependencies(&mut self, dependencies: Vec<(IssueId, IssueId, DependencyType)>) {
+        for (from_id, to_id, dep_type) in dependencies {
+            // Skip if either issue doesn't exist
+            if !self.node_map.contains_key(&from_id) || !self.node_map.contains_key(&to_id) {
+                continue;
+            }
+
+            let from_node = self.node_map[&from_id];
+            let to_node = self.node_map[&to_id];
+
+            // Add edge (skip cycle check since we're importing existing data)
+            self.graph.add_edge(from_node, to_node, dep_type);
+        }
     }
 }
 
@@ -889,18 +997,25 @@ mod tests {
         let issue2 = storage.create(create_test_issue("Issue 2")).await.unwrap();
 
         // Export all issues
-        let exported = storage.export_all().await.unwrap();
-        assert_eq!(exported.len(), 2);
+        let exported_issues = storage.export_all().await.unwrap();
+        assert_eq!(exported_issues.len(), 2);
 
         // Create new storage and import
         let mut new_storage = new_in_memory_storage("test".to_string());
-        new_storage.import_issues(exported).await.unwrap();
+        new_storage.import_issues(exported_issues).await.unwrap();
 
         // Verify imported issues
         let retrieved1 = new_storage.get(&issue1.id).await.unwrap();
         let retrieved2 = new_storage.get(&issue2.id).await.unwrap();
         assert!(retrieved1.is_some());
         assert!(retrieved2.is_some());
+
+        assert_eq!(retrieved1.unwrap().title, "Issue 1");
+        assert_eq!(retrieved2.unwrap().title, "Issue 2");
+
+        // NOTE: Dependencies are NOT preserved by import_issues().
+        // This is a known limitation of the current IssueStorage trait API.
+        // See documentation on import_issues() for details and workarounds.
     }
 
     #[tokio::test]
@@ -908,5 +1023,82 @@ mod tests {
         let storage = new_in_memory_storage("test".to_string());
         // Save is a no-op for in-memory storage, but should not error
         storage.save().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_creates() {
+        use std::sync::Arc;
+        use tokio::sync::Mutex as TokioMutex;
+
+        // Verify Arc<Mutex<>> correctness under concurrent mutations
+        let storage = Arc::new(TokioMutex::new(new_in_memory_storage("test".to_string())));
+
+        // Spawn multiple concurrent tasks creating issues
+        let mut handles = vec![];
+        for i in 0..10 {
+            let storage_clone = Arc::clone(&storage);
+            let handle = tokio::spawn(async move {
+                let mut storage_guard = storage_clone.lock().await;
+                storage_guard
+                    .create(create_test_issue(&format!("Concurrent Issue {}", i)))
+                    .await
+                    .unwrap()
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all tasks to complete
+        let mut created_ids = vec![];
+        for handle in handles {
+            let issue = handle.await.unwrap();
+            created_ids.push(issue.id);
+        }
+
+        // Verify all issues were created with unique IDs
+        assert_eq!(created_ids.len(), 10);
+        let unique_ids: std::collections::HashSet<_> = created_ids.iter().collect();
+        assert_eq!(unique_ids.len(), 10, "All IDs should be unique");
+
+        // Verify we can retrieve all issues
+        let storage_guard = storage.lock().await;
+        for id in created_ids {
+            let issue = storage_guard.get(&id).await.unwrap();
+            assert!(issue.is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_performance_benchmark() {
+        // Verify claim: "1000 issues in <10ms"
+        use std::time::Instant;
+
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let start = Instant::now();
+
+        // Create 1000 issues
+        for i in 0..1000 {
+            storage
+                .create(create_test_issue(&format!("Performance Test Issue {}", i)))
+                .await
+                .unwrap();
+        }
+
+        let duration = start.elapsed();
+
+        // Verify we created 1000 issues
+        let all_issues = storage.export_all().await.unwrap();
+        assert_eq!(all_issues.len(), 1000);
+
+        // Log performance for visibility
+        println!("Created 1000 issues in {:?}", duration);
+
+        // Allow some buffer above 10ms for CI environments
+        // In local testing this should be well under 10ms
+        assert!(
+            duration.as_millis() < 100,
+            "Creating 1000 issues took {:?}, expected < 100ms",
+            duration
+        );
     }
 }

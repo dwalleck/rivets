@@ -103,6 +103,11 @@ impl IdGenerator {
         self.existing_ids.insert(id);
     }
 
+    /// Get the current database size from the configuration
+    pub fn database_size(&self) -> usize {
+        self.config.database_size
+    }
+
     /// Clear internal state to manage memory growth
     ///
     /// This method clears the collision tracking set and child counters.
