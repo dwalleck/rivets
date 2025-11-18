@@ -8,6 +8,7 @@
 // Public modules for library usage
 pub mod domain;
 pub mod error;
+pub mod id_generation;
 pub mod storage;
 
 // Public CLI module (needed by binary)
