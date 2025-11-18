@@ -9,6 +9,10 @@ repository = "https://github.com/yourusername/rivets"
 keywords = ["issue-tracker", "project-management", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 
+[lib]
+name = "rivets"
+path = "src/lib.rs"
+
 [[bin]]
 name = "rivets"
 path = "src/main.rs"
@@ -22,6 +26,9 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+petgraph = { workspace = true }
 
 [dev-dependencies]
-# Test-specific dependencies can be added here
+tokio-test = "0.4"

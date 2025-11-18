@@ -39,7 +39,7 @@ impl Cli {
     }
 
     /// Execute the CLI command
-    pub fn execute(&self) -> Result<()> {
+    pub async fn execute(&self) -> Result<()> {
         match &self.command {
             Some(Commands::Init) => {
                 println!("Initializing rivets repository...");

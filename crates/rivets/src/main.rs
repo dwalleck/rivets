@@ -1,18 +1,15 @@
-//! Rivets - A Rust-based issue tracking system.
-
-#![forbid(unsafe_code)]
-
-mod cli;
-mod commands;
-mod config;
-mod domain;
-mod error;
-mod storage;
+//! Rivets CLI binary.
 
 use anyhow::Result;
+use rivets::cli::Cli;
 use tracing_subscriber::EnvFilter;
 
-fn main() -> Result<()> {
+/// Main entry point for the rivets CLI.
+///
+/// Uses tokio's current_thread runtime for simplicity and lower overhead.
+/// This is appropriate for CLI applications with sequential I/O-bound operations.
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<()> {
     // Initialize tracing subscriber
     // Can be controlled via RUST_LOG environment variable
     // Example: RUST_LOG=rivets=debug,rivets_jsonl=trace cargo run
@@ -26,8 +23,8 @@ fn main() -> Result<()> {
 
     tracing::debug!("Starting rivets CLI");
 
-    let cli = cli::Cli::parse();
-    cli.execute()?;
+    let cli = Cli::parse();
+    cli.execute().await?;
 
     tracing::debug!("Rivets CLI completed successfully");
     Ok(())

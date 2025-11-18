@@ -20,6 +20,13 @@ serde_json = "1.0"
 thiserror = "2.0"
 anyhow = "1.0"
 
+# Async runtime
+tokio = { version = "1.0", features = ["rt", "macros", "io-util", "fs"] }
+async-trait = "0.1"
+
+# Graph algorithms
+petgraph = "0.6"
+
 # Logging and tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "ansi"] }
