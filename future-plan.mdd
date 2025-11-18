@@ -1,0 +1,69 @@
+ I like your   Phase 1: Storage Trait + In-Memory Graph and Phase 2: PostgreSQL with Recursive CTEs and this that you
+mentioned earlier. Better Approach: Storage Abstraction
+
+  Instead of hardcoding SQLite or PostgreSQL, create a storage trait:
+
+  // Define the storage interface
+  pub trait IssueStorage: Send + Sync {
+      fn create_issue(&mut self, issue: NewIssue) -> Result<Issue>;
+      fn get_issue(&self, id: &IssueId) -> Result<Option<Issue>>;
+      fn list_issues(&self, filter: &IssueFilter) -> Result<Vec<Issue>>;
+      fn update_issue(&mut self, id: &IssueId, changes: IssueUpdate) -> Result<Issue>;
+      fn delete_issue(&mut self, id: &IssueId) -> Result<()>;
+
+      fn add_dependency(&mut self, dep: Dependency) -> Result<()>;
+      fn check_cycle(&self, from: &IssueId, to: &IssueId) -> Result<bool>;
+      fn find_ready(&self, filter: &IssueFilter) -> Result<Vec<Issue>>;
+      // ... other operations
+  }
+
+  // Multiple implementations
+  pub struct InMemoryStorage { ... }
+  pub struct PostgresStorage { ... }
+  pub struct SqliteStorage { ... }   // optional "lite" mode
+
+  What This Enables
+
+  Phase 1 - MVP (now):
+  - Use InMemoryStorage + JSONL files
+  - Fast development, easy testing
+  - Works offline, no DB setup needed
+  - Validates UX and workflows
+
+  Phase 2 - PostgreSQL (later):
+  - Add PostgresStorage implementation
+  - CLI can connect to shared PostgreSQL
+  - Multiple users, services can share data
+  - JSONL becomes export/backup feature
+
+  Phase 3 - Flexibility (future):
+  - Keep InMemoryStorage for tests
+  - Add SqliteStorage for single-user/offline mode
+  - Use PostgresStorage for production/multi-user
+  - Choose backend via config
+
+  What About JSONL?
+
+  With PostgreSQL as source of truth, JSONL could become:
+
+  1. Export format - For code review, archival, git history
+  2. Import format - Seed data, migrations, backups
+  3. Optional sync - For offline work (like git)
+
+  Instead of JSONL being the source of truth with DB as cache (beads model), you'd have:
+  - PostgreSQL = source of truth for active work
+  - JSONL = interchange format for portability
+
+  Recommended Task Ordering
+
+  Based on this, I'd suggest:
+
+  1. ✅ rivets-x1e - Hash ID generation (pure algorithm, DB-agnostic)
+  2. ✅ Define storage trait - Abstract interface (NEW TASK)
+  3. ✅ InMemoryStorage - First implementation (fast MVP)
+  4. ✅ rivets-bsp - Core CLI commands (using trait)
+  5. ✅ rivets-6op - Dependency logic (in Rust, not SQL)
+  6. ✅ rivets-qeb - Ready work algorithm (graph traversal)
+  7. ✅ rivets-x51 - JSONL import/export (using trait)
+  8. ⏱️ PostgresStorage - When you need multi-user (later) However, we need to make sure to break all of this down into
+granular tasks
