@@ -86,6 +86,13 @@ pub struct Issue {
     /// External reference (e.g., GitHub issue number)
     pub external_ref: Option<String>,
 
+    /// Dependencies (issues this issue depends on)
+    ///
+    /// **Note**: This field is maintained for JSONL serialization. The dependency
+    /// graph in storage (petgraph) is the source of truth for internal operations.
+    /// This field should be kept in sync with the graph.
+    pub dependencies: Vec<Dependency>,
+
     /// Creation timestamp
     pub created_at: DateTime<Utc>,
 
