@@ -53,6 +53,9 @@ use crate::error::Result;
 use async_trait::async_trait;
 use std::path::PathBuf;
 
+// Storage backend implementations
+pub mod in_memory;
+
 /// Core storage trait for issue management.
 ///
 /// This trait defines the interface for all storage backends. Implementations
@@ -253,12 +256,22 @@ pub enum StorageBackend {
 ///
 /// - `Error::Io` if file operations fail (JSONL backend)
 /// - `Error::Storage` for backend-specific initialization errors
-pub async fn create_storage(_backend: StorageBackend) -> Result<Box<dyn IssueStorage>> {
-    // TODO: Implement backends in subsequent tasks
-    // For now, return a placeholder error
-    Err(crate::error::Error::Storage(
-        "Storage backends not yet implemented".to_string(),
-    ))
+pub async fn create_storage(backend: StorageBackend) -> Result<Box<dyn IssueStorage>> {
+    match backend {
+        StorageBackend::InMemory => Ok(in_memory::new_in_memory_storage("rivets".to_string())),
+        StorageBackend::Jsonl(_path) => {
+            // TODO: Implement JSONL backend
+            Err(crate::error::Error::Storage(
+                "JSONL storage backend not yet implemented".to_string(),
+            ))
+        }
+        StorageBackend::PostgreSQL(_conn_str) => {
+            // TODO: Implement PostgreSQL backend
+            Err(crate::error::Error::Storage(
+                "PostgreSQL storage backend not yet implemented".to_string(),
+            ))
+        }
+    }
 }
 
 #[cfg(test)]
