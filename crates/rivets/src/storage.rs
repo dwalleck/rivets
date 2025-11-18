@@ -196,6 +196,13 @@ pub trait IssueStorage: Send + Sync {
 
     /// Save changes to persistent storage.
     ///
+    /// This method takes `&self` (not `&mut self`) to allow saving from shared
+    /// references. Implementations use interior mutability (e.g., `Arc<Mutex<>>`)
+    /// to handle this safely. This design choice enables:
+    /// - Saving after read-only queries without requiring exclusive access
+    /// - Periodic auto-save operations from background tasks
+    /// - Explicit save points in transaction-like workflows
+    ///
     /// For in-memory storage with JSONL backing, this writes to disk.
     /// For database backends, this is typically a no-op (auto-committed).
     async fn save(&self) -> Result<()>;
@@ -251,6 +258,7 @@ pub async fn create_storage(_backend: StorageBackend) -> Result<Box<dyn IssueSto
 mod tests {
     use super::*;
     use crate::domain::{IssueStatus, IssueType};
+    use chrono::Utc;
 
     /// Mock implementation of IssueStorage for testing trait object usage
     struct MockStorage;
@@ -267,19 +275,18 @@ mod tests {
                 issue_type: IssueType::Task,
                 assignee: None,
                 labels: vec![],
-                dependencies: vec![],
                 design: None,
                 acceptance_criteria: None,
                 notes: None,
                 external_ref: None,
-                created_at: "2024-01-01T00:00:00Z".to_string(),
-                updated_at: "2024-01-01T00:00:00Z".to_string(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
                 closed_at: None,
             })
         }
 
         async fn get(&self, id: &IssueId) -> Result<Option<Issue>> {
-            if id.0 == "test-1" {
+            if id.as_str() == "test-1" {
                 Ok(Some(Issue {
                     id: id.clone(),
                     title: "Test Issue".to_string(),
@@ -289,13 +296,12 @@ mod tests {
                     issue_type: IssueType::Task,
                     assignee: None,
                     labels: vec![],
-                    dependencies: vec![],
                     design: None,
                     acceptance_criteria: None,
                     notes: None,
                     external_ref: None,
-                    created_at: "2024-01-01T00:00:00Z".to_string(),
-                    updated_at: "2024-01-01T00:00:00Z".to_string(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
                     closed_at: None,
                 }))
             } else {
@@ -381,7 +387,7 @@ mod tests {
         };
 
         let issue = storage.create(new_issue).await.unwrap();
-        assert_eq!(issue.id.0, "test-1");
+        assert_eq!(issue.id.as_str(), "test-1");
         assert_eq!(issue.title, "Test Issue");
     }
 
@@ -392,7 +398,7 @@ mod tests {
         // Test existing issue
         let result = storage.get(&IssueId::new("test-1")).await.unwrap();
         assert!(result.is_some());
-        assert_eq!(result.unwrap().id.0, "test-1");
+        assert_eq!(result.unwrap().id.as_str(), "test-1");
 
         // Test non-existing issue
         let result = storage.get(&IssueId::new("test-99")).await.unwrap();

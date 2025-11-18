@@ -2,17 +2,26 @@
 //!
 //! This module contains the core domain types for the rivets issue tracker.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Unique identifier for an issue
+///
+/// Wraps a string ID in a newtype for type safety. The inner field is private
+/// to enforce encapsulation and allow future changes to the ID format.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct IssueId(pub String);
+pub struct IssueId(String);
 
 impl IssueId {
     /// Create a new issue ID
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
+    }
+
+    /// Get the ID as a string slice
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -35,6 +44,10 @@ impl From<&str> for IssueId {
 }
 
 /// Represents an issue in the tracking system
+///
+/// Note: Dependencies are managed by the storage backend and accessed via
+/// `IssueStorage::get_dependencies()` rather than being stored on the Issue
+/// itself. This prevents data duplication and ensures a single source of truth.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Issue {
     /// Unique identifier for the issue
@@ -61,9 +74,6 @@ pub struct Issue {
     /// Labels
     pub labels: Vec<String>,
 
-    /// Dependencies on other issues
-    pub dependencies: Vec<Dependency>,
-
     /// Design notes (optional)
     pub design: Option<String>,
 
@@ -76,14 +86,14 @@ pub struct Issue {
     /// External reference (e.g., GitHub issue number)
     pub external_ref: Option<String>,
 
-    /// Creation timestamp (ISO 8601)
-    pub created_at: String,
+    /// Creation timestamp
+    pub created_at: DateTime<Utc>,
 
-    /// Last update timestamp (ISO 8601)
-    pub updated_at: String,
+    /// Last update timestamp
+    pub updated_at: DateTime<Utc>,
 
-    /// Closed timestamp (ISO 8601, optional)
-    pub closed_at: Option<String>,
+    /// Closed timestamp (optional)
+    pub closed_at: Option<DateTime<Utc>>,
 }
 
 /// Status of an issue
@@ -151,6 +161,12 @@ pub enum DependencyType {
     DiscoveredFrom,
 }
 
+/// Maximum length for issue titles
+pub const MAX_TITLE_LENGTH: usize = 200;
+
+/// Minimum length for issue titles
+pub const MIN_TITLE_LENGTH: usize = 1;
+
 /// Data for creating a new issue
 #[derive(Debug, Clone)]
 pub struct NewIssue {
@@ -186,6 +202,39 @@ pub struct NewIssue {
 
     /// Dependencies
     pub dependencies: Vec<(IssueId, DependencyType)>,
+}
+
+impl NewIssue {
+    /// Validate the new issue data
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Title is empty or exceeds MAX_TITLE_LENGTH
+    /// - Priority is not in range 0-4
+    pub fn validate(&self) -> Result<(), String> {
+        let title_len = self.title.trim().len();
+
+        if title_len < MIN_TITLE_LENGTH {
+            return Err("Title cannot be empty".to_string());
+        }
+
+        if title_len > MAX_TITLE_LENGTH {
+            return Err(format!(
+                "Title cannot exceed {} characters (got {})",
+                MAX_TITLE_LENGTH, title_len
+            ));
+        }
+
+        if self.priority > 4 {
+            return Err(format!(
+                "Priority must be in range 0-4 (got {})",
+                self.priority
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 /// Data for updating an existing issue
