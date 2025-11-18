@@ -87,9 +87,16 @@ pub trait IssueStorage: Send + Sync {
     ///
     /// Generates a unique ID for the issue and sets creation timestamps.
     ///
+    /// # Implementation Requirements
+    ///
+    /// Implementations **MUST** validate input by calling `issue.validate()`
+    /// before creating the issue. This ensures consistent validation across
+    /// all storage backends.
+    ///
     /// # Errors
     ///
     /// Returns `Error::InvalidPriority` if priority is not in range 0-4.
+    /// Returns `Error::Storage` if title validation fails or other constraints are violated.
     async fn create(&mut self, issue: NewIssue) -> Result<Issue>;
 
     /// Get an issue by ID.

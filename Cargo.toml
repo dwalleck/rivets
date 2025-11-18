@@ -28,6 +28,7 @@ tokio = { version = "1.0", features = ["rt", "macros", "io-util", "fs"] }
 async-trait = "0.1"
 
 # Graph algorithms
+# TODO(rivets-6op): Used for dependency graph cycle detection and traversal
 petgraph = "0.6"
 
 # Logging and tracing

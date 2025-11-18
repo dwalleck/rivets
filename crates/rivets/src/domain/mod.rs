@@ -164,9 +164,6 @@ pub enum DependencyType {
 /// Maximum length for issue titles
 pub const MAX_TITLE_LENGTH: usize = 200;
 
-/// Minimum length for issue titles
-pub const MIN_TITLE_LENGTH: usize = 1;
-
 /// Data for creating a new issue
 #[derive(Debug, Clone)]
 pub struct NewIssue {
@@ -213,16 +210,17 @@ impl NewIssue {
     /// - Title is empty or exceeds MAX_TITLE_LENGTH
     /// - Priority is not in range 0-4
     pub fn validate(&self) -> Result<(), String> {
-        let title_len = self.title.trim().len();
+        let trimmed_title = self.title.trim();
 
-        if title_len < MIN_TITLE_LENGTH {
+        if trimmed_title.is_empty() {
             return Err("Title cannot be empty".to_string());
         }
 
-        if title_len > MAX_TITLE_LENGTH {
+        if trimmed_title.len() > MAX_TITLE_LENGTH {
             return Err(format!(
                 "Title cannot exceed {} characters (got {})",
-                MAX_TITLE_LENGTH, title_len
+                MAX_TITLE_LENGTH,
+                trimmed_title.len()
             ));
         }
 
@@ -234,6 +232,32 @@ impl NewIssue {
         }
 
         Ok(())
+    }
+}
+
+impl Default for NewIssue {
+    /// Create a NewIssue with sensible defaults for testing.
+    ///
+    /// Default values:
+    /// - title: "Untitled Issue"
+    /// - description: ""
+    /// - priority: 2 (medium)
+    /// - issue_type: Task
+    /// - All optional fields: None or empty
+    fn default() -> Self {
+        Self {
+            title: "Untitled Issue".to_string(),
+            description: String::new(),
+            priority: 2,
+            issue_type: IssueType::Task,
+            assignee: None,
+            labels: vec![],
+            design: None,
+            acceptance_criteria: None,
+            notes: None,
+            external_ref: None,
+            dependencies: vec![],
+        }
     }
 }
 
@@ -252,7 +276,12 @@ pub struct IssueUpdate {
     /// New priority (if updating)
     pub priority: Option<u8>,
 
-    /// New assignee (if updating, None to clear)
+    /// New assignee (if updating)
+    ///
+    /// This uses the double-Option pattern to represent three distinct states:
+    /// - `None`: Don't modify the assignee (leave unchanged)
+    /// - `Some(None)`: Clear the assignee (set to unassigned)
+    /// - `Some(Some(name))`: Set assignee to the given name
     pub assignee: Option<Option<String>>,
 
     /// New design notes (if updating)
@@ -288,4 +317,176 @@ pub struct IssueFilter {
 
     /// Limit number of results
     pub limit: Option<usize>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ===== IssueId Tests =====
+
+    #[test]
+    fn test_issue_id_display() {
+        let id = IssueId::new("test-123");
+        assert_eq!(format!("{}", id), "test-123");
+    }
+
+    #[test]
+    fn test_issue_id_from_string() {
+        let id = IssueId::from("test-456".to_string());
+        assert_eq!(id.as_str(), "test-456");
+    }
+
+    #[test]
+    fn test_issue_id_from_str() {
+        let id = IssueId::from("test-789");
+        assert_eq!(id.as_str(), "test-789");
+    }
+
+    #[test]
+    fn test_issue_id_as_str() {
+        let id = IssueId::new("proj-abc");
+        assert_eq!(id.as_str(), "proj-abc");
+    }
+
+    #[test]
+    fn test_issue_id_equality() {
+        let id1 = IssueId::new("same-id");
+        let id2 = IssueId::new("same-id");
+        let id3 = IssueId::new("different-id");
+
+        assert_eq!(id1, id2);
+        assert_ne!(id1, id3);
+    }
+
+    // ===== NewIssue::validate() Tests =====
+
+    #[test]
+    fn test_validate_valid_issue() {
+        let issue = NewIssue {
+            title: "Valid Title".to_string(),
+            priority: 2,
+            ..Default::default()
+        };
+        assert!(issue.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_empty_title() {
+        let issue = NewIssue {
+            title: "".to_string(),
+            ..Default::default()
+        };
+        let result = issue.validate();
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Title cannot be empty");
+    }
+
+    #[test]
+    fn test_validate_whitespace_only_title() {
+        let issue = NewIssue {
+            title: "   \t\n  ".to_string(),
+            ..Default::default()
+        };
+        let result = issue.validate();
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Title cannot be empty");
+    }
+
+    #[test]
+    fn test_validate_title_too_long() {
+        let long_title = "x".repeat(MAX_TITLE_LENGTH + 1);
+        let issue = NewIssue {
+            title: long_title.clone(),
+            ..Default::default()
+        };
+        let result = issue.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains(&format!("cannot exceed {}", MAX_TITLE_LENGTH)));
+    }
+
+    #[test]
+    fn test_validate_title_exactly_max_length() {
+        let max_title = "x".repeat(MAX_TITLE_LENGTH);
+        let issue = NewIssue {
+            title: max_title,
+            ..Default::default()
+        };
+        assert!(issue.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_title_with_whitespace() {
+        let issue = NewIssue {
+            title: "  Valid Title  ".to_string(),
+            ..Default::default()
+        };
+        assert!(issue.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_invalid_priority_low() {
+        let issue = NewIssue {
+            title: "Valid Title".to_string(),
+            priority: 5,
+            ..Default::default()
+        };
+        let result = issue.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("Priority must be in range 0-4"));
+    }
+
+    #[test]
+    fn test_validate_invalid_priority_high() {
+        let issue = NewIssue {
+            title: "Valid Title".to_string(),
+            priority: 255,
+            ..Default::default()
+        };
+        let result = issue.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("Priority must be in range 0-4"));
+    }
+
+    #[test]
+    fn test_validate_priority_boundaries() {
+        for priority in 0..=4 {
+            let issue = NewIssue {
+                title: "Valid Title".to_string(),
+                priority,
+                ..Default::default()
+            };
+            assert!(
+                issue.validate().is_ok(),
+                "Priority {} should be valid",
+                priority
+            );
+        }
+    }
+
+    // ===== NewIssue::default() Tests =====
+
+    #[test]
+    fn test_new_issue_default() {
+        let issue = NewIssue::default();
+        assert_eq!(issue.title, "Untitled Issue");
+        assert_eq!(issue.description, "");
+        assert_eq!(issue.priority, 2);
+        assert_eq!(issue.issue_type, IssueType::Task);
+        assert!(issue.assignee.is_none());
+        assert!(issue.labels.is_empty());
+        assert!(issue.dependencies.is_empty());
+    }
+
+    #[test]
+    fn test_new_issue_default_validates() {
+        let issue = NewIssue::default();
+        assert!(issue.validate().is_ok());
+    }
 }
