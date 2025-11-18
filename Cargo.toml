@@ -27,7 +27,7 @@ anyhow = "1.0"
 sha2 = "0.10"
 
 # Async runtime
-tokio = { version = "1.0", features = ["rt", "macros", "io-util", "fs"] }
+tokio = { version = "1.0", features = ["rt", "macros", "io-util", "fs", "sync"] }
 async-trait = "0.1"
 
 # Graph algorithms
