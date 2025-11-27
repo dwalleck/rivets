@@ -31,7 +31,7 @@ use tokio::io::{AsyncRead, BufReader};
 pub struct JsonlReader<R> {
     /// Buffered reader wrapping the underlying async reader.
     reader: BufReader<R>,
-    /// Current line number (1-indexed) for error reporting.
+    /// Current line number (1-based counting, 0 before any lines are read) for error reporting.
     line_number: usize,
 }
 
@@ -39,7 +39,8 @@ impl<R: AsyncRead + Unpin> JsonlReader<R> {
     /// Creates a new `JsonlReader` wrapping the given async reader.
     ///
     /// The reader is wrapped in a [`BufReader`] for efficient buffered I/O.
-    /// Line numbering starts at 0 and increments with each line read.
+    /// Line numbering uses 1-based indexing: the counter starts at 0 and increments
+    /// after each line is read, so the first line read is numbered 1.
     ///
     /// # Arguments
     ///
@@ -84,8 +85,8 @@ impl<R: AsyncRead + Unpin> JsonlReader<R> {
 
     /// Returns the current line number.
     ///
-    /// Line numbers are 0-indexed before any lines are read, then increment
-    /// to 1 after the first line is read, and so on.
+    /// Returns 0 before any lines have been read. After reading, returns the
+    /// 1-based line number of the last line read (first line = 1, second line = 2, etc.).
     #[must_use]
     pub fn line_number(&self) -> usize {
         self.line_number
