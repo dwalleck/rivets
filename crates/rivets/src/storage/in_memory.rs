@@ -70,17 +70,75 @@ use tokio::sync::Mutex;
 /// Warnings that can occur during JSONL file loading.
 ///
 /// These are non-fatal issues that don't prevent loading but indicate
-/// data quality problems in the JSONL file.
+/// data quality problems in the JSONL file. When warnings occur, the load
+/// operation continues but problematic data is skipped or sanitized.
+///
+/// # Handling Warnings
+///
+/// Applications should log or report these warnings to users, as they indicate
+/// data corruption or integrity issues that may need manual resolution.
+///
+/// **Example:**
+/// ```no_run
+/// # use rivets::storage::in_memory::load_from_jsonl;
+/// # use std::path::Path;
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() -> anyhow::Result<()> {
+/// let (storage, warnings) = load_from_jsonl(
+///     Path::new(".rivets/issues.jsonl"),
+///     "rivets".to_string()
+/// ).await?;
+///
+/// for warning in warnings {
+///     match warning {
+///         rivets::storage::in_memory::LoadWarning::MalformedJson { line_number, error } => {
+///             eprintln!("⚠️  Skipped malformed JSON at line {}: {}", line_number, error);
+///         }
+///         rivets::storage::in_memory::LoadWarning::OrphanedDependency { from, to } => {
+///             eprintln!("⚠️  Skipped orphaned dependency: {} -> {}", from, to);
+///         }
+///         rivets::storage::in_memory::LoadWarning::CircularDependency { from, to } => {
+///             eprintln!("⚠️  Broke circular dependency: {} -> {}", from, to);
+///         }
+///         rivets::storage::in_memory::LoadWarning::InvalidIssueData { issue_id, line_number, error } => {
+///             eprintln!("⚠️  Skipped invalid issue {} at line {}: {}", issue_id, line_number, error);
+///         }
+///     }
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub enum LoadWarning {
     /// Malformed JSON line that couldn't be parsed
+    ///
+    /// **Effect**: Line is skipped entirely; no issue created from this line.
+    /// **Common causes**: File corruption, manual editing errors, incomplete writes.
     MalformedJson { line_number: usize, error: String },
 
     /// Dependency references an issue that doesn't exist in the file
+    ///
+    /// **Effect**: The dependency edge is skipped; both issues are still loaded,
+    /// but the dependency relationship is not created.
+    /// **Common causes**: Partial exports, deleted dependencies, file corruption.
     OrphanedDependency { from: IssueId, to: IssueId },
 
     /// Adding a dependency would create a circular reference
+    ///
+    /// **Effect**: The dependency edge is skipped to break the cycle; both issues
+    /// are loaded but one dependency edge is omitted.
+    /// **Common causes**: Manual JSONL editing, bugs in earlier versions.
     CircularDependency { from: IssueId, to: IssueId },
+
+    /// Issue data failed validation (invalid priority, title length, etc.)
+    ///
+    /// **Effect**: The entire issue is skipped and not loaded into storage.
+    /// **Common causes**: Manual editing, version mismatches, data corruption.
+    InvalidIssueData {
+        issue_id: IssueId,
+        line_number: usize,
+        error: String,
+    },
 }
 
 /// Inner storage structure (not thread-safe).
@@ -226,6 +284,17 @@ pub fn new_in_memory_storage(prefix: String) -> Box<dyn IssueStorage> {
 /// For databases with tens of thousands of issues, monitor memory usage during load.
 /// Future versions may implement streaming or chunked loading for very large databases.
 ///
+/// # Performance Considerations
+///
+/// **ID Registration**: During the second pass, all loaded issue IDs are registered with
+/// the ID generator via `register_id()`. This is an O(n) operation where n is the number
+/// of issues. The ID generator maintains a hash set of used IDs to prevent future collisions,
+/// so registration is O(1) per ID.
+///
+/// For typical databases (< 10,000 issues), ID registration completes in milliseconds.
+/// For very large databases (> 100,000 issues), expect 10-50ms additional load time for
+/// ID registration.
+///
 /// # Returns
 ///
 /// Returns a tuple of `(storage, warnings)` where warnings contains all non-fatal
@@ -263,12 +332,22 @@ pub async fn load_from_jsonl(
     let mut warnings = Vec::new();
     let mut line_number = 0;
 
-    // First pass: Parse all issues from JSONL
+    // First pass: Parse and validate all issues from JSONL
     while let Some(line) = lines.next_line().await.map_err(Error::Io)? {
         line_number += 1;
 
         match serde_json::from_str::<Issue>(&line) {
             Ok(issue) => {
+                // Validate issue data integrity
+                if let Err(validation_error) = issue.validate() {
+                    warnings.push(LoadWarning::InvalidIssueData {
+                        issue_id: issue.id.clone(),
+                        line_number,
+                        error: validation_error,
+                    });
+                    // Skip invalid issues - don't add to storage
+                    continue;
+                }
                 issues.push(issue);
             }
             Err(e) => {
@@ -363,10 +442,13 @@ pub async fn save_to_jsonl(storage: &dyn IssueStorage, path: &Path) -> Result<()
     let mut writer = BufWriter::new(file);
 
     // Export all issues
-    let issues = storage.export_all().await?;
+    let mut issues = storage.export_all().await?;
 
     // Write each issue as a JSON line
-    for issue in issues {
+    for issue in &mut issues {
+        // Sort dependencies for deterministic serialization
+        issue.dependencies.sort();
+
         let json = serde_json::to_string(&issue)
             .map_err(|e| Error::Storage(format!("JSON serialization failed: {}", e)))?;
 
@@ -1691,6 +1773,432 @@ mod tests {
             1,
             "Cycle should be broken, only one dependency edge should exist"
         );
+
+        temp_dir.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_full_persistence_workflow_integration() {
+        use crate::domain::{DependencyType, IssueStatus, IssueType, IssueUpdate, NewIssue};
+        use tempfile::tempdir;
+
+        let temp_dir = tempdir().unwrap();
+        let file_path = temp_dir.path().join("workflow.jsonl");
+
+        // Step 1: Create storage and add issues
+        let mut storage = super::new_in_memory_storage("test".to_string());
+
+        let issue1 = storage
+            .create(NewIssue {
+                title: "Foundation work".to_string(),
+                description: "Base implementation".to_string(),
+                priority: 3,
+                issue_type: IssueType::Task,
+                assignee: Some("alice".to_string()),
+                labels: vec!["backend".to_string()],
+                design: None,
+                acceptance_criteria: None,
+                notes: None,
+                external_ref: None,
+                dependencies: vec![],
+            })
+            .await
+            .unwrap();
+
+        let issue2 = storage
+            .create(NewIssue {
+                title: "Build on foundation".to_string(),
+                description: "Depends on issue1".to_string(),
+                priority: 2,
+                issue_type: IssueType::Feature,
+                assignee: Some("bob".to_string()),
+                labels: vec!["frontend".to_string()],
+                design: None,
+                acceptance_criteria: None,
+                notes: None,
+                external_ref: Some("GH-123".to_string()),
+                dependencies: vec![],
+            })
+            .await
+            .unwrap();
+
+        let issue3 = storage
+            .create(NewIssue {
+                title: "Polish UI".to_string(),
+                description: "Final touches".to_string(),
+                priority: 1,
+                issue_type: IssueType::Task,
+                assignee: None,
+                labels: vec![],
+                design: None,
+                acceptance_criteria: None,
+                notes: None,
+                external_ref: None,
+                dependencies: vec![],
+            })
+            .await
+            .unwrap();
+
+        // Step 2: Add dependencies
+        storage
+            .add_dependency(&issue2.id, &issue1.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+        storage
+            .add_dependency(&issue3.id, &issue2.id, DependencyType::Related)
+            .await
+            .unwrap();
+
+        // Step 3: Update an issue
+        storage
+            .update(
+                &issue1.id,
+                IssueUpdate {
+                    title: None,
+                    description: Some("Updated description".to_string()),
+                    status: Some(IssueStatus::InProgress),
+                    priority: None,
+                    assignee: None,
+                    design: None,
+                    acceptance_criteria: None,
+                    notes: None,
+                    external_ref: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Step 4: Save to JSONL
+        super::save_to_jsonl(storage.as_ref(), &file_path)
+            .await
+            .unwrap();
+
+        // Step 5: Load from JSONL into new storage
+        let (reloaded_storage, warnings) = super::load_from_jsonl(&file_path, "test".to_string())
+            .await
+            .unwrap();
+
+        // Verify no warnings during load
+        assert!(
+            warnings.is_empty(),
+            "Expected clean load, got warnings: {:?}",
+            warnings
+        );
+
+        // Step 6: Verify all issues loaded correctly
+        let loaded_issues = reloaded_storage.export_all().await.unwrap();
+        assert_eq!(loaded_issues.len(), 3, "Should have 3 issues");
+
+        // Step 7: Verify issue1 was updated correctly
+        let loaded_issue1 = reloaded_storage.get(&issue1.id).await.unwrap().unwrap();
+        assert_eq!(loaded_issue1.status, IssueStatus::InProgress);
+        assert_eq!(loaded_issue1.description, "Updated description");
+        assert_eq!(loaded_issue1.title, "Foundation work");
+        assert_eq!(loaded_issue1.assignee, Some("alice".to_string()));
+        assert_eq!(loaded_issue1.labels, vec!["backend".to_string()]);
+
+        // Step 8: Verify issue2 loaded with correct properties
+        let loaded_issue2 = reloaded_storage.get(&issue2.id).await.unwrap().unwrap();
+        assert_eq!(loaded_issue2.title, "Build on foundation");
+        assert_eq!(loaded_issue2.external_ref, Some("GH-123".to_string()));
+        assert_eq!(loaded_issue2.priority, 2);
+
+        // Step 9: Verify dependencies were preserved
+        let deps2 = reloaded_storage.get_dependencies(&issue2.id).await.unwrap();
+        assert_eq!(deps2.len(), 1);
+        assert_eq!(deps2[0].depends_on_id, issue1.id);
+        assert_eq!(deps2[0].dep_type, DependencyType::Blocks);
+
+        let deps3 = reloaded_storage.get_dependencies(&issue3.id).await.unwrap();
+        assert_eq!(deps3.len(), 1);
+        assert_eq!(deps3[0].depends_on_id, issue2.id);
+        assert_eq!(deps3[0].dep_type, DependencyType::Related);
+
+        // Step 10: Verify dependents (reverse dependencies)
+        let dependents1 = reloaded_storage.get_dependents(&issue1.id).await.unwrap();
+        assert_eq!(dependents1.len(), 1);
+        // get_dependents returns dependencies where depends_on_id is the ID of the depending issue
+        assert_eq!(dependents1[0].depends_on_id, issue2.id);
+
+        // Step 11: Verify blocked issues query
+        let blocked = reloaded_storage.blocked_issues().await.unwrap();
+        // issue2 is blocked by issue1 (in progress)
+        // issue3 depends on issue2 (open) but it's a Related dependency, not blocking
+        assert!(
+            blocked
+                .iter()
+                .any(|(issue, _blockers)| issue.id == issue2.id),
+            "Issue2 should be in blocked list"
+        );
+
+        // Step 12: Verify ready-to-work issues
+        let ready = reloaded_storage.ready_to_work(None).await.unwrap();
+        // issue1 has no dependencies and is in progress
+        // issue3 has only Related dependencies, so it's ready
+        assert!(
+            ready.iter().any(|i| i.id == issue3.id),
+            "Issue3 should be ready (Related deps don't block)"
+        );
+
+        // Step 13: Perform operations on reloaded storage
+        // Add a new dependency
+        let mut reloaded_storage_mut = reloaded_storage;
+        reloaded_storage_mut
+            .add_dependency(&issue3.id, &issue1.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+
+        // Verify the new dependency
+        let deps3_updated = reloaded_storage_mut
+            .get_dependencies(&issue3.id)
+            .await
+            .unwrap();
+        assert_eq!(deps3_updated.len(), 2);
+        assert!(deps3_updated
+            .iter()
+            .any(|d| d.depends_on_id == issue1.id && d.dep_type == DependencyType::Blocks));
+
+        // Step 14: Update an issue after reload
+        reloaded_storage_mut
+            .update(
+                &issue2.id,
+                IssueUpdate {
+                    title: None,
+                    description: None,
+                    status: Some(IssueStatus::Closed),
+                    priority: None,
+                    assignee: None,
+                    design: None,
+                    acceptance_criteria: None,
+                    notes: None,
+                    external_ref: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let final_issue2 = reloaded_storage_mut.get(&issue2.id).await.unwrap().unwrap();
+        assert_eq!(final_issue2.status, IssueStatus::Closed);
+
+        // Step 15: Save again and verify roundtrip consistency
+        let file_path2 = temp_dir.path().join("workflow2.jsonl");
+        super::save_to_jsonl(reloaded_storage_mut.as_ref(), &file_path2)
+            .await
+            .unwrap();
+
+        let (final_storage, final_warnings) =
+            super::load_from_jsonl(&file_path2, "test".to_string())
+                .await
+                .unwrap();
+
+        assert!(final_warnings.is_empty());
+        let final_issues = final_storage.export_all().await.unwrap();
+        assert_eq!(final_issues.len(), 3);
+
+        temp_dir.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_id_generator_state_preservation_on_reload() {
+        use crate::domain::{IssueType, NewIssue};
+        use tempfile::tempdir;
+
+        let temp_dir = tempdir().unwrap();
+        let file_path = temp_dir.path().join("id_gen_test.jsonl");
+
+        // Step 1: Create storage and add some issues
+        let mut storage = super::new_in_memory_storage("test".to_string());
+
+        let issue1 = storage
+            .create(NewIssue {
+                title: "First issue".to_string(),
+                description: "Description".to_string(),
+                priority: 2,
+                issue_type: IssueType::Task,
+                assignee: None,
+                labels: vec![],
+                design: None,
+                acceptance_criteria: None,
+                notes: None,
+                external_ref: None,
+                dependencies: vec![],
+            })
+            .await
+            .unwrap();
+
+        let issue2 = storage
+            .create(NewIssue {
+                title: "Second issue".to_string(),
+                description: "Description".to_string(),
+                priority: 2,
+                issue_type: IssueType::Task,
+                assignee: None,
+                labels: vec![],
+                design: None,
+                acceptance_criteria: None,
+                notes: None,
+                external_ref: None,
+                dependencies: vec![],
+            })
+            .await
+            .unwrap();
+
+        // Collect existing IDs
+        let existing_ids: Vec<String> = vec![
+            issue1.id.as_str().to_string(),
+            issue2.id.as_str().to_string(),
+        ];
+
+        // Step 2: Save to JSONL
+        super::save_to_jsonl(storage.as_ref(), &file_path)
+            .await
+            .unwrap();
+
+        // Step 3: Load from JSONL
+        let (mut reloaded_storage, warnings) =
+            super::load_from_jsonl(&file_path, "test".to_string())
+                .await
+                .unwrap();
+
+        assert!(warnings.is_empty());
+
+        // Step 4: Create new issues after reload and verify no ID collisions
+        let issue3 = reloaded_storage
+            .create(NewIssue {
+                title: "Third issue after reload".to_string(),
+                description: "Description".to_string(),
+                priority: 2,
+                issue_type: IssueType::Task,
+                assignee: None,
+                labels: vec![],
+                design: None,
+                acceptance_criteria: None,
+                notes: None,
+                external_ref: None,
+                dependencies: vec![],
+            })
+            .await
+            .unwrap();
+
+        let issue4 = reloaded_storage
+            .create(NewIssue {
+                title: "Fourth issue after reload".to_string(),
+                description: "Description".to_string(),
+                priority: 2,
+                issue_type: IssueType::Task,
+                assignee: None,
+                labels: vec![],
+                design: None,
+                acceptance_criteria: None,
+                notes: None,
+                external_ref: None,
+                dependencies: vec![],
+            })
+            .await
+            .unwrap();
+
+        // Step 5: Verify no collisions - new IDs should be different from existing ones
+        assert!(
+            !existing_ids.contains(&issue3.id.as_str().to_string()),
+            "New issue3 ID '{}' collides with existing IDs: {:?}",
+            issue3.id.as_str(),
+            existing_ids
+        );
+        assert!(
+            !existing_ids.contains(&issue4.id.as_str().to_string()),
+            "New issue4 ID '{}' collides with existing IDs: {:?}",
+            issue4.id.as_str(),
+            existing_ids
+        );
+
+        // Step 6: Verify all 4 issues exist
+        let all_issues = reloaded_storage.export_all().await.unwrap();
+        assert_eq!(all_issues.len(), 4);
+
+        temp_dir.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_load_jsonl_with_invalid_issue_data() {
+        use crate::domain::{IssueId, IssueStatus, IssueType};
+        use chrono::Utc;
+        use tempfile::tempdir;
+
+        let temp_dir = tempdir().unwrap();
+        let file_path = temp_dir.path().join("invalid.jsonl");
+
+        // Create an issue with invalid priority (> 4)
+        let invalid_issue = Issue {
+            id: IssueId::new("test-invalid"),
+            title: "Invalid priority issue".to_string(),
+            description: "This has invalid priority".to_string(),
+            status: IssueStatus::Open,
+            priority: 10, // Invalid - exceeds maximum of 4
+            issue_type: IssueType::Task,
+            assignee: None,
+            labels: vec![],
+            design: None,
+            acceptance_criteria: None,
+            notes: None,
+            external_ref: None,
+            dependencies: vec![],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            closed_at: None,
+        };
+
+        // Create a valid issue
+        let valid_issue = Issue {
+            id: IssueId::new("test-valid"),
+            title: "Valid issue".to_string(),
+            description: "This is valid".to_string(),
+            status: IssueStatus::Open,
+            priority: 2,
+            issue_type: IssueType::Task,
+            assignee: None,
+            labels: vec![],
+            design: None,
+            acceptance_criteria: None,
+            notes: None,
+            external_ref: None,
+            dependencies: vec![],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            closed_at: None,
+        };
+
+        // Write both issues to JSONL
+        let json_invalid = serde_json::to_string(&invalid_issue).unwrap();
+        let json_valid = serde_json::to_string(&valid_issue).unwrap();
+        tokio::fs::write(&file_path, format!("{}\n{}\n", json_invalid, json_valid))
+            .await
+            .unwrap();
+
+        // Load - should get a warning for the invalid issue
+        let (loaded_storage, warnings) = super::load_from_jsonl(&file_path, "test".to_string())
+            .await
+            .unwrap();
+
+        // Should have 1 warning for invalid issue data
+        assert_eq!(warnings.len(), 1);
+        match &warnings[0] {
+            super::LoadWarning::InvalidIssueData {
+                issue_id,
+                line_number,
+                error,
+            } => {
+                assert_eq!(issue_id.as_str(), "test-invalid");
+                assert_eq!(*line_number, 1);
+                assert!(error.contains("Priority"));
+                assert!(error.contains("exceeds maximum"));
+            }
+            _ => panic!("Expected InvalidIssueData warning, got: {:?}", warnings[0]),
+        }
+
+        // Only the valid issue should be loaded
+        let loaded_issues = loaded_storage.export_all().await.unwrap();
+        assert_eq!(loaded_issues.len(), 1);
+        assert_eq!(loaded_issues[0].id.as_str(), "test-valid");
 
         temp_dir.close().unwrap();
     }
