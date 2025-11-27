@@ -446,7 +446,9 @@ pub async fn save_to_jsonl(storage: &dyn IssueStorage, path: &Path) -> Result<()
 
     // Write each issue as a JSON line
     for issue in &mut issues {
-        // Sort dependencies for deterministic serialization
+        // Sort dependencies for deterministic serialization.
+        // This ensures consistent JSONL output across saves, preventing spurious
+        // diffs in version control when dependencies are added/removed in different orders.
         issue.dependencies.sort();
 
         let json = serde_json::to_string(&issue)
@@ -1449,7 +1451,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_save_load_jsonl_round_trip() {
+    async fn test_jsonl_persistence_round_trip() {
         use tempfile::tempdir;
 
         // Create storage with some issues
