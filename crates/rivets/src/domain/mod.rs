@@ -10,7 +10,7 @@ use std::fmt;
 ///
 /// Wraps a string ID in a newtype for type safety. The inner field is private
 /// to enforce encapsulation and allow future changes to the ID format.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct IssueId(String);
 
 impl IssueId {
@@ -86,6 +86,17 @@ pub struct Issue {
     /// External reference (e.g., GitHub issue number)
     pub external_ref: Option<String>,
 
+    /// Dependencies (issues this issue depends on)
+    ///
+    /// **Note**: This field is maintained for JSONL serialization. The dependency
+    /// graph in storage (petgraph) is the source of truth for internal operations.
+    /// This field should be kept in sync with the graph.
+    ///
+    /// **Ordering**: Dependencies are sorted lexicographically by `depends_on_id` and then
+    /// by `dep_type` before serialization to ensure deterministic JSONL output. This prevents
+    /// spurious diffs in version control when dependencies are added/removed in different orders.
+    pub dependencies: Vec<Dependency>,
+
     /// Creation timestamp
     pub created_at: DateTime<Utc>,
 
@@ -94,6 +105,37 @@ pub struct Issue {
 
     /// Closed timestamp (optional)
     pub closed_at: Option<DateTime<Utc>>,
+}
+
+impl Issue {
+    /// Validate issue data integrity
+    ///
+    /// Checks:
+    /// - Title is not empty and within MAX_TITLE_LENGTH
+    /// - Priority is within valid range (0-4)
+    ///
+    /// Returns Ok(()) if valid, Err with description if invalid.
+    pub fn validate(&self) -> Result<(), String> {
+        let trimmed_title = self.title.trim();
+
+        if trimmed_title.is_empty() {
+            return Err("Title cannot be empty".to_string());
+        }
+
+        if self.title.len() > MAX_TITLE_LENGTH {
+            return Err(format!(
+                "Title length ({}) exceeds maximum of {}",
+                self.title.len(),
+                MAX_TITLE_LENGTH
+            ));
+        }
+
+        if self.priority > 4 {
+            return Err(format!("Priority {} exceeds maximum of 4", self.priority));
+        }
+
+        Ok(())
+    }
 }
 
 /// Status of an issue
@@ -135,7 +177,7 @@ pub enum IssueType {
 }
 
 /// Dependency between issues
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Dependency {
     /// ID of the issue this depends on
     pub depends_on_id: IssueId,
@@ -145,7 +187,7 @@ pub struct Dependency {
 }
 
 /// Type of dependency relationship
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DependencyType {
     /// Hard blocker - prevents work
