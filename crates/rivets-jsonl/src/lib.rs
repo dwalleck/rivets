@@ -123,9 +123,11 @@ pub mod error;
 pub mod query;
 pub mod reader;
 pub mod stream;
+pub mod warning;
 pub mod writer;
 
 pub use atomic::{write_jsonl_atomic, write_jsonl_atomic_iter};
 pub use error::{Error, Result};
 pub use reader::JsonlReader;
+pub use warning::{Warning, WarningCollector};
 pub use writer::JsonlWriter;
