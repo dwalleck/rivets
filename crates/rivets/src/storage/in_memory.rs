@@ -489,31 +489,30 @@ impl IssueStorage for InMemoryStorage {
     async fn create(&mut self, new_issue: NewIssue) -> Result<Issue> {
         let mut inner = self.lock().await;
 
-        // Validate the new issue
+        // === Phase 1: All validations (no mutations) ===
+        // Validate the new issue data (title, priority, etc.)
         new_issue
             .validate()
             .map_err(|e| Error::Storage(format!("Validation failed: {}", e)))?;
 
-        // Validate all dependencies BEFORE modifying storage
-        // This prevents graph corruption if validation fails after issue is added
+        // Validate all dependency targets exist
         for (depends_on_id, _dep_type) in &new_issue.dependencies {
-            // Validate dependency exists
             if !inner.issues.contains_key(depends_on_id) {
                 return Err(Error::IssueNotFound(depends_on_id.clone()));
             }
         }
 
-        // Generate unique ID
+        // === Phase 2: ID generation ===
         let id = inner.generate_id(&new_issue)?;
 
-        // Check for cycles BEFORE adding to graph
-        // We temporarily add the node to check cycles, but haven't stored the issue yet
+        // === Phase 3: Cycle detection ===
+        // We temporarily add the node to check for cycles, then clean up if needed
         let temp_node = inner.graph.add_node(id.clone());
         inner.node_map.insert(id.clone(), temp_node);
 
         for (depends_on_id, _dep_type) in &new_issue.dependencies {
             if inner.has_cycle_impl(&id, depends_on_id)? {
-                // Rollback: remove the temporary node
+                // Rollback: remove the temporary node before returning error
                 inner.graph.remove_node(temp_node);
                 inner.node_map.remove(&id);
                 return Err(Error::CircularDependency {
@@ -523,7 +522,7 @@ impl IssueStorage for InMemoryStorage {
             }
         }
 
-        // All validations passed - now it's safe to add the issue
+        // === Phase 4: Create issue (all validations passed) ===
         let now = Utc::now();
 
         // Convert dependencies from tuples to Dependency structs
@@ -617,6 +616,12 @@ impl IssueStorage for InMemoryStorage {
             issue.external_ref = Some(external_ref);
         }
 
+        // Validate the updated issue to ensure data integrity
+        // This catches invalid titles, descriptions, or priorities that may have been set
+        issue
+            .validate()
+            .map_err(|e| Error::Storage(format!("Validation failed: {}", e)))?;
+
         issue.updated_at = Utc::now();
 
         Ok(issue.clone())
@@ -672,7 +677,20 @@ impl IssueStorage for InMemoryStorage {
             return Err(Error::IssueNotFound(to.clone()));
         }
 
-        // Check for cycles
+        // Get node indices (we know they exist from the checks above)
+        let from_node = inner.node_map[from];
+        let to_node = inner.node_map[to];
+
+        // Check for duplicate dependency using graph lookup (O(1) with find_edge)
+        // This is more efficient than iterating through the issue.dependencies vector
+        if inner.graph.find_edge(from_node, to_node).is_some() {
+            return Err(Error::Storage(format!(
+                "Dependency already exists: {} -> {}",
+                from, to
+            )));
+        }
+
+        // Check for cycles (must be done after duplicate check to avoid false positives)
         if inner.has_cycle_impl(from, to)? {
             return Err(Error::CircularDependency {
                 from: from.clone(),
@@ -680,26 +698,7 @@ impl IssueStorage for InMemoryStorage {
             });
         }
 
-        // Check for duplicate dependency
-        let issue = inner
-            .issues
-            .get(from)
-            .ok_or_else(|| Error::IssueNotFound(from.clone()))?;
-
-        if issue
-            .dependencies
-            .iter()
-            .any(|dep| dep.depends_on_id == *to)
-        {
-            return Err(Error::Storage(format!(
-                "Dependency already exists: {} -> {}",
-                from, to
-            )));
-        }
-
         // Add edge to graph
-        let from_node = inner.node_map[from];
-        let to_node = inner.node_map[to];
         inner.graph.add_edge(from_node, to_node, dep_type);
 
         // Also add to issue's dependencies vector for JSONL serialization
@@ -2941,5 +2940,557 @@ mod tests {
 
         // Verify tree contains all 999 descendants
         assert_eq!(tree.len(), 999);
+    }
+
+    // =======================================================================
+    // Graph-Vector Synchronization Tests
+    //
+    // These tests verify that the dependency graph (petgraph edges) and the
+    // issue.dependencies vector stay synchronized after all operations.
+    // This is critical for data integrity during JSONL serialization.
+    // =======================================================================
+
+    /// Helper function to verify graph-vector synchronization for a specific issue.
+    /// Returns an error message if synchronization is broken, None if synchronized.
+    async fn verify_sync_for_issue(
+        storage: &dyn IssueStorage,
+        issue_id: &IssueId,
+    ) -> Option<String> {
+        // Get dependencies from graph via get_dependencies()
+        let graph_deps = match storage.get_dependencies(issue_id).await {
+            Ok(deps) => deps,
+            Err(e) => return Some(format!("Failed to get graph deps for {}: {}", issue_id, e)),
+        };
+
+        // Get issue to access vector dependencies
+        let issue = match storage.get(issue_id).await {
+            Ok(Some(issue)) => issue,
+            Ok(None) => return Some(format!("Issue {} not found", issue_id)),
+            Err(e) => return Some(format!("Failed to get issue {}: {}", issue_id, e)),
+        };
+
+        let vector_deps = &issue.dependencies;
+
+        // Check count matches
+        if graph_deps.len() != vector_deps.len() {
+            return Some(format!(
+                "Issue {}: graph has {} deps, vector has {} deps",
+                issue_id,
+                graph_deps.len(),
+                vector_deps.len()
+            ));
+        }
+
+        // Check each graph dependency exists in vector
+        for graph_dep in &graph_deps {
+            let found = vector_deps.iter().any(|v| {
+                v.depends_on_id == graph_dep.depends_on_id && v.dep_type == graph_dep.dep_type
+            });
+            if !found {
+                return Some(format!(
+                    "Issue {}: graph dep {:?} not found in vector",
+                    issue_id, graph_dep
+                ));
+            }
+        }
+
+        // Check each vector dependency exists in graph
+        for vector_dep in vector_deps {
+            let found = graph_deps.iter().any(|g| {
+                g.depends_on_id == vector_dep.depends_on_id && g.dep_type == vector_dep.dep_type
+            });
+            if !found {
+                return Some(format!(
+                    "Issue {}: vector dep {:?} not found in graph",
+                    issue_id, vector_dep
+                ));
+            }
+        }
+
+        None
+    }
+
+    /// Helper function to verify synchronization for all issues in storage.
+    async fn verify_all_issues_synchronized(
+        storage: &dyn IssueStorage,
+    ) -> std::result::Result<(), String> {
+        let all_issues = storage.export_all().await.map_err(|e| e.to_string())?;
+
+        for issue in &all_issues {
+            if let Some(err) = verify_sync_for_issue(storage, &issue.id).await {
+                return Err(err);
+            }
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_sync_after_add_dependency() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let issue1 = storage.create(create_test_issue("Issue 1")).await.unwrap();
+        let issue2 = storage.create(create_test_issue("Issue 2")).await.unwrap();
+        let issue3 = storage.create(create_test_issue("Issue 3")).await.unwrap();
+
+        // Add multiple dependencies
+        storage
+            .add_dependency(&issue2.id, &issue1.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+        storage
+            .add_dependency(&issue3.id, &issue1.id, DependencyType::Related)
+            .await
+            .unwrap();
+        storage
+            .add_dependency(&issue3.id, &issue2.id, DependencyType::ParentChild)
+            .await
+            .unwrap();
+
+        // Verify synchronization for all issues
+        verify_all_issues_synchronized(storage.as_ref())
+            .await
+            .expect("Graph and vector should be synchronized after add_dependency");
+
+        // Explicitly verify issue3 has both dependencies
+        let issue3_updated = storage.get(&issue3.id).await.unwrap().unwrap();
+        assert_eq!(
+            issue3_updated.dependencies.len(),
+            2,
+            "Issue 3 should have 2 dependencies in vector"
+        );
+
+        let graph_deps = storage.get_dependencies(&issue3.id).await.unwrap();
+        assert_eq!(
+            graph_deps.len(),
+            2,
+            "Issue 3 should have 2 dependencies in graph"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sync_after_remove_dependency() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let issue1 = storage.create(create_test_issue("Issue 1")).await.unwrap();
+        let issue2 = storage.create(create_test_issue("Issue 2")).await.unwrap();
+
+        // Add and then remove dependency
+        storage
+            .add_dependency(&issue2.id, &issue1.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+
+        // Verify sync before removal
+        verify_all_issues_synchronized(storage.as_ref())
+            .await
+            .expect("Should be synchronized before removal");
+
+        // Remove the dependency
+        storage
+            .remove_dependency(&issue2.id, &issue1.id)
+            .await
+            .unwrap();
+
+        // Verify sync after removal
+        verify_all_issues_synchronized(storage.as_ref())
+            .await
+            .expect("Graph and vector should be synchronized after remove_dependency");
+
+        // Explicitly verify issue2 has no dependencies
+        let issue2_updated = storage.get(&issue2.id).await.unwrap().unwrap();
+        assert_eq!(
+            issue2_updated.dependencies.len(),
+            0,
+            "Issue 2 should have 0 dependencies in vector after removal"
+        );
+
+        let graph_deps = storage.get_dependencies(&issue2.id).await.unwrap();
+        assert_eq!(
+            graph_deps.len(),
+            0,
+            "Issue 2 should have 0 dependencies in graph after removal"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sync_after_create_with_dependencies() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        // Create base issues
+        let issue1 = storage.create(create_test_issue("Issue 1")).await.unwrap();
+        let issue2 = storage.create(create_test_issue("Issue 2")).await.unwrap();
+
+        // Create issue with dependencies via NewIssue
+        let new_issue = NewIssue {
+            title: "Issue with deps".to_string(),
+            description: "Has dependencies at creation".to_string(),
+            priority: 2,
+            issue_type: IssueType::Task,
+            assignee: None,
+            labels: vec![],
+            design: None,
+            acceptance_criteria: None,
+            notes: None,
+            external_ref: None,
+            dependencies: vec![
+                (issue1.id.clone(), DependencyType::Blocks),
+                (issue2.id.clone(), DependencyType::Related),
+            ],
+        };
+
+        let issue3 = storage.create(new_issue).await.unwrap();
+
+        // Verify synchronization
+        verify_all_issues_synchronized(storage.as_ref())
+            .await
+            .expect("Graph and vector should be synchronized after create with dependencies");
+
+        // Verify issue3 has correct dependencies
+        assert_eq!(
+            issue3.dependencies.len(),
+            2,
+            "Issue 3 should have 2 dependencies"
+        );
+
+        let graph_deps = storage.get_dependencies(&issue3.id).await.unwrap();
+        assert_eq!(
+            graph_deps.len(),
+            2,
+            "Issue 3 should have 2 graph dependencies"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sync_after_update_does_not_affect_deps() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let issue1 = storage.create(create_test_issue("Issue 1")).await.unwrap();
+        let issue2 = storage.create(create_test_issue("Issue 2")).await.unwrap();
+
+        // Add dependency
+        storage
+            .add_dependency(&issue2.id, &issue1.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+
+        // Update issue2 (should not affect dependencies)
+        storage
+            .update(
+                &issue2.id,
+                IssueUpdate {
+                    title: Some("Updated Issue 2".to_string()),
+                    status: Some(IssueStatus::InProgress),
+                    priority: Some(1),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // Verify synchronization still holds
+        verify_all_issues_synchronized(storage.as_ref())
+            .await
+            .expect("Graph and vector should remain synchronized after update");
+
+        // Verify dependency is still present
+        let issue2_updated = storage.get(&issue2.id).await.unwrap().unwrap();
+        assert_eq!(
+            issue2_updated.dependencies.len(),
+            1,
+            "Issue 2 should still have 1 dependency after update"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sync_complex_dependency_chain() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        // Create chain of issues: 1 <- 2 <- 3 <- 4 <- 5
+        let mut issues = Vec::new();
+        for i in 1..=5 {
+            let issue = storage
+                .create(create_test_issue(&format!("Issue {}", i)))
+                .await
+                .unwrap();
+            issues.push(issue);
+        }
+
+        // Add chain dependencies
+        for i in 1..5 {
+            storage
+                .add_dependency(&issues[i].id, &issues[i - 1].id, DependencyType::Blocks)
+                .await
+                .unwrap();
+        }
+
+        // Verify synchronization
+        verify_all_issues_synchronized(storage.as_ref())
+            .await
+            .expect("Graph and vector should be synchronized for chain");
+
+        // Add cross-links
+        storage
+            .add_dependency(&issues[4].id, &issues[0].id, DependencyType::Related)
+            .await
+            .unwrap();
+        storage
+            .add_dependency(&issues[3].id, &issues[0].id, DependencyType::Related)
+            .await
+            .unwrap();
+
+        // Verify synchronization after cross-links
+        verify_all_issues_synchronized(storage.as_ref())
+            .await
+            .expect("Graph and vector should be synchronized after cross-links");
+
+        // Remove some dependencies
+        storage
+            .remove_dependency(&issues[2].id, &issues[1].id)
+            .await
+            .unwrap();
+
+        // Verify synchronization after removal
+        verify_all_issues_synchronized(storage.as_ref())
+            .await
+            .expect("Graph and vector should be synchronized after removal in chain");
+    }
+
+    #[tokio::test]
+    async fn test_sync_after_jsonl_round_trip() {
+        use tempfile::tempdir;
+
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        // Create issues with dependencies
+        let issue1 = storage.create(create_test_issue("Issue 1")).await.unwrap();
+        let issue2 = storage.create(create_test_issue("Issue 2")).await.unwrap();
+        let issue3 = storage.create(create_test_issue("Issue 3")).await.unwrap();
+
+        storage
+            .add_dependency(&issue2.id, &issue1.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+        storage
+            .add_dependency(&issue3.id, &issue2.id, DependencyType::Related)
+            .await
+            .unwrap();
+        storage
+            .add_dependency(&issue3.id, &issue1.id, DependencyType::ParentChild)
+            .await
+            .unwrap();
+
+        // Save to JSONL
+        let temp_dir = tempdir().unwrap();
+        let file_path = temp_dir.path().join("sync_test.jsonl");
+        super::save_to_jsonl(storage.as_ref(), &file_path)
+            .await
+            .unwrap();
+
+        // Load from JSONL
+        let (loaded_storage, warnings) = super::load_from_jsonl(&file_path, "test".to_string())
+            .await
+            .unwrap();
+
+        assert!(
+            warnings.is_empty(),
+            "Should have no warnings: {:?}",
+            warnings
+        );
+
+        // Verify synchronization in loaded storage
+        verify_all_issues_synchronized(loaded_storage.as_ref())
+            .await
+            .expect("Graph and vector should be synchronized after JSONL round-trip");
+
+        // Perform operations on loaded storage and verify sync
+        let mut loaded_storage = loaded_storage;
+        let issue4 = loaded_storage
+            .create(create_test_issue("Issue 4"))
+            .await
+            .unwrap();
+        loaded_storage
+            .add_dependency(&issue4.id, &issue3.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+
+        verify_all_issues_synchronized(loaded_storage.as_ref())
+            .await
+            .expect("Graph and vector should be synchronized after operations on loaded storage");
+
+        temp_dir.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_sync_multiple_dependency_types() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let issue1 = storage.create(create_test_issue("Issue 1")).await.unwrap();
+        let issue2 = storage.create(create_test_issue("Issue 2")).await.unwrap();
+
+        // Add dependencies of all types from issue2 to issue1
+        // Note: multiple edges with different types between same nodes
+        storage
+            .add_dependency(&issue2.id, &issue1.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+
+        // Verify sync
+        verify_all_issues_synchronized(storage.as_ref())
+            .await
+            .expect("Graph and vector should be synchronized with Blocks dependency");
+
+        // Attempt to add duplicate should fail
+        let result = storage
+            .add_dependency(&issue2.id, &issue1.id, DependencyType::Blocks)
+            .await;
+        assert!(result.is_err(), "Should not allow duplicate dependency");
+
+        // Original sync should still hold
+        verify_all_issues_synchronized(storage.as_ref())
+            .await
+            .expect("Graph and vector should remain synchronized after duplicate attempt");
+    }
+
+    #[tokio::test]
+    async fn test_sync_after_failed_cycle_detection() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let issue1 = storage.create(create_test_issue("Issue 1")).await.unwrap();
+        let issue2 = storage.create(create_test_issue("Issue 2")).await.unwrap();
+        let issue3 = storage.create(create_test_issue("Issue 3")).await.unwrap();
+
+        // Create chain: 1 <- 2 <- 3
+        storage
+            .add_dependency(&issue2.id, &issue1.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+        storage
+            .add_dependency(&issue3.id, &issue2.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+
+        // Attempt to create cycle (should fail)
+        let result = storage
+            .add_dependency(&issue1.id, &issue3.id, DependencyType::Blocks)
+            .await;
+        assert!(result.is_err(), "Cycle creation should fail");
+
+        // Sync should still hold after failed cycle attempt
+        verify_all_issues_synchronized(storage.as_ref())
+            .await
+            .expect("Graph and vector should be synchronized after failed cycle attempt");
+
+        // Verify original dependencies are intact
+        let deps2 = storage.get_dependencies(&issue2.id).await.unwrap();
+        assert_eq!(deps2.len(), 1);
+        let deps3 = storage.get_dependencies(&issue3.id).await.unwrap();
+        assert_eq!(deps3.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_sync_with_import_issues() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        // Create issues with dependencies directly
+        let now = chrono::Utc::now();
+        let issues = vec![
+            Issue {
+                id: IssueId::new("test-1"),
+                title: "Issue 1".to_string(),
+                description: "Test".to_string(),
+                status: IssueStatus::Open,
+                priority: 2,
+                issue_type: IssueType::Task,
+                assignee: None,
+                labels: vec![],
+                design: None,
+                acceptance_criteria: None,
+                notes: None,
+                external_ref: None,
+                dependencies: vec![],
+                created_at: now,
+                updated_at: now,
+                closed_at: None,
+            },
+            Issue {
+                id: IssueId::new("test-2"),
+                title: "Issue 2".to_string(),
+                description: "Test".to_string(),
+                status: IssueStatus::Open,
+                priority: 2,
+                issue_type: IssueType::Task,
+                assignee: None,
+                labels: vec![],
+                design: None,
+                acceptance_criteria: None,
+                notes: None,
+                external_ref: None,
+                dependencies: vec![Dependency {
+                    depends_on_id: IssueId::new("test-1"),
+                    dep_type: DependencyType::Blocks,
+                }],
+                created_at: now,
+                updated_at: now,
+                closed_at: None,
+            },
+        ];
+
+        // Import issues
+        storage.import_issues(issues).await.unwrap();
+
+        // Verify synchronization
+        verify_all_issues_synchronized(storage.as_ref())
+            .await
+            .expect("Graph and vector should be synchronized after import_issues");
+    }
+
+    #[tokio::test]
+    async fn test_sync_stress_many_operations() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        // Create 20 issues
+        let mut issues = Vec::new();
+        for i in 0..20 {
+            let issue = storage
+                .create(create_test_issue(&format!("Issue {}", i)))
+                .await
+                .unwrap();
+            issues.push(issue);
+        }
+
+        // Add many dependencies (avoiding cycles)
+        for i in 1..20 {
+            for j in 0..i {
+                // Only add some dependencies to avoid too many
+                if (i + j) % 3 == 0 {
+                    storage
+                        .add_dependency(&issues[i].id, &issues[j].id, DependencyType::Related)
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+
+        // Verify sync after many additions
+        verify_all_issues_synchronized(storage.as_ref())
+            .await
+            .expect("Graph and vector should be synchronized after many additions");
+
+        // Remove some dependencies
+        for i in 1..20 {
+            for j in 0..i {
+                if (i + j) % 6 == 0 {
+                    let _ = storage
+                        .remove_dependency(&issues[i].id, &issues[j].id)
+                        .await;
+                }
+            }
+        }
+
+        // Verify sync after removals
+        verify_all_issues_synchronized(storage.as_ref())
+            .await
+            .expect("Graph and vector should be synchronized after many removals");
     }
 }
