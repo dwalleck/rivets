@@ -592,6 +592,138 @@ mod atomic_write_integration {
         cleanup(&path).await;
     }
 
+    /// Verify atomic write fails gracefully on permission denied
+    #[tokio::test]
+    #[cfg(unix)] // Permission tests are Unix-specific
+    async fn atomic_write_fails_on_permission_denied() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Create a dedicated directory for permission testing
+        let dir_path = std::env::temp_dir().join("rivets_permission_test");
+        let _ = tokio::fs::remove_dir_all(&dir_path).await;
+        tokio::fs::create_dir(&dir_path).await.unwrap();
+
+        let path = dir_path.join("test.jsonl");
+
+        // Create initial file with known content
+        let initial_records = vec![TestRecord {
+            id: 100,
+            name: "Protected".to_string(),
+            active: true,
+        }];
+        write_jsonl_atomic(&path, &initial_records).await.unwrap();
+
+        // Make the directory read-only (prevents creating new files)
+        let mut perms = tokio::fs::metadata(&dir_path).await.unwrap().permissions();
+        perms.set_mode(0o555); // Read-only + executable (needed to read dir contents)
+        tokio::fs::set_permissions(&dir_path, perms).await.unwrap();
+
+        // Attempt to write (should fail because can't create temp file in read-only dir)
+        let new_records = vec![TestRecord {
+            id: 200,
+            name: "ShouldFail".to_string(),
+            active: false,
+        }];
+
+        let result = write_jsonl_atomic(&path, &new_records).await;
+        assert!(
+            result.is_err(),
+            "Writing to file in read-only directory should fail"
+        );
+
+        // Restore write permission to read the file
+        let mut perms = tokio::fs::metadata(&dir_path).await.unwrap().permissions();
+        perms.set_mode(0o755);
+        tokio::fs::set_permissions(&dir_path, perms).await.unwrap();
+
+        // Verify original file is unchanged
+        let file = tokio::fs::File::open(&path).await.unwrap();
+        let mut reader = JsonlReader::new(file);
+
+        let record: TestRecord = reader.read_line().await.unwrap().unwrap();
+        assert_eq!(record.id, 100);
+        assert_eq!(record.name, "Protected");
+
+        // Cleanup
+        tokio::fs::remove_dir_all(&dir_path).await.unwrap();
+    }
+
+    /// Verify atomic write handles serialization failures correctly
+    #[tokio::test]
+    async fn atomic_write_fails_on_serialization_error() {
+        use serde::Serialize;
+
+        // Custom type that always fails to serialize
+        #[derive(Debug)]
+        struct FailingRecord {
+            #[allow(dead_code)]
+            value: String,
+        }
+
+        impl Serialize for FailingRecord {
+            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                Err(serde::ser::Error::custom(
+                    "intentional serialization failure",
+                ))
+            }
+        }
+
+        let path = test_file_path("atomic_serialize_error");
+        cleanup(&path).await;
+
+        // Create initial file with valid content
+        let initial_records = vec![TestRecord {
+            id: 300,
+            name: "Valid".to_string(),
+            active: true,
+        }];
+        write_jsonl_atomic(&path, &initial_records).await.unwrap();
+
+        // Attempt to write records that fail serialization
+        let failing_records = vec![
+            FailingRecord {
+                value: "This will fail".to_string(),
+            },
+            FailingRecord {
+                value: "This too".to_string(),
+            },
+        ];
+
+        let result = write_jsonl_atomic(&path, &failing_records).await;
+        assert!(
+            result.is_err(),
+            "Writing records with serialization errors should fail"
+        );
+
+        // Verify error message contains serialization info
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("serialization") || err_msg.contains("intentional"),
+            "Error should indicate serialization failure: {}",
+            err_msg
+        );
+
+        // Verify original file is unchanged
+        let file = tokio::fs::File::open(&path).await.unwrap();
+        let mut reader = JsonlReader::new(file);
+
+        let record: TestRecord = reader.read_line().await.unwrap().unwrap();
+        assert_eq!(record.id, 300);
+        assert_eq!(record.name, "Valid");
+
+        // Verify no temp file was left behind
+        let temp_path = path.with_extension("jsonl.tmp");
+        assert!(
+            !temp_path.exists(),
+            "Temp file should be cleaned up after serialization failure"
+        );
+
+        cleanup(&path).await;
+    }
+
     /// Verify special characters are preserved through atomic write
     #[tokio::test]
     async fn atomic_write_special_characters() {
