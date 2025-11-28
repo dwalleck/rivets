@@ -223,6 +223,14 @@ impl<R: AsyncRead + Unpin> JsonlReader<R> {
     /// - Errors are propagated through the stream (not short-circuited)
     /// - After an error, the stream continues attempting to read subsequent lines
     ///
+    /// # When to Use
+    ///
+    /// - **Use `stream()`** for declarative stream processing with combinators
+    ///   (filter, map, take, etc.) and when working with large files where constant
+    ///   memory usage is important
+    /// - **Use `read_line()`** for imperative-style processing with explicit
+    ///   control flow and error handling, or when reading a small number of records
+    ///
     /// # Examples
     ///
     /// ```no_run
