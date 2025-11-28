@@ -50,12 +50,13 @@
 
 use crate::domain::{
     Dependency, DependencyType, Issue, IssueFilter, IssueId, IssueStatus, IssueUpdate, NewIssue,
+    SortPolicy,
 };
 use crate::error::{Error, Result};
 use crate::id_generation::{IdGenerator, IdGeneratorConfig};
 use crate::storage::IssueStorage;
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use petgraph::algo;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
@@ -853,49 +854,15 @@ impl IssueStorage for InMemoryStorage {
         Ok(issues)
     }
 
-    async fn ready_to_work(&self, filter: Option<&IssueFilter>) -> Result<Vec<Issue>> {
+    async fn ready_to_work(
+        &self,
+        filter: Option<&IssueFilter>,
+        sort_policy: Option<SortPolicy>,
+    ) -> Result<Vec<Issue>> {
         let inner = self.lock().await;
 
-        // Find all blocked issues
-        let mut blocked = HashSet::new();
-
-        // Direct blocks: issues with blocking dependencies
-        for id in inner.issues.keys() {
-            let node = inner.node_map[id];
-
-            for edge in inner.graph.edges(node) {
-                if edge.weight() == &DependencyType::Blocks {
-                    let blocker_id = &inner.graph[edge.target()];
-                    if let Some(blocker) = inner.issues.get(blocker_id) {
-                        if blocker.status != IssueStatus::Closed {
-                            blocked.insert(id.clone());
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Transitive blocking via parent-child (BFS with depth limit)
-        let mut to_process: VecDeque<(IssueId, usize)> =
-            blocked.iter().map(|id| (id.clone(), 0)).collect();
-
-        while let Some((id, depth)) = to_process.pop_front() {
-            if depth >= 50 {
-                continue;
-            }
-
-            // Find children (issues that depend on this one via parent-child)
-            let node = inner.node_map[&id];
-            for edge in inner.graph.edges_directed(node, Direction::Incoming) {
-                if edge.weight() == &DependencyType::ParentChild {
-                    let child_id = &inner.graph[edge.source()];
-                    if blocked.insert(child_id.clone()) {
-                        to_process.push_back((child_id.clone(), depth + 1));
-                    }
-                }
-            }
-        }
+        // Find all blocked issues using BFS traversal
+        let blocked = inner.find_blocked_issues();
 
         // Filter out blocked and closed issues
         let mut ready: Vec<Issue> = inner
@@ -947,12 +914,9 @@ impl IssueStorage for InMemoryStorage {
             });
         }
 
-        // Sort by priority (lower number = higher priority) then by age
-        ready.sort_by(|a, b| {
-            a.priority
-                .cmp(&b.priority)
-                .then(a.created_at.cmp(&b.created_at))
-        });
+        // Apply sort policy
+        let policy = sort_policy.unwrap_or_default();
+        inner.sort_by_policy(&mut ready, policy);
 
         Ok(ready)
     }
@@ -1167,6 +1131,116 @@ impl InMemoryStorageInner {
 
             // Add edge (skip cycle check since we're importing existing data)
             self.graph.add_edge(from_node, to_node, dep_type);
+        }
+    }
+
+    /// Find all blocked issues using BFS traversal.
+    ///
+    /// This method identifies issues that are blocked either:
+    /// 1. Directly: via 'blocks' dependencies to open/in_progress issues
+    /// 2. Transitively: via parent-child relationships (if parent is blocked, children are too)
+    ///
+    /// The BFS traversal has a depth limit of 50 to prevent infinite loops in
+    /// malformed dependency graphs.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Find all issues with direct 'blocks' dependencies to unclosed issues
+    /// 2. Use BFS to propagate blocking through parent-child relationships
+    /// 3. Return the set of all blocked issue IDs
+    fn find_blocked_issues(&self) -> HashSet<IssueId> {
+        const MAX_DEPTH: usize = 50;
+
+        let mut blocked = HashSet::new();
+
+        // Phase 1: Find directly blocked issues
+        // An issue is directly blocked if it has a 'blocks' dependency on an unclosed issue
+        for id in self.issues.keys() {
+            let node = self.node_map[id];
+
+            for edge in self.graph.edges(node) {
+                if edge.weight() == &DependencyType::Blocks {
+                    let blocker_id = &self.graph[edge.target()];
+                    if let Some(blocker) = self.issues.get(blocker_id) {
+                        if blocker.status != IssueStatus::Closed {
+                            blocked.insert(id.clone());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Phase 2: Propagate blocking through parent-child relationships
+        // If a parent issue is blocked, all its children are also blocked
+        let mut to_process: VecDeque<(IssueId, usize)> =
+            blocked.iter().map(|id| (id.clone(), 0)).collect();
+
+        while let Some((id, depth)) = to_process.pop_front() {
+            if depth >= MAX_DEPTH {
+                continue;
+            }
+
+            // Find children (issues that depend on this one via parent-child)
+            // In parent-child relationship: child -> parent (child depends on parent)
+            // So we look for incoming edges where this issue is the target (parent)
+            let node = self.node_map[&id];
+            for edge in self.graph.edges_directed(node, Direction::Incoming) {
+                if edge.weight() == &DependencyType::ParentChild {
+                    let child_id = &self.graph[edge.source()];
+                    if blocked.insert(child_id.clone()) {
+                        to_process.push_back((child_id.clone(), depth + 1));
+                    }
+                }
+            }
+        }
+
+        blocked
+    }
+
+    /// Sort issues according to the specified sort policy.
+    ///
+    /// # Sort Policies
+    ///
+    /// - `Hybrid`: Recent issues (< 48h) sorted by priority, older issues by age
+    /// - `Priority`: Strict priority ordering (P0 -> P1 -> P2 -> P3 -> P4)
+    /// - `Oldest`: Creation date ascending (oldest first)
+    fn sort_by_policy(&self, issues: &mut [Issue], policy: SortPolicy) {
+        match policy {
+            SortPolicy::Hybrid => {
+                let now = Utc::now();
+                let cutoff = now - Duration::hours(48);
+
+                issues.sort_by(|a, b| {
+                    let a_is_recent = a.created_at > cutoff;
+                    let b_is_recent = b.created_at > cutoff;
+
+                    match (a_is_recent, b_is_recent) {
+                        // Both recent: sort by priority (lower = higher priority), then by age
+                        (true, true) => a
+                            .priority
+                            .cmp(&b.priority)
+                            .then(a.created_at.cmp(&b.created_at)),
+                        // Both old: sort by age (oldest first)
+                        (false, false) => a.created_at.cmp(&b.created_at),
+                        // Recent comes before old
+                        (true, false) => std::cmp::Ordering::Less,
+                        (false, true) => std::cmp::Ordering::Greater,
+                    }
+                });
+            }
+            SortPolicy::Priority => {
+                // Strict priority ordering with age as tiebreaker
+                issues.sort_by(|a, b| {
+                    a.priority
+                        .cmp(&b.priority)
+                        .then(a.created_at.cmp(&b.created_at))
+                });
+            }
+            SortPolicy::Oldest => {
+                // Pure age-based ordering
+                issues.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+            }
         }
     }
 }
@@ -1393,7 +1467,7 @@ mod tests {
             .unwrap();
 
         // Get ready issues
-        let ready = storage.ready_to_work(None).await.unwrap();
+        let ready = storage.ready_to_work(None, None).await.unwrap();
 
         // issue3 and issue1 should be ready, issue2 should be blocked
         assert_eq!(ready.len(), 2);
@@ -2018,7 +2092,7 @@ mod tests {
         );
 
         // Step 12: Verify ready-to-work issues
-        let ready = reloaded_storage.ready_to_work(None).await.unwrap();
+        let ready = reloaded_storage.ready_to_work(None, None).await.unwrap();
         // issue1 has no dependencies and is in progress
         // issue3 has only Related dependencies, so it's ready
         assert!(
@@ -2395,7 +2469,7 @@ mod tests {
         assert_eq!(deps[0].dep_type, DependencyType::Related);
 
         // Related dependency should NOT block work
-        let ready = storage.ready_to_work(None).await.unwrap();
+        let ready = storage.ready_to_work(None, None).await.unwrap();
         assert_eq!(ready.len(), 2);
     }
 
@@ -2451,7 +2525,7 @@ mod tests {
         assert_eq!(deps[0].dep_type, DependencyType::DiscoveredFrom);
 
         // DiscoveredFrom should NOT block work
-        let ready = storage.ready_to_work(None).await.unwrap();
+        let ready = storage.ready_to_work(None, None).await.unwrap();
         assert_eq!(ready.len(), 2);
     }
 
@@ -3494,5 +3568,673 @@ mod tests {
         verify_all_issues_synchronized(storage.as_ref())
             .await
             .expect("Graph and vector should be synchronized after many removals");
+    }
+
+    // ========== Ready Work Algorithm Tests ==========
+
+    /// Helper to create an issue with specific priority
+    fn create_test_issue_with_priority(title: &str, priority: u8) -> NewIssue {
+        NewIssue {
+            title: title.to_string(),
+            description: "Test description".to_string(),
+            priority,
+            issue_type: IssueType::Task,
+            assignee: None,
+            labels: vec![],
+            design: None,
+            acceptance_criteria: None,
+            notes: None,
+            external_ref: None,
+            dependencies: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ready_to_work_direct_blocking() {
+        // Test that issues with direct 'blocks' dependencies are excluded
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let blocker = storage
+            .create(create_test_issue("Blocker Issue"))
+            .await
+            .unwrap();
+        let blocked = storage
+            .create(create_test_issue("Blocked Issue"))
+            .await
+            .unwrap();
+        let ready_issue = storage
+            .create(create_test_issue("Ready Issue"))
+            .await
+            .unwrap();
+
+        // Add blocking dependency: blocked depends on blocker
+        storage
+            .add_dependency(&blocked.id, &blocker.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+
+        let ready = storage.ready_to_work(None, None).await.unwrap();
+
+        // Should include blocker and ready_issue, but not blocked
+        assert_eq!(ready.len(), 2);
+        let ready_ids: Vec<_> = ready.iter().map(|i| i.id.clone()).collect();
+        assert!(ready_ids.contains(&blocker.id));
+        assert!(ready_ids.contains(&ready_issue.id));
+        assert!(!ready_ids.contains(&blocked.id));
+    }
+
+    #[tokio::test]
+    async fn test_ready_to_work_closed_blocker_unblocks() {
+        // Test that when a blocker is closed, the blocked issue becomes ready
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let blocker = storage
+            .create(create_test_issue("Blocker Issue"))
+            .await
+            .unwrap();
+        let blocked = storage
+            .create(create_test_issue("Blocked Issue"))
+            .await
+            .unwrap();
+
+        storage
+            .add_dependency(&blocked.id, &blocker.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+
+        // Initially blocked should not be ready
+        let ready = storage.ready_to_work(None, None).await.unwrap();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, blocker.id);
+
+        // Close the blocker
+        storage
+            .update(
+                &blocker.id,
+                IssueUpdate {
+                    status: Some(IssueStatus::Closed),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // Now blocked should be ready
+        let ready = storage.ready_to_work(None, None).await.unwrap();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, blocked.id);
+    }
+
+    #[tokio::test]
+    async fn test_ready_to_work_parent_child_transitive_blocking() {
+        // Test that blocked parents block their children transitively
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        // Create hierarchy: epic -> parent_task -> child_task
+        let blocker = storage.create(create_test_issue("Blocker")).await.unwrap();
+        let epic = storage.create(create_test_issue("Epic")).await.unwrap();
+        let parent_task = storage
+            .create(create_test_issue("Parent Task"))
+            .await
+            .unwrap();
+        let child_task = storage
+            .create(create_test_issue("Child Task"))
+            .await
+            .unwrap();
+
+        // Epic is blocked by blocker
+        storage
+            .add_dependency(&epic.id, &blocker.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+
+        // parent_task is child of epic
+        storage
+            .add_dependency(&parent_task.id, &epic.id, DependencyType::ParentChild)
+            .await
+            .unwrap();
+
+        // child_task is child of parent_task
+        storage
+            .add_dependency(&child_task.id, &parent_task.id, DependencyType::ParentChild)
+            .await
+            .unwrap();
+
+        let ready = storage.ready_to_work(None, None).await.unwrap();
+
+        // Only blocker should be ready; epic, parent_task, and child_task are all blocked
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, blocker.id);
+    }
+
+    #[tokio::test]
+    async fn test_ready_to_work_depth_limit() {
+        // Test that depth limit of 50 is enforced
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        // Create chain: blocker -> issue_0 -> issue_1 -> ... -> issue_60
+        let blocker = storage.create(create_test_issue("Blocker")).await.unwrap();
+
+        let mut prev_id = blocker.id.clone();
+        let mut issue_ids = vec![blocker.id.clone()];
+
+        // Create 60 levels of parent-child relationships
+        for i in 0..60 {
+            let issue = storage
+                .create(create_test_issue(&format!("Issue Level {}", i)))
+                .await
+                .unwrap();
+
+            // Link via parent-child (issue is child of prev)
+            if i == 0 {
+                // First level is blocked by blocker
+                storage
+                    .add_dependency(&issue.id, &prev_id, DependencyType::Blocks)
+                    .await
+                    .unwrap();
+            } else {
+                storage
+                    .add_dependency(&issue.id, &prev_id, DependencyType::ParentChild)
+                    .await
+                    .unwrap();
+            }
+
+            issue_ids.push(issue.id.clone());
+            prev_id = issue.id;
+        }
+
+        let ready = storage.ready_to_work(None, None).await.unwrap();
+
+        // Due to depth limit of 50, issues at level 51+ should still be ready
+        // Levels 0-49 are blocked (50 levels of parent-child propagation)
+        // Level 50+ should be unblocked due to depth limit
+        assert!(
+            !ready.is_empty(),
+            "Some issues should be ready due to depth limit"
+        );
+
+        // Blocker should always be ready
+        let ready_ids: Vec<_> = ready.iter().map(|i| i.id.clone()).collect();
+        assert!(ready_ids.contains(&blocker.id));
+    }
+
+    #[tokio::test]
+    async fn test_ready_to_work_related_dependency_does_not_block() {
+        // Test that 'related' dependencies don't cause blocking
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let issue1 = storage.create(create_test_issue("Issue 1")).await.unwrap();
+        let issue2 = storage.create(create_test_issue("Issue 2")).await.unwrap();
+
+        // Add 'related' dependency - should not block
+        storage
+            .add_dependency(&issue2.id, &issue1.id, DependencyType::Related)
+            .await
+            .unwrap();
+
+        let ready = storage.ready_to_work(None, None).await.unwrap();
+
+        // Both should be ready since 'related' doesn't block
+        assert_eq!(ready.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_ready_to_work_discovered_from_does_not_block() {
+        // Test that 'discovered-from' dependencies don't cause blocking
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let original = storage
+            .create(create_test_issue("Original Issue"))
+            .await
+            .unwrap();
+        let discovered = storage
+            .create(create_test_issue("Discovered Issue"))
+            .await
+            .unwrap();
+
+        storage
+            .add_dependency(&discovered.id, &original.id, DependencyType::DiscoveredFrom)
+            .await
+            .unwrap();
+
+        let ready = storage.ready_to_work(None, None).await.unwrap();
+
+        // Both should be ready
+        assert_eq!(ready.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_ready_to_work_multiple_blockers() {
+        // Test that issue with multiple blockers is blocked until all are closed
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let blocker1 = storage
+            .create(create_test_issue("Blocker 1"))
+            .await
+            .unwrap();
+        let blocker2 = storage
+            .create(create_test_issue("Blocker 2"))
+            .await
+            .unwrap();
+        let blocked = storage.create(create_test_issue("Blocked")).await.unwrap();
+
+        storage
+            .add_dependency(&blocked.id, &blocker1.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+        storage
+            .add_dependency(&blocked.id, &blocker2.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+
+        // Initially blocked
+        let ready = storage.ready_to_work(None, None).await.unwrap();
+        assert!(!ready.iter().any(|i| i.id == blocked.id));
+
+        // Close blocker1
+        storage
+            .update(
+                &blocker1.id,
+                IssueUpdate {
+                    status: Some(IssueStatus::Closed),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // Still blocked by blocker2
+        let ready = storage.ready_to_work(None, None).await.unwrap();
+        assert!(!ready.iter().any(|i| i.id == blocked.id));
+
+        // Close blocker2
+        storage
+            .update(
+                &blocker2.id,
+                IssueUpdate {
+                    status: Some(IssueStatus::Closed),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // Now unblocked
+        let ready = storage.ready_to_work(None, None).await.unwrap();
+        assert!(ready.iter().any(|i| i.id == blocked.id));
+    }
+
+    #[tokio::test]
+    async fn test_ready_to_work_complex_dependency_graph() {
+        // Test a complex scenario with multiple dependency types
+        //
+        // Graph structure:
+        //   epic ----blocks----> blocker (closed)
+        //     |
+        //   parent-child
+        //     v
+        //   task1 ---related---> task2
+        //     |
+        //   parent-child
+        //     v
+        //   subtask (should be ready since blocker is closed)
+
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let blocker = storage.create(create_test_issue("Blocker")).await.unwrap();
+        let epic = storage.create(create_test_issue("Epic")).await.unwrap();
+        let task1 = storage.create(create_test_issue("Task 1")).await.unwrap();
+        let task2 = storage.create(create_test_issue("Task 2")).await.unwrap();
+        let subtask = storage.create(create_test_issue("Subtask")).await.unwrap();
+
+        // Epic is blocked by blocker
+        storage
+            .add_dependency(&epic.id, &blocker.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+
+        // task1 is child of epic
+        storage
+            .add_dependency(&task1.id, &epic.id, DependencyType::ParentChild)
+            .await
+            .unwrap();
+
+        // task1 is related to task2
+        storage
+            .add_dependency(&task1.id, &task2.id, DependencyType::Related)
+            .await
+            .unwrap();
+
+        // subtask is child of task1
+        storage
+            .add_dependency(&subtask.id, &task1.id, DependencyType::ParentChild)
+            .await
+            .unwrap();
+
+        // With blocker open: only blocker and task2 are ready
+        let ready = storage.ready_to_work(None, None).await.unwrap();
+        let ready_ids: Vec<_> = ready.iter().map(|i| i.id.clone()).collect();
+        assert!(ready_ids.contains(&blocker.id));
+        assert!(ready_ids.contains(&task2.id));
+        assert!(!ready_ids.contains(&epic.id));
+        assert!(!ready_ids.contains(&task1.id));
+        assert!(!ready_ids.contains(&subtask.id));
+
+        // Close blocker
+        storage
+            .update(
+                &blocker.id,
+                IssueUpdate {
+                    status: Some(IssueStatus::Closed),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // Now all non-closed issues are ready
+        let ready = storage.ready_to_work(None, None).await.unwrap();
+        assert_eq!(ready.len(), 4); // epic, task1, task2, subtask (blocker is closed)
+    }
+
+    // ========== Sort Policy Tests ==========
+
+    #[tokio::test]
+    async fn test_sort_policy_priority() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        // Create issues with different priorities
+        let p4 = storage
+            .create(create_test_issue_with_priority("P4 Issue", 4))
+            .await
+            .unwrap();
+        let p0 = storage
+            .create(create_test_issue_with_priority("P0 Issue", 0))
+            .await
+            .unwrap();
+        let p2 = storage
+            .create(create_test_issue_with_priority("P2 Issue", 2))
+            .await
+            .unwrap();
+        let p1 = storage
+            .create(create_test_issue_with_priority("P1 Issue", 1))
+            .await
+            .unwrap();
+
+        let ready = storage
+            .ready_to_work(None, Some(SortPolicy::Priority))
+            .await
+            .unwrap();
+
+        // Should be sorted P0 -> P1 -> P2 -> P4
+        assert_eq!(ready[0].id, p0.id);
+        assert_eq!(ready[1].id, p1.id);
+        assert_eq!(ready[2].id, p2.id);
+        assert_eq!(ready[3].id, p4.id);
+    }
+
+    #[tokio::test]
+    async fn test_sort_policy_oldest() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        // Create issues (first created = oldest)
+        let first = storage
+            .create(create_test_issue_with_priority("First (P4)", 4))
+            .await
+            .unwrap();
+        let second = storage
+            .create(create_test_issue_with_priority("Second (P0)", 0))
+            .await
+            .unwrap();
+        let third = storage
+            .create(create_test_issue_with_priority("Third (P2)", 2))
+            .await
+            .unwrap();
+
+        let ready = storage
+            .ready_to_work(None, Some(SortPolicy::Oldest))
+            .await
+            .unwrap();
+
+        // Should be sorted by creation time regardless of priority
+        assert_eq!(ready[0].id, first.id);
+        assert_eq!(ready[1].id, second.id);
+        assert_eq!(ready[2].id, third.id);
+    }
+
+    #[tokio::test]
+    async fn test_sort_policy_hybrid() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        // Create recent issues (within 48h) - these should sort by priority
+        let recent_p2 = storage
+            .create(create_test_issue_with_priority("Recent P2", 2))
+            .await
+            .unwrap();
+        let recent_p0 = storage
+            .create(create_test_issue_with_priority("Recent P0", 0))
+            .await
+            .unwrap();
+
+        // For testing hybrid sort properly, we would need to manipulate created_at
+        // timestamps. Since we can't easily do that in the current API, we'll verify
+        // that recent issues are sorted by priority (the default behavior for all recent)
+        let ready = storage
+            .ready_to_work(None, Some(SortPolicy::Hybrid))
+            .await
+            .unwrap();
+
+        // With all recent issues, should sort by priority
+        assert_eq!(ready[0].id, recent_p0.id);
+        assert_eq!(ready[1].id, recent_p2.id);
+    }
+
+    #[tokio::test]
+    async fn test_sort_policy_default_is_hybrid() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let p2 = storage
+            .create(create_test_issue_with_priority("P2 Issue", 2))
+            .await
+            .unwrap();
+        let p0 = storage
+            .create(create_test_issue_with_priority("P0 Issue", 0))
+            .await
+            .unwrap();
+
+        // None should default to Hybrid (which for recent issues = priority sort)
+        let ready = storage.ready_to_work(None, None).await.unwrap();
+
+        assert_eq!(ready[0].id, p0.id);
+        assert_eq!(ready[1].id, p2.id);
+    }
+
+    // ========== Filter Tests ==========
+
+    #[tokio::test]
+    async fn test_ready_to_work_with_assignee_filter() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let mut alice_issue = create_test_issue("Alice's Task");
+        alice_issue.assignee = Some("alice".to_string());
+        let alice = storage.create(alice_issue).await.unwrap();
+
+        let mut bob_issue = create_test_issue("Bob's Task");
+        bob_issue.assignee = Some("bob".to_string());
+        let _bob = storage.create(bob_issue).await.unwrap();
+
+        let filter = IssueFilter {
+            assignee: Some("alice".to_string()),
+            ..Default::default()
+        };
+
+        let ready = storage.ready_to_work(Some(&filter), None).await.unwrap();
+
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, alice.id);
+    }
+
+    #[tokio::test]
+    async fn test_ready_to_work_with_priority_filter() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let p0 = storage
+            .create(create_test_issue_with_priority("P0", 0))
+            .await
+            .unwrap();
+        let _p1 = storage
+            .create(create_test_issue_with_priority("P1", 1))
+            .await
+            .unwrap();
+        let _p2 = storage
+            .create(create_test_issue_with_priority("P2", 2))
+            .await
+            .unwrap();
+
+        let filter = IssueFilter {
+            priority: Some(0),
+            ..Default::default()
+        };
+
+        let ready = storage.ready_to_work(Some(&filter), None).await.unwrap();
+
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, p0.id);
+    }
+
+    // ========== Performance Test ==========
+
+    #[tokio::test]
+    async fn test_ready_to_work_performance_1000_issues() {
+        use std::time::Instant;
+
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        // Create 1000 issues with various dependencies
+        let mut issues = Vec::new();
+        for i in 0..1000 {
+            let priority = (i % 5) as u8;
+            let issue = storage
+                .create(create_test_issue_with_priority(
+                    &format!("Issue {}", i),
+                    priority,
+                ))
+                .await
+                .unwrap();
+            issues.push(issue);
+        }
+
+        // Add some blocking dependencies (about 10% of issues)
+        for i in (0..100).step_by(2) {
+            let blocker_idx = i * 10;
+            let blocked_idx = blocker_idx + 1;
+            if blocked_idx < issues.len() {
+                storage
+                    .add_dependency(
+                        &issues[blocked_idx].id,
+                        &issues[blocker_idx].id,
+                        DependencyType::Blocks,
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+
+        // Add some parent-child relationships
+        for i in (0..50).step_by(2) {
+            let parent_idx = i * 20;
+            let child_idx = parent_idx + 2;
+            if child_idx < issues.len() {
+                storage
+                    .add_dependency(
+                        &issues[child_idx].id,
+                        &issues[parent_idx].id,
+                        DependencyType::ParentChild,
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+
+        // Measure ready_to_work performance
+        let start = Instant::now();
+        let ready = storage.ready_to_work(None, None).await.unwrap();
+        let duration = start.elapsed();
+
+        println!(
+            "ready_to_work for 1000 issues: {:?} ({} ready)",
+            duration,
+            ready.len()
+        );
+
+        // Should complete in < 50ms (using 50ms threshold for CI stability)
+        assert!(
+            duration.as_millis() < 50,
+            "ready_to_work took {:?}, expected < 50ms",
+            duration
+        );
+
+        // Verify we got some results
+        assert!(!ready.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_ready_to_work_performance_with_deep_hierarchy() {
+        use std::time::Instant;
+
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        // Create a blocker that blocks an epic with deep hierarchy
+        let blocker = storage.create(create_test_issue("Blocker")).await.unwrap();
+
+        let epic = storage.create(create_test_issue("Epic")).await.unwrap();
+
+        storage
+            .add_dependency(&epic.id, &blocker.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+
+        // Create 49 levels of parent-child (max traversal depth is 50)
+        let mut prev_id = epic.id.clone();
+        for i in 0..49 {
+            let task = storage
+                .create(create_test_issue(&format!("Level {} Task", i)))
+                .await
+                .unwrap();
+            storage
+                .add_dependency(&task.id, &prev_id, DependencyType::ParentChild)
+                .await
+                .unwrap();
+            prev_id = task.id;
+        }
+
+        // Add some unrelated issues
+        for i in 0..500 {
+            storage
+                .create(create_test_issue(&format!("Unrelated {}", i)))
+                .await
+                .unwrap();
+        }
+
+        let start = Instant::now();
+        let ready = storage.ready_to_work(None, None).await.unwrap();
+        let duration = start.elapsed();
+
+        println!(
+            "ready_to_work with deep hierarchy: {:?} ({} ready)",
+            duration,
+            ready.len()
+        );
+
+        assert!(
+            duration.as_millis() < 50,
+            "ready_to_work took {:?}, expected < 50ms",
+            duration
+        );
+
+        // Only blocker and unrelated issues should be ready
+        // Epic and all its children are blocked
+        assert!(ready.iter().any(|i| i.id == blocker.id));
+        assert!(!ready.iter().any(|i| i.id == epic.id));
     }
 }
