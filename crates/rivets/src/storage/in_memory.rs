@@ -60,11 +60,12 @@ use petgraph::algo;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 use petgraph::Direction;
+use rivets_jsonl::{read_jsonl_resilient, Warning as JsonlWarning};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::fs::File;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::Mutex;
 
 /// Warnings that can occur during JSONL file loading.
@@ -324,39 +325,52 @@ pub async fn load_from_jsonl(
     path: &Path,
     prefix: String,
 ) -> Result<(Box<dyn IssueStorage>, Vec<LoadWarning>)> {
-    let file = File::open(path).await.map_err(Error::Io)?;
-    let reader = BufReader::new(file);
-    let mut lines = reader.lines();
+    // First pass: Use rivets-jsonl for resilient parsing
+    let (parsed_issues, jsonl_warnings) =
+        read_jsonl_resilient::<Issue, _>(path)
+            .await
+            .map_err(|e| match e {
+                rivets_jsonl::Error::Io(io_err) => Error::Io(io_err),
+                rivets_jsonl::Error::Json(json_err) => Error::Json(json_err),
+                rivets_jsonl::Error::InvalidFormat(msg) => Error::Storage(msg),
+            })?;
 
-    let mut issues = Vec::new();
     let mut warnings = Vec::new();
-    let mut line_number = 0;
 
-    // First pass: Parse and validate all issues from JSONL
-    while let Some(line) = lines.next_line().await.map_err(Error::Io)? {
-        line_number += 1;
-
-        match serde_json::from_str::<Issue>(&line) {
-            Ok(issue) => {
-                // Validate issue data integrity
-                if let Err(validation_error) = issue.validate() {
-                    warnings.push(LoadWarning::InvalidIssueData {
-                        issue_id: issue.id.clone(),
-                        line_number,
-                        error: validation_error,
-                    });
-                    // Skip invalid issues - don't add to storage
-                    continue;
-                }
-                issues.push(issue);
+    // Convert rivets_jsonl warnings to LoadWarnings
+    for warning in jsonl_warnings {
+        match warning {
+            JsonlWarning::MalformedJson { line_number, error } => {
+                warnings.push(LoadWarning::MalformedJson { line_number, error });
             }
-            Err(e) => {
+            JsonlWarning::SkippedLine {
+                line_number,
+                reason,
+            } => {
+                // Map SkippedLine to MalformedJson since both indicate parsing issues
                 warnings.push(LoadWarning::MalformedJson {
                     line_number,
-                    error: e.to_string(),
+                    error: reason,
                 });
             }
         }
+    }
+
+    // Validate issues and filter out invalid ones
+    // Note: line_number here is the record index (1-based) within successfully parsed records,
+    // not the actual file line number if there were malformed/skipped lines.
+    let mut issues = Vec::new();
+    for (index, issue) in parsed_issues.into_iter().enumerate() {
+        let record_number = index + 1; // 1-based indexing for user-friendly messages
+        if let Err(validation_error) = issue.validate() {
+            warnings.push(LoadWarning::InvalidIssueData {
+                issue_id: issue.id.clone(),
+                line_number: record_number,
+                error: validation_error,
+            });
+            continue;
+        }
+        issues.push(issue);
     }
 
     // Create storage and import issues
