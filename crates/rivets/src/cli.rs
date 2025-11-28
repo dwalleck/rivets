@@ -146,7 +146,7 @@ pub struct CreateArgs {
     pub title: Option<String>,
 
     /// Detailed description
-    #[arg(short = 'D', long)]
+    #[arg(short = 'D', long, value_parser = validate_description)]
     pub description: Option<String>,
 
     /// Priority level (0=critical, 1=high, 2=medium, 3=low, 4=backlog)
@@ -237,7 +237,7 @@ pub struct UpdateArgs {
     pub title: Option<String>,
 
     /// New description
-    #[arg(short = 'D', long)]
+    #[arg(short = 'D', long, value_parser = validate_description)]
     pub description: Option<String>,
 
     /// New status
@@ -570,6 +570,10 @@ fn validate_issue_id(s: &str) -> std::result::Result<String, String> {
     validate_prefix(prefix).map_err(|e| format!("Issue ID {}", e.to_lowercase()))?;
 
     // Validate suffix
+    //
+    // Note: We use explicit checks instead of regex (e.g., `^[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*$`)
+    // to provide specific, actionable error messages and avoid adding regex as a dependency.
+    // This approach is more maintainable for a CLI tool where user-facing errors matter.
     if suffix.is_empty() {
         return Err("Issue ID suffix cannot be empty".to_string());
     }
@@ -583,6 +587,7 @@ fn validate_issue_id(s: &str) -> std::result::Result<String, String> {
     }
 
     // Prevent edge cases: leading/trailing hyphens or consecutive hyphens
+    // Equivalent to regex: ^[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*$
     if suffix.starts_with('-') {
         return Err("Issue ID suffix cannot start with a hyphen".to_string());
     }
@@ -618,7 +623,53 @@ fn validate_title(s: &str) -> std::result::Result<String, String> {
         ));
     }
 
+    // Check for newlines in title (titles should be single-line)
+    if s.contains('\n') || s.contains('\r') {
+        return Err("Title cannot contain newline characters".to_string());
+    }
+
+    // Check for control characters (0x00-0x1F except tab, and 0x7F-0x9F)
+    // These can cause display issues and are likely user errors
+    if let Some(pos) = s.chars().position(|c| {
+        let code = c as u32;
+        // Control characters excluding tab (0x09)
+        (code < 0x20 && code != 0x09) || (0x7F..=0x9F).contains(&code)
+    }) {
+        return Err(format!(
+            "Title contains invalid control character at position {}",
+            pos
+        ));
+    }
+
     Ok(s.to_string())
+}
+
+/// Validate text field (description, notes, etc.)
+///
+/// Allows newlines but rejects control characters that could cause display issues.
+/// Unlike titles, multi-line text is acceptable for descriptions and notes.
+fn validate_text_field(s: &str, field_name: &str) -> std::result::Result<String, String> {
+    // Check for control characters (0x00-0x1F except tab and newlines, and 0x7F-0x9F)
+    if let Some(pos) = s.chars().position(|c| {
+        let code = c as u32;
+        // Control characters excluding tab (0x09), LF (0x0A), and CR (0x0D)
+        (code < 0x20 && code != 0x09 && code != 0x0A && code != 0x0D)
+            || (0x7F..=0x9F).contains(&code)
+    }) {
+        return Err(format!(
+            "{} contains invalid control character at position {}",
+            field_name, pos
+        ));
+    }
+
+    Ok(s.to_string())
+}
+
+/// Validate description field
+///
+/// Wrapper for validate_text_field specifically for descriptions.
+fn validate_description(s: &str) -> std::result::Result<String, String> {
+    validate_text_field(s, "Description")
 }
 
 // ============================================================================
@@ -996,6 +1047,78 @@ mod tests {
         let result = validate_title("   ");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn test_validate_title_with_newline() {
+        let result = validate_title("Title with\nnewline");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("newline"));
+    }
+
+    #[test]
+    fn test_validate_title_with_carriage_return() {
+        let result = validate_title("Title with\rcarriage return");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("newline"));
+    }
+
+    #[test]
+    fn test_validate_title_with_control_character() {
+        // Test with null character (0x00)
+        let result = validate_title("Title with\x00control");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("control character"));
+    }
+
+    #[test]
+    fn test_validate_title_with_tab_allowed() {
+        // Tab (0x09) should be allowed
+        let result = validate_title("Title with\ttab");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "Title with\ttab");
+    }
+
+    #[test]
+    fn test_validate_title_with_delete_character() {
+        // DEL character (0x7F)
+        let result = validate_title("Title with\x7Fdelete");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("control character"));
+    }
+
+    // ========== validate_description Tests ==========
+
+    #[test]
+    fn test_validate_description_with_newline_allowed() {
+        // Newlines should be allowed in descriptions
+        let result = validate_description("Multi-line\ndescription");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "Multi-line\ndescription");
+    }
+
+    #[test]
+    fn test_validate_description_with_control_character() {
+        // Control characters should be rejected
+        let result = validate_description("Description with\x00control");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("control character"));
+    }
+
+    #[test]
+    fn test_validate_description_with_tab_and_newline() {
+        // Both tab and newline should be allowed
+        let result = validate_description("Line1\n\tIndented line");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "Line1\n\tIndented line");
+    }
+
+    #[test]
+    fn test_validate_description_empty() {
+        // Empty descriptions should be allowed
+        let result = validate_description("");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "");
     }
 
     // ========== CLI Parsing Tests ==========
