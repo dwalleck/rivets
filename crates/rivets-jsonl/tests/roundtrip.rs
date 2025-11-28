@@ -952,3 +952,283 @@ mod stream_integration {
         assert_eq!(read_records, records);
     }
 }
+
+// ============================================================================
+// Resilient stream integration tests
+// ============================================================================
+
+mod resilient_stream_integration {
+    use super::*;
+    use futures::stream::StreamExt;
+    use rivets_jsonl::warning::Warning;
+    use std::pin::pin;
+
+    /// Tests resilient streaming with mixed valid/invalid JSONL data.
+    /// This simulates a corrupted JSONL file where some lines have been damaged.
+    #[tokio::test]
+    async fn resilient_stream_with_corrupted_data() {
+        // Create a JSONL string with some valid and some corrupted lines
+        let raw_data = b"{\"id\": 1, \"name\": \"Valid1\", \"active\": true}\n\
+                         {corrupted line without proper json}\n\
+                         {\"id\": 3, \"name\": \"Valid2\", \"active\": false}\n\
+                         {also corrupted\n\
+                         {\"id\": 5, \"name\": \"Valid3\", \"active\": true}\n\
+                         {\"missing_required_field\": 123}\n\
+                         {\"id\": 7, \"name\": \"Valid4\", \"active\": false}\n";
+
+        let reader = JsonlReader::new(Cursor::new(raw_data.as_slice()));
+        let (stream, warnings) = reader.stream_resilient::<TestRecord>();
+
+        let records: Vec<TestRecord> = pin!(stream).collect().await;
+
+        // Should have recovered 4 valid records
+        assert_eq!(records.len(), 4);
+        assert_eq!(records[0].id, 1);
+        assert_eq!(records[1].id, 3);
+        assert_eq!(records[2].id, 5);
+        assert_eq!(records[3].id, 7);
+
+        // Should have collected 3 warnings (2 corrupted lines + 1 missing field)
+        let collected_warnings = warnings.into_warnings();
+        assert_eq!(collected_warnings.len(), 3);
+
+        // Verify warning line numbers are correct
+        assert_eq!(collected_warnings[0].line_number(), 2);
+        assert_eq!(collected_warnings[1].line_number(), 4);
+        assert_eq!(collected_warnings[2].line_number(), 6);
+    }
+
+    /// Tests resilient streaming with a large dataset containing occasional errors.
+    /// Simulates a production scenario with mostly valid data and rare corruptions.
+    #[tokio::test]
+    async fn resilient_stream_large_dataset_with_sparse_errors() {
+        const TOTAL_LINES: usize = 1000;
+        const ERROR_FREQUENCY: usize = 50; // One error every 50 lines
+
+        // Build a dataset with predictable error positions
+        let mut data = String::new();
+        let mut expected_valid_count = 0;
+        let mut expected_error_lines = Vec::new();
+
+        for i in 0..TOTAL_LINES {
+            if i > 0 && i % ERROR_FREQUENCY == 0 {
+                data.push_str("{invalid json line}\n");
+                expected_error_lines.push(i + 1); // 1-based line number
+            } else {
+                data.push_str(&format!(
+                    "{{\"id\": {}, \"name\": \"Record_{}\", \"active\": {}}}\n",
+                    expected_valid_count,
+                    expected_valid_count,
+                    expected_valid_count % 2 == 0
+                ));
+                expected_valid_count += 1;
+            }
+        }
+
+        let reader = JsonlReader::new(Cursor::new(data.as_bytes()));
+        let (stream, warnings) = reader.stream_resilient::<TestRecord>();
+
+        let records: Vec<TestRecord> = pin!(stream).collect().await;
+
+        // Verify all valid records were recovered
+        assert_eq!(records.len(), expected_valid_count);
+
+        // Verify records are in order
+        for (i, record) in records.iter().enumerate() {
+            assert_eq!(record.id, i as u32);
+        }
+
+        // Verify warning count matches expected errors
+        let collected_warnings = warnings.into_warnings();
+        assert_eq!(collected_warnings.len(), expected_error_lines.len());
+
+        // Verify warning line numbers
+        for (warning, expected_line) in collected_warnings.iter().zip(expected_error_lines.iter()) {
+            assert_eq!(warning.line_number(), *expected_line);
+        }
+    }
+
+    /// Tests resilient streaming behavior when warnings can be inspected mid-stream.
+    #[tokio::test]
+    async fn resilient_stream_inspect_warnings_during_processing() {
+        let raw_data = b"{\"id\": 1, \"name\": \"First\", \"active\": true}\n\
+                         {invalid}\n\
+                         {\"id\": 2, \"name\": \"Second\", \"active\": false}\n\
+                         {also invalid}\n\
+                         {\"id\": 3, \"name\": \"Third\", \"active\": true}\n";
+
+        let reader = JsonlReader::new(Cursor::new(raw_data.as_slice()));
+        let (stream, warnings) = reader.stream_resilient::<TestRecord>();
+        let mut stream = pin!(stream);
+
+        // First record
+        let record1 = stream.next().await.unwrap();
+        assert_eq!(record1.id, 1);
+        assert_eq!(warnings.len(), 0); // No warnings yet
+
+        // Second record (third line, after skipping invalid line 2)
+        let record2 = stream.next().await.unwrap();
+        assert_eq!(record2.id, 2);
+        assert_eq!(warnings.len(), 1); // One warning collected
+
+        // Third record (fifth line, after skipping invalid line 4)
+        let record3 = stream.next().await.unwrap();
+        assert_eq!(record3.id, 3);
+        assert_eq!(warnings.len(), 2); // Two warnings collected
+
+        // Stream exhausted
+        assert!(stream.next().await.is_none());
+
+        // Verify final warning state
+        let final_warnings = warnings.into_warnings();
+        assert_eq!(final_warnings.len(), 2);
+    }
+
+    /// Tests resilient streaming with complex nested records.
+    #[tokio::test]
+    async fn resilient_stream_complex_records() {
+        // Mix valid complex records with invalid JSON
+        let raw_data = b"{\"id\": \"abc-1\", \"value\": 1.5, \"tags\": [\"a\", \"b\"], \"metadata\": {\"created_by\": \"user1\", \"version\": 1}}\n\
+                         {\"id\": \"abc-2\", \"value\": \"not_a_number\", \"tags\": []}\n\
+                         {\"id\": \"abc-3\", \"value\": 3.5, \"tags\": [\"c\"], \"metadata\": null}\n\
+                         {malformed json}\n\
+                         {\"id\": \"abc-4\", \"value\": 4.5, \"tags\": [\"d\", \"e\", \"f\"], \"metadata\": {\"created_by\": \"user2\", \"version\": 4}}\n";
+
+        let reader = JsonlReader::new(Cursor::new(raw_data.as_slice()));
+        let (stream, warnings) = reader.stream_resilient::<ComplexRecord>();
+
+        let records: Vec<ComplexRecord> = pin!(stream).collect().await;
+
+        // Should have 3 valid records
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].id, "abc-1");
+        assert_eq!(records[1].id, "abc-3");
+        assert_eq!(records[2].id, "abc-4");
+
+        // Should have 2 warnings
+        let collected = warnings.into_warnings();
+        assert_eq!(collected.len(), 2);
+    }
+
+    /// Tests that resilient streaming handles empty lines and whitespace correctly.
+    #[tokio::test]
+    async fn resilient_stream_handles_empty_and_whitespace_lines() {
+        let raw_data = b"\n\
+                         {\"id\": 1, \"name\": \"First\", \"active\": true}\n\
+                         \n\
+                         \t  \n\
+                         {invalid}\n\
+                         \n\
+                         {\"id\": 2, \"name\": \"Second\", \"active\": false}\n\
+                         \n";
+
+        let reader = JsonlReader::new(Cursor::new(raw_data.as_slice()));
+        let (stream, warnings) = reader.stream_resilient::<TestRecord>();
+
+        let records: Vec<TestRecord> = pin!(stream).collect().await;
+
+        // Should have 2 valid records
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].id, 1);
+        assert_eq!(records[1].id, 2);
+
+        // Only 1 warning for the invalid line (empty lines don't generate warnings)
+        let collected = warnings.into_warnings();
+        assert_eq!(collected.len(), 1);
+    }
+
+    /// Tests resilient streaming with all lines corrupted.
+    #[tokio::test]
+    async fn resilient_stream_all_corrupted() {
+        let raw_data = b"{invalid1}\n{invalid2}\n{invalid3}\n";
+
+        let reader = JsonlReader::new(Cursor::new(raw_data.as_slice()));
+        let (stream, warnings) = reader.stream_resilient::<TestRecord>();
+
+        let records: Vec<TestRecord> = pin!(stream).collect().await;
+
+        // No valid records
+        assert!(records.is_empty());
+
+        // All 3 lines generated warnings
+        let collected = warnings.into_warnings();
+        assert_eq!(collected.len(), 3);
+    }
+
+    /// Tests that warning details contain useful error information.
+    #[tokio::test]
+    async fn resilient_stream_warning_details() {
+        // Type mismatch error (id should be u32, not string)
+        let raw_data = b"{\"id\": \"not_a_number\", \"name\": \"Test\", \"active\": true}\n";
+
+        let reader = JsonlReader::new(Cursor::new(raw_data.as_slice()));
+        let (stream, warnings) = reader.stream_resilient::<TestRecord>();
+
+        let records: Vec<TestRecord> = pin!(stream).collect().await;
+        assert!(records.is_empty());
+
+        let collected = warnings.into_warnings();
+        assert_eq!(collected.len(), 1);
+
+        match &collected[0] {
+            Warning::MalformedJson { line_number, error } => {
+                assert_eq!(*line_number, 1);
+                // Error message should mention the type issue
+                assert!(!error.is_empty());
+            }
+            _ => panic!("Expected MalformedJson warning"),
+        }
+    }
+
+    /// Tests resilient streaming with take() combinator.
+    #[tokio::test]
+    async fn resilient_stream_with_take() {
+        let raw_data = b"{\"id\": 1, \"name\": \"A\", \"active\": true}\n\
+                         {invalid}\n\
+                         {\"id\": 2, \"name\": \"B\", \"active\": false}\n\
+                         {\"id\": 3, \"name\": \"C\", \"active\": true}\n\
+                         {\"id\": 4, \"name\": \"D\", \"active\": false}\n";
+
+        let reader = JsonlReader::new(Cursor::new(raw_data.as_slice()));
+        let (stream, warnings) = reader.stream_resilient::<TestRecord>();
+
+        // Take only first 2 valid records
+        let records: Vec<TestRecord> = pin!(stream).take(2).collect().await;
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].id, 1);
+        assert_eq!(records[1].id, 2);
+
+        // Warning should have been collected even though we stopped early
+        assert_eq!(warnings.len(), 1);
+    }
+
+    /// Tests resilient streaming with filter() combinator.
+    #[tokio::test]
+    async fn resilient_stream_with_filter() {
+        let raw_data = b"{\"id\": 1, \"name\": \"A\", \"active\": true}\n\
+                         {\"id\": 2, \"name\": \"B\", \"active\": false}\n\
+                         {invalid}\n\
+                         {\"id\": 3, \"name\": \"C\", \"active\": true}\n\
+                         {\"id\": 4, \"name\": \"D\", \"active\": false}\n";
+
+        let reader = JsonlReader::new(Cursor::new(raw_data.as_slice()));
+        let (stream, warnings) = reader.stream_resilient::<TestRecord>();
+
+        // Filter to only active records
+        let active_records: Vec<TestRecord> = pin!(stream)
+            .filter(|r| {
+                let active = r.active;
+                async move { active }
+            })
+            .collect()
+            .await;
+
+        assert_eq!(active_records.len(), 2);
+        assert_eq!(active_records[0].id, 1);
+        assert_eq!(active_records[1].id, 3);
+
+        // Warning should still be collected
+        assert_eq!(warnings.len(), 1);
+    }
+}
