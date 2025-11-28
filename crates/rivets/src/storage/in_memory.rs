@@ -109,6 +109,9 @@ use tokio::sync::Mutex;
 ///
 /// The 48-hour default balances urgency (high-priority recent work surfaces quickly)
 /// with fairness (older issues eventually get promoted regardless of priority).
+///
+/// Note: This window could be made configurable in future versions if use cases
+/// arise requiring different urgency/fairness trade-offs.
 const HYBRID_SORT_RECENT_WINDOW_HOURS: i64 = 48;
 
 /// Warnings that can occur during JSONL file loading.
@@ -1217,6 +1220,8 @@ impl InMemoryStorageInner {
     /// - `Related`: Informational only, does not block
     /// - `DiscoveredFrom`: Provenance only, does not block
     fn find_blocked_issues(&self) -> HashSet<IssueId> {
+        // Note: This depth limit could be made configurable in future versions
+        // if use cases arise that require different traversal depths.
         const MAX_DEPTH: usize = 50;
 
         let mut blocked = HashSet::new();
@@ -4691,6 +4696,89 @@ mod tests {
         assert!(
             ready_ids_after.contains(&child2.id),
             "Child2 should be ready after blocker closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ready_to_work_transitive_unblocking_deep_hierarchy() {
+        // Test that closing a blocker unblocks a deep parent -> child -> grandchild chain
+        //
+        // Hierarchy:
+        //   blocker --blocks--> parent --parent-child--> child --parent-child--> grandchild
+        //
+        // When blocker is open: parent, child, grandchild all blocked
+        // When blocker is closed: parent, child, grandchild all become ready
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let blocker = storage.create(create_test_issue("Blocker")).await.unwrap();
+        let parent = storage.create(create_test_issue("Parent")).await.unwrap();
+        let child = storage.create(create_test_issue("Child")).await.unwrap();
+        let grandchild = storage
+            .create(create_test_issue("Grandchild"))
+            .await
+            .unwrap();
+
+        // Block the parent with the blocker
+        storage
+            .add_dependency(&parent.id, &blocker.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+
+        // Create parent-child chain: child -> parent, grandchild -> child
+        storage
+            .add_dependency(&child.id, &parent.id, DependencyType::ParentChild)
+            .await
+            .unwrap();
+        storage
+            .add_dependency(&grandchild.id, &child.id, DependencyType::ParentChild)
+            .await
+            .unwrap();
+
+        // Verify initial state: only blocker is ready
+        let ready = storage.ready_to_work(None, None).await.unwrap();
+        let ready_ids: HashSet<_> = ready.iter().map(|i| i.id.clone()).collect();
+
+        assert!(ready_ids.contains(&blocker.id), "Blocker should be ready");
+        assert!(
+            !ready_ids.contains(&parent.id),
+            "Parent should be blocked by blocker"
+        );
+        assert!(
+            !ready_ids.contains(&child.id),
+            "Child should be blocked transitively via parent"
+        );
+        assert!(
+            !ready_ids.contains(&grandchild.id),
+            "Grandchild should be blocked transitively via parent->child"
+        );
+
+        // Close the blocker
+        storage
+            .update(
+                &blocker.id,
+                IssueUpdate {
+                    status: Some(IssueStatus::Closed),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // Verify all become ready after blocker is closed
+        let ready_after = storage.ready_to_work(None, None).await.unwrap();
+        let ready_ids_after: HashSet<_> = ready_after.iter().map(|i| i.id.clone()).collect();
+
+        assert!(
+            ready_ids_after.contains(&parent.id),
+            "Parent should be ready after blocker closed"
+        );
+        assert!(
+            ready_ids_after.contains(&child.id),
+            "Child should be ready after blocker closed (unblocked via parent)"
+        );
+        assert!(
+            ready_ids_after.contains(&grandchild.id),
+            "Grandchild should be ready after blocker closed (unblocked via parent->child)"
         );
     }
 
