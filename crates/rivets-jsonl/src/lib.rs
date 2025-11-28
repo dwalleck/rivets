@@ -31,6 +31,89 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! # Streaming Patterns
+//!
+//! ## Processing Large Files with Constant Memory
+//!
+//! ```no_run
+//! use rivets_jsonl::JsonlReader;
+//! use futures::stream::StreamExt;
+//! use serde::Deserialize;
+//! use std::pin::pin;
+//! use tokio::fs::File;
+//!
+//! #[derive(Deserialize)]
+//! struct Record { id: u32, name: String }
+//!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let file = File::open("large.jsonl").await?;
+//! let reader = JsonlReader::new(file);
+//! let mut stream = pin!(reader.stream::<Record>());
+//!
+//! // Process one record at a time - constant memory usage
+//! while let Some(result) = stream.next().await {
+//!     let record = result?;
+//!     // Process record...
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Filtering and Transforming
+//!
+//! ```no_run
+//! use rivets_jsonl::JsonlReader;
+//! use futures::stream::StreamExt;
+//! use serde::Deserialize;
+//! use tokio::fs::File;
+//!
+//! #[derive(Deserialize)]
+//! struct Record { id: u32, active: bool, name: String }
+//!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let file = File::open("data.jsonl").await?;
+//! let reader = JsonlReader::new(file);
+//!
+//! // Filter and collect valid, active records
+//! let active_records: Vec<Record> = reader
+//!     .stream::<Record>()
+//!     .filter_map(|r| async move { r.ok() })
+//!     .filter(|r| {
+//!         let is_active = r.active;
+//!         async move { is_active }
+//!     })
+//!     .collect()
+//!     .await;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Taking a Subset
+//!
+//! ```no_run
+//! use rivets_jsonl::JsonlReader;
+//! use futures::stream::StreamExt;
+//! use serde::Deserialize;
+//! use tokio::fs::File;
+//!
+//! #[derive(Deserialize)]
+//! struct Record { id: u32 }
+//!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let file = File::open("data.jsonl").await?;
+//! let reader = JsonlReader::new(file);
+//!
+//! // Read only the first 100 records
+//! let first_100: Vec<Record> = reader
+//!     .stream::<Record>()
+//!     .take(100)
+//!     .filter_map(|r| async move { r.ok() })
+//!     .collect()
+//!     .await;
+//! # Ok(())
+//! # }
+//! ```
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

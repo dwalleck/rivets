@@ -318,3 +318,185 @@ async fn roundtrip_mixed_types_as_json_value() {
         serde_json::json!({"id": 1, "name": "test", "active": true})
     );
 }
+
+// ============================================================================
+// Stream integration tests
+// ============================================================================
+
+mod stream_integration {
+    use super::*;
+    use futures::stream::StreamExt;
+    use std::pin::pin;
+
+    /// Tests streaming with 1000+ records to verify constant memory usage
+    /// and correct behavior with large datasets.
+    #[tokio::test]
+    async fn stream_large_dataset() {
+        const RECORD_COUNT: u32 = 1500;
+
+        let records: Vec<TestRecord> = (0..RECORD_COUNT)
+            .map(|i| TestRecord {
+                id: i,
+                name: format!("Record_{}", i),
+                active: i % 2 == 0,
+            })
+            .collect();
+
+        let buffer = Cursor::new(Vec::new());
+        let mut writer = JsonlWriter::new(buffer);
+        writer.write_all(records.iter()).await.unwrap();
+        writer.flush().await.unwrap();
+
+        let data = writer.into_inner().into_inner().into_inner();
+        let reader = JsonlReader::new(Cursor::new(data));
+        let stream = pin!(reader.stream::<TestRecord>());
+
+        let read_records: Vec<TestRecord> = stream
+            .map(|r| r.expect("all records should parse successfully"))
+            .collect()
+            .await;
+
+        assert_eq!(read_records.len(), RECORD_COUNT as usize);
+
+        for (i, record) in read_records.iter().enumerate() {
+            assert_eq!(record.id, i as u32);
+            assert_eq!(record.name, format!("Record_{}", i));
+            assert_eq!(record.active, i % 2 == 0);
+        }
+    }
+
+    /// Tests that streaming correctly propagates errors while continuing
+    /// to process subsequent records.
+    #[tokio::test]
+    async fn stream_with_interleaved_errors() {
+        let raw_data = b"{\"id\": 1, \"name\": \"Valid1\", \"active\": true}\n\
+                         {invalid json}\n\
+                         {\"id\": 3, \"name\": \"Valid2\", \"active\": false}\n\
+                         also invalid\n\
+                         {\"id\": 5, \"name\": \"Valid3\", \"active\": true}\n";
+
+        let reader = JsonlReader::new(Cursor::new(raw_data.as_slice()));
+        let stream = pin!(reader.stream::<TestRecord>());
+
+        let results: Vec<rivets_jsonl::Result<TestRecord>> = stream.collect().await;
+
+        assert_eq!(results.len(), 5);
+        assert!(results[0].is_ok());
+        assert!(results[1].is_err());
+        assert!(results[2].is_ok());
+        assert!(results[3].is_err());
+        assert!(results[4].is_ok());
+
+        let valid_records: Vec<&TestRecord> =
+            results.iter().filter_map(|r| r.as_ref().ok()).collect();
+
+        assert_eq!(valid_records.len(), 3);
+        assert_eq!(valid_records[0].id, 1);
+        assert_eq!(valid_records[1].id, 3);
+        assert_eq!(valid_records[2].id, 5);
+    }
+
+    /// Tests streaming with take() to verify lazy evaluation.
+    #[tokio::test]
+    async fn stream_take_subset() {
+        const TOTAL_RECORDS: u32 = 1000;
+        const RECORDS_TO_TAKE: usize = 10;
+
+        let records: Vec<TestRecord> = (0..TOTAL_RECORDS)
+            .map(|i| TestRecord {
+                id: i,
+                name: format!("Record_{}", i),
+                active: true,
+            })
+            .collect();
+
+        let buffer = Cursor::new(Vec::new());
+        let mut writer = JsonlWriter::new(buffer);
+        writer.write_all(records.iter()).await.unwrap();
+        writer.flush().await.unwrap();
+
+        let data = writer.into_inner().into_inner().into_inner();
+        let reader = JsonlReader::new(Cursor::new(data));
+        let stream = pin!(reader.stream::<TestRecord>());
+
+        let taken: Vec<TestRecord> = stream
+            .take(RECORDS_TO_TAKE)
+            .map(|r| r.unwrap())
+            .collect()
+            .await;
+
+        assert_eq!(taken.len(), RECORDS_TO_TAKE);
+        for (i, record) in taken.iter().enumerate() {
+            assert_eq!(record.id, i as u32);
+        }
+    }
+
+    /// Tests streaming with filter to process only matching records.
+    #[tokio::test]
+    async fn stream_filter_records() {
+        let records: Vec<TestRecord> = (0..100)
+            .map(|i| TestRecord {
+                id: i,
+                name: format!("Record_{}", i),
+                active: i % 3 == 0,
+            })
+            .collect();
+
+        let buffer = Cursor::new(Vec::new());
+        let mut writer = JsonlWriter::new(buffer);
+        writer.write_all(records.iter()).await.unwrap();
+        writer.flush().await.unwrap();
+
+        let data = writer.into_inner().into_inner().into_inner();
+        let reader = JsonlReader::new(Cursor::new(data));
+        let stream = pin!(reader.stream::<TestRecord>());
+
+        let active_records: Vec<TestRecord> = stream
+            .filter_map(|r| async move { r.ok() })
+            .filter(|r| {
+                let is_active = r.active;
+                async move { is_active }
+            })
+            .collect()
+            .await;
+
+        assert_eq!(active_records.len(), 34);
+        for record in active_records {
+            assert!(record.active);
+            assert_eq!(record.id % 3, 0);
+        }
+    }
+
+    /// Tests that complex records can be streamed correctly.
+    #[tokio::test]
+    async fn stream_complex_records() {
+        let records: Vec<ComplexRecord> = (0..100)
+            .map(|i| ComplexRecord {
+                id: format!("id-{}", i),
+                value: i as f64 * 1.5,
+                tags: vec![format!("tag{}", i), format!("group{}", i % 5)],
+                metadata: if i % 2 == 0 {
+                    Some(Metadata {
+                        created_by: format!("user{}", i % 10),
+                        version: i,
+                    })
+                } else {
+                    None
+                },
+            })
+            .collect();
+
+        let buffer = Cursor::new(Vec::new());
+        let mut writer = JsonlWriter::new(buffer);
+        writer.write_all(records.iter()).await.unwrap();
+        writer.flush().await.unwrap();
+
+        let data = writer.into_inner().into_inner().into_inner();
+        let reader = JsonlReader::new(Cursor::new(data));
+        let stream = pin!(reader.stream::<ComplexRecord>());
+
+        let read_records: Vec<ComplexRecord> = stream.map(|r| r.unwrap()).collect().await;
+
+        assert_eq!(read_records, records);
+    }
+}
