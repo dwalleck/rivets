@@ -3,7 +3,9 @@
 //! This module provides async functionality for reading JSONL files line-by-line
 //! with efficient buffering and line number tracking for error reporting.
 
-use tokio::io::{AsyncRead, BufReader};
+use crate::{Error, Result};
+use serde::de::DeserializeOwned;
+use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 
 /// Async reader for JSONL (JSON Lines) data.
 ///
@@ -127,6 +129,71 @@ impl<R: AsyncRead + Unpin> JsonlReader<R> {
     pub fn into_inner(self) -> BufReader<R> {
         self.reader
     }
+
+    /// Reads a single line from the JSONL data and deserializes it.
+    ///
+    /// This method reads the next non-empty line, increments the line counter,
+    /// and deserializes the JSON content into the specified type.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(Some(T))` - Successfully read and deserialized a record
+    /// - `Ok(None)` - End of file reached
+    /// - `Err(Error::Io(_))` - I/O error during reading
+    /// - `Err(Error::Json(_))` - JSON parsing error
+    ///
+    /// # Type Parameters
+    ///
+    /// * `T` - The type to deserialize each JSON line into. Must implement
+    ///   [`DeserializeOwned`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use rivets_jsonl::JsonlReader;
+    /// use serde::Deserialize;
+    /// use tokio::fs::File;
+    ///
+    /// #[derive(Deserialize)]
+    /// struct Record {
+    ///     id: u32,
+    ///     name: String,
+    /// }
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let file = File::open("data.jsonl").await?;
+    /// let mut reader = JsonlReader::new(file);
+    ///
+    /// while let Some(record) = reader.read_line::<Record>().await? {
+    ///     println!("Read record: {}", record.name);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn read_line<T: DeserializeOwned>(&mut self) -> Result<Option<T>> {
+        let mut line = String::new();
+
+        loop {
+            line.clear();
+            let bytes_read = self.reader.read_line(&mut line).await?;
+
+            if bytes_read == 0 {
+                return Ok(None);
+            }
+
+            self.line_number += 1;
+
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let value: T = serde_json::from_str(trimmed)
+                .map_err(|e| Error::InvalidFormat(format!("line {}: {}", self.line_number, e)))?;
+
+            return Ok(Some(value));
+        }
+    }
 }
 
 impl<R: AsyncRead + Unpin + Default> Default for JsonlReader<R> {
@@ -138,7 +205,14 @@ impl<R: AsyncRead + Unpin + Default> Default for JsonlReader<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Deserialize;
     use std::io::Cursor;
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct TestRecord {
+        id: u32,
+        name: String,
+    }
 
     #[test]
     fn new_reader_starts_at_line_zero() {
@@ -186,5 +260,176 @@ mod tests {
         let data = Cursor::new(b"test");
         let reader = JsonlReader::new(data);
         let _inner = reader.into_inner();
+    }
+
+    #[tokio::test]
+    async fn read_line_returns_none_for_empty_input() {
+        let data = Cursor::new(b"");
+        let mut reader = JsonlReader::new(data);
+
+        let result: Option<TestRecord> = reader.read_line().await.unwrap();
+        assert!(result.is_none());
+        assert_eq!(reader.line_number(), 0);
+    }
+
+    #[tokio::test]
+    async fn read_line_reads_single_record() {
+        let data = Cursor::new(b"{\"id\": 1, \"name\": \"Alice\"}\n");
+        let mut reader = JsonlReader::new(data);
+
+        let record: TestRecord = reader.read_line().await.unwrap().unwrap();
+        assert_eq!(record.id, 1);
+        assert_eq!(record.name, "Alice");
+        assert_eq!(reader.line_number(), 1);
+
+        let result: Option<TestRecord> = reader.read_line().await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn read_line_reads_multiple_records() {
+        let data = Cursor::new(
+            b"{\"id\": 1, \"name\": \"Alice\"}\n{\"id\": 2, \"name\": \"Bob\"}\n{\"id\": 3, \"name\": \"Charlie\"}\n",
+        );
+        let mut reader = JsonlReader::new(data);
+
+        let record1: TestRecord = reader.read_line().await.unwrap().unwrap();
+        assert_eq!(record1.id, 1);
+        assert_eq!(record1.name, "Alice");
+        assert_eq!(reader.line_number(), 1);
+
+        let record2: TestRecord = reader.read_line().await.unwrap().unwrap();
+        assert_eq!(record2.id, 2);
+        assert_eq!(record2.name, "Bob");
+        assert_eq!(reader.line_number(), 2);
+
+        let record3: TestRecord = reader.read_line().await.unwrap().unwrap();
+        assert_eq!(record3.id, 3);
+        assert_eq!(record3.name, "Charlie");
+        assert_eq!(reader.line_number(), 3);
+
+        let result: Option<TestRecord> = reader.read_line().await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn read_line_skips_empty_lines() {
+        let data = Cursor::new(
+            b"\n{\"id\": 1, \"name\": \"Alice\"}\n\n\n{\"id\": 2, \"name\": \"Bob\"}\n",
+        );
+        let mut reader = JsonlReader::new(data);
+
+        let record1: TestRecord = reader.read_line().await.unwrap().unwrap();
+        assert_eq!(record1.id, 1);
+        assert_eq!(reader.line_number(), 2);
+
+        let record2: TestRecord = reader.read_line().await.unwrap().unwrap();
+        assert_eq!(record2.id, 2);
+        assert_eq!(reader.line_number(), 5);
+
+        let result: Option<TestRecord> = reader.read_line().await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn read_line_skips_whitespace_only_lines() {
+        let data = Cursor::new(b"   \n{\"id\": 1, \"name\": \"Alice\"}\n\t\t\n");
+        let mut reader = JsonlReader::new(data);
+
+        let record: TestRecord = reader.read_line().await.unwrap().unwrap();
+        assert_eq!(record.id, 1);
+        assert_eq!(reader.line_number(), 2);
+
+        let result: Option<TestRecord> = reader.read_line().await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn read_line_handles_line_without_trailing_newline() {
+        let data = Cursor::new(b"{\"id\": 1, \"name\": \"Alice\"}");
+        let mut reader = JsonlReader::new(data);
+
+        let record: TestRecord = reader.read_line().await.unwrap().unwrap();
+        assert_eq!(record.id, 1);
+        assert_eq!(reader.line_number(), 1);
+
+        let result: Option<TestRecord> = reader.read_line().await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn read_line_returns_error_for_invalid_json() {
+        let data = Cursor::new(b"{invalid json}\n");
+        let mut reader = JsonlReader::new(data);
+
+        let result: Result<Option<TestRecord>> = reader.read_line().await;
+        assert!(result.is_err());
+        assert_eq!(reader.line_number(), 1);
+
+        let error = result.unwrap_err();
+        match error {
+            Error::InvalidFormat(msg) => {
+                assert!(msg.contains("line 1"));
+            }
+            _ => panic!("Expected InvalidFormat error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_line_returns_error_for_type_mismatch() {
+        let data = Cursor::new(b"{\"id\": \"not a number\", \"name\": \"Alice\"}\n");
+        let mut reader = JsonlReader::new(data);
+
+        let result: Result<Option<TestRecord>> = reader.read_line().await;
+        assert!(result.is_err());
+
+        let error = result.unwrap_err();
+        match error {
+            Error::InvalidFormat(msg) => {
+                assert!(msg.contains("line 1"));
+            }
+            _ => panic!("Expected InvalidFormat error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_line_includes_correct_line_number_in_error() {
+        let data = Cursor::new(b"{\"id\": 1, \"name\": \"Alice\"}\n{invalid}\n");
+        let mut reader = JsonlReader::new(data);
+
+        let _record: TestRecord = reader.read_line().await.unwrap().unwrap();
+        assert_eq!(reader.line_number(), 1);
+
+        let result: Result<Option<TestRecord>> = reader.read_line().await;
+        assert!(result.is_err());
+        assert_eq!(reader.line_number(), 2);
+
+        let error = result.unwrap_err();
+        match error {
+            Error::InvalidFormat(msg) => {
+                assert!(msg.contains("line 2"));
+            }
+            _ => panic!("Expected InvalidFormat error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_line_trims_leading_and_trailing_whitespace() {
+        let data = Cursor::new(b"  {\"id\": 1, \"name\": \"Alice\"}  \n");
+        let mut reader = JsonlReader::new(data);
+
+        let record: TestRecord = reader.read_line().await.unwrap().unwrap();
+        assert_eq!(record.id, 1);
+        assert_eq!(record.name, "Alice");
+    }
+
+    #[tokio::test]
+    async fn read_line_handles_only_empty_lines() {
+        let data = Cursor::new(b"\n\n\n");
+        let mut reader = JsonlReader::new(data);
+
+        let result: Option<TestRecord> = reader.read_line().await.unwrap();
+        assert!(result.is_none());
+        assert_eq!(reader.line_number(), 3);
     }
 }
