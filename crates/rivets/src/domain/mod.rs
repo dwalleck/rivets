@@ -206,6 +206,12 @@ pub enum DependencyType {
 /// Maximum length for issue titles
 pub const MAX_TITLE_LENGTH: usize = 200;
 
+/// Minimum priority level (0 = critical)
+pub const MIN_PRIORITY: u8 = 0;
+
+/// Maximum priority level (4 = backlog)
+pub const MAX_PRIORITY: u8 = 4;
+
 /// Data for creating a new issue
 #[derive(Debug, Clone)]
 pub struct NewIssue {

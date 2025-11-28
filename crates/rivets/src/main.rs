@@ -23,7 +23,7 @@ async fn main() -> Result<()> {
 
     tracing::debug!("Starting rivets CLI");
 
-    let cli = Cli::parse();
+    let cli = Cli::parse_args();
     cli.execute().await?;
 
     tracing::debug!("Rivets CLI completed successfully");
