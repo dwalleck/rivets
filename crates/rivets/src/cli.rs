@@ -30,6 +30,8 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 
+use crate::domain::MAX_TITLE_LENGTH;
+
 /// Rivets - A Rust-based issue tracking system
 ///
 /// Track issues, dependencies, and project progress using JSONL storage.
@@ -139,7 +141,8 @@ pub struct CreateArgs {
     /// Issue title (required, or prompted interactively)
     ///
     /// Short description of the issue. Will be prompted if not provided.
-    #[arg(long)]
+    /// Maximum 200 characters.
+    #[arg(long, value_parser = validate_title)]
     pub title: Option<String>,
 
     /// Detailed description
@@ -229,8 +232,8 @@ pub struct UpdateArgs {
     #[arg(value_parser = validate_issue_id)]
     pub issue_id: String,
 
-    /// New title
-    #[arg(long)]
+    /// New title (maximum 200 characters)
+    #[arg(long, value_parser = validate_title)]
     pub title: Option<String>,
 
     /// New description
@@ -245,7 +248,12 @@ pub struct UpdateArgs {
     #[arg(short, long, value_parser = clap::value_parser!(u8).range(0..=4))]
     pub priority: Option<u8>,
 
-    /// New assignee (use "" to unassign)
+    /// New assignee
+    ///
+    /// Note: To unassign, use `--no-assignee` flag instead. Clap does not
+    /// support empty strings ("") as argument values by default.
+    ///
+    /// TODO: Implement --no-assignee flag for explicit unassignment
     #[arg(short, long)]
     pub assignee: Option<String>,
 
@@ -546,11 +554,11 @@ fn validate_issue_id(s: &str) -> std::result::Result<String, String> {
         return Err("Issue ID cannot be empty".to_string());
     }
 
-    // Check for the prefix-suffix format
+    // Check for the prefix-suffix format (must have at least one hyphen)
     let parts: Vec<&str> = s.splitn(2, '-').collect();
     if parts.len() != 2 {
         return Err(format!(
-            "Invalid issue ID format: '{}'. Expected format: prefix-suffix (e.g., proj-abc)",
+            "Invalid issue ID format: '{}'. Expected format: prefix-suffix (e.g., proj-abc or proj-abc-123)",
             s
         ));
     }
@@ -575,8 +583,35 @@ fn validate_issue_id(s: &str) -> std::result::Result<String, String> {
         return Err("Issue ID suffix cannot be empty".to_string());
     }
 
-    if !suffix.chars().all(|c| c.is_ascii_alphanumeric()) {
-        return Err("Issue ID suffix must be alphanumeric".to_string());
+    // Suffix can contain alphanumerics and hyphens (for IDs like proj-abc-123)
+    if !suffix
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err("Issue ID suffix must contain only alphanumerics and hyphens".to_string());
+    }
+
+    Ok(s.to_string())
+}
+
+/// Validate title length.
+///
+/// Title must not exceed MAX_TITLE_LENGTH (200 characters).
+///
+/// Examples: Valid titles under 200 chars
+fn validate_title(s: &str) -> std::result::Result<String, String> {
+    let s = s.trim();
+
+    if s.is_empty() {
+        return Err("Title cannot be empty".to_string());
+    }
+
+    if s.len() > MAX_TITLE_LENGTH {
+        return Err(format!(
+            "Title cannot exceed {} characters, got {} characters",
+            MAX_TITLE_LENGTH,
+            s.len()
+        ));
     }
 
     Ok(s.to_string())
@@ -862,6 +897,71 @@ mod tests {
     fn test_validate_issue_id_invalid_chars() {
         assert!(validate_issue_id("proj-abc_123").is_err()); // underscore in suffix
         assert!(validate_issue_id("proj_test-abc").is_err()); // underscore in prefix
+    }
+
+    #[test]
+    fn test_validate_issue_id_multiple_hyphens() {
+        // Issue IDs with multiple hyphens in suffix should now be valid
+        assert!(validate_issue_id("proj-abc-123").is_ok());
+        assert!(validate_issue_id("rivets-feature-xyz").is_ok());
+        assert!(validate_issue_id("test-a-b-c-d").is_ok());
+        assert_eq!(validate_issue_id("proj-abc-123").unwrap(), "proj-abc-123");
+    }
+
+    #[test]
+    fn test_validate_issue_id_prefix_exactly_20_chars() {
+        let prefix_20 = "a".repeat(20);
+        let issue_id = format!("{}-xyz", prefix_20);
+        assert!(validate_issue_id(&issue_id).is_ok());
+    }
+
+    #[test]
+    fn test_validate_issue_id_prefix_21_chars() {
+        let prefix_21 = "a".repeat(21);
+        let issue_id = format!("{}-xyz", prefix_21);
+        let result = validate_issue_id(&issue_id);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("prefix must be 2-20"));
+    }
+
+    #[test]
+    fn test_validate_title_valid() {
+        assert!(validate_title("Short title").is_ok());
+        assert!(validate_title("A".repeat(200).as_str()).is_ok()); // Exactly 200 chars
+    }
+
+    #[test]
+    fn test_validate_title_empty() {
+        let result = validate_title("");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn test_validate_title_too_long() {
+        let long_title = "A".repeat(201);
+        let result = validate_title(&long_title);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cannot exceed 200"));
+    }
+
+    #[test]
+    fn test_validate_title_exactly_max_length() {
+        let max_title = "A".repeat(200);
+        assert!(validate_title(&max_title).is_ok());
+        assert_eq!(validate_title(&max_title).unwrap().len(), 200);
+    }
+
+    #[test]
+    fn test_validate_title_trims_whitespace() {
+        assert_eq!(validate_title("  Test Title  ").unwrap(), "Test Title");
+    }
+
+    #[test]
+    fn test_validate_title_whitespace_only() {
+        let result = validate_title("   ");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cannot be empty"));
     }
 
     // ========== CLI Parsing Tests ==========
