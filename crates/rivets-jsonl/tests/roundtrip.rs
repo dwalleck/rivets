@@ -333,17 +333,10 @@ mod atomic_write_integration {
     }
 
     async fn cleanup(path: &std::path::Path) {
-        if let Err(e) = tokio::fs::remove_file(path).await {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("Warning: Failed to cleanup {}: {}", path.display(), e);
-            }
-        }
+        // Best-effort cleanup - ignore errors as they're non-critical for tests
+        let _ = tokio::fs::remove_file(path).await;
         let temp_path = path.with_extension("jsonl.tmp");
-        if let Err(e) = tokio::fs::remove_file(&temp_path).await {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("Warning: Failed to cleanup {}: {}", temp_path.display(), e);
-            }
-        }
+        let _ = tokio::fs::remove_file(&temp_path).await;
     }
 
     /// Verify atomic write creates valid JSONL that can be read back
@@ -956,6 +949,368 @@ mod stream_integration {
 // ============================================================================
 // Resilient stream integration tests
 // ============================================================================
+
+// ============================================================================
+// read_jsonl_resilient integration tests
+// ============================================================================
+
+mod read_jsonl_resilient_integration {
+    use super::*;
+    use rivets_jsonl::{read_jsonl_resilient, warning::Warning};
+    use std::io::Write;
+    use std::path::PathBuf;
+
+    fn test_file_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("rivets_resilient_test_{}.jsonl", name))
+    }
+
+    async fn cleanup(path: &std::path::Path) {
+        // Best-effort cleanup - ignore errors as they're non-critical for tests
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    fn write_test_file(path: &std::path::Path, content: &str) {
+        let mut file = std::fs::File::create(path).expect("Failed to create test file");
+        file.write_all(content.as_bytes())
+            .expect("Failed to write test file");
+        file.flush().expect("Failed to flush test file");
+    }
+
+    /// Tests the primary use case: loading a corrupted JSONL file.
+    /// This simulates a real-world scenario where some records in the file
+    /// have been corrupted.
+    #[tokio::test]
+    async fn resilient_read_corrupted_file() {
+        let path = test_file_path("corrupted");
+        cleanup(&path).await;
+
+        // Create a file with some valid and some corrupted lines
+        let content = r#"{"id": 1, "name": "Valid1", "active": true}
+{corrupted line without proper json}
+{"id": 3, "name": "Valid2", "active": false}
+{also corrupted
+{"id": 5, "name": "Valid3", "active": true}
+{"missing_required_field": 123}
+{"id": 7, "name": "Valid4", "active": false}
+"#;
+        write_test_file(&path, content);
+
+        let (records, warnings) = read_jsonl_resilient::<TestRecord, _>(&path)
+            .await
+            .expect("Should succeed despite corrupted lines");
+
+        // Should have recovered 4 valid records
+        assert_eq!(records.len(), 4);
+        assert_eq!(records[0].id, 1);
+        assert_eq!(records[1].id, 3);
+        assert_eq!(records[2].id, 5);
+        assert_eq!(records[3].id, 7);
+
+        // Should have collected 3 warnings (2 corrupted lines + 1 missing field)
+        assert_eq!(warnings.len(), 3);
+
+        // Verify warning line numbers are correct
+        assert_eq!(warnings[0].line_number(), 2);
+        assert_eq!(warnings[1].line_number(), 4);
+        assert_eq!(warnings[2].line_number(), 6);
+
+        // Verify warnings are MalformedJson type
+        for warning in &warnings {
+            match warning {
+                Warning::MalformedJson { .. } => {}
+                _ => panic!("Expected MalformedJson warning"),
+            }
+        }
+
+        cleanup(&path).await;
+    }
+
+    /// Tests loading a large file with sparse errors (simulating production data).
+    #[tokio::test]
+    async fn resilient_read_large_file_with_sparse_errors() {
+        let path = test_file_path("large_sparse_errors");
+        cleanup(&path).await;
+
+        const TOTAL_LINES: usize = 1000;
+        const ERROR_FREQUENCY: usize = 100; // One error every 100 lines
+
+        let mut content = String::new();
+        let mut expected_valid_count = 0;
+        let mut expected_error_lines = Vec::new();
+
+        for i in 0..TOTAL_LINES {
+            if i > 0 && i % ERROR_FREQUENCY == 0 {
+                content.push_str("{invalid json line}\n");
+                expected_error_lines.push(i + 1); // 1-based line number
+            } else {
+                content.push_str(&format!(
+                    "{{\"id\": {}, \"name\": \"Record_{}\", \"active\": {}}}\n",
+                    expected_valid_count,
+                    expected_valid_count,
+                    expected_valid_count % 2 == 0
+                ));
+                expected_valid_count += 1;
+            }
+        }
+
+        write_test_file(&path, &content);
+
+        let (records, warnings) = read_jsonl_resilient::<TestRecord, _>(&path)
+            .await
+            .expect("Should succeed");
+
+        // Verify all valid records were recovered
+        assert_eq!(records.len(), expected_valid_count);
+
+        // Verify records are in order
+        for (i, record) in records.iter().enumerate() {
+            assert_eq!(record.id, i as u32);
+        }
+
+        // Verify warning count matches expected errors
+        assert_eq!(warnings.len(), expected_error_lines.len());
+
+        // Verify warning line numbers
+        for (warning, expected_line) in warnings.iter().zip(expected_error_lines.iter()) {
+            assert_eq!(warning.line_number(), *expected_line);
+        }
+
+        cleanup(&path).await;
+    }
+
+    /// Tests that the function returns an error when the file doesn't exist.
+    #[tokio::test]
+    async fn resilient_read_nonexistent_file() {
+        let path = PathBuf::from("/nonexistent/directory/file.jsonl");
+        let result = read_jsonl_resilient::<TestRecord, _>(&path).await;
+        assert!(result.is_err());
+    }
+
+    /// Tests reading a completely valid file (no warnings).
+    #[tokio::test]
+    async fn resilient_read_all_valid() {
+        let path = test_file_path("all_valid");
+        cleanup(&path).await;
+
+        let records: Vec<TestRecord> = (0..100)
+            .map(|i| TestRecord {
+                id: i,
+                name: format!("Record_{}", i),
+                active: i % 2 == 0,
+            })
+            .collect();
+
+        let content = records
+            .iter()
+            .map(|r| serde_json::to_string(r).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        write_test_file(&path, &content);
+
+        let (read_records, warnings) = read_jsonl_resilient::<TestRecord, _>(&path)
+            .await
+            .expect("Should succeed");
+
+        assert_eq!(read_records.len(), 100);
+        assert!(warnings.is_empty());
+
+        for (original, read) in records.iter().zip(read_records.iter()) {
+            assert_eq!(original, read);
+        }
+
+        cleanup(&path).await;
+    }
+
+    /// Tests reading a file where all lines are corrupted.
+    #[tokio::test]
+    async fn resilient_read_all_corrupted() {
+        let path = test_file_path("all_corrupted");
+        cleanup(&path).await;
+
+        let content = r#"{invalid1}
+{invalid2}
+{invalid3}
+{invalid4}
+{invalid5}
+"#;
+        write_test_file(&path, content);
+
+        let (records, warnings) = read_jsonl_resilient::<TestRecord, _>(&path)
+            .await
+            .expect("Should succeed with empty records");
+
+        assert!(records.is_empty());
+        assert_eq!(warnings.len(), 5);
+
+        cleanup(&path).await;
+    }
+
+    /// Tests reading a file with complex nested records.
+    #[tokio::test]
+    async fn resilient_read_complex_records() {
+        let path = test_file_path("complex_records");
+        cleanup(&path).await;
+
+        let content = r#"{"id": "abc-1", "value": 1.5, "tags": ["a", "b"], "metadata": {"created_by": "user1", "version": 1}}
+{"id": "abc-2", "value": "not_a_number", "tags": []}
+{"id": "abc-3", "value": 3.5, "tags": ["c"], "metadata": null}
+{malformed json}
+{"id": "abc-4", "value": 4.5, "tags": ["d", "e", "f"], "metadata": {"created_by": "user2", "version": 4}}
+"#;
+        write_test_file(&path, content);
+
+        let (records, warnings) = read_jsonl_resilient::<ComplexRecord, _>(&path)
+            .await
+            .expect("Should succeed");
+
+        // Should have 3 valid records
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].id, "abc-1");
+        assert_eq!(records[1].id, "abc-3");
+        assert_eq!(records[2].id, "abc-4");
+
+        // Should have 2 warnings
+        assert_eq!(warnings.len(), 2);
+
+        cleanup(&path).await;
+    }
+
+    /// Tests that empty lines and whitespace-only lines are handled correctly.
+    #[tokio::test]
+    async fn resilient_read_handles_empty_and_whitespace_lines() {
+        let path = test_file_path("empty_whitespace");
+        cleanup(&path).await;
+
+        let content = r#"
+{"id": 1, "name": "First", "active": true}
+
+
+{invalid}
+
+{"id": 2, "name": "Second", "active": false}
+
+"#;
+        write_test_file(&path, content);
+
+        let (records, warnings) = read_jsonl_resilient::<TestRecord, _>(&path)
+            .await
+            .expect("Should succeed");
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].id, 1);
+        assert_eq!(records[1].id, 2);
+
+        // Only 1 warning for the invalid line
+        assert_eq!(warnings.len(), 1);
+
+        cleanup(&path).await;
+    }
+
+    /// Tests reading an empty file.
+    #[tokio::test]
+    async fn resilient_read_empty_file() {
+        let path = test_file_path("empty");
+        cleanup(&path).await;
+
+        write_test_file(&path, "");
+
+        let (records, warnings) = read_jsonl_resilient::<TestRecord, _>(&path)
+            .await
+            .expect("Should succeed");
+
+        assert!(records.is_empty());
+        assert!(warnings.is_empty());
+
+        cleanup(&path).await;
+    }
+
+    /// Tests that warning error messages contain useful information.
+    #[tokio::test]
+    async fn resilient_read_warning_details() {
+        let path = test_file_path("warning_details");
+        cleanup(&path).await;
+
+        // Type mismatch error (id should be u32, not string)
+        let content = r#"{"id": "not_a_number", "name": "Test", "active": true}"#;
+        write_test_file(&path, content);
+
+        let (records, warnings) = read_jsonl_resilient::<TestRecord, _>(&path)
+            .await
+            .expect("Should succeed");
+
+        assert!(records.is_empty());
+        assert_eq!(warnings.len(), 1);
+
+        match &warnings[0] {
+            Warning::MalformedJson { line_number, error } => {
+                assert_eq!(*line_number, 1);
+                assert!(!error.is_empty());
+            }
+            _ => panic!("Expected MalformedJson warning"),
+        }
+
+        cleanup(&path).await;
+    }
+
+    /// Tests that unicode content is preserved correctly.
+    #[tokio::test]
+    async fn resilient_read_unicode() {
+        let path = test_file_path("unicode");
+        cleanup(&path).await;
+
+        let content = r#"{"id": 1, "name": "Hello, 世界! 😀", "active": true}"#;
+        write_test_file(&path, content);
+
+        let (records, warnings) = read_jsonl_resilient::<TestRecord, _>(&path)
+            .await
+            .expect("Should succeed");
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].name, "Hello, 世界! 😀");
+        assert!(warnings.is_empty());
+
+        cleanup(&path).await;
+    }
+
+    /// Tests reading with PathBuf.
+    #[tokio::test]
+    async fn resilient_read_pathbuf() {
+        let path = test_file_path("pathbuf");
+        cleanup(&path).await;
+
+        let content = r#"{"id": 1, "name": "Test", "active": true}"#;
+        write_test_file(&path, content);
+
+        let pathbuf = PathBuf::from(&path);
+        let (records, _) = read_jsonl_resilient::<TestRecord, _>(&pathbuf)
+            .await
+            .expect("Should succeed");
+
+        assert_eq!(records.len(), 1);
+
+        cleanup(&path).await;
+    }
+
+    /// Tests reading with a String path.
+    #[tokio::test]
+    async fn resilient_read_string_path() {
+        let path = test_file_path("string_path");
+        cleanup(&path).await;
+
+        let content = r#"{"id": 1, "name": "Test", "active": true}"#;
+        write_test_file(&path, content);
+
+        let path_string = path.to_string_lossy().to_string();
+        let (records, _) = read_jsonl_resilient::<TestRecord, _>(&path_string)
+            .await
+            .expect("Should succeed");
+
+        assert_eq!(records.len(), 1);
+
+        cleanup(&path).await;
+    }
+}
 
 mod resilient_stream_integration {
     use super::*;
