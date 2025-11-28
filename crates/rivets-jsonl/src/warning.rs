@@ -117,6 +117,36 @@ impl Warning {
             }
         }
     }
+
+    /// Returns a static string identifying the warning kind.
+    ///
+    /// This is useful for programmatic filtering and grouping of warnings
+    /// without pattern matching on the enum variants.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rivets_jsonl::warning::Warning;
+    ///
+    /// let warning = Warning::MalformedJson {
+    ///     line_number: 5,
+    ///     error: "parse error".to_string(),
+    /// };
+    /// assert_eq!(warning.kind(), "malformed_json");
+    ///
+    /// let warning2 = Warning::SkippedLine {
+    ///     line_number: 10,
+    ///     reason: "empty".to_string(),
+    /// };
+    /// assert_eq!(warning2.kind(), "skipped_line");
+    /// ```
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::MalformedJson { .. } => "malformed_json",
+            Self::SkippedLine { .. } => "skipped_line",
+        }
+    }
 }
 
 impl std::fmt::Display for Warning {
@@ -124,6 +154,12 @@ impl std::fmt::Display for Warning {
         write!(f, "{}", self.description())
     }
 }
+
+/// Implement the Error trait to allow Warning to be used in error contexts.
+///
+/// This enables warnings to be used with `Result` types and error handling
+/// utilities that expect `std::error::Error`.
+impl std::error::Error for Warning {}
 
 /// A thread-safe collector for accumulating warnings during JSONL processing.
 ///
@@ -136,6 +172,12 @@ impl std::fmt::Display for Warning {
 ///
 /// This type is `Send` and `Sync`, making it safe to use across threads.
 /// The internal mutex ensures that concurrent additions are properly serialized.
+///
+/// # Mutex Poisoning
+///
+/// All methods will panic if the internal mutex is poisoned, which only occurs
+/// if another thread panicked while holding the lock. In typical usage, this
+/// should not occur.
 ///
 /// # Examples
 ///
@@ -466,6 +508,51 @@ mod tests {
             assert_eq!(w1, w2);
             assert_ne!(w1, w3);
             assert_ne!(w1, w4);
+        }
+
+        #[test]
+        fn kind_returns_correct_variant_name() {
+            let malformed = Warning::MalformedJson {
+                line_number: 1,
+                error: "error".to_string(),
+            };
+            assert_eq!(malformed.kind(), "malformed_json");
+
+            let skipped = Warning::SkippedLine {
+                line_number: 2,
+                reason: "reason".to_string(),
+            };
+            assert_eq!(skipped.kind(), "skipped_line");
+        }
+
+        #[test]
+        fn kind_enables_filtering_by_type() {
+            let warnings = [
+                Warning::MalformedJson {
+                    line_number: 1,
+                    error: "error1".to_string(),
+                },
+                Warning::SkippedLine {
+                    line_number: 2,
+                    reason: "reason1".to_string(),
+                },
+                Warning::MalformedJson {
+                    line_number: 3,
+                    error: "error2".to_string(),
+                },
+            ];
+
+            let malformed_count = warnings
+                .iter()
+                .filter(|w| w.kind() == "malformed_json")
+                .count();
+            let skipped_count = warnings
+                .iter()
+                .filter(|w| w.kind() == "skipped_line")
+                .count();
+
+            assert_eq!(malformed_count, 2);
+            assert_eq!(skipped_count, 1);
         }
     }
 
