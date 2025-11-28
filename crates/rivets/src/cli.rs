@@ -30,7 +30,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::domain::MAX_TITLE_LENGTH;
+use crate::domain::{MAX_PRIORITY, MAX_TITLE_LENGTH, MIN_PRIORITY};
 
 /// Rivets - A Rust-based issue tracking system
 ///
@@ -150,7 +150,7 @@ pub struct CreateArgs {
     pub description: Option<String>,
 
     /// Priority level (0=critical, 1=high, 2=medium, 3=low, 4=backlog)
-    #[arg(short, long, value_parser = clap::value_parser!(u8).range(0..=4), default_value = "2")]
+    #[arg(short, long, value_parser = clap::value_parser!(u8).range(MIN_PRIORITY as i64..=MAX_PRIORITY as i64), default_value = "2")]
     pub priority: u8,
 
     /// Issue type
@@ -193,7 +193,7 @@ pub struct ListArgs {
     pub status: Option<IssueStatusArg>,
 
     /// Filter by priority
-    #[arg(short, long, value_parser = clap::value_parser!(u8).range(0..=4))]
+    #[arg(short, long, value_parser = clap::value_parser!(u8).range(MIN_PRIORITY as i64..=MAX_PRIORITY as i64))]
     pub priority: Option<u8>,
 
     /// Filter by issue type
@@ -245,7 +245,7 @@ pub struct UpdateArgs {
     pub status: Option<IssueStatusArg>,
 
     /// New priority
-    #[arg(short, long, value_parser = clap::value_parser!(u8).range(0..=4))]
+    #[arg(short, long, value_parser = clap::value_parser!(u8).range(MIN_PRIORITY as i64..=MAX_PRIORITY as i64))]
     pub priority: Option<u8>,
 
     /// New assignee
@@ -306,7 +306,7 @@ pub struct ReadyArgs {
     pub assignee: Option<String>,
 
     /// Filter by priority
-    #[arg(short, long, value_parser = clap::value_parser!(u8).range(0..=4))]
+    #[arg(short, long, value_parser = clap::value_parser!(u8).range(MIN_PRIORITY as i64..=MAX_PRIORITY as i64))]
     pub priority: Option<u8>,
 
     /// Maximum number of issues to display
@@ -566,17 +566,8 @@ fn validate_issue_id(s: &str) -> std::result::Result<String, String> {
     let prefix = parts[0];
     let suffix = parts[1];
 
-    // Validate prefix
-    if prefix.len() < 2 || prefix.len() > 20 {
-        return Err(format!(
-            "Issue ID prefix must be 2-20 characters, got {} characters",
-            prefix.len()
-        ));
-    }
-
-    if !prefix.chars().all(|c| c.is_ascii_alphanumeric()) {
-        return Err("Issue ID prefix must be alphanumeric".to_string());
-    }
+    // Validate prefix using shared validation logic
+    validate_prefix(prefix).map_err(|e| format!("Issue ID {}", e.to_lowercase()))?;
 
     // Validate suffix
     if suffix.is_empty() {
@@ -589,6 +580,19 @@ fn validate_issue_id(s: &str) -> std::result::Result<String, String> {
         .all(|c| c.is_ascii_alphanumeric() || c == '-')
     {
         return Err("Issue ID suffix must contain only alphanumerics and hyphens".to_string());
+    }
+
+    // Prevent edge cases: leading/trailing hyphens or consecutive hyphens
+    if suffix.starts_with('-') {
+        return Err("Issue ID suffix cannot start with a hyphen".to_string());
+    }
+
+    if suffix.ends_with('-') {
+        return Err("Issue ID suffix cannot end with a hyphen".to_string());
+    }
+
+    if suffix.contains("--") {
+        return Err("Issue ID suffix cannot contain consecutive hyphens".to_string());
     }
 
     Ok(s.to_string())
@@ -890,7 +894,10 @@ mod tests {
     fn test_validate_issue_id_prefix_too_short() {
         let result = validate_issue_id("a-123");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("prefix must be 2-20"));
+        assert!(result
+            .unwrap_err()
+            .to_lowercase()
+            .contains("at least 2 characters"));
     }
 
     #[test]
@@ -921,7 +928,34 @@ mod tests {
         let issue_id = format!("{}-xyz", prefix_21);
         let result = validate_issue_id(&issue_id);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("prefix must be 2-20"));
+        assert!(result
+            .unwrap_err()
+            .to_lowercase()
+            .contains("cannot exceed 20"));
+    }
+
+    #[test]
+    fn test_validate_issue_id_leading_hyphen_suffix() {
+        // `proj--abc` has a leading hyphen in the suffix (after the first hyphen)
+        let result = validate_issue_id("proj--abc");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cannot start with a hyphen"));
+    }
+
+    #[test]
+    fn test_validate_issue_id_trailing_hyphen_suffix() {
+        let result = validate_issue_id("proj-abc-");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cannot end with a hyphen"));
+    }
+
+    #[test]
+    fn test_validate_issue_id_consecutive_hyphens() {
+        let result = validate_issue_id("proj-a--b");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("cannot contain consecutive hyphens"));
     }
 
     #[test]
