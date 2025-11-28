@@ -333,17 +333,10 @@ mod atomic_write_integration {
     }
 
     async fn cleanup(path: &std::path::Path) {
-        if let Err(e) = tokio::fs::remove_file(path).await {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("Warning: Failed to cleanup {}: {}", path.display(), e);
-            }
-        }
+        // Best-effort cleanup - ignore errors as they're non-critical for tests
+        let _ = tokio::fs::remove_file(path).await;
         let temp_path = path.with_extension("jsonl.tmp");
-        if let Err(e) = tokio::fs::remove_file(&temp_path).await {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("Warning: Failed to cleanup {}: {}", temp_path.display(), e);
-            }
-        }
+        let _ = tokio::fs::remove_file(&temp_path).await;
     }
 
     /// Verify atomic write creates valid JSONL that can be read back
@@ -972,11 +965,8 @@ mod read_jsonl_resilient_integration {
     }
 
     async fn cleanup(path: &std::path::Path) {
-        if let Err(e) = tokio::fs::remove_file(path).await {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("Warning: Failed to cleanup {}: {}", path.display(), e);
-            }
-        }
+        // Best-effort cleanup - ignore errors as they're non-critical for tests
+        let _ = tokio::fs::remove_file(path).await;
     }
 
     fn write_test_file(path: &std::path::Path, content: &str) {

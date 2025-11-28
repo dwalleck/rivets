@@ -20,4 +20,4 @@ futures = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 futures = { workspace = true }
-tempfile = "3.18"
+tempfile = { workspace = true }

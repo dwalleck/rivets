@@ -205,6 +205,22 @@ use tokio::fs::File;
 /// early. The function will return all records successfully read up to that point
 /// along with any warnings collected.
 ///
+/// # Memory Usage
+///
+/// This function loads the entire file into memory at once. For large files,
+/// consider the following:
+///
+/// - **Small to medium files** (< 100MB): Use `read_jsonl_resilient()` for simplicity
+/// - **Large files** (> 100MB): Use [`JsonlReader::stream_resilient()`] for constant
+///   memory usage with streaming processing
+/// - **Memory-constrained environments**: Always prefer streaming over loading entire
+///   files into memory
+///
+/// The memory footprint includes:
+/// - All successfully parsed records in the returned `Vec<T>`
+/// - All warnings in the returned `Vec<Warning>`
+/// - Temporary buffers used during deserialization
+///
 /// # Examples
 ///
 /// ## Basic Usage
