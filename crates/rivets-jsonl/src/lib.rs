@@ -114,6 +114,40 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! ## Resilient Streaming
+//!
+//! Process JSONL files that may contain malformed lines, collecting warnings
+//! for problematic lines while continuing to process valid data:
+//!
+//! ```no_run
+//! use rivets_jsonl::JsonlReader;
+//! use futures::stream::StreamExt;
+//! use serde::Deserialize;
+//! use tokio::fs::File;
+//!
+//! #[derive(Deserialize)]
+//! struct Record { id: u32, name: String }
+//!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let file = File::open("data.jsonl").await?;
+//! let reader = JsonlReader::new(file);
+//!
+//! // Stream continues despite malformed JSON lines
+//! let (stream, warnings) = reader.stream_resilient::<Record>();
+//!
+//! let records: Vec<Record> = stream.collect().await;
+//!
+//! // Check warnings after processing
+//! for warning in warnings.warnings() {
+//!     eprintln!("Warning: {}", warning);
+//! }
+//!
+//! println!("Loaded {} valid records with {} warnings",
+//!          records.len(), warnings.len());
+//! # Ok(())
+//! # }
+//! ```
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
