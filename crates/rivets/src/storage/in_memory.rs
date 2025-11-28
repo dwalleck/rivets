@@ -792,6 +792,15 @@ impl IssueStorage for InMemoryStorage {
         inner.has_cycle_impl(from, to)
     }
 
+    async fn get_dependency_tree(
+        &self,
+        id: &IssueId,
+        max_depth: Option<usize>,
+    ) -> Result<Vec<(Dependency, usize)>> {
+        let inner = self.lock().await;
+        inner.get_dependency_tree_impl(id, max_depth)
+    }
+
     async fn list(&self, filter: &IssueFilter) -> Result<Vec<Issue>> {
         let inner = self.lock().await;
 
@@ -1034,6 +1043,68 @@ impl IssueStorage for InMemoryStorage {
 }
 
 impl InMemoryStorageInner {
+    /// Internal implementation of dependency tree traversal.
+    ///
+    /// Uses BFS to traverse the dependency graph, returning all transitive
+    /// dependencies with their depth level.
+    fn get_dependency_tree_impl(
+        &self,
+        id: &IssueId,
+        max_depth: Option<usize>,
+    ) -> Result<Vec<(Dependency, usize)>> {
+        let start_node = self
+            .node_map
+            .get(id)
+            .ok_or_else(|| Error::IssueNotFound(id.clone()))?;
+
+        let mut result = Vec::new();
+        let mut visited = HashSet::new();
+        let mut queue: VecDeque<(NodeIndex, usize)> = VecDeque::new();
+
+        // Start BFS from direct dependencies (depth 1)
+        for edge in self.graph.edges(*start_node) {
+            let target_node = edge.target();
+            if visited.insert(target_node) {
+                queue.push_back((target_node, 1));
+                result.push((
+                    Dependency {
+                        depends_on_id: self.graph[target_node].clone(),
+                        dep_type: *edge.weight(),
+                    },
+                    1,
+                ));
+            }
+        }
+
+        // BFS traversal for transitive dependencies
+        while let Some((current_node, depth)) = queue.pop_front() {
+            // Check max depth limit
+            if let Some(max) = max_depth {
+                if depth >= max {
+                    continue;
+                }
+            }
+
+            // Explore dependencies of current node
+            for edge in self.graph.edges(current_node) {
+                let target_node = edge.target();
+                if visited.insert(target_node) {
+                    let next_depth = depth + 1;
+                    queue.push_back((target_node, next_depth));
+                    result.push((
+                        Dependency {
+                            depends_on_id: self.graph[target_node].clone(),
+                            dep_type: *edge.weight(),
+                        },
+                        next_depth,
+                    ));
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
     /// Internal implementation of cycle detection.
     ///
     /// Uses petgraph's `has_path_connecting` to check if adding
@@ -2217,5 +2288,658 @@ mod tests {
         assert_eq!(loaded_issues[0].id.as_str(), "test-valid");
 
         temp_dir.close().unwrap();
+    }
+
+    // ========== Dependency Type Tests ==========
+
+    #[tokio::test]
+    async fn test_all_dependency_types() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let issue1 = storage.create(create_test_issue("Blocker")).await.unwrap();
+        let issue2 = storage.create(create_test_issue("Related")).await.unwrap();
+        let issue3 = storage.create(create_test_issue("Parent")).await.unwrap();
+        let issue4 = storage
+            .create(create_test_issue("Discovered"))
+            .await
+            .unwrap();
+        let main_issue = storage
+            .create(create_test_issue("Main Issue"))
+            .await
+            .unwrap();
+
+        // Add all 4 dependency types
+        storage
+            .add_dependency(&main_issue.id, &issue1.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+        storage
+            .add_dependency(&main_issue.id, &issue2.id, DependencyType::Related)
+            .await
+            .unwrap();
+        storage
+            .add_dependency(&main_issue.id, &issue3.id, DependencyType::ParentChild)
+            .await
+            .unwrap();
+        storage
+            .add_dependency(&main_issue.id, &issue4.id, DependencyType::DiscoveredFrom)
+            .await
+            .unwrap();
+
+        // Verify all dependencies
+        let deps = storage.get_dependencies(&main_issue.id).await.unwrap();
+        assert_eq!(deps.len(), 4);
+
+        // Verify each type
+        assert!(deps
+            .iter()
+            .any(|d| d.depends_on_id == issue1.id && d.dep_type == DependencyType::Blocks));
+        assert!(deps
+            .iter()
+            .any(|d| d.depends_on_id == issue2.id && d.dep_type == DependencyType::Related));
+        assert!(deps
+            .iter()
+            .any(|d| d.depends_on_id == issue3.id && d.dep_type == DependencyType::ParentChild));
+        assert!(deps
+            .iter()
+            .any(|d| d.depends_on_id == issue4.id && d.dep_type == DependencyType::DiscoveredFrom));
+    }
+
+    #[tokio::test]
+    async fn test_blocks_dependency_type() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let blocker = storage
+            .create(create_test_issue("Blocker Task"))
+            .await
+            .unwrap();
+        let blocked = storage
+            .create(create_test_issue("Blocked Task"))
+            .await
+            .unwrap();
+
+        storage
+            .add_dependency(&blocked.id, &blocker.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+
+        let deps = storage.get_dependencies(&blocked.id).await.unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].dep_type, DependencyType::Blocks);
+
+        // Blocked task should appear in blocked_issues
+        let blocked_list = storage.blocked_issues().await.unwrap();
+        assert_eq!(blocked_list.len(), 1);
+        assert_eq!(blocked_list[0].0.id, blocked.id);
+    }
+
+    #[tokio::test]
+    async fn test_related_dependency_type() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let issue1 = storage
+            .create(create_test_issue("Related Issue 1"))
+            .await
+            .unwrap();
+        let issue2 = storage
+            .create(create_test_issue("Related Issue 2"))
+            .await
+            .unwrap();
+
+        storage
+            .add_dependency(&issue2.id, &issue1.id, DependencyType::Related)
+            .await
+            .unwrap();
+
+        let deps = storage.get_dependencies(&issue2.id).await.unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].dep_type, DependencyType::Related);
+
+        // Related dependency should NOT block work
+        let ready = storage.ready_to_work(None).await.unwrap();
+        assert_eq!(ready.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_parent_child_dependency_type() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let mut epic = create_test_issue("Epic");
+        epic.issue_type = IssueType::Epic;
+        let epic = storage.create(epic).await.unwrap();
+
+        let subtask = storage.create(create_test_issue("Subtask")).await.unwrap();
+
+        storage
+            .add_dependency(&subtask.id, &epic.id, DependencyType::ParentChild)
+            .await
+            .unwrap();
+
+        let deps = storage.get_dependencies(&subtask.id).await.unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].dep_type, DependencyType::ParentChild);
+
+        // Get dependents of epic
+        let dependents = storage.get_dependents(&epic.id).await.unwrap();
+        assert_eq!(dependents.len(), 1);
+        assert_eq!(dependents[0].depends_on_id, subtask.id);
+    }
+
+    #[tokio::test]
+    async fn test_discovered_from_dependency_type() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let original_task = storage
+            .create(create_test_issue("Original Task"))
+            .await
+            .unwrap();
+        let discovered_bug = storage
+            .create(create_test_issue("Discovered Bug"))
+            .await
+            .unwrap();
+
+        storage
+            .add_dependency(
+                &discovered_bug.id,
+                &original_task.id,
+                DependencyType::DiscoveredFrom,
+            )
+            .await
+            .unwrap();
+
+        let deps = storage.get_dependencies(&discovered_bug.id).await.unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].dep_type, DependencyType::DiscoveredFrom);
+
+        // DiscoveredFrom should NOT block work
+        let ready = storage.ready_to_work(None).await.unwrap();
+        assert_eq!(ready.len(), 2);
+    }
+
+    // ========== Dependency Tree Tests ==========
+
+    #[tokio::test]
+    async fn test_dependency_tree_simple_chain() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let issue_a = storage.create(create_test_issue("A")).await.unwrap();
+        let issue_b = storage.create(create_test_issue("B")).await.unwrap();
+        let issue_c = storage.create(create_test_issue("C")).await.unwrap();
+
+        // A -> B -> C
+        storage
+            .add_dependency(&issue_a.id, &issue_b.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+        storage
+            .add_dependency(&issue_b.id, &issue_c.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+
+        // Get tree from A
+        let tree = storage
+            .get_dependency_tree(&issue_a.id, None)
+            .await
+            .unwrap();
+        assert_eq!(tree.len(), 2);
+
+        // B should be at depth 1
+        assert!(tree
+            .iter()
+            .any(|(d, depth)| d.depends_on_id == issue_b.id && *depth == 1));
+
+        // C should be at depth 2
+        assert!(tree
+            .iter()
+            .any(|(d, depth)| d.depends_on_id == issue_c.id && *depth == 2));
+    }
+
+    #[tokio::test]
+    async fn test_dependency_tree_diamond() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        //       A
+        //      / \
+        //     B   C
+        //      \ /
+        //       D
+
+        let issue_a = storage.create(create_test_issue("A")).await.unwrap();
+        let issue_b = storage.create(create_test_issue("B")).await.unwrap();
+        let issue_c = storage.create(create_test_issue("C")).await.unwrap();
+        let issue_d = storage.create(create_test_issue("D")).await.unwrap();
+
+        storage
+            .add_dependency(&issue_a.id, &issue_b.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+        storage
+            .add_dependency(&issue_a.id, &issue_c.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+        storage
+            .add_dependency(&issue_b.id, &issue_d.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+        storage
+            .add_dependency(&issue_c.id, &issue_d.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+
+        let tree = storage
+            .get_dependency_tree(&issue_a.id, None)
+            .await
+            .unwrap();
+
+        // Should have B, C at depth 1, D at depth 2
+        // D should only appear once due to visited tracking
+        assert_eq!(tree.len(), 3);
+
+        let depth_1_count = tree.iter().filter(|(_, depth)| *depth == 1).count();
+        let depth_2_count = tree.iter().filter(|(_, depth)| *depth == 2).count();
+
+        assert_eq!(depth_1_count, 2);
+        assert_eq!(depth_2_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_dependency_tree_with_max_depth() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let issue_a = storage.create(create_test_issue("A")).await.unwrap();
+        let issue_b = storage.create(create_test_issue("B")).await.unwrap();
+        let issue_c = storage.create(create_test_issue("C")).await.unwrap();
+        let issue_d = storage.create(create_test_issue("D")).await.unwrap();
+
+        // A -> B -> C -> D
+        storage
+            .add_dependency(&issue_a.id, &issue_b.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+        storage
+            .add_dependency(&issue_b.id, &issue_c.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+        storage
+            .add_dependency(&issue_c.id, &issue_d.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+
+        // Get tree with max_depth = 2
+        let tree = storage
+            .get_dependency_tree(&issue_a.id, Some(2))
+            .await
+            .unwrap();
+
+        // Should only include B and C
+        assert_eq!(tree.len(), 2);
+        assert!(tree.iter().any(|(d, _)| d.depends_on_id == issue_b.id));
+        assert!(tree.iter().any(|(d, _)| d.depends_on_id == issue_c.id));
+        assert!(!tree.iter().any(|(d, _)| d.depends_on_id == issue_d.id));
+    }
+
+    #[tokio::test]
+    async fn test_dependency_tree_empty() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let issue = storage
+            .create(create_test_issue("No Dependencies"))
+            .await
+            .unwrap();
+
+        let tree = storage.get_dependency_tree(&issue.id, None).await.unwrap();
+
+        assert!(tree.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_dependency_tree_not_found() {
+        let storage = new_in_memory_storage("test".to_string());
+
+        let result = storage
+            .get_dependency_tree(&IssueId::new("nonexistent"), None)
+            .await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::IssueNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn test_dependency_tree_mixed_types() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let main = storage.create(create_test_issue("Main")).await.unwrap();
+        let blocker = storage.create(create_test_issue("Blocker")).await.unwrap();
+        let related = storage.create(create_test_issue("Related")).await.unwrap();
+        let deep = storage.create(create_test_issue("Deep")).await.unwrap();
+
+        storage
+            .add_dependency(&main.id, &blocker.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+        storage
+            .add_dependency(&main.id, &related.id, DependencyType::Related)
+            .await
+            .unwrap();
+        storage
+            .add_dependency(&blocker.id, &deep.id, DependencyType::ParentChild)
+            .await
+            .unwrap();
+
+        let tree = storage.get_dependency_tree(&main.id, None).await.unwrap();
+
+        assert_eq!(tree.len(), 3);
+
+        // Check different dependency types are preserved
+        let blocks_count = tree
+            .iter()
+            .filter(|(d, _)| d.dep_type == DependencyType::Blocks)
+            .count();
+        let related_count = tree
+            .iter()
+            .filter(|(d, _)| d.dep_type == DependencyType::Related)
+            .count();
+        let parent_child_count = tree
+            .iter()
+            .filter(|(d, _)| d.dep_type == DependencyType::ParentChild)
+            .count();
+
+        assert_eq!(blocks_count, 1);
+        assert_eq!(related_count, 1);
+        assert_eq!(parent_child_count, 1);
+    }
+
+    // ========== Cycle Detection Tests ==========
+
+    #[tokio::test]
+    async fn test_self_dependency_cycle() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let issue = storage
+            .create(create_test_issue("Self Referencing"))
+            .await
+            .unwrap();
+
+        // Try to add self-dependency
+        let result = storage
+            .add_dependency(&issue.id, &issue.id, DependencyType::Blocks)
+            .await;
+
+        // Self-dependency should fail as a cycle
+        // Note: has_path_connecting returns true for same node
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_two_node_cycle() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let issue1 = storage.create(create_test_issue("Issue 1")).await.unwrap();
+        let issue2 = storage.create(create_test_issue("Issue 2")).await.unwrap();
+
+        // 1 -> 2
+        storage
+            .add_dependency(&issue1.id, &issue2.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+
+        // Try 2 -> 1 (would create cycle)
+        let result = storage
+            .add_dependency(&issue2.id, &issue1.id, DependencyType::Blocks)
+            .await;
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::CircularDependency { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_long_chain_cycle_detection() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        // Create chain of 10 issues
+        let mut issues = Vec::new();
+        for i in 0..10 {
+            let issue = storage
+                .create(create_test_issue(&format!("Issue {}", i)))
+                .await
+                .unwrap();
+            issues.push(issue);
+        }
+
+        // Create linear chain: 0 -> 1 -> 2 -> ... -> 9
+        for i in 0..9 {
+            storage
+                .add_dependency(&issues[i].id, &issues[i + 1].id, DependencyType::Blocks)
+                .await
+                .unwrap();
+        }
+
+        // Try to close the cycle: 9 -> 0
+        let result = storage
+            .add_dependency(&issues[9].id, &issues[0].id, DependencyType::Blocks)
+            .await;
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::CircularDependency { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_has_cycle_method() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let issue1 = storage.create(create_test_issue("Issue 1")).await.unwrap();
+        let issue2 = storage.create(create_test_issue("Issue 2")).await.unwrap();
+        let issue3 = storage.create(create_test_issue("Issue 3")).await.unwrap();
+        let issue4 = storage.create(create_test_issue("Issue 4")).await.unwrap();
+
+        // 1 -> 2 -> 3
+        storage
+            .add_dependency(&issue1.id, &issue2.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+        storage
+            .add_dependency(&issue2.id, &issue3.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+
+        // Check has_cycle
+        // 3 -> 1 would create cycle (path 1->2->3 exists, so 3->1 closes the loop)
+        assert!(storage.has_cycle(&issue3.id, &issue1.id).await.unwrap());
+
+        // 1 -> 3 would NOT create cycle (no path from 3 to 1)
+        assert!(!storage.has_cycle(&issue1.id, &issue3.id).await.unwrap());
+
+        // 3 -> 2 WOULD create cycle (path 2->3 exists, so 3->2 closes the loop)
+        assert!(storage.has_cycle(&issue3.id, &issue2.id).await.unwrap());
+
+        // 4 has no dependencies, so no cycles possible with it
+        assert!(!storage.has_cycle(&issue4.id, &issue1.id).await.unwrap());
+        assert!(!storage.has_cycle(&issue1.id, &issue4.id).await.unwrap());
+    }
+
+    // ========== Edge Cases ==========
+
+    #[tokio::test]
+    async fn test_duplicate_dependency() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let issue1 = storage.create(create_test_issue("Issue 1")).await.unwrap();
+        let issue2 = storage.create(create_test_issue("Issue 2")).await.unwrap();
+
+        // Add dependency
+        storage
+            .add_dependency(&issue2.id, &issue1.id, DependencyType::Blocks)
+            .await
+            .unwrap();
+
+        // Try to add same dependency again
+        let result = storage
+            .add_dependency(&issue2.id, &issue1.id, DependencyType::Blocks)
+            .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_remove_nonexistent_dependency() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let issue1 = storage.create(create_test_issue("Issue 1")).await.unwrap();
+        let issue2 = storage.create(create_test_issue("Issue 2")).await.unwrap();
+
+        // Try to remove nonexistent dependency
+        let result = storage.remove_dependency(&issue2.id, &issue1.id).await;
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::DependencyNotFound { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_dependency_on_nonexistent_issue() {
+        let mut storage = new_in_memory_storage("test".to_string());
+
+        let issue = storage.create(create_test_issue("Issue")).await.unwrap();
+
+        let result = storage
+            .add_dependency(
+                &issue.id,
+                &IssueId::new("nonexistent"),
+                DependencyType::Blocks,
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::IssueNotFound(_)));
+    }
+
+    // ========== Performance Benchmark ==========
+
+    #[tokio::test]
+    async fn test_cycle_check_performance_1000_issues() {
+        use std::time::Instant;
+
+        let mut storage = new_in_memory_storage("bench".to_string());
+
+        // Create 1000 issues
+        let mut issues = Vec::with_capacity(1000);
+        for i in 0..1000 {
+            let issue = storage
+                .create(create_test_issue(&format!("Performance Issue {}", i)))
+                .await
+                .unwrap();
+            issues.push(issue);
+        }
+
+        // Create a linear chain of 500 dependencies
+        for i in 0..499 {
+            storage
+                .add_dependency(&issues[i].id, &issues[i + 1].id, DependencyType::Blocks)
+                .await
+                .unwrap();
+        }
+
+        // Benchmark: check if adding a cycle would be detected
+        let start = Instant::now();
+
+        // Perform 100 cycle checks (checking if 499 -> 0 would create a cycle)
+        for _ in 0..100 {
+            let would_cycle = storage
+                .has_cycle(&issues[499].id, &issues[0].id)
+                .await
+                .unwrap();
+            assert!(would_cycle);
+        }
+
+        let duration = start.elapsed();
+
+        // 100 cycle checks should complete in under 10ms
+        // (i.e., each check should be under 0.1ms)
+        println!(
+            "100 cycle checks on 1000 issues with 500 deps completed in {:?}",
+            duration
+        );
+        assert!(
+            duration.as_millis() < 10,
+            "Cycle check performance too slow: {:?} (expected < 10ms)",
+            duration
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dependency_tree_performance() {
+        use std::time::Instant;
+
+        let mut storage = new_in_memory_storage("bench".to_string());
+
+        // Create 1000 issues
+        let mut issues = Vec::with_capacity(1000);
+        for i in 0..1000 {
+            let issue = storage
+                .create(create_test_issue(&format!("Tree Issue {}", i)))
+                .await
+                .unwrap();
+            issues.push(issue);
+        }
+
+        // Create a balanced binary tree structure
+        // Each issue at level n depends on 2 issues at level n+1
+        for i in 0..500 {
+            let left_child = i * 2 + 1;
+            let right_child = i * 2 + 2;
+            if left_child < 1000 {
+                storage
+                    .add_dependency(
+                        &issues[i].id,
+                        &issues[left_child].id,
+                        DependencyType::Blocks,
+                    )
+                    .await
+                    .unwrap();
+            }
+            if right_child < 1000 {
+                storage
+                    .add_dependency(
+                        &issues[i].id,
+                        &issues[right_child].id,
+                        DependencyType::Blocks,
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let start = Instant::now();
+
+        // Get full dependency tree from root
+        let tree = storage
+            .get_dependency_tree(&issues[0].id, None)
+            .await
+            .unwrap();
+
+        let duration = start.elapsed();
+
+        // Tree traversal should complete in under 10ms
+        println!(
+            "Dependency tree of {} nodes completed in {:?}",
+            tree.len(),
+            duration
+        );
+        assert!(
+            duration.as_millis() < 10,
+            "Dependency tree traversal too slow: {:?} (expected < 10ms)",
+            duration
+        );
+
+        // Verify tree contains all 999 descendants
+        assert_eq!(tree.len(), 999);
     }
 }

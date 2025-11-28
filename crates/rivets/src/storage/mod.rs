@@ -167,6 +167,38 @@ pub trait IssueStorage: Send + Sync {
     /// Returns `true` if adding `from -> to` would create a circular dependency.
     async fn has_cycle(&self, from: &IssueId, to: &IssueId) -> Result<bool>;
 
+    /// Get the full dependency tree for an issue.
+    ///
+    /// Performs a breadth-first traversal of the dependency graph starting from
+    /// the given issue, returning all transitive dependencies with their depth
+    /// in the tree. The result is ordered by traversal order (BFS).
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The root issue ID to start traversal from
+    /// * `max_depth` - Optional maximum depth to traverse (None for unlimited)
+    ///
+    /// # Returns
+    ///
+    /// A vector of tuples containing:
+    /// - The dependency relationship
+    /// - The depth in the tree (1 for direct dependencies, 2 for their dependencies, etc.)
+    ///
+    /// # Example
+    ///
+    /// For a dependency chain A -> B -> C, calling `get_dependency_tree(&A, None)` returns:
+    /// - (B, 1) - direct dependency
+    /// - (C, 2) - transitive dependency
+    ///
+    /// # Errors
+    ///
+    /// - `Error::IssueNotFound` if the issue doesn't exist
+    async fn get_dependency_tree(
+        &self,
+        id: &IssueId,
+        max_depth: Option<usize>,
+    ) -> Result<Vec<(Dependency, usize)>>;
+
     // ========== Queries ==========
 
     /// List issues matching the given filter.
@@ -362,6 +394,14 @@ mod tests {
 
         async fn has_cycle(&self, _from: &IssueId, _to: &IssueId) -> Result<bool> {
             Ok(false)
+        }
+
+        async fn get_dependency_tree(
+            &self,
+            _id: &IssueId,
+            _max_depth: Option<usize>,
+        ) -> Result<Vec<(Dependency, usize)>> {
+            Ok(vec![])
         }
 
         async fn list(&self, _filter: &IssueFilter) -> Result<Vec<Issue>> {
