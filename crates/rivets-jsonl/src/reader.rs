@@ -4,6 +4,7 @@
 //! with efficient buffering and line number tracking for error reporting.
 
 use crate::{Error, Result};
+use futures::stream::Stream;
 use serde::de::DeserializeOwned;
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 
@@ -193,6 +194,76 @@ impl<R: AsyncRead + Unpin> JsonlReader<R> {
 
             return Ok(Some(value));
         }
+    }
+
+    /// Returns an async [`Stream`] of deserialized records from the JSONL data.
+    ///
+    /// This method consumes the reader and returns a stream that lazily reads
+    /// and deserializes records on demand. This enables efficient processing of
+    /// large JSONL files with constant memory usage, as only one record is held
+    /// in memory at a time.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `T` - The type to deserialize each JSON line into. Must implement
+    ///   [`DeserializeOwned`] and `'static` (required by the stream implementation).
+    ///
+    /// # Returns
+    ///
+    /// An async stream that yields `Result<T>` for each line:
+    /// - `Ok(T)` - Successfully read and deserialized a record
+    /// - `Err(Error)` - I/O or JSON parsing error
+    ///
+    /// The stream terminates (returns `None`) when EOF is reached.
+    ///
+    /// # Stream Behavior
+    ///
+    /// - Uses [`futures::stream::unfold`] for lazy evaluation
+    /// - Memory usage is constant regardless of file size
+    /// - Errors are propagated through the stream (not short-circuited)
+    /// - After an error, the stream continues attempting to read subsequent lines
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use rivets_jsonl::JsonlReader;
+    /// use futures::stream::StreamExt;
+    /// use serde::Deserialize;
+    /// use std::pin::pin;
+    /// use tokio::fs::File;
+    ///
+    /// #[derive(Deserialize)]
+    /// struct Record {
+    ///     id: u32,
+    ///     name: String,
+    /// }
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let file = File::open("data.jsonl").await?;
+    /// let reader = JsonlReader::new(file);
+    /// // Pin the stream to use with StreamExt methods
+    /// let mut stream = pin!(reader.stream::<Record>());
+    ///
+    /// while let Some(result) = stream.next().await {
+    ///     match result {
+    ///         Ok(record) => println!("Read record: {}", record.name),
+    ///         Err(e) => eprintln!("Error: {}", e),
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn stream<T>(self) -> impl Stream<Item = Result<T>>
+    where
+        T: DeserializeOwned + 'static,
+    {
+        futures::stream::unfold(self, |mut reader| async move {
+            match reader.read_line().await {
+                Ok(Some(value)) => Some((Ok(value), reader)),
+                Ok(None) => None,
+                Err(e) => Some((Err(e), reader)),
+            }
+        })
     }
 }
 
@@ -431,5 +502,224 @@ mod tests {
         let result: Option<TestRecord> = reader.read_line().await.unwrap();
         assert!(result.is_none());
         assert_eq!(reader.line_number(), 3);
+    }
+
+    // ============================================================================
+    // Stream tests
+    // ============================================================================
+
+    mod stream_tests {
+        use super::*;
+        use futures::stream::StreamExt;
+        use std::pin::pin;
+
+        #[tokio::test]
+        async fn stream_returns_empty_for_empty_input() {
+            let data = Cursor::new(b"");
+            let reader = JsonlReader::new(data);
+            let mut stream = pin!(reader.stream::<TestRecord>());
+
+            let result = stream.next().await;
+            assert!(result.is_none());
+        }
+
+        #[tokio::test]
+        async fn stream_reads_single_record() {
+            let data = Cursor::new(b"{\"id\": 1, \"name\": \"Alice\"}\n");
+            let reader = JsonlReader::new(data);
+            let mut stream = pin!(reader.stream::<TestRecord>());
+
+            let record = stream.next().await.unwrap().unwrap();
+            assert_eq!(record.id, 1);
+            assert_eq!(record.name, "Alice");
+
+            let result = stream.next().await;
+            assert!(result.is_none());
+        }
+
+        #[tokio::test]
+        async fn stream_reads_multiple_records() {
+            let data = Cursor::new(
+                b"{\"id\": 1, \"name\": \"Alice\"}\n{\"id\": 2, \"name\": \"Bob\"}\n{\"id\": 3, \"name\": \"Charlie\"}\n",
+            );
+            let reader = JsonlReader::new(data);
+            let stream = pin!(reader.stream::<TestRecord>());
+
+            let records: Vec<TestRecord> = stream.map(|r| r.unwrap()).collect().await;
+
+            assert_eq!(records.len(), 3);
+            assert_eq!(records[0].id, 1);
+            assert_eq!(records[0].name, "Alice");
+            assert_eq!(records[1].id, 2);
+            assert_eq!(records[1].name, "Bob");
+            assert_eq!(records[2].id, 3);
+            assert_eq!(records[2].name, "Charlie");
+        }
+
+        #[tokio::test]
+        async fn stream_skips_empty_lines() {
+            let data = Cursor::new(
+                b"\n{\"id\": 1, \"name\": \"Alice\"}\n\n\n{\"id\": 2, \"name\": \"Bob\"}\n",
+            );
+            let reader = JsonlReader::new(data);
+            let stream = pin!(reader.stream::<TestRecord>());
+
+            let records: Vec<TestRecord> = stream.map(|r| r.unwrap()).collect().await;
+
+            assert_eq!(records.len(), 2);
+            assert_eq!(records[0].id, 1);
+            assert_eq!(records[1].id, 2);
+        }
+
+        #[tokio::test]
+        async fn stream_propagates_errors() {
+            let data = Cursor::new(b"{\"id\": 1, \"name\": \"Alice\"}\n{invalid}\n");
+            let reader = JsonlReader::new(data);
+            let mut stream = pin!(reader.stream::<TestRecord>());
+
+            let record = stream.next().await.unwrap().unwrap();
+            assert_eq!(record.id, 1);
+
+            let error = stream.next().await.unwrap();
+            assert!(error.is_err());
+            match error.unwrap_err() {
+                Error::InvalidFormat(msg) => {
+                    assert!(msg.contains("line 2"));
+                }
+                _ => panic!("Expected InvalidFormat error"),
+            }
+
+            let result = stream.next().await;
+            assert!(result.is_none());
+        }
+
+        #[tokio::test]
+        async fn stream_continues_after_error() {
+            let data = Cursor::new(
+                b"{\"id\": 1, \"name\": \"Alice\"}\n{invalid}\n{\"id\": 3, \"name\": \"Charlie\"}\n",
+            );
+            let reader = JsonlReader::new(data);
+            let mut stream = pin!(reader.stream::<TestRecord>());
+
+            let record1 = stream.next().await.unwrap().unwrap();
+            assert_eq!(record1.id, 1);
+
+            let error = stream.next().await.unwrap();
+            assert!(error.is_err());
+
+            let record3 = stream.next().await.unwrap().unwrap();
+            assert_eq!(record3.id, 3);
+            assert_eq!(record3.name, "Charlie");
+
+            let result = stream.next().await;
+            assert!(result.is_none());
+        }
+
+        #[tokio::test]
+        async fn stream_handles_line_without_trailing_newline() {
+            let data = Cursor::new(b"{\"id\": 1, \"name\": \"Alice\"}");
+            let reader = JsonlReader::new(data);
+            let stream = pin!(reader.stream::<TestRecord>());
+
+            let records: Vec<TestRecord> = stream.map(|r| r.unwrap()).collect().await;
+
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].id, 1);
+        }
+
+        #[tokio::test]
+        async fn stream_can_be_collected() {
+            let data =
+                Cursor::new(b"{\"id\": 1, \"name\": \"Alice\"}\n{\"id\": 2, \"name\": \"Bob\"}\n");
+            let reader = JsonlReader::new(data);
+            let stream = pin!(reader.stream::<TestRecord>());
+
+            let results: Vec<Result<TestRecord>> = stream.collect().await;
+
+            assert_eq!(results.len(), 2);
+            assert!(results.iter().all(|r| r.is_ok()));
+        }
+
+        #[tokio::test]
+        async fn stream_can_use_take() {
+            let data = Cursor::new(
+                b"{\"id\": 1, \"name\": \"Alice\"}\n{\"id\": 2, \"name\": \"Bob\"}\n{\"id\": 3, \"name\": \"Charlie\"}\n",
+            );
+            let reader = JsonlReader::new(data);
+            let stream = pin!(reader.stream::<TestRecord>());
+
+            let records: Vec<TestRecord> = stream.take(2).map(|r| r.unwrap()).collect().await;
+
+            assert_eq!(records.len(), 2);
+            assert_eq!(records[0].id, 1);
+            assert_eq!(records[1].id, 2);
+        }
+
+        #[tokio::test]
+        async fn stream_can_use_filter() {
+            let data = Cursor::new(
+                b"{\"id\": 1, \"name\": \"Alice\"}\n{\"id\": 2, \"name\": \"Bob\"}\n{\"id\": 3, \"name\": \"Charlie\"}\n",
+            );
+            let reader = JsonlReader::new(data);
+            let stream = pin!(reader.stream::<TestRecord>());
+
+            let records: Vec<TestRecord> = stream
+                .filter_map(|r| async move { r.ok() })
+                .filter(|r| {
+                    let matches = r.id > 1;
+                    async move { matches }
+                })
+                .collect()
+                .await;
+
+            assert_eq!(records.len(), 2);
+            assert_eq!(records[0].id, 2);
+            assert_eq!(records[1].id, 3);
+        }
+
+        #[tokio::test]
+        async fn stream_is_lazy_evaluated() {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            use std::sync::Arc;
+
+            #[derive(Debug, Deserialize)]
+            #[expect(dead_code, reason = "Field used for JSON deserialization only")]
+            struct CountingRecord {
+                value: u32,
+            }
+
+            let data = Cursor::new(
+                b"{\"value\": 1}\n{\"value\": 2}\n{\"value\": 3}\n{\"value\": 4}\n{\"value\": 5}\n",
+            );
+            let reader = JsonlReader::new(data);
+            let stream = pin!(reader.stream::<CountingRecord>());
+
+            let count = Arc::new(AtomicUsize::new(0));
+            let count_clone = count.clone();
+
+            let records: Vec<CountingRecord> = stream
+                .take(2)
+                .inspect(|_| {
+                    count_clone.fetch_add(1, Ordering::SeqCst);
+                })
+                .filter_map(|r| async move { r.ok() })
+                .collect()
+                .await;
+
+            assert_eq!(records.len(), 2);
+            assert_eq!(count.load(Ordering::SeqCst), 2);
+        }
+
+        #[tokio::test]
+        async fn stream_handles_whitespace_only_lines() {
+            let data = Cursor::new(b"   \n{\"id\": 1, \"name\": \"Alice\"}\n\t\t\n");
+            let reader = JsonlReader::new(data);
+            let stream = pin!(reader.stream::<TestRecord>());
+
+            let records: Vec<TestRecord> = stream.map(|r| r.unwrap()).collect().await;
+
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].id, 1);
+        }
     }
 }
