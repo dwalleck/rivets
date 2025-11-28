@@ -15,6 +15,22 @@
 //! If a crash occurs during step 1 or 2, the original file remains intact.
 //! The temporary file may be left behind, but data integrity is preserved.
 //!
+//! # Platform Notes
+//!
+//! - **POSIX (Linux, macOS)**: Atomic rename is guaranteed by the OS when source
+//!   and destination are on the same filesystem
+//! - **Windows**: File rename may not be atomic if the target exists. The implementation
+//!   uses `tokio::fs::rename` which handles this, but atomicity guarantees are
+//!   OS-dependent on Windows
+//!
+//! # Durability Notes
+//!
+//! This implementation calls `flush()` to ensure data is written to OS buffers before
+//! renaming. On most POSIX systems, the rename operation triggers an implicit fsync,
+//! providing reasonable durability guarantees. For applications requiring maximum
+//! durability (guaranteed disk persistence), consider adding explicit sync operations,
+//! though this significantly impacts performance (10-100x slower).
+//!
 //! # Examples
 //!
 //! ```no_run
