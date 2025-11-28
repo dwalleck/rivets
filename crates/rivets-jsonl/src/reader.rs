@@ -393,7 +393,8 @@ impl<R: AsyncRead + Unpin> JsonlReader<R> {
                     // Read raw line to track line number before parsing
                     let mut line = String::new();
 
-                    loop {
+                    // Find next non-empty line
+                    let trimmed = loop {
                         line.clear();
                         match reader.reader.read_line(&mut line).await {
                             Ok(0) => {
@@ -403,22 +404,20 @@ impl<R: AsyncRead + Unpin> JsonlReader<R> {
                             Ok(_) => {
                                 reader.line_number += 1;
                                 let trimmed = line.trim();
-                                if trimmed.is_empty() {
-                                    // Skip empty lines
-                                    continue;
+                                if !trimmed.is_empty() {
+                                    // Found non-empty line
+                                    break trimmed;
                                 }
-                                // Found non-empty line, break inner loop to parse
-                                break;
+                                // Skip empty lines and continue
                             }
                             Err(_) => {
                                 // I/O errors terminate the stream
                                 return None;
                             }
                         }
-                    }
+                    };
 
-                    // Attempt to parse the line
-                    let trimmed = line.trim();
+                    // Attempt to parse the line using trimmed value
                     match serde_json::from_str::<T>(trimmed) {
                         Ok(value) => {
                             return Some((value, (reader, warnings)));

@@ -179,6 +179,14 @@ impl std::error::Error for Warning {}
 /// if another thread panicked while holding the lock. In typical usage, this
 /// should not occur.
 ///
+/// # Memory Management
+///
+/// The collector accumulates warnings unboundedly in memory. For large files
+/// with many errors, consider periodically calling [`clear()`](Self::clear)
+/// to process and discard accumulated warnings, or use
+/// [`warnings()`](Self::warnings) to copy and process warnings in batches
+/// while continuing to collect new ones.
+///
 /// # Examples
 ///
 /// ```
