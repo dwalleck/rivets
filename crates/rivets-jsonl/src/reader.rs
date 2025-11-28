@@ -519,7 +519,10 @@ mod tests {
     mod stream_tests {
         use super::*;
         use futures::stream::StreamExt;
+        use std::io::Cursor;
         use std::pin::pin;
+        use std::task::Poll;
+        use tokio::io::AsyncRead;
 
         #[tokio::test]
         async fn stream_returns_empty_for_empty_input() {
@@ -728,6 +731,147 @@ mod tests {
 
             assert_eq!(records.len(), 1);
             assert_eq!(records[0].id, 1);
+        }
+
+        /// Custom AsyncRead that simulates I/O errors mid-stream
+        struct FailingReader {
+            data: Cursor<Vec<u8>>,
+            fail_at_byte: usize,
+            bytes_read: usize,
+        }
+
+        impl FailingReader {
+            fn new(data: Vec<u8>, fail_at_byte: usize) -> Self {
+                Self {
+                    data: Cursor::new(data),
+                    fail_at_byte,
+                    bytes_read: 0,
+                }
+            }
+        }
+
+        impl AsyncRead for FailingReader {
+            fn poll_read(
+                mut self: std::pin::Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+                buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                if self.bytes_read >= self.fail_at_byte {
+                    return Poll::Ready(Err(std::io::Error::other("simulated I/O error")));
+                }
+
+                let before = buf.filled().len();
+                let result = std::pin::Pin::new(&mut self.data).poll_read(cx, buf);
+                let after = buf.filled().len();
+                self.bytes_read += after - before;
+
+                result
+            }
+        }
+
+        #[tokio::test]
+        async fn stream_handles_io_errors() {
+            // Create a reader that fails immediately to demonstrate I/O error propagation
+            let data = b"{\"id\": 1, \"name\": \"Alice\"}\n".to_vec();
+            let failing_reader = FailingReader::new(data, 0); // Fail immediately
+
+            let reader = JsonlReader::new(failing_reader);
+            let mut stream = pin!(reader.stream::<TestRecord>());
+
+            // First read should encounter the I/O error
+            let result = stream.next().await;
+            assert!(result.is_some());
+
+            // Verify it's an I/O error
+            match result.unwrap() {
+                Err(Error::Io(e)) => {
+                    assert_eq!(e.to_string(), "simulated I/O error");
+                }
+                Err(other) => panic!("Expected I/O error, got {:?}", other),
+                Ok(_) => panic!("Expected error, got successful read"),
+            }
+        }
+
+        #[tokio::test]
+        async fn stream_handles_extremely_long_lines() {
+            // Create a record with an extremely long string field (10KB)
+            let long_string = "x".repeat(10_000);
+            let json = format!("{{\"id\": 1, \"name\": \"{}\"}}\n", long_string);
+            let data = Cursor::new(json.as_bytes());
+
+            // Use a small buffer capacity to ensure the line exceeds it
+            let reader = JsonlReader::with_capacity(data, 128);
+            let mut stream = pin!(reader.stream::<TestRecord>());
+
+            // Should successfully read the long line
+            let result = stream.next().await;
+            assert!(result.is_some());
+            let record = result.unwrap().unwrap();
+            assert_eq!(record.id, 1);
+            assert_eq!(record.name.len(), 10_000);
+
+            // Verify EOF
+            assert!(stream.next().await.is_none());
+        }
+
+        #[tokio::test]
+        async fn stream_concurrent_consumption() {
+            use futures::stream::select;
+
+            // Create two separate JSONL files
+            let data1 =
+                Cursor::new(b"{\"id\": 1, \"name\": \"Alice\"}\n{\"id\": 2, \"name\": \"Bob\"}\n");
+            let data2 = Cursor::new(
+                b"{\"id\": 3, \"name\": \"Charlie\"}\n{\"id\": 4, \"name\": \"Diana\"}\n",
+            );
+
+            let reader1 = JsonlReader::new(data1);
+            let reader2 = JsonlReader::new(data2);
+
+            let stream1 = reader1.stream::<TestRecord>();
+            let stream2 = reader2.stream::<TestRecord>();
+
+            // Merge the two streams
+            let mut merged = pin!(select(stream1, stream2));
+
+            let mut ids = Vec::new();
+            while let Some(result) = merged.next().await {
+                let record = result.unwrap();
+                ids.push(record.id);
+            }
+
+            // All 4 records should be present (order may vary due to interleaving)
+            ids.sort();
+            assert_eq!(ids, vec![1, 2, 3, 4]);
+        }
+
+        #[tokio::test]
+        async fn stream_handles_multiple_errors() {
+            // Mix valid and invalid JSON
+            let data = Cursor::new(
+                b"{\"id\": 1, \"name\": \"Alice\"}\n\
+                  {invalid}\n\
+                  {\"id\": 2, \"name\": \"Bob\"}\n\
+                  {also invalid\n\
+                  {\"id\": 3, \"name\": \"Charlie\"}\n",
+            );
+
+            let reader = JsonlReader::new(data);
+            let stream = pin!(reader.stream::<TestRecord>());
+
+            let results: Vec<Result<TestRecord>> = stream.collect().await;
+
+            assert_eq!(results.len(), 5);
+            assert!(results[0].is_ok());
+            assert!(results[1].is_err()); // invalid JSON
+            assert!(results[2].is_ok());
+            assert!(results[3].is_err()); // invalid JSON
+            assert!(results[4].is_ok());
+
+            // Verify the successful records
+            assert_eq!(results[0].as_ref().unwrap().id, 1);
+            assert_eq!(results[2].as_ref().unwrap().id, 2);
+            assert_eq!(results[4].as_ref().unwrap().id, 3);
         }
     }
 }
