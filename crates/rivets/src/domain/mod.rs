@@ -203,6 +203,33 @@ pub enum DependencyType {
     DiscoveredFrom,
 }
 
+/// Sort policy for ready work queries.
+///
+/// Controls how ready-to-work issues are ordered in the results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortPolicy {
+    /// Hybrid sorting (default): Recent issues (< 48h) by priority, older by age.
+    ///
+    /// This balances urgency with preventing starvation of older issues:
+    /// - Issues created within the last 48 hours are sorted by priority (P0 first)
+    /// - Older issues are sorted by creation date (oldest first)
+    /// - Recent issues come before older issues at the same priority level
+    #[default]
+    Hybrid,
+
+    /// Strict priority sorting: P0 -> P1 -> P2 -> P3 -> P4.
+    ///
+    /// Issues are sorted purely by priority, with ties broken by creation date
+    /// (oldest first within the same priority).
+    Priority,
+
+    /// Age-based sorting: oldest issues first.
+    ///
+    /// Issues are sorted by creation date ascending, ignoring priority.
+    /// Use this to prevent starvation of older, lower-priority issues.
+    Oldest,
+}
+
 /// Maximum length for issue titles
 pub const MAX_TITLE_LENGTH: usize = 200;
 

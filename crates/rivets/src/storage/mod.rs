@@ -47,7 +47,7 @@
 //! ```
 
 use crate::domain::{
-    Dependency, DependencyType, Issue, IssueFilter, IssueId, IssueUpdate, NewIssue,
+    Dependency, DependencyType, Issue, IssueFilter, IssueId, IssueUpdate, NewIssue, SortPolicy,
 };
 use crate::error::Result;
 use async_trait::async_trait;
@@ -213,8 +213,22 @@ pub trait IssueStorage: Send + Sync {
     /// - Not blocked by dependencies
     /// - Not blocked transitively through parent-child relationships
     ///
-    /// Results are sorted by priority and age (configurable).
-    async fn ready_to_work(&self, filter: Option<&IssueFilter>) -> Result<Vec<Issue>>;
+    /// # Sort Policies
+    ///
+    /// The `sort_policy` parameter controls result ordering:
+    /// - `Hybrid` (default): Recent issues (< 48h) by priority, older by age
+    /// - `Priority`: Strict P0 -> P1 -> P2 -> P3 -> P4 ordering
+    /// - `Oldest`: Creation date ascending (oldest first)
+    ///
+    /// # Arguments
+    ///
+    /// * `filter` - Optional filter to narrow results by status, priority, type, assignee, or label
+    /// * `sort_policy` - Sort order for results (defaults to Hybrid if None)
+    async fn ready_to_work(
+        &self,
+        filter: Option<&IssueFilter>,
+        sort_policy: Option<SortPolicy>,
+    ) -> Result<Vec<Issue>>;
 
     /// Get all blocked issues.
     ///
@@ -408,7 +422,11 @@ mod tests {
             Ok(vec![])
         }
 
-        async fn ready_to_work(&self, _filter: Option<&IssueFilter>) -> Result<Vec<Issue>> {
+        async fn ready_to_work(
+            &self,
+            _filter: Option<&IssueFilter>,
+            _sort_policy: Option<SortPolicy>,
+        ) -> Result<Vec<Issue>> {
             Ok(vec![])
         }
 
@@ -474,7 +492,7 @@ mod tests {
         // Test that query methods return empty results
         let filter = IssueFilter::default();
         assert!(storage.list(&filter).await.unwrap().is_empty());
-        assert!(storage.ready_to_work(None).await.unwrap().is_empty());
+        assert!(storage.ready_to_work(None, None).await.unwrap().is_empty());
         assert!(storage.blocked_issues().await.unwrap().is_empty());
     }
 
