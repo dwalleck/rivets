@@ -382,19 +382,29 @@ pub async fn create_storage(backend: StorageBackend) -> Result<Box<dyn IssueStor
 /// - `has_cycle`: Always returns `false`
 /// - Other methods: Unimplemented (will panic if called)
 ///
-/// # Limitations
+/// # When to Use MockStorage vs In-Memory Storage
 ///
-/// This is a minimal mock implementation intended for basic trait object testing.
-/// For more sophisticated test scenarios, consider:
-/// - Using the in-memory storage backend via [`in_memory::new_in_memory_storage`]
-/// - Implementing a custom mock with tools like `mockall`
-/// - Building a test fixture with pre-populated data
+/// **Use `MockStorage` when:**
+/// - You only need to verify trait object compilation and basic usage
+/// - You don't need to actually store or retrieve real data
+/// - You're testing code paths that accept `Box<dyn IssueStorage>`
+///
+/// **Use [`in_memory::new_in_memory_storage`] when:**
+/// - You need actual CRUD functionality in tests
+/// - You're testing dependency graphs and relationships
+/// - You need to verify business logic with real data persistence
 ///
 /// # Thread Safety
 ///
-/// `MockStorage` is safe to share across threads (it's a zero-sized type with no state),
-/// but be aware that it doesn't maintain any actual storage state. For testing with
-/// shared mutable state, consider using the in-memory backend wrapped in `Arc<Mutex<>>`.
+/// `MockStorage` is inherently thread-safe as it contains no mutable state
+/// (it's a zero-sized type). However, it doesn't provide any actual storage
+/// functionality. For testing concurrent access patterns, use the in-memory
+/// backend which properly handles synchronization.
+
+/// The hardcoded issue ID returned by [`MockStorage`].
+#[cfg(any(test, feature = "test-util"))]
+pub const MOCK_ISSUE_ID: &str = "test-1";
+
 #[cfg(any(test, feature = "test-util"))]
 #[derive(Clone, Copy)]
 #[non_exhaustive]
@@ -452,11 +462,11 @@ impl Default for MockStorage {
 #[async_trait]
 impl IssueStorage for MockStorage {
     async fn create(&mut self, _issue: NewIssue) -> Result<Issue> {
-        Ok(Self::test_issue(IssueId::new("test-1")))
+        Ok(Self::test_issue(IssueId::new(MOCK_ISSUE_ID)))
     }
 
     async fn get(&self, id: &IssueId) -> Result<Option<Issue>> {
-        if id.as_str() == "test-1" {
+        if id.as_str() == MOCK_ISSUE_ID {
             Ok(Some(Self::test_issue(id.clone())))
         } else {
             Ok(None)
@@ -558,7 +568,7 @@ mod tests {
         };
 
         let issue = storage.create(new_issue).await.unwrap();
-        assert_eq!(issue.id.as_str(), "test-1");
+        assert_eq!(issue.id.as_str(), MOCK_ISSUE_ID);
         assert_eq!(issue.title, "Test Issue");
     }
 
@@ -567,9 +577,9 @@ mod tests {
         let storage: Box<dyn IssueStorage> = Box::new(MockStorage::new());
 
         // Test existing issue
-        let result = storage.get(&IssueId::new("test-1")).await.unwrap();
+        let result = storage.get(&IssueId::new(MOCK_ISSUE_ID)).await.unwrap();
         assert!(result.is_some());
-        assert_eq!(result.unwrap().id.as_str(), "test-1");
+        assert_eq!(result.unwrap().id.as_str(), MOCK_ISSUE_ID);
 
         // Test non-existing issue
         let result = storage.get(&IssueId::new("test-99")).await.unwrap();
@@ -591,7 +601,7 @@ mod tests {
     async fn test_dependencies() {
         let storage: Box<dyn IssueStorage> = Box::new(MockStorage::new());
 
-        let id = IssueId::new("test-1");
+        let id = IssueId::new(MOCK_ISSUE_ID);
         assert!(storage.get_dependencies(&id).await.unwrap().is_empty());
         assert!(storage.get_dependents(&id).await.unwrap().is_empty());
         assert!(!storage
