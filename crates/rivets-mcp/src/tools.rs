@@ -5,8 +5,8 @@
 use crate::context::Context;
 use crate::error::Result;
 use crate::models::{
-    parse_dep_type, parse_issue_type, parse_status, BlockedIssueResponse, McpIssue,
-    SetContextResponse, WhereAmIResponse,
+    dep_type_to_string, parse_dep_type, parse_issue_type, parse_status, BlockedIssueResponse,
+    McpIssue, SetContextResponse, WhereAmIResponse,
 };
 use rivets::domain::{IssueFilter, IssueId, IssueType, IssueUpdate, NewIssue};
 use std::path::Path;
@@ -301,7 +301,8 @@ impl Tools {
         storage.save().await?;
 
         Ok(format!(
-            "Added dependency: {issue_id} depends on {depends_on_id} ({dep_type:?})"
+            "Added dependency: {issue_id} depends on {depends_on_id} ({})",
+            dep_type_to_string(dep_type)
         ))
     }
 }

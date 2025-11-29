@@ -182,7 +182,9 @@ fn issue_type_to_string(issue_type: IssueType) -> String {
     }
 }
 
-fn dep_type_to_string(dep_type: DependencyType) -> String {
+/// Convert a `DependencyType` to its string representation.
+#[must_use]
+pub fn dep_type_to_string(dep_type: DependencyType) -> String {
     match dep_type {
         DependencyType::Blocks => "blocks".to_string(),
         DependencyType::Related => "related".to_string(),

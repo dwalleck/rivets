@@ -50,7 +50,7 @@ rivets-jsonl = { path = "crates/rivets-jsonl" }
 rivets = { path = "crates/rivets" }
 
 # JSON Schema
-schemars = "0.8"
+schemars = "1.1"
 
 # Testing utilities
 tempfile = "3.18"
