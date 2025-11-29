@@ -10,6 +10,7 @@ use rivets::domain::{
 use rivets::error::Error;
 use rivets::storage::in_memory::{load_from_jsonl, new_in_memory_storage, save_to_jsonl};
 use rivets::storage::IssueStorage;
+use rstest::rstest;
 use tempfile::tempdir;
 
 fn create_test_issue(title: &str) -> NewIssue {
@@ -492,47 +493,25 @@ async fn test_ready_to_work_parent_child_transitive_blocking() {
     assert_eq!(ready[0].id, blocker.id);
 }
 
+#[rstest]
+#[case::related(DependencyType::Related)]
+#[case::discovered_from(DependencyType::DiscoveredFrom)]
 #[tokio::test]
-async fn test_ready_to_work_related_dependency_does_not_block() {
+async fn test_ready_to_work_non_blocking_dependency_types(#[case] dep_type: DependencyType) {
     let mut storage = new_in_memory_storage("test".to_string());
 
     let issue1 = storage.create(create_test_issue("Issue 1")).await.unwrap();
     let issue2 = storage.create(create_test_issue("Issue 2")).await.unwrap();
 
-    // Add 'related' dependency - should not block
     storage
-        .add_dependency(&issue2.id, &issue1.id, DependencyType::Related)
+        .add_dependency(&issue2.id, &issue1.id, dep_type)
         .await
         .unwrap();
 
     let ready = storage.ready_to_work(None, None).await.unwrap();
 
-    // Both should be ready since 'related' doesn't block
-    assert_eq!(ready.len(), 2);
-}
-
-#[tokio::test]
-async fn test_ready_to_work_discovered_from_does_not_block() {
-    let mut storage = new_in_memory_storage("test".to_string());
-
-    let original = storage
-        .create(create_test_issue("Original Issue"))
-        .await
-        .unwrap();
-    let discovered = storage
-        .create(create_test_issue("Discovered Issue"))
-        .await
-        .unwrap();
-
-    storage
-        .add_dependency(&discovered.id, &original.id, DependencyType::DiscoveredFrom)
-        .await
-        .unwrap();
-
-    let ready = storage.ready_to_work(None, None).await.unwrap();
-
-    // Both should be ready
-    assert_eq!(ready.len(), 2);
+    // Both should be ready since these dependency types don't block
+    assert_eq!(ready.len(), 2, "{:?} should not block", dep_type);
 }
 
 // ========== Sort Policy Tests ==========

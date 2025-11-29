@@ -108,6 +108,57 @@ The project is currently in the research and planning phase. Architectural decis
 - Use `&str` instead of `String` for function parameters when ownership isn't needed
 - Favor borrowing and zero-copy operations
 
+### Testing with rstest
+
+This project uses [rstest](https://docs.rs/rstest) for parameterized testing. Use rstest when you have multiple test cases that share the same test logic.
+
+**When to use rstest:**
+
+- Multiple similar tests that only differ in input/expected values
+- Testing the same behavior with different configurations
+- Verifying boundary conditions across multiple values
+
+**Key features:**
+
+- `#[rstest]` - Marks a test as parameterized
+- `#[case(...)]` - Defines individual test cases with named variants
+- `#[values(...)]` - Creates matrix tests across multiple values
+- `#[fixture]` - Defines reusable test fixtures
+
+**Example - Using `#[case]` for discrete test cases:**
+
+```rust
+use rstest::rstest;
+
+#[rstest]
+#[case::simple("hello", 5)]
+#[case::empty("", 0)]
+#[case::unicode("日本語", 3)]
+#[test]
+fn test_char_count(#[case] input: &str, #[case] expected: usize) {
+    assert_eq!(input.chars().count(), expected);
+}
+```
+
+**Example - Using `#[values]` for value ranges:**
+
+```rust
+use rstest::rstest;
+
+#[rstest]
+fn test_valid_priority(#[values(1, 2, 3, 4, 5)] priority: u8) {
+    assert!(priority >= 1 && priority <= 5);
+}
+```
+
+**Guidelines:**
+
+- Name cases descriptively with `#[case::name(...)]` for clear test output
+- Prefer `#[case]` when test cases have different expected behaviors
+- Prefer `#[values]` when testing the same assertion across a range
+- Don't force rstest on tests that don't benefit from parameterization
+- Works with `#[tokio::test]` for async tests (place `#[rstest]` before `#[tokio::test]`)
+
 ## ⚠️ CRITICAL: Before Making ANY Code Changes
 
 **MANDATORY**: Always consult project guidelines before:
@@ -133,35 +184,6 @@ Key guidelines to follow:
 4. You MUST create progress tracking files
 
 **NEVER** proceed with implementation without following established guidelines.
-
-## ⚠️ CRITICAL: MCP Tool Usage
-
-**MANDATORY**: When working with external packages or encountering compilation errors:
-
-1. **ALWAYS use context7 MCP** for NuGet package documentation
-2. **NEVER guess** at API signatures or method names
-3. **IMMEDIATELY check** context7 when you see "method not found" or "cannot convert type" errors
-4. **READ MCP-USAGE-GUIDE.md** for detailed instructions
-
-Example workflow:
-
-```
-Compilation error → Is it package-related? → Use context7 MCP
-Need to use FluentValidation? → Check context7 FIRST
-Unsure about TUnit syntax? → Use context7 for current docs
-```
-
-## Overview
-
-Stratify.GraphQL is a high-performance, source generator-based GraphQL library for .NET that eliminates runtime reflection through compile-time code generation. Positioning itself as the "Dapper of GraphQL," it achieves 50% faster cold start times and 30% lower memory usage compared to traditional reflection-based GraphQL libraries like HotChocolate and GraphQL for .NET.
-
-**Key Innovation**: The library "compiles away" traditional design pattern abstractions - providing the architectural benefits of patterns like Template Method, Strategy, and Command while generating direct, specialized code that eliminates runtime polymorphism and dynamic dispatch overhead.
-
-**Primary Implementation**: Source generators analyze GraphQL type definitions at compile time and generate optimized resolver code, type mappings, and execution plans. All GraphQL infrastructure is generated as efficient, debuggable C# code with zero runtime reflection.
-
-**Target Market**: Performance-conscious .NET developers building high-traffic APIs, microservices teams needing efficient service-to-service communication, and cloud-native applications where cold start times and memory usage directly impact costs.
-
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Framework Philosophy
 

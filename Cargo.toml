@@ -54,6 +54,7 @@ schemars = "0.8"
 
 # Testing utilities
 tempfile = "3.18"
+rstest = "0.26"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

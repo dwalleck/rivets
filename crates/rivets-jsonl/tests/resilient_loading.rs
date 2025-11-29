@@ -69,6 +69,7 @@ struct InnerData {
 
 mod warning_collection_tests {
     use super::*;
+    use rstest::rstest;
 
     #[test]
     fn warning_collector_starts_empty() {
@@ -135,23 +136,13 @@ mod warning_collection_tests {
         assert_eq!(warnings[2].line_number(), 10);
     }
 
-    #[test]
-    fn warning_line_number_is_correct() {
-        // Test that line numbers are reported correctly for various positions
-        let lines = [1, 10, 100, 1000, 10000];
-
-        for &line in &lines {
-            let warning = Warning::MalformedJson {
-                line_number: line,
-                error: "test".to_string(),
-            };
-            assert_eq!(
-                warning.line_number(),
-                line,
-                "Line number mismatch for line {}",
-                line
-            );
-        }
+    #[rstest]
+    fn warning_line_number_is_correct(#[values(1, 10, 100, 1000, 10000)] line: usize) {
+        let warning = Warning::MalformedJson {
+            line_number: line,
+            error: "test".to_string(),
+        };
+        assert_eq!(warning.line_number(), line);
     }
 
     #[test]
