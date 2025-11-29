@@ -16,10 +16,15 @@
 
 use crate::error::{Error, Result};
 use rivets::storage::{create_storage, IssueStorage, StorageBackend};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+/// Maximum number of cached workspaces to prevent resource exhaustion.
+///
+/// When this limit is reached, the oldest workspace is evicted from cache.
+const MAX_CACHED_WORKSPACES: usize = 32;
 
 /// Global context state for the MCP server.
 ///
@@ -28,11 +33,14 @@ pub struct Context {
     /// The current active workspace root.
     current_workspace: Option<PathBuf>,
 
-    /// Per-workspace storage instances.
+    /// Per-workspace storage instances (limited to [`MAX_CACHED_WORKSPACES`]).
     storage_cache: HashMap<PathBuf, Arc<RwLock<Box<dyn IssueStorage>>>>,
 
     /// Per-workspace database paths (discovered dynamically).
     database_paths: HashMap<PathBuf, PathBuf>,
+
+    /// Insertion order for FIFO cache eviction.
+    cache_order: VecDeque<PathBuf>,
 }
 
 impl Context {
@@ -43,27 +51,38 @@ impl Context {
             current_workspace: None,
             storage_cache: HashMap::new(),
             database_paths: HashMap::new(),
+            cache_order: VecDeque::new(),
         }
     }
 
     /// Set the current workspace root.
     ///
     /// This will:
-    /// 1. Canonicalize the path
-    /// 2. Verify a `.rivets/` directory exists
-    /// 3. Create or retrieve a storage instance
+    /// 1. Canonicalize the path (resolves `..`, symlinks, validates existence)
+    /// 2. Validate the path is safe (no null bytes, is absolute)
+    /// 3. Verify a `.rivets/` directory exists
+    /// 4. Create or retrieve a storage instance
+    ///
+    /// # Security
+    ///
+    /// - Path canonicalization prevents directory traversal attacks
+    /// - Cache size is limited to prevent resource exhaustion
     ///
     /// # Errors
     ///
     /// Returns an error if the workspace path doesn't exist, has no `.rivets/` directory,
     /// or if storage creation fails.
     pub async fn set_workspace(&mut self, workspace_root: &Path) -> Result<WorkspaceInfo> {
+        // Canonicalize to resolve symlinks and `..` (prevents path traversal)
         let canonical = workspace_root
             .canonicalize()
             .map_err(|e| Error::WorkspaceNotFound {
                 path: workspace_root.display().to_string(),
                 source: Some(e),
             })?;
+
+        // Validate path is safe
+        validate_path(&canonical)?;
 
         // Verify .rivets directory exists
         let rivets_dir = canonical.join(".rivets");
@@ -80,18 +99,32 @@ impl Context {
         self.database_paths
             .insert(canonical.clone(), db_path.clone());
 
-        // Create storage if not cached (using entry API to avoid race condition)
-        if let std::collections::hash_map::Entry::Vacant(e) =
-            self.storage_cache.entry(canonical.clone())
-        {
+        // Create storage if not cached
+        if !self.storage_cache.contains_key(&canonical) {
+            // Evict oldest workspace if cache is full
+            while self.storage_cache.len() >= MAX_CACHED_WORKSPACES {
+                self.evict_oldest();
+            }
+
             let storage = create_storage(StorageBackend::Jsonl(db_path.clone())).await?;
-            e.insert(Arc::new(RwLock::new(storage)));
+            self.storage_cache
+                .insert(canonical.clone(), Arc::new(RwLock::new(storage)));
+            self.cache_order.push_back(canonical.clone());
         }
 
         Ok(WorkspaceInfo {
             workspace_root: canonical,
             database_path: db_path,
         })
+    }
+
+    /// Evict the oldest cached workspace to make room for new entries.
+    fn evict_oldest(&mut self) {
+        if let Some(oldest) = self.cache_order.pop_front() {
+            self.storage_cache.remove(&oldest);
+            self.database_paths.remove(&oldest);
+            tracing::debug!("Evicted workspace from cache: {}", oldest.display());
+        }
     }
 
     /// Get the current workspace root.
@@ -173,7 +206,15 @@ impl Context {
         self.database_paths
             .insert(workspace_root.clone(), PathBuf::from("test://memory"));
         self.storage_cache
-            .insert(workspace_root, Arc::new(RwLock::new(storage)));
+            .insert(workspace_root.clone(), Arc::new(RwLock::new(storage)));
+        self.cache_order.push_back(workspace_root);
+    }
+
+    /// Get the number of cached workspaces (for testing).
+    #[cfg(test)]
+    #[must_use]
+    pub fn cache_size(&self) -> usize {
+        self.storage_cache.len()
     }
 }
 
@@ -191,6 +232,45 @@ pub struct WorkspaceInfo {
 
     /// The path to the database file.
     pub database_path: PathBuf,
+}
+
+/// Validate that a path is safe to use as a workspace.
+///
+/// # Security Checks
+///
+/// - Path must be absolute (canonicalization ensures this)
+/// - Path must not contain null bytes
+/// - Path components must not contain path traversal attempts after canonicalization
+fn validate_path(path: &Path) -> Result<()> {
+    // Canonicalized paths should always be absolute
+    if !path.is_absolute() {
+        return Err(Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Workspace path must be absolute",
+        )));
+    }
+
+    // Check for null bytes in path (could be used for injection)
+    let path_str = path.to_string_lossy();
+    if path_str.contains('\0') {
+        return Err(Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Workspace path contains invalid characters",
+        )));
+    }
+
+    // After canonicalization, there should be no `..` components
+    // This is a defense-in-depth check
+    for component in path.components() {
+        if let std::path::Component::ParentDir = component {
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Workspace path contains parent directory references",
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 /// Find the database file in a `.rivets/` directory.
@@ -334,5 +414,77 @@ mod tests {
             Err(e) => panic!("Expected WorkspaceNotFound, got {e:?}"),
             Ok(_) => panic!("Expected error, got Ok"),
         }
+    }
+
+    #[test]
+    fn test_validate_path_rejects_relative() {
+        let result = validate_path(Path::new("relative/path"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_path_accepts_absolute() {
+        let result = validate_path(Path::new("/absolute/path"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_cache_eviction() {
+        use rivets::storage::in_memory::new_in_memory_storage;
+
+        let mut context = Context::new();
+
+        // Add workspaces up to the limit
+        for i in 0..super::MAX_CACHED_WORKSPACES {
+            let path = PathBuf::from(format!("/test/workspace{i}"));
+            let storage = new_in_memory_storage("test".to_string());
+            context.set_test_workspace(path, storage);
+        }
+
+        assert_eq!(context.cache_size(), super::MAX_CACHED_WORKSPACES);
+
+        // Adding one more should maintain the limit (via eviction when set_workspace is called)
+        // For set_test_workspace, we manually manage the cache, so this tests the structure
+        let path = PathBuf::from("/test/workspace_extra");
+        let storage = new_in_memory_storage("test".to_string());
+        context.set_test_workspace(path, storage);
+
+        // set_test_workspace doesn't evict, so cache grows
+        // This verifies the cache_size() method works
+        assert_eq!(context.cache_size(), super::MAX_CACHED_WORKSPACES + 1);
+    }
+
+    #[test]
+    fn test_evict_oldest() {
+        use rivets::storage::in_memory::new_in_memory_storage;
+
+        let mut context = Context::new();
+
+        // Add a few workspaces
+        for i in 0..3 {
+            let path = PathBuf::from(format!("/test/workspace{i}"));
+            let storage = new_in_memory_storage("test".to_string());
+            context.set_test_workspace(path, storage);
+        }
+
+        assert_eq!(context.cache_size(), 3);
+        assert_eq!(context.cache_order.len(), 3);
+
+        // Evict oldest
+        context.evict_oldest();
+        assert_eq!(context.cache_size(), 2);
+        assert_eq!(context.cache_order.len(), 2);
+
+        // Evict again
+        context.evict_oldest();
+        assert_eq!(context.cache_size(), 1);
+
+        // Evict last
+        context.evict_oldest();
+        assert_eq!(context.cache_size(), 0);
+
+        // Evicting from empty cache is a no-op
+        context.evict_oldest();
+        assert_eq!(context.cache_size(), 0);
     }
 }
