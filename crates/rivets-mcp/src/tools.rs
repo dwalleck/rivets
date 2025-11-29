@@ -51,12 +51,11 @@ impl Tools {
 
         match context.current_workspace() {
             Some(workspace) => {
-                let rivets_dir = workspace.join(".rivets");
-                let db_path = rivets_dir.join("issues.jsonl");
+                let db_path = context.current_database_path();
 
                 Ok(WhereAmIResponse {
                     workspace_root: Some(workspace.display().to_string()),
-                    database_path: Some(db_path.display().to_string()),
+                    database_path: db_path.map(|p| p.display().to_string()),
                     context_set: true,
                 })
             }

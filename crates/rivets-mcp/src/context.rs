@@ -21,6 +21,9 @@ pub struct Context {
 
     /// Per-workspace storage instances.
     storage_cache: HashMap<PathBuf, Arc<RwLock<Box<dyn IssueStorage>>>>,
+
+    /// Per-workspace database paths (discovered dynamically).
+    database_paths: HashMap<PathBuf, PathBuf>,
 }
 
 impl Context {
@@ -30,6 +33,7 @@ impl Context {
         Self {
             current_workspace: None,
             storage_cache: HashMap::new(),
+            database_paths: HashMap::new(),
         }
     }
 
@@ -60,6 +64,10 @@ impl Context {
 
         self.current_workspace = Some(canonical.clone());
 
+        // Store database path
+        self.database_paths
+            .insert(canonical.clone(), db_path.clone());
+
         // Create storage if not cached
         if !self.storage_cache.contains_key(&canonical) {
             let storage = create_storage(StorageBackend::Jsonl(db_path.clone())).await?;
@@ -77,6 +85,14 @@ impl Context {
     #[must_use]
     pub fn current_workspace(&self) -> Option<&PathBuf> {
         self.current_workspace.as_ref()
+    }
+
+    /// Get the database path for the current workspace.
+    #[must_use]
+    pub fn current_database_path(&self) -> Option<&PathBuf> {
+        self.current_workspace
+            .as_ref()
+            .and_then(|ws| self.database_paths.get(ws))
     }
 
     /// Get storage for the current workspace.
