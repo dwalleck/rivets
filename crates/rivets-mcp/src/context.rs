@@ -198,8 +198,9 @@ impl Context {
 
     /// Set up a workspace with injected storage for testing.
     ///
-    /// This bypasses the normal storage creation flow, allowing tests to inject
-    /// mock or in-memory storage without requiring a real `.rivets/` directory.
+    /// This bypasses the normal storage creation flow and cache eviction,
+    /// allowing tests to inject mock or in-memory storage without requiring
+    /// a real `.rivets/` directory.
     #[cfg(test)]
     pub fn set_test_workspace(&mut self, workspace_root: PathBuf, storage: Box<dyn IssueStorage>) {
         self.current_workspace = Some(workspace_root.clone());

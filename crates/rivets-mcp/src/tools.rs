@@ -33,6 +33,7 @@ pub struct Tools {
 
 impl Tools {
     /// Create a new Tools instance with the given context.
+    #[must_use]
     pub fn new(context: Arc<RwLock<Context>>) -> Self {
         Self { context }
     }
