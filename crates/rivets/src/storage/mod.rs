@@ -389,8 +389,15 @@ pub async fn create_storage(backend: StorageBackend) -> Result<Box<dyn IssueStor
 /// - Using the in-memory storage backend via [`in_memory::new_in_memory_storage`]
 /// - Implementing a custom mock with tools like `mockall`
 /// - Building a test fixture with pre-populated data
+///
+/// # Thread Safety
+///
+/// `MockStorage` is safe to share across threads (it's a zero-sized type with no state),
+/// but be aware that it doesn't maintain any actual storage state. For testing with
+/// shared mutable state, consider using the in-memory backend wrapped in `Arc<Mutex<>>`.
 #[cfg(any(test, feature = "test-util"))]
 #[derive(Clone, Copy)]
+#[non_exhaustive]
 pub struct MockStorage;
 
 #[cfg(any(test, feature = "test-util"))]
@@ -609,22 +616,20 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::default_constructed_unit_structs, clippy::clone_on_copy)]
-    async fn test_mock_storage_default_and_clone() {
-        // Test Default implementation (allow lint to verify Default works)
-        let storage1: Box<dyn IssueStorage> = Box::new(MockStorage::default());
-        assert!(storage1
+    async fn test_mock_storage_default() {
+        let storage: Box<dyn IssueStorage> = Box::new(MockStorage::new());
+        assert!(storage
             .list(&IssueFilter::default())
             .await
             .unwrap()
             .is_empty());
+    }
 
-        // Test Clone/Copy - MockStorage is a ZST so this is free
-        // (allow lint to verify Clone works even though Copy is preferred)
+    #[tokio::test]
+    async fn test_mock_storage_copy_semantics() {
         let mock = MockStorage::new();
-        let _mock_copy = mock; // Copy
-        let _mock_clone = mock.clone(); // Clone
-                                        // Original still usable (Copy semantics)
+        let _copy1 = mock;
+        let _copy2 = mock; // Still usable - Copy semantics work
         let _: Box<dyn IssueStorage> = Box::new(mock);
     }
 }
