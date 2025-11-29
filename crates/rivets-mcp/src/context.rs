@@ -145,14 +145,15 @@ impl Context {
     ///
     /// # Errors
     ///
-    /// Returns `Error::NoContext` if no workspace has been set.
+    /// Returns `Error::NoContext` if no workspace has been set, or
+    /// `Error::WorkspaceNotInitialized` if the workspace wasn't initialized via `set_workspace()`.
     pub fn storage(&self) -> Result<Arc<RwLock<Box<dyn IssueStorage>>>> {
         let workspace = self.current_workspace.as_ref().ok_or(Error::NoContext)?;
 
         self.storage_cache
             .get(workspace)
             .cloned()
-            .ok_or(Error::NoContext)
+            .ok_or_else(|| Error::WorkspaceNotInitialized(workspace.display().to_string()))
     }
 
     /// Get storage for a specific workspace, or the current one if not specified.
@@ -304,13 +305,21 @@ fn find_database(rivets_dir: &Path) -> Result<PathBuf> {
     match found.len() {
         0 => Ok(rivets_dir.join("issues.jsonl")), // Default for new workspaces
         1 => Ok(found.into_iter().next().expect("checked len")),
-        _ => Err(Error::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "Multiple database files found in {}. Remove duplicates or use issues.jsonl.",
-                rivets_dir.display()
-            ),
-        ))),
+        _ => {
+            let files: Vec<_> = found
+                .iter()
+                .filter_map(|p| p.file_name())
+                .map(|n| n.to_string_lossy())
+                .collect();
+            Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "Multiple database files found in {}: {}. Remove duplicates or use issues.jsonl.",
+                    rivets_dir.display(),
+                    files.join(", ")
+                ),
+            )))
+        }
     }
 }
 
@@ -425,7 +434,8 @@ mod tests {
 
     #[test]
     fn test_validate_path_accepts_absolute() {
-        let result = validate_path(Path::new("/absolute/path"));
+        // Use temp_dir() which is absolute on all platforms
+        let result = validate_path(&std::env::temp_dir());
         assert!(result.is_ok());
     }
 
