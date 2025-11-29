@@ -92,8 +92,11 @@ impl Tools {
         assignee: Option<String>,
         workspace_root: Option<&str>,
     ) -> Result<Vec<McpIssue>> {
-        let context = self.context.read().await;
-        let storage = context.storage_for(workspace_root.map(Path::new))?;
+        // Release context lock before acquiring storage lock to prevent deadlocks
+        let storage = {
+            let context = self.context.read().await;
+            context.storage_for(workspace_root.map(Path::new))?
+        };
         let storage = storage.read().await;
 
         let filter = IssueFilter {
@@ -121,8 +124,10 @@ impl Tools {
         limit: Option<usize>,
         workspace_root: Option<&str>,
     ) -> Result<Vec<McpIssue>> {
-        let context = self.context.read().await;
-        let storage = context.storage_for(workspace_root.map(Path::new))?;
+        let storage = {
+            let context = self.context.read().await;
+            context.storage_for(workspace_root.map(Path::new))?
+        };
         let storage = storage.read().await;
 
         let filter = IssueFilter {
@@ -148,8 +153,10 @@ impl Tools {
         issue_id: &str,
         workspace_root: Option<&str>,
     ) -> Result<Option<McpIssue>> {
-        let context = self.context.read().await;
-        let storage = context.storage_for(workspace_root.map(Path::new))?;
+        let storage = {
+            let context = self.context.read().await;
+            context.storage_for(workspace_root.map(Path::new))?
+        };
         let storage = storage.read().await;
 
         let id = IssueId::new(issue_id);
@@ -163,8 +170,10 @@ impl Tools {
     ///
     /// Returns an error if no context is set or storage operations fail.
     pub async fn blocked(&self, workspace_root: Option<&str>) -> Result<Vec<BlockedIssueResponse>> {
-        let context = self.context.read().await;
-        let storage = context.storage_for(workspace_root.map(Path::new))?;
+        let storage = {
+            let context = self.context.read().await;
+            context.storage_for(workspace_root.map(Path::new))?
+        };
         let storage = storage.read().await;
 
         let blocked = storage.blocked_issues().await?;
@@ -195,8 +204,10 @@ impl Tools {
         acceptance_criteria: Option<String>,
         workspace_root: Option<&str>,
     ) -> Result<McpIssue> {
-        let context = self.context.read().await;
-        let storage = context.storage_for(workspace_root.map(Path::new))?;
+        let storage = {
+            let context = self.context.read().await;
+            context.storage_for(workspace_root.map(Path::new))?
+        };
         let mut storage = storage.write().await;
 
         let new_issue = NewIssue {
@@ -239,8 +250,10 @@ impl Tools {
         notes: Option<String>,
         workspace_root: Option<&str>,
     ) -> Result<McpIssue> {
-        let context = self.context.read().await;
-        let storage = context.storage_for(workspace_root.map(Path::new))?;
+        let storage = {
+            let context = self.context.read().await;
+            context.storage_for(workspace_root.map(Path::new))?
+        };
         let mut storage = storage.write().await;
 
         let id = IssueId::new(issue_id);
@@ -272,8 +285,10 @@ impl Tools {
         reason: Option<String>,
         workspace_root: Option<&str>,
     ) -> Result<McpIssue> {
-        let context = self.context.read().await;
-        let storage = context.storage_for(workspace_root.map(Path::new))?;
+        let storage = {
+            let context = self.context.read().await;
+            context.storage_for(workspace_root.map(Path::new))?
+        };
         let mut storage = storage.write().await;
 
         let id = IssueId::new(issue_id);
@@ -300,8 +315,10 @@ impl Tools {
         dep_type: Option<&str>,
         workspace_root: Option<&str>,
     ) -> Result<String> {
-        let context = self.context.read().await;
-        let storage = context.storage_for(workspace_root.map(Path::new))?;
+        let storage = {
+            let context = self.context.read().await;
+            context.storage_for(workspace_root.map(Path::new))?
+        };
         let mut storage = storage.write().await;
 
         let from = IssueId::new(issue_id);
