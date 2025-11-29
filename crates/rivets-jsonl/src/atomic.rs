@@ -209,6 +209,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use serde::{Deserialize, Serialize};
     use tokio::io::AsyncReadExt;
 
@@ -218,32 +219,15 @@ mod tests {
         name: String,
     }
 
-    #[test]
-    fn make_temp_path_with_extension() {
-        let path = Path::new("/path/to/file.jsonl");
+    #[rstest]
+    #[case("/path/to/file.jsonl", "/path/to/file.jsonl.tmp")]
+    #[case("/path/to/file", "/path/to/file.tmp")]
+    #[case("/path/to/file.tar.gz", "/path/to/file.tar.gz.tmp")]
+    #[case("data.jsonl", "data.jsonl.tmp")]
+    fn make_temp_path_appends_tmp_suffix(#[case] input: &str, #[case] expected: &str) {
+        let path = Path::new(input);
         let temp = make_temp_path(path);
-        assert_eq!(temp, Path::new("/path/to/file.jsonl.tmp"));
-    }
-
-    #[test]
-    fn make_temp_path_without_extension() {
-        let path = Path::new("/path/to/file");
-        let temp = make_temp_path(path);
-        assert_eq!(temp, Path::new("/path/to/file.tmp"));
-    }
-
-    #[test]
-    fn make_temp_path_with_multiple_extensions() {
-        let path = Path::new("/path/to/file.tar.gz");
-        let temp = make_temp_path(path);
-        assert_eq!(temp, Path::new("/path/to/file.tar.gz.tmp"));
-    }
-
-    #[test]
-    fn make_temp_path_relative() {
-        let path = Path::new("data.jsonl");
-        let temp = make_temp_path(path);
-        assert_eq!(temp, Path::new("data.jsonl.tmp"));
+        assert_eq!(temp, Path::new(expected));
     }
 
     #[tokio::test]

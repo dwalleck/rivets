@@ -322,6 +322,7 @@ pub fn validate_id(id: &str, prefix: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     #[test]
     fn test_base36_encoding() {
@@ -331,28 +332,17 @@ mod tests {
         assert!(result.chars().all(|c| c.is_ascii_alphanumeric()));
     }
 
-    #[test]
-    fn test_adaptive_length() {
-        let config_small = IdGeneratorConfig {
+    #[rstest]
+    #[case(100, 4)]
+    #[case(800, 5)]
+    #[case(2000, 6)]
+    fn test_adaptive_length(#[case] database_size: usize, #[case] expected_length: usize) {
+        let config = IdGeneratorConfig {
             prefix: "test".to_string(),
-            database_size: 100,
+            database_size,
         };
-        let generator_small = IdGenerator::new(config_small);
-        assert_eq!(generator_small.adaptive_length(), 4);
-
-        let config_medium = IdGeneratorConfig {
-            prefix: "test".to_string(),
-            database_size: 800,
-        };
-        let generator_medium = IdGenerator::new(config_medium);
-        assert_eq!(generator_medium.adaptive_length(), 5);
-
-        let config_large = IdGeneratorConfig {
-            prefix: "test".to_string(),
-            database_size: 2000,
-        };
-        let generator_large = IdGenerator::new(config_large);
-        assert_eq!(generator_large.adaptive_length(), 6);
+        let generator = IdGenerator::new(config);
+        assert_eq!(generator.adaptive_length(), expected_length);
     }
 
     #[test]
