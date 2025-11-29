@@ -381,7 +381,16 @@ pub async fn create_storage(backend: StorageBackend) -> Result<Box<dyn IssueStor
 /// - `get_dependencies`, `get_dependents`: Return empty vectors
 /// - `has_cycle`: Always returns `false`
 /// - Other methods: Unimplemented (will panic if called)
+///
+/// # Limitations
+///
+/// This is a minimal mock implementation intended for basic trait object testing.
+/// For more sophisticated test scenarios, consider:
+/// - Using the in-memory storage backend via [`in_memory::new_in_memory_storage`]
+/// - Implementing a custom mock with tools like `mockall`
+/// - Building a test fixture with pre-populated data
 #[cfg(any(test, feature = "test-util"))]
+#[derive(Clone, Copy)]
 pub struct MockStorage;
 
 #[cfg(any(test, feature = "test-util"))]
@@ -597,5 +606,25 @@ mod tests {
             .has_cycle(&id, &IssueId::new("test-2"))
             .await
             .unwrap());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::default_constructed_unit_structs, clippy::clone_on_copy)]
+    async fn test_mock_storage_default_and_clone() {
+        // Test Default implementation (allow lint to verify Default works)
+        let storage1: Box<dyn IssueStorage> = Box::new(MockStorage::default());
+        assert!(storage1
+            .list(&IssueFilter::default())
+            .await
+            .unwrap()
+            .is_empty());
+
+        // Test Clone/Copy - MockStorage is a ZST so this is free
+        // (allow lint to verify Clone works even though Copy is preferred)
+        let mock = MockStorage::new();
+        let _mock_copy = mock; // Copy
+        let _mock_clone = mock.clone(); // Clone
+                                        // Original still usable (Copy semantics)
+        let _: Box<dyn IssueStorage> = Box::new(mock);
     }
 }
