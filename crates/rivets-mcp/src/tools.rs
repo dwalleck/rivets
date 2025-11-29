@@ -16,15 +16,44 @@
 //! This design mirrors the beads MCP server's approach for compatibility.
 
 use crate::context::Context;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::models::{
     dep_type_to_str, parse_dep_type, parse_issue_type, parse_status, BlockedIssueResponse,
     McpIssue, SetContextResponse, WhereAmIResponse,
 };
-use rivets::domain::{IssueFilter, IssueId, IssueType, IssueUpdate, NewIssue};
+use rivets::domain::{
+    DependencyType, IssueFilter, IssueId, IssueStatus, IssueType, IssueUpdate, NewIssue,
+};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+/// Parse and validate a status string.
+fn validate_status(status: &str) -> Result<IssueStatus> {
+    parse_status(status).ok_or_else(|| Error::InvalidArgument {
+        field: "status",
+        value: status.to_string(),
+        valid_values: "open, in_progress, blocked, closed",
+    })
+}
+
+/// Parse and validate an issue type string.
+fn validate_issue_type(issue_type: &str) -> Result<IssueType> {
+    parse_issue_type(issue_type).ok_or_else(|| Error::InvalidArgument {
+        field: "issue_type",
+        value: issue_type.to_string(),
+        valid_values: "bug, feature, task, epic, chore",
+    })
+}
+
+/// Parse and validate a dependency type string.
+fn validate_dep_type(dep_type: &str) -> Result<DependencyType> {
+    parse_dep_type(dep_type).ok_or_else(|| Error::InvalidArgument {
+        field: "dep_type",
+        value: dep_type.to_string(),
+        valid_values: "blocks, related, parent-child, discovered-from",
+    })
+}
 
 /// Tool implementations for the rivets MCP server.
 pub struct Tools {
@@ -115,7 +144,7 @@ impl Tools {
     ///
     /// # Errors
     ///
-    /// Returns an error if no context is set or storage operations fail.
+    /// Returns an error if no context is set, invalid filter values, or storage operations fail.
     pub async fn list(
         &self,
         status: Option<&str>,
@@ -125,6 +154,10 @@ impl Tools {
         limit: Option<usize>,
         workspace_root: Option<&str>,
     ) -> Result<Vec<McpIssue>> {
+        // Validate enum values before acquiring locks
+        let status = status.map(validate_status).transpose()?;
+        let issue_type = issue_type.map(validate_issue_type).transpose()?;
+
         let storage = {
             let context = self.context.read().await;
             context.storage_for(workspace_root.map(Path::new))?
@@ -132,9 +165,9 @@ impl Tools {
         let storage = storage.read().await;
 
         let filter = IssueFilter {
-            status: status.and_then(parse_status),
+            status,
             priority,
-            issue_type: issue_type.and_then(parse_issue_type),
+            issue_type,
             assignee,
             limit,
             ..Default::default()
@@ -148,12 +181,8 @@ impl Tools {
     ///
     /// # Errors
     ///
-    /// Returns an error if no context is set or storage operations fail.
-    pub async fn show(
-        &self,
-        issue_id: &str,
-        workspace_root: Option<&str>,
-    ) -> Result<Option<McpIssue>> {
+    /// Returns an error if no context is set, issue not found, or storage operations fail.
+    pub async fn show(&self, issue_id: &str, workspace_root: Option<&str>) -> Result<McpIssue> {
         let storage = {
             let context = self.context.read().await;
             context.storage_for(workspace_root.map(Path::new))?
@@ -161,8 +190,11 @@ impl Tools {
         let storage = storage.read().await;
 
         let id = IssueId::new(issue_id);
-        let issue = storage.get(&id).await?;
-        Ok(issue.map(Into::into))
+        let issue = storage
+            .get(&id)
+            .await?
+            .ok_or_else(|| Error::IssueNotFound(issue_id.to_string()))?;
+        Ok(issue.into())
     }
 
     /// Get blocked issues.
@@ -191,7 +223,7 @@ impl Tools {
     ///
     /// # Errors
     ///
-    /// Returns an error if no context is set, validation fails, or storage operations fail.
+    /// Returns an error if no context is set, invalid `issue_type`, or storage operations fail.
     #[allow(clippy::too_many_arguments)]
     pub async fn create(
         &self,
@@ -205,6 +237,12 @@ impl Tools {
         acceptance_criteria: Option<String>,
         workspace_root: Option<&str>,
     ) -> Result<McpIssue> {
+        // Validate issue_type before acquiring locks
+        let issue_type = issue_type
+            .map(validate_issue_type)
+            .transpose()?
+            .unwrap_or(IssueType::Task);
+
         let storage = {
             let context = self.context.read().await;
             context.storage_for(workspace_root.map(Path::new))?
@@ -215,9 +253,7 @@ impl Tools {
             title,
             description: description.unwrap_or_default(),
             priority: priority.unwrap_or(2),
-            issue_type: issue_type
-                .and_then(parse_issue_type)
-                .unwrap_or(IssueType::Task),
+            issue_type,
             assignee,
             labels: labels.unwrap_or_default(),
             design,
@@ -236,7 +272,7 @@ impl Tools {
     ///
     /// # Errors
     ///
-    /// Returns an error if no context is set, issue not found, or storage operations fail.
+    /// Returns an error if no context is set, invalid status, issue not found, or storage fails.
     #[allow(clippy::too_many_arguments)]
     pub async fn update(
         &self,
@@ -249,8 +285,12 @@ impl Tools {
         design: Option<String>,
         acceptance_criteria: Option<String>,
         notes: Option<String>,
+        external_ref: Option<String>,
         workspace_root: Option<&str>,
     ) -> Result<McpIssue> {
+        // Validate status before acquiring locks
+        let status = status.map(validate_status).transpose()?;
+
         let storage = {
             let context = self.context.read().await;
             context.storage_for(workspace_root.map(Path::new))?
@@ -261,13 +301,13 @@ impl Tools {
         let updates = IssueUpdate {
             title,
             description,
-            status: status.and_then(parse_status),
+            status,
             priority,
             assignee,
             design,
             acceptance_criteria,
             notes,
-            external_ref: None,
+            external_ref,
         };
 
         let issue = storage.update(&id, updates).await?;
@@ -308,7 +348,8 @@ impl Tools {
     ///
     /// # Errors
     ///
-    /// Returns an error if no context is set, issues not found, cycle detected, or storage fails.
+    /// Returns an error if no context is set, invalid `dep_type`, issues not found, cycle detected,
+    /// or storage fails.
     pub async fn dep(
         &self,
         issue_id: &str,
@@ -316,6 +357,12 @@ impl Tools {
         dep_type: Option<&str>,
         workspace_root: Option<&str>,
     ) -> Result<String> {
+        // Validate dep_type before acquiring locks
+        let dep_type = dep_type
+            .map(validate_dep_type)
+            .transpose()?
+            .unwrap_or(DependencyType::Blocks);
+
         let storage = {
             let context = self.context.read().await;
             context.storage_for(workspace_root.map(Path::new))?
@@ -324,9 +371,6 @@ impl Tools {
 
         let from = IssueId::new(issue_id);
         let to = IssueId::new(depends_on_id);
-        let dep_type = dep_type
-            .and_then(parse_dep_type)
-            .unwrap_or(rivets::domain::DependencyType::Blocks);
 
         storage.add_dependency(&from, &to, dep_type).await?;
         storage.save().await?;
@@ -406,8 +450,7 @@ mod tests {
 
         // Show the issue
         let shown = tools.show(&issue.id, None).await.unwrap();
-        assert!(shown.is_some());
-        assert_eq!(shown.unwrap().title, "Test Issue");
+        assert_eq!(shown.title, "Test Issue");
     }
 
     #[rstest]
@@ -439,6 +482,7 @@ mod tests {
                 None,
                 Some("in_progress"),
                 Some(0),
+                None,
                 None,
                 None,
                 None,
