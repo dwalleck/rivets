@@ -93,9 +93,9 @@ impl From<Issue> for McpIssue {
             id: issue.id.to_string(),
             title: issue.title,
             description: issue.description,
-            status: status_to_string(issue.status),
+            status: status_to_str(issue.status).to_string(),
             priority: issue.priority,
-            issue_type: issue_type_to_string(issue.issue_type),
+            issue_type: issue_type_to_str(issue.issue_type).to_string(),
             assignee: issue.assignee,
             labels: issue.labels,
             design: issue.design,
@@ -124,7 +124,7 @@ impl From<Dependency> for McpDependency {
     fn from(dep: Dependency) -> Self {
         Self {
             depends_on_id: dep.depends_on_id.to_string(),
-            dep_type: dep_type_to_string(dep.dep_type),
+            dep_type: dep_type_to_str(dep.dep_type).to_string(),
         }
     }
 }
@@ -162,34 +162,35 @@ pub struct StatsResponse {
 }
 
 // Helper functions for converting enums to strings
+// These return &'static str to avoid unnecessary allocations
 
-fn status_to_string(status: IssueStatus) -> String {
+fn status_to_str(status: IssueStatus) -> &'static str {
     match status {
-        IssueStatus::Open => "open".to_string(),
-        IssueStatus::InProgress => "in_progress".to_string(),
-        IssueStatus::Blocked => "blocked".to_string(),
-        IssueStatus::Closed => "closed".to_string(),
+        IssueStatus::Open => "open",
+        IssueStatus::InProgress => "in_progress",
+        IssueStatus::Blocked => "blocked",
+        IssueStatus::Closed => "closed",
     }
 }
 
-fn issue_type_to_string(issue_type: IssueType) -> String {
+fn issue_type_to_str(issue_type: IssueType) -> &'static str {
     match issue_type {
-        IssueType::Bug => "bug".to_string(),
-        IssueType::Feature => "feature".to_string(),
-        IssueType::Task => "task".to_string(),
-        IssueType::Epic => "epic".to_string(),
-        IssueType::Chore => "chore".to_string(),
+        IssueType::Bug => "bug",
+        IssueType::Feature => "feature",
+        IssueType::Task => "task",
+        IssueType::Epic => "epic",
+        IssueType::Chore => "chore",
     }
 }
 
 /// Convert a `DependencyType` to its string representation.
 #[must_use]
-pub fn dep_type_to_string(dep_type: DependencyType) -> String {
+pub fn dep_type_to_str(dep_type: DependencyType) -> &'static str {
     match dep_type {
-        DependencyType::Blocks => "blocks".to_string(),
-        DependencyType::Related => "related".to_string(),
-        DependencyType::ParentChild => "parent-child".to_string(),
-        DependencyType::DiscoveredFrom => "discovered-from".to_string(),
+        DependencyType::Blocks => "blocks",
+        DependencyType::Related => "related",
+        DependencyType::ParentChild => "parent-child",
+        DependencyType::DiscoveredFrom => "discovered-from",
     }
 }
 
