@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/rivets-jsonl",
     "crates/rivets",
+    "crates/rivets-mcp",
 ]
 
 [workspace.package]
@@ -46,6 +47,10 @@ clap = { version = "4.5", features = ["derive", "cargo"] }
 
 # Internal workspace crates
 rivets-jsonl = { path = "crates/rivets-jsonl" }
+rivets = { path = "crates/rivets" }
+
+# JSON Schema
+schemars = "1.1"
 
 # Testing utilities
 tempfile = "3.18"
