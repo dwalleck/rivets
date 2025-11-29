@@ -186,6 +186,7 @@ impl RivetsMcpServer {
                 params.design,
                 params.acceptance_criteria,
                 params.notes,
+                params.external_ref,
                 params.workspace_root.as_deref(),
             )
             .await

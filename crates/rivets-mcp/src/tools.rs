@@ -249,6 +249,7 @@ impl Tools {
         design: Option<String>,
         acceptance_criteria: Option<String>,
         notes: Option<String>,
+        external_ref: Option<String>,
         workspace_root: Option<&str>,
     ) -> Result<McpIssue> {
         let storage = {
@@ -267,7 +268,7 @@ impl Tools {
             design,
             acceptance_criteria,
             notes,
-            external_ref: None,
+            external_ref,
         };
 
         let issue = storage.update(&id, updates).await?;
@@ -439,6 +440,7 @@ mod tests {
                 None,
                 Some("in_progress"),
                 Some(0),
+                None,
                 None,
                 None,
                 None,

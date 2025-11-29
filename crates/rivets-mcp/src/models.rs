@@ -82,7 +82,7 @@ pub struct CreateParams {
     /// Issue description.
     pub description: Option<String>,
 
-    /// Priority level (1-5, default 2).
+    /// Priority level (0-4, default 2).
     pub priority: Option<u8>,
 
     /// Issue type (bug, feature, task, epic, chore).
