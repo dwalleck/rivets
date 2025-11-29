@@ -80,11 +80,12 @@ impl Context {
         self.database_paths
             .insert(canonical.clone(), db_path.clone());
 
-        // Create storage if not cached
-        if !self.storage_cache.contains_key(&canonical) {
+        // Create storage if not cached (using entry API to avoid race condition)
+        if let std::collections::hash_map::Entry::Vacant(e) =
+            self.storage_cache.entry(canonical.clone())
+        {
             let storage = create_storage(StorageBackend::Jsonl(db_path.clone())).await?;
-            self.storage_cache
-                .insert(canonical.clone(), Arc::new(RwLock::new(storage)));
+            e.insert(Arc::new(RwLock::new(storage)));
         }
 
         Ok(WorkspaceInfo {
