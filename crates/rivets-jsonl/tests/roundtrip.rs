@@ -4,6 +4,7 @@
 //! read back with JsonlReader, ensuring consistency across the full I/O cycle.
 
 use rivets_jsonl::{JsonlReader, JsonlWriter};
+use rstest::rstest;
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 
@@ -28,8 +29,54 @@ struct Metadata {
     version: u32,
 }
 
+/// Helper to perform write-then-read roundtrip for any serializable type
+async fn roundtrip<T>(original: &T) -> T
+where
+    T: Serialize + for<'de> Deserialize<'de>,
+{
+    let buffer = Cursor::new(Vec::new());
+    let mut writer = JsonlWriter::new(buffer);
+    writer.write(original).await.unwrap();
+    writer.flush().await.unwrap();
+
+    let data = writer.into_inner().into_inner().into_inner();
+    let mut reader = JsonlReader::new(Cursor::new(data));
+    reader.read_line().await.unwrap().unwrap()
+}
+
+#[rstest]
+#[case::simple(TestRecord { id: 1, name: "Alice".to_string(), active: true })]
+#[case::special_chars(TestRecord { id: 42, name: "Line1\nLine2\tTabbed\"Quoted\"\\Backslash".to_string(), active: true })]
+#[case::unicode(TestRecord { id: 1, name: "Hello, \u{4e16}\u{754c}! \u{1F600} \u{00e9}\u{00e8}".to_string(), active: true })]
+#[case::empty_string(TestRecord { id: 1, name: String::new(), active: false })]
+#[case::large_name(TestRecord { id: 1, name: "x".repeat(100_000), active: true })]
 #[tokio::test]
-async fn roundtrip_single_record() {
+async fn roundtrip_test_record(#[case] original: TestRecord) {
+    let read_back = roundtrip(&original).await;
+    assert_eq!(original, read_back);
+}
+
+#[rstest]
+#[case::with_metadata(ComplexRecord {
+    id: "abc-123".to_string(),
+    value: 1.23456,
+    tags: vec!["tag1".to_string(), "tag2".to_string(), "tag3".to_string()],
+    metadata: Some(Metadata { created_by: "test".to_string(), version: 1 }),
+})]
+#[case::null_optional(ComplexRecord {
+    id: "xyz-789".to_string(),
+    value: 0.0,
+    tags: vec![],
+    metadata: None,
+})]
+#[tokio::test]
+async fn roundtrip_complex_record(#[case] original: ComplexRecord) {
+    let read_back = roundtrip(&original).await;
+    assert_eq!(original, read_back);
+}
+
+#[tokio::test]
+async fn roundtrip_single_record_verifies_eof() {
     let original = TestRecord {
         id: 1,
         name: "Alice".to_string(),
@@ -88,111 +135,6 @@ async fn roundtrip_multiple_records() {
 }
 
 #[tokio::test]
-async fn roundtrip_complex_record() {
-    let original = ComplexRecord {
-        id: "abc-123".to_string(),
-        value: 1.23456,
-        tags: vec!["tag1".to_string(), "tag2".to_string(), "tag3".to_string()],
-        metadata: Some(Metadata {
-            created_by: "test".to_string(),
-            version: 1,
-        }),
-    };
-
-    let buffer = Cursor::new(Vec::new());
-    let mut writer = JsonlWriter::new(buffer);
-    writer.write(&original).await.unwrap();
-    writer.flush().await.unwrap();
-
-    let data = writer.into_inner().into_inner().into_inner();
-    let mut reader = JsonlReader::new(Cursor::new(data));
-
-    let read_back: ComplexRecord = reader.read_line().await.unwrap().unwrap();
-    assert_eq!(original, read_back);
-}
-
-#[tokio::test]
-async fn roundtrip_with_null_optional() {
-    let original = ComplexRecord {
-        id: "xyz-789".to_string(),
-        value: 0.0,
-        tags: vec![],
-        metadata: None,
-    };
-
-    let buffer = Cursor::new(Vec::new());
-    let mut writer = JsonlWriter::new(buffer);
-    writer.write(&original).await.unwrap();
-    writer.flush().await.unwrap();
-
-    let data = writer.into_inner().into_inner().into_inner();
-    let mut reader = JsonlReader::new(Cursor::new(data));
-
-    let read_back: ComplexRecord = reader.read_line().await.unwrap().unwrap();
-    assert_eq!(original, read_back);
-}
-
-#[tokio::test]
-async fn roundtrip_special_characters() {
-    let original = TestRecord {
-        id: 42,
-        name: "Line1\nLine2\tTabbed\"Quoted\"\\Backslash".to_string(),
-        active: true,
-    };
-
-    let buffer = Cursor::new(Vec::new());
-    let mut writer = JsonlWriter::new(buffer);
-    writer.write(&original).await.unwrap();
-    writer.flush().await.unwrap();
-
-    let data = writer.into_inner().into_inner().into_inner();
-    let mut reader = JsonlReader::new(Cursor::new(data));
-
-    let read_back: TestRecord = reader.read_line().await.unwrap().unwrap();
-    assert_eq!(original, read_back);
-}
-
-#[tokio::test]
-async fn roundtrip_unicode() {
-    let original = TestRecord {
-        id: 1,
-        name: "Hello, \u{4e16}\u{754c}! \u{1F600} \u{00e9}\u{00e8}".to_string(),
-        active: true,
-    };
-
-    let buffer = Cursor::new(Vec::new());
-    let mut writer = JsonlWriter::new(buffer);
-    writer.write(&original).await.unwrap();
-    writer.flush().await.unwrap();
-
-    let data = writer.into_inner().into_inner().into_inner();
-    let mut reader = JsonlReader::new(Cursor::new(data));
-
-    let read_back: TestRecord = reader.read_line().await.unwrap().unwrap();
-    assert_eq!(original, read_back);
-}
-
-#[tokio::test]
-async fn roundtrip_empty_string() {
-    let original = TestRecord {
-        id: 1,
-        name: String::new(),
-        active: false,
-    };
-
-    let buffer = Cursor::new(Vec::new());
-    let mut writer = JsonlWriter::new(buffer);
-    writer.write(&original).await.unwrap();
-    writer.flush().await.unwrap();
-
-    let data = writer.into_inner().into_inner().into_inner();
-    let mut reader = JsonlReader::new(Cursor::new(data));
-
-    let read_back: TestRecord = reader.read_line().await.unwrap().unwrap();
-    assert_eq!(original, read_back);
-}
-
-#[tokio::test]
 async fn roundtrip_large_batch() {
     let records: Vec<TestRecord> = (0..1000)
         .map(|i| TestRecord {
@@ -217,27 +159,6 @@ async fn roundtrip_large_batch() {
 
     assert_eq!(records.len(), read_records.len());
     assert_eq!(records, read_records);
-}
-
-#[tokio::test]
-async fn roundtrip_large_record() {
-    let large_name = "x".repeat(100_000);
-    let original = TestRecord {
-        id: 1,
-        name: large_name,
-        active: true,
-    };
-
-    let buffer = Cursor::new(Vec::new());
-    let mut writer = JsonlWriter::new(buffer);
-    writer.write(&original).await.unwrap();
-    writer.flush().await.unwrap();
-
-    let data = writer.into_inner().into_inner().into_inner();
-    let mut reader = JsonlReader::new(Cursor::new(data));
-
-    let read_back: TestRecord = reader.read_line().await.unwrap().unwrap();
-    assert_eq!(original, read_back);
 }
 
 #[tokio::test]
