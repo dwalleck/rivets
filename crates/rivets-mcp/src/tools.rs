@@ -1,6 +1,19 @@
 //! MCP tool implementations.
 //!
 //! This module contains the implementations for all MCP tools exposed by the server.
+//!
+//! # Workspace Parameter Design
+//!
+//! Most tool methods accept an optional `workspace_root` parameter. This enables:
+//!
+//! - **Multi-workspace support**: AI assistants can work with multiple projects
+//!   in a single session without repeatedly calling `set_context`
+//! - **MCP protocol compatibility**: Each tool call can specify its target workspace,
+//!   matching how MCP tools receive parameters from the client
+//! - **Fallback behavior**: If `workspace_root` is `None`, the current context
+//!   (set via `set_context`) is used
+//!
+//! This design mirrors the beads MCP server's approach for compatibility.
 
 use crate::context::Context;
 use crate::error::Result;

@@ -43,6 +43,7 @@ chrono = { workspace = true }
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = { workspace = true }
+rstest = { workspace = true }
 
 [lints]
 workspace = true

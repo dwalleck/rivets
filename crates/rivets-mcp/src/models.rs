@@ -229,3 +229,47 @@ pub fn parse_dep_type(s: &str) -> Option<DependencyType> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case::open("open", Some(IssueStatus::Open))]
+    #[case::open_uppercase("OPEN", Some(IssueStatus::Open))]
+    #[case::in_progress_underscore("in_progress", Some(IssueStatus::InProgress))]
+    #[case::in_progress_hyphen("in-progress", Some(IssueStatus::InProgress))]
+    #[case::blocked("blocked", Some(IssueStatus::Blocked))]
+    #[case::closed("closed", Some(IssueStatus::Closed))]
+    #[case::invalid("invalid", None)]
+    #[case::empty("", None)]
+    fn test_parse_status(#[case] input: &str, #[case] expected: Option<IssueStatus>) {
+        assert_eq!(parse_status(input), expected);
+    }
+
+    #[rstest]
+    #[case::bug("bug", Some(IssueType::Bug))]
+    #[case::feature("feature", Some(IssueType::Feature))]
+    #[case::task("task", Some(IssueType::Task))]
+    #[case::epic("epic", Some(IssueType::Epic))]
+    #[case::chore("chore", Some(IssueType::Chore))]
+    #[case::uppercase("BUG", Some(IssueType::Bug))]
+    #[case::invalid("invalid", None)]
+    fn test_parse_issue_type(#[case] input: &str, #[case] expected: Option<IssueType>) {
+        assert_eq!(parse_issue_type(input), expected);
+    }
+
+    #[rstest]
+    #[case::blocks("blocks", Some(DependencyType::Blocks))]
+    #[case::related("related", Some(DependencyType::Related))]
+    #[case::parent_child_hyphen("parent-child", Some(DependencyType::ParentChild))]
+    #[case::parent_child_underscore("parent_child", Some(DependencyType::ParentChild))]
+    #[case::discovered_from_hyphen("discovered-from", Some(DependencyType::DiscoveredFrom))]
+    #[case::discovered_from_underscore("discovered_from", Some(DependencyType::DiscoveredFrom))]
+    #[case::uppercase("BLOCKS", Some(DependencyType::Blocks))]
+    #[case::invalid("invalid", None)]
+    fn test_parse_dep_type(#[case] input: &str, #[case] expected: Option<DependencyType>) {
+        assert_eq!(parse_dep_type(input), expected);
+    }
+}

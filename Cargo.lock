@@ -818,6 +818,7 @@ dependencies = [
  "chrono",
  "rivets",
  "rmcp",
+ "rstest",
  "schemars",
  "serde",
  "serde_json",

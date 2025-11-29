@@ -13,6 +13,10 @@ use tokio::sync::RwLock;
 /// Provides MCP protocol handling over stdio transport.
 pub struct RivetsMcpServer {
     context: Arc<RwLock<Context>>,
+    /// Tool implementations for MCP handlers.
+    ///
+    /// Currently unused in this skeleton implementation. Will be wired up to
+    /// rmcp request handlers in rivets-cfx (MCP server integration task).
     #[allow(dead_code)]
     tools: Tools,
 }

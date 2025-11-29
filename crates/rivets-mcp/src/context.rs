@@ -4,6 +4,15 @@
 //! - Workspace detection (walking up to find `.rivets/`)
 //! - Path canonicalization
 //! - Per-workspace storage instance management
+//!
+//! # Lock Ordering
+//!
+//! When using `Context` with `Tools`, locks must be acquired in this order:
+//! 1. `Context` read/write lock (via `Arc<RwLock<Context>>`)
+//! 2. Storage read/write lock (via `Arc<RwLock<Box<dyn IssueStorage>>>`)
+//!
+//! Never attempt to acquire a context lock while holding a storage lock.
+//! This prevents potential deadlocks in concurrent scenarios.
 
 use crate::error::{Error, Result};
 use rivets::storage::{create_storage, IssueStorage, StorageBackend};
