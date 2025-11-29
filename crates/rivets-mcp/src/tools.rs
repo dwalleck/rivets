@@ -549,4 +549,66 @@ mod tests {
         let result = tools.list(None, None, None, None, None, None).await;
         assert!(result.is_err());
     }
+
+    /// Test concurrent access to Tools methods.
+    ///
+    /// This test exercises the lock ordering fix - if context lock was held
+    /// while acquiring storage lock, concurrent operations could deadlock.
+    /// The timeout ensures the test fails rather than hanging forever.
+    #[rstest]
+    #[tokio::test]
+    async fn test_concurrent_access(#[future] tools: Tools) {
+        use std::time::Duration;
+
+        let tools = Arc::new(tools.await);
+
+        // Spawn multiple concurrent operations
+        let mut handles = vec![];
+
+        // Readers
+        for _ in 0..5 {
+            let tools = Arc::clone(&tools);
+            handles.push(tokio::spawn(async move {
+                for _ in 0..10 {
+                    let _ = tools.list(None, None, None, None, None, None).await;
+                    let _ = tools.ready(None, None, None, None).await;
+                }
+            }));
+        }
+
+        // Writers
+        for i in 0..3 {
+            let tools = Arc::clone(&tools);
+            handles.push(tokio::spawn(async move {
+                for j in 0..5 {
+                    let _ = tools
+                        .create(
+                            format!("Concurrent Issue {i}-{j}"),
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                        .await;
+                }
+            }));
+        }
+
+        // Wait with timeout - if deadlock, this will fail
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            for handle in handles {
+                handle.await.unwrap();
+            }
+        })
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "Concurrent operations timed out - possible deadlock"
+        );
+    }
 }
