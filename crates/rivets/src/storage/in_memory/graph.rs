@@ -102,54 +102,6 @@ pub(super) fn has_cycle_impl(
     Ok(algo::has_path_connecting(graph, *to_node, *from_node, None))
 }
 
-/// Export all dependencies from the graph.
-///
-/// Returns a list of (from, to, type) tuples representing all edges in the dependency graph.
-///
-/// **Note**: This is a helper method for future use (JSONL backend, extended trait API).
-/// Not currently exposed through the IssueStorage trait.
-#[allow(dead_code)]
-pub(super) fn export_dependencies(
-    graph: &DiGraph<IssueId, DependencyType>,
-) -> Vec<(IssueId, IssueId, DependencyType)> {
-    graph
-        .edge_references()
-        .map(|edge| {
-            let from = &graph[edge.source()];
-            let to = &graph[edge.target()];
-            let dep_type = *edge.weight();
-            (from.clone(), to.clone(), dep_type)
-        })
-        .collect()
-}
-
-/// Import dependencies into the graph.
-///
-/// Assumes all referenced issues have already been imported.
-/// Skips dependencies where either endpoint doesn't exist.
-///
-/// **Note**: This is a helper method for future use (JSONL backend, extended trait API).
-/// Not currently exposed through the IssueStorage trait.
-#[allow(dead_code)]
-pub(super) fn import_dependencies(
-    graph: &mut DiGraph<IssueId, DependencyType>,
-    node_map: &HashMap<IssueId, NodeIndex>,
-    dependencies: Vec<(IssueId, IssueId, DependencyType)>,
-) {
-    for (from_id, to_id, dep_type) in dependencies {
-        // Skip if either issue doesn't exist
-        if !node_map.contains_key(&from_id) || !node_map.contains_key(&to_id) {
-            continue;
-        }
-
-        let from_node = node_map[&from_id];
-        let to_node = node_map[&to_id];
-
-        // Add edge (skip cycle check since we're importing existing data)
-        graph.add_edge(from_node, to_node, dep_type);
-    }
-}
-
 /// Find all blocked issues using BFS traversal.
 ///
 /// This method identifies issues that are blocked either:
