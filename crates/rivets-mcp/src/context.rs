@@ -209,18 +209,25 @@ fn find_database(rivets_dir: &Path) -> Result<PathBuf> {
 
 /// Discover a rivets workspace by walking up from the given directory.
 ///
-/// Returns the workspace root (directory containing `.rivets/`).
+/// Returns the canonicalized workspace root (directory containing `.rivets/`).
 ///
 /// # Errors
 ///
-/// Returns `Error::NoRivetsDirectory` if no `.rivets/` directory is found.
+/// Returns `Error::NoRivetsDirectory` if no `.rivets/` directory is found,
+/// or `Error::WorkspaceNotFound` if the path cannot be canonicalized.
 pub fn discover_workspace(start: &Path) -> Result<PathBuf> {
     let mut current = start.to_path_buf();
 
     loop {
         let rivets_dir = current.join(".rivets");
         if rivets_dir.exists() && rivets_dir.is_dir() {
-            return Ok(current);
+            // Canonicalize to resolve symlinks (e.g., /var -> /private/var on macOS)
+            return current
+                .canonicalize()
+                .map_err(|e| Error::WorkspaceNotFound {
+                    path: current.display().to_string(),
+                    source: Some(e),
+                });
         }
 
         if !current.pop() {
@@ -244,7 +251,8 @@ mod tests {
 
         let result = discover_workspace(temp.path());
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), temp.path());
+        // Compare canonicalized paths to handle symlinks (e.g., /var -> /private/var on macOS)
+        assert_eq!(result.unwrap(), temp.path().canonicalize().unwrap());
     }
 
     #[test]
