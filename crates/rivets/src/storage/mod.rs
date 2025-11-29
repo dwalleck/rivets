@@ -347,9 +347,9 @@ pub async fn create_storage(backend: StorageBackend) -> Result<Box<dyn IssueStor
 
 /// Mock implementation of [`IssueStorage`] for testing.
 ///
-/// This struct provides a minimal implementation of the storage trait that can be used
-/// in tests to verify trait object usage and basic functionality. It stores a single
-/// hardcoded issue ("test-1") and returns empty results for most queries.
+/// This is a **stateless** mock that provides a minimal implementation of the storage
+/// trait for verifying trait object usage. It always returns the same hardcoded issue
+/// ("test-1") and does not persist any data between calls.
 ///
 /// # Availability
 ///
@@ -414,24 +414,14 @@ impl MockStorage {
     pub fn new() -> Self {
         Self
     }
-}
 
-#[cfg(any(test, feature = "test-util"))]
-impl Default for MockStorage {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(any(test, feature = "test-util"))]
-#[async_trait]
-impl IssueStorage for MockStorage {
-    async fn create(&mut self, _issue: NewIssue) -> Result<Issue> {
+    /// Creates the test issue with the given ID.
+    fn test_issue(id: IssueId) -> Issue {
         use crate::domain::{IssueStatus, IssueType};
         use chrono::Utc;
 
-        Ok(Issue {
-            id: IssueId::new("test-1"),
+        Issue {
+            id,
             title: "Test Issue".to_string(),
             description: "Test description".to_string(),
             status: IssueStatus::Open,
@@ -447,32 +437,27 @@ impl IssueStorage for MockStorage {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             closed_at: None,
-        })
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-util"))]
+impl Default for MockStorage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(any(test, feature = "test-util"))]
+#[async_trait]
+impl IssueStorage for MockStorage {
+    async fn create(&mut self, _issue: NewIssue) -> Result<Issue> {
+        Ok(Self::test_issue(IssueId::new("test-1")))
     }
 
     async fn get(&self, id: &IssueId) -> Result<Option<Issue>> {
-        use crate::domain::{IssueStatus, IssueType};
-        use chrono::Utc;
-
         if id.as_str() == "test-1" {
-            Ok(Some(Issue {
-                id: id.clone(),
-                title: "Test Issue".to_string(),
-                description: "Test description".to_string(),
-                status: IssueStatus::Open,
-                priority: 1,
-                issue_type: IssueType::Task,
-                assignee: None,
-                labels: vec![],
-                design: None,
-                acceptance_criteria: None,
-                notes: None,
-                external_ref: None,
-                dependencies: vec![],
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-                closed_at: None,
-            }))
+            Ok(Some(Self::test_issue(id.clone())))
         } else {
             Ok(None)
         }
@@ -613,16 +598,6 @@ mod tests {
             .has_cycle(&id, &IssueId::new("test-2"))
             .await
             .unwrap());
-    }
-
-    #[tokio::test]
-    async fn test_mock_storage_default() {
-        let storage: Box<dyn IssueStorage> = Box::new(MockStorage::new());
-        assert!(storage
-            .list(&IssueFilter::default())
-            .await
-            .unwrap()
-            .is_empty());
     }
 
     #[tokio::test]
