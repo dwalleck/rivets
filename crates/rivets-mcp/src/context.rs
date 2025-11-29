@@ -217,6 +217,9 @@ fn find_database(rivets_dir: &Path) -> Result<PathBuf> {
         }
     }
 
+    // Sort for deterministic behavior (read_dir order is undefined)
+    found.sort();
+
     match found.len() {
         0 => Ok(rivets_dir.join("issues.jsonl")), // Default for new workspaces
         1 => Ok(found.into_iter().next().expect("checked len")),
