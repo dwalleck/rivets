@@ -345,6 +345,10 @@ pub async fn create_storage(backend: StorageBackend) -> Result<Box<dyn IssueStor
 
 // ========== Test Utilities ==========
 
+/// The hardcoded issue ID returned by [`MockStorage`].
+#[cfg(any(test, feature = "test-util"))]
+pub const MOCK_ISSUE_ID: &str = "test-1";
+
 /// Mock implementation of [`IssueStorage`] for testing.
 ///
 /// This is a **stateless** mock that provides a minimal implementation of the storage
@@ -401,11 +405,6 @@ pub async fn create_storage(backend: StorageBackend) -> Result<Box<dyn IssueStor
 /// (it's a zero-sized type). However, it doesn't provide any actual storage
 /// functionality. For testing concurrent access patterns, use the in-memory
 /// backend which properly handles synchronization.
-
-/// The hardcoded issue ID returned by [`MockStorage`].
-#[cfg(any(test, feature = "test-util"))]
-pub const MOCK_ISSUE_ID: &str = "test-1";
-
 #[cfg(any(test, feature = "test-util"))]
 #[derive(Clone, Copy)]
 #[non_exhaustive]
