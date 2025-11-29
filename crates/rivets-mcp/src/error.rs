@@ -9,6 +9,21 @@ pub enum Error {
     #[error("No workspace context set. Call set_context first.")]
     NoContext,
 
+    /// Invalid argument value provided.
+    #[error("Invalid {field}: '{value}'. Valid values: {valid_values}")]
+    InvalidArgument {
+        /// The field name that had an invalid value.
+        field: &'static str,
+        /// The invalid value that was provided.
+        value: String,
+        /// Description of valid values.
+        valid_values: &'static str,
+    },
+
+    /// The requested issue was not found.
+    #[error("Issue not found: {0}")]
+    IssueNotFound(String),
+
     /// The specified workspace was not found or path is invalid.
     #[error("Workspace not found: {path}")]
     WorkspaceNotFound {
