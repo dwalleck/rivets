@@ -348,8 +348,9 @@ pub async fn create_storage(backend: StorageBackend) -> Result<Box<dyn IssueStor
 /// Mock implementation of [`IssueStorage`] for testing.
 ///
 /// This is a **stateless** mock that provides a minimal implementation of the storage
-/// trait for verifying trait object usage. It always returns the same hardcoded issue
-/// ("test-1") and does not persist any data between calls.
+/// trait for verifying trait object usage. It always returns hardcoded data for issue
+/// "test-1" but does not persist any data between calls. Timestamps are generated fresh
+/// on each call.
 ///
 /// # Availability
 ///
@@ -425,8 +426,20 @@ impl MockStorage {
         Self
     }
 
-    /// Creates the test issue with the given ID.
-    fn test_issue(id: IssueId) -> Issue {
+    /// Creates a test issue with the given ID.
+    ///
+    /// This is useful for creating expected values in downstream tests that need
+    /// to match the format returned by [`MockStorage`].
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use rivets::storage::{MockStorage, MOCK_ISSUE_ID};
+    /// use rivets::domain::IssueId;
+    ///
+    /// let expected = MockStorage::create_test_issue(IssueId::new(MOCK_ISSUE_ID));
+    /// ```
+    pub fn create_test_issue(id: IssueId) -> Issue {
         use crate::domain::{IssueStatus, IssueType};
         use chrono::Utc;
 
@@ -462,23 +475,27 @@ impl Default for MockStorage {
 #[async_trait]
 impl IssueStorage for MockStorage {
     async fn create(&mut self, _issue: NewIssue) -> Result<Issue> {
-        Ok(Self::test_issue(IssueId::new(MOCK_ISSUE_ID)))
+        Ok(Self::create_test_issue(IssueId::new(MOCK_ISSUE_ID)))
     }
 
     async fn get(&self, id: &IssueId) -> Result<Option<Issue>> {
         if id.as_str() == MOCK_ISSUE_ID {
-            Ok(Some(Self::test_issue(id.clone())))
+            Ok(Some(Self::create_test_issue(id.clone())))
         } else {
             Ok(None)
         }
     }
 
     async fn update(&mut self, _id: &IssueId, _updates: IssueUpdate) -> Result<Issue> {
-        unimplemented!("MockStorage: update not implemented")
+        unimplemented!(
+            "MockStorage::update() is not implemented. Use in_memory::new_in_memory_storage() for full CRUD."
+        )
     }
 
     async fn delete(&mut self, _id: &IssueId) -> Result<()> {
-        unimplemented!("MockStorage: delete not implemented")
+        unimplemented!(
+            "MockStorage::delete() is not implemented. Use in_memory::new_in_memory_storage() for full CRUD."
+        )
     }
 
     async fn add_dependency(
@@ -487,11 +504,15 @@ impl IssueStorage for MockStorage {
         _to: &IssueId,
         _dep_type: DependencyType,
     ) -> Result<()> {
-        unimplemented!("MockStorage: add_dependency not implemented")
+        unimplemented!(
+            "MockStorage::add_dependency() is not implemented. Use in_memory::new_in_memory_storage() for full CRUD."
+        )
     }
 
     async fn remove_dependency(&mut self, _from: &IssueId, _to: &IssueId) -> Result<()> {
-        unimplemented!("MockStorage: remove_dependency not implemented")
+        unimplemented!(
+            "MockStorage::remove_dependency() is not implemented. Use in_memory::new_in_memory_storage() for full CRUD."
+        )
     }
 
     async fn get_dependencies(&self, _id: &IssueId) -> Result<Vec<Dependency>> {
