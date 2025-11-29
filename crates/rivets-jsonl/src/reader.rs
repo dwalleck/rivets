@@ -450,11 +450,51 @@ mod tests {
     use super::*;
     use serde::Deserialize;
     use std::io::Cursor;
+    use std::pin::Pin;
+    use std::task::Poll;
+    use tokio::io::AsyncRead;
 
     #[derive(Debug, Deserialize, PartialEq)]
     struct TestRecord {
         id: u32,
         name: String,
+    }
+
+    /// Custom AsyncRead that simulates I/O errors mid-stream.
+    /// Shared by stream_tests and resilient_stream_tests.
+    struct FailingReader {
+        data: Cursor<Vec<u8>>,
+        fail_at_byte: usize,
+        bytes_read: usize,
+    }
+
+    impl FailingReader {
+        fn new(data: Vec<u8>, fail_at_byte: usize) -> Self {
+            Self {
+                data: Cursor::new(data),
+                fail_at_byte,
+                bytes_read: 0,
+            }
+        }
+    }
+
+    impl AsyncRead for FailingReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            if self.bytes_read >= self.fail_at_byte {
+                return Poll::Ready(Err(std::io::Error::other("simulated I/O error")));
+            }
+
+            let before = buf.filled().len();
+            let result = Pin::new(&mut self.data).poll_read(cx, buf);
+            let after = buf.filled().len();
+            self.bytes_read += after - before;
+
+            result
+        }
     }
 
     #[test]
@@ -685,8 +725,6 @@ mod tests {
         use futures::stream::StreamExt;
         use std::io::Cursor;
         use std::pin::pin;
-        use std::task::Poll;
-        use tokio::io::AsyncRead;
 
         #[tokio::test]
         async fn stream_returns_empty_for_empty_input() {
@@ -897,42 +935,6 @@ mod tests {
             assert_eq!(records[0].id, 1);
         }
 
-        /// Custom AsyncRead that simulates I/O errors mid-stream
-        struct FailingReader {
-            data: Cursor<Vec<u8>>,
-            fail_at_byte: usize,
-            bytes_read: usize,
-        }
-
-        impl FailingReader {
-            fn new(data: Vec<u8>, fail_at_byte: usize) -> Self {
-                Self {
-                    data: Cursor::new(data),
-                    fail_at_byte,
-                    bytes_read: 0,
-                }
-            }
-        }
-
-        impl AsyncRead for FailingReader {
-            fn poll_read(
-                mut self: std::pin::Pin<&mut Self>,
-                cx: &mut std::task::Context<'_>,
-                buf: &mut tokio::io::ReadBuf<'_>,
-            ) -> Poll<std::io::Result<()>> {
-                if self.bytes_read >= self.fail_at_byte {
-                    return Poll::Ready(Err(std::io::Error::other("simulated I/O error")));
-                }
-
-                let before = buf.filled().len();
-                let result = std::pin::Pin::new(&mut self.data).poll_read(cx, buf);
-                let after = buf.filled().len();
-                self.bytes_read += after - before;
-
-                result
-            }
-        }
-
         #[tokio::test]
         async fn stream_handles_io_errors() {
             // Create a reader that fails immediately to demonstrate I/O error propagation
@@ -1049,8 +1051,6 @@ mod tests {
         use futures::stream::StreamExt;
         use std::io::Cursor;
         use std::pin::pin;
-        use std::task::Poll;
-        use tokio::io::AsyncRead;
 
         #[tokio::test]
         async fn stream_resilient_returns_empty_for_empty_input() {
@@ -1330,42 +1330,6 @@ mod tests {
             // All 3 lines generated warnings
             let collected = warnings.into_warnings();
             assert_eq!(collected.len(), 3);
-        }
-
-        /// Custom AsyncRead that simulates I/O errors mid-stream
-        struct FailingReader {
-            data: Cursor<Vec<u8>>,
-            fail_at_byte: usize,
-            bytes_read: usize,
-        }
-
-        impl FailingReader {
-            fn new(data: Vec<u8>, fail_at_byte: usize) -> Self {
-                Self {
-                    data: Cursor::new(data),
-                    fail_at_byte,
-                    bytes_read: 0,
-                }
-            }
-        }
-
-        impl AsyncRead for FailingReader {
-            fn poll_read(
-                mut self: std::pin::Pin<&mut Self>,
-                cx: &mut std::task::Context<'_>,
-                buf: &mut tokio::io::ReadBuf<'_>,
-            ) -> Poll<std::io::Result<()>> {
-                if self.bytes_read >= self.fail_at_byte {
-                    return Poll::Ready(Err(std::io::Error::other("simulated I/O error")));
-                }
-
-                let before = buf.filled().len();
-                let result = std::pin::Pin::new(&mut self.data).poll_read(cx, buf);
-                let after = buf.filled().len();
-                self.bytes_read += after - before;
-
-                result
-            }
         }
 
         #[tokio::test]
