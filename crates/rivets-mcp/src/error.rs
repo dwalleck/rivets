@@ -9,9 +9,19 @@ pub enum Error {
     #[error("No workspace context set. Call set_context first.")]
     NoContext,
 
-    /// The specified workspace was not found.
-    #[error("Workspace not found: {0}")]
-    WorkspaceNotFound(String),
+    /// The specified workspace was not found or path is invalid.
+    #[error("Workspace not found: {path}")]
+    WorkspaceNotFound {
+        /// The path that was not found.
+        path: String,
+        /// The underlying IO error, if any.
+        #[source]
+        source: Option<std::io::Error>,
+    },
+
+    /// Workspace exists but was not initialized via `set_context`.
+    #[error("Workspace not initialized: {0}. Call set_context first.")]
+    WorkspaceNotInitialized(String),
 
     /// Failed to discover a rivets workspace.
     #[error("No .rivets directory found in {0} or parent directories")]

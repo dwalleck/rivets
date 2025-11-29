@@ -51,7 +51,10 @@ impl Context {
     pub async fn set_workspace(&mut self, workspace_root: &Path) -> Result<WorkspaceInfo> {
         let canonical = workspace_root
             .canonicalize()
-            .map_err(|_| Error::WorkspaceNotFound(workspace_root.display().to_string()))?;
+            .map_err(|e| Error::WorkspaceNotFound {
+                path: workspace_root.display().to_string(),
+                source: Some(e),
+            })?;
 
         // Verify .rivets directory exists
         let rivets_dir = canonical.join(".rivets");
@@ -113,22 +116,41 @@ impl Context {
     ///
     /// # Errors
     ///
-    /// Returns an error if the workspace doesn't exist or no context is set.
+    /// Returns an error if:
+    /// - No context is set and no workspace path is provided
+    /// - The workspace path doesn't exist (with IO error context)
+    /// - The workspace exists but wasn't initialized via `set_workspace()`
     pub fn storage_for(
         &self,
         workspace_root: Option<&Path>,
     ) -> Result<Arc<RwLock<Box<dyn IssueStorage>>>> {
         let workspace = match workspace_root {
-            Some(path) => path
-                .canonicalize()
-                .map_err(|_| Error::WorkspaceNotFound(path.display().to_string()))?,
+            Some(path) => path.canonicalize().map_err(|e| Error::WorkspaceNotFound {
+                path: path.display().to_string(),
+                source: Some(e),
+            })?,
             None => self.current_workspace.clone().ok_or(Error::NoContext)?,
         };
 
         self.storage_cache
             .get(&workspace)
             .cloned()
-            .ok_or(Error::NoContext)
+            .ok_or_else(|| Error::WorkspaceNotInitialized(workspace.display().to_string()))
+    }
+
+    /// Discover and set the workspace by walking up from the given directory.
+    ///
+    /// This is a convenience method that combines `discover_workspace()` and `set_workspace()`.
+    /// It walks up from the starting directory to find a `.rivets/` directory, then
+    /// initializes storage for that workspace.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no `.rivets/` directory is found in the path hierarchy,
+    /// or if storage creation fails.
+    pub async fn discover_and_set_workspace(&mut self, start: &Path) -> Result<WorkspaceInfo> {
+        let workspace_root = discover_workspace(start)?;
+        self.set_workspace(&workspace_root).await
     }
 }
 
@@ -210,5 +232,53 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let result = discover_workspace(temp.path());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_discover_workspace_from_nested_dir() {
+        let temp = TempDir::new().unwrap();
+        let rivets_dir = temp.path().join(".rivets");
+        std::fs::create_dir(&rivets_dir).unwrap();
+
+        // Create a deeply nested subdirectory
+        let subdir = temp.path().join("src").join("nested").join("deep");
+        std::fs::create_dir_all(&subdir).unwrap();
+
+        // Discovery should walk up and find the .rivets directory
+        let result = discover_workspace(&subdir);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), temp.path().canonicalize().unwrap());
+    }
+
+    // Note: Full discover_and_set_workspace() integration test requires
+    // working storage backend. This will be added in rivets-d06 (integration tests).
+
+    #[test]
+    fn test_storage_for_uninitialized_workspace() {
+        let temp = TempDir::new().unwrap();
+        let rivets_dir = temp.path().join(".rivets");
+        std::fs::create_dir(&rivets_dir).unwrap();
+
+        let context = Context::new();
+        // Path exists but wasn't initialized via set_workspace
+        let result = context.storage_for(Some(temp.path()));
+
+        match result {
+            Err(Error::WorkspaceNotInitialized(_)) => {} // Expected
+            Err(e) => panic!("Expected WorkspaceNotInitialized, got {e:?}"),
+            Ok(_) => panic!("Expected error, got Ok"),
+        }
+    }
+
+    #[test]
+    fn test_storage_for_nonexistent_path() {
+        let context = Context::new();
+        let result = context.storage_for(Some(Path::new("/nonexistent/path/to/workspace")));
+
+        match result {
+            Err(Error::WorkspaceNotFound { .. }) => {} // Expected
+            Err(e) => panic!("Expected WorkspaceNotFound, got {e:?}"),
+            Ok(_) => panic!("Expected error, got Ok"),
+        }
     }
 }
