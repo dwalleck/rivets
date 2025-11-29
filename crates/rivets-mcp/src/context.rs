@@ -171,20 +171,40 @@ pub struct WorkspaceInfo {
 }
 
 /// Find the database file in a `.rivets/` directory.
+///
+/// Prefers the standard `issues.jsonl` location first, then falls back to
+/// searching for any `.jsonl` or `.db` file. Returns an error if multiple
+/// database files are found to avoid ambiguity.
 fn find_database(rivets_dir: &Path) -> Result<PathBuf> {
-    // Look for .jsonl files (primary) or .db files
+    // Prefer the standard location first for deterministic behavior
+    let standard = rivets_dir.join("issues.jsonl");
+    if standard.exists() {
+        return Ok(standard);
+    }
+
+    // Fall back to searching for any .jsonl or .db file
+    let mut found = Vec::new();
     for entry in std::fs::read_dir(rivets_dir)? {
         let entry = entry?;
         let path = entry.path();
         if let Some(ext) = path.extension() {
             if ext == "jsonl" || ext == "db" {
-                return Ok(path);
+                found.push(path);
             }
         }
     }
 
-    // Default to issues.jsonl if no database found
-    Ok(rivets_dir.join("issues.jsonl"))
+    match found.len() {
+        0 => Ok(rivets_dir.join("issues.jsonl")), // Default for new workspaces
+        1 => Ok(found.into_iter().next().expect("checked len")),
+        _ => Err(Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "Multiple database files found in {}. Remove duplicates or use issues.jsonl.",
+                rivets_dir.display()
+            ),
+        ))),
+    }
 }
 
 /// Discover a rivets workspace by walking up from the given directory.

@@ -28,7 +28,6 @@ schemars = { workspace = true }
 
 # Async runtime
 tokio = { workspace = true, features = ["full", "signal"] }
-async-trait = { workspace = true }
 
 # Error handling
 thiserror = { workspace = true }
