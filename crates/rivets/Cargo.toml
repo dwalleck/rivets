@@ -32,6 +32,12 @@ async-trait = { workspace = true }
 petgraph = { workspace = true }
 sha2 = { workspace = true }
 
+[features]
+# Enable test utilities like MockStorage for downstream crates to use in their tests.
+# This is useful when you want to test code that depends on the IssueStorage trait
+# without requiring a real storage backend.
+test-util = []
+
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3.0"

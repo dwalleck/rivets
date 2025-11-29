@@ -13,6 +13,29 @@
 //! and truly async (PostgreSQL) implementations. The trait is object-safe,
 //! allowing for dynamic dispatch via `Box<dyn IssueStorage>`.
 //!
+//! # Test Utilities
+//!
+//! This module provides a [`MockStorage`] implementation for testing code that
+//! depends on the [`IssueStorage`] trait. To use it in your tests, enable the
+//! `test-util` feature:
+//!
+//! ```toml
+//! [dev-dependencies]
+//! rivets = { version = "...", features = ["test-util"] }
+//! ```
+//!
+//! Then use `MockStorage` in your tests:
+//!
+//! ```rust,ignore
+//! use rivets::storage::{MockStorage, IssueStorage};
+//!
+//! #[tokio::test]
+//! async fn test_with_mock_storage() {
+//!     let storage: Box<dyn IssueStorage> = Box::new(MockStorage::new());
+//!     // Use storage in tests...
+//! }
+//! ```
+//!
 //! # Example
 //!
 //! ```no_run
@@ -320,20 +343,104 @@ pub async fn create_storage(backend: StorageBackend) -> Result<Box<dyn IssueStor
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::domain::{IssueStatus, IssueType};
-    use chrono::Utc;
+// ========== Test Utilities ==========
 
-    /// Mock implementation of IssueStorage for testing trait object usage
-    struct MockStorage;
+/// Mock implementation of [`IssueStorage`] for testing.
+///
+/// This struct provides a minimal implementation of the storage trait that can be used
+/// in tests to verify trait object usage and basic functionality. It stores a single
+/// hardcoded issue ("test-1") and returns empty results for most queries.
+///
+/// # Availability
+///
+/// This type is available when:
+/// - Running tests (`#[cfg(test)]`)
+/// - The `test-util` feature is enabled
+///
+/// # Example
+///
+/// ```rust,ignore
+/// // In your Cargo.toml:
+/// // [dev-dependencies]
+/// // rivets = { path = "...", features = ["test-util"] }
+///
+/// use rivets::storage::{MockStorage, IssueStorage};
+///
+/// #[tokio::test]
+/// async fn test_my_code_with_mock_storage() {
+///     let storage: Box<dyn IssueStorage> = Box::new(MockStorage::new());
+///     // Use storage in tests...
+/// }
+/// ```
+///
+/// # Behavior
+///
+/// - `create`: Always returns a new issue with ID "test-1"
+/// - `get`: Returns `Some` only for ID "test-1", `None` otherwise
+/// - `list`, `ready_to_work`, `blocked_issues`: Return empty vectors
+/// - `get_dependencies`, `get_dependents`: Return empty vectors
+/// - `has_cycle`: Always returns `false`
+/// - Other methods: Unimplemented (will panic if called)
+#[cfg(any(test, feature = "test-util"))]
+pub struct MockStorage;
 
-    #[async_trait]
-    impl IssueStorage for MockStorage {
-        async fn create(&mut self, _issue: NewIssue) -> Result<Issue> {
-            Ok(Issue {
-                id: IssueId::new("test-1"),
+#[cfg(any(test, feature = "test-util"))]
+impl MockStorage {
+    /// Create a new MockStorage instance.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use rivets::storage::MockStorage;
+    ///
+    /// let storage = MockStorage::new();
+    /// ```
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[cfg(any(test, feature = "test-util"))]
+impl Default for MockStorage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(any(test, feature = "test-util"))]
+#[async_trait]
+impl IssueStorage for MockStorage {
+    async fn create(&mut self, _issue: NewIssue) -> Result<Issue> {
+        use crate::domain::{IssueStatus, IssueType};
+        use chrono::Utc;
+
+        Ok(Issue {
+            id: IssueId::new("test-1"),
+            title: "Test Issue".to_string(),
+            description: "Test description".to_string(),
+            status: IssueStatus::Open,
+            priority: 1,
+            issue_type: IssueType::Task,
+            assignee: None,
+            labels: vec![],
+            design: None,
+            acceptance_criteria: None,
+            notes: None,
+            external_ref: None,
+            dependencies: vec![],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            closed_at: None,
+        })
+    }
+
+    async fn get(&self, id: &IssueId) -> Result<Option<Issue>> {
+        use crate::domain::{IssueStatus, IssueType};
+        use chrono::Utc;
+
+        if id.as_str() == "test-1" {
+            Ok(Some(Issue {
+                id: id.clone(),
                 title: "Test Issue".to_string(),
                 description: "Test description".to_string(),
                 status: IssueStatus::Open,
@@ -349,108 +456,91 @@ mod tests {
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
                 closed_at: None,
-            })
-        }
-
-        async fn get(&self, id: &IssueId) -> Result<Option<Issue>> {
-            if id.as_str() == "test-1" {
-                Ok(Some(Issue {
-                    id: id.clone(),
-                    title: "Test Issue".to_string(),
-                    description: "Test description".to_string(),
-                    status: IssueStatus::Open,
-                    priority: 1,
-                    issue_type: IssueType::Task,
-                    assignee: None,
-                    labels: vec![],
-                    design: None,
-                    acceptance_criteria: None,
-                    notes: None,
-                    external_ref: None,
-                    dependencies: vec![],
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
-                    closed_at: None,
-                }))
-            } else {
-                Ok(None)
-            }
-        }
-
-        async fn update(&mut self, _id: &IssueId, _updates: IssueUpdate) -> Result<Issue> {
-            unimplemented!("Mock storage: update not implemented")
-        }
-
-        async fn delete(&mut self, _id: &IssueId) -> Result<()> {
-            unimplemented!("Mock storage: delete not implemented")
-        }
-
-        async fn add_dependency(
-            &mut self,
-            _from: &IssueId,
-            _to: &IssueId,
-            _dep_type: DependencyType,
-        ) -> Result<()> {
-            unimplemented!("Mock storage: add_dependency not implemented")
-        }
-
-        async fn remove_dependency(&mut self, _from: &IssueId, _to: &IssueId) -> Result<()> {
-            unimplemented!("Mock storage: remove_dependency not implemented")
-        }
-
-        async fn get_dependencies(&self, _id: &IssueId) -> Result<Vec<Dependency>> {
-            Ok(vec![])
-        }
-
-        async fn get_dependents(&self, _id: &IssueId) -> Result<Vec<Dependency>> {
-            Ok(vec![])
-        }
-
-        async fn has_cycle(&self, _from: &IssueId, _to: &IssueId) -> Result<bool> {
-            Ok(false)
-        }
-
-        async fn get_dependency_tree(
-            &self,
-            _id: &IssueId,
-            _max_depth: Option<usize>,
-        ) -> Result<Vec<(Dependency, usize)>> {
-            Ok(vec![])
-        }
-
-        async fn list(&self, _filter: &IssueFilter) -> Result<Vec<Issue>> {
-            Ok(vec![])
-        }
-
-        async fn ready_to_work(
-            &self,
-            _filter: Option<&IssueFilter>,
-            _sort_policy: Option<SortPolicy>,
-        ) -> Result<Vec<Issue>> {
-            Ok(vec![])
-        }
-
-        async fn blocked_issues(&self) -> Result<Vec<(Issue, Vec<Issue>)>> {
-            Ok(vec![])
-        }
-
-        async fn import_issues(&mut self, _issues: Vec<Issue>) -> Result<()> {
-            Ok(())
-        }
-
-        async fn export_all(&self) -> Result<Vec<Issue>> {
-            Ok(vec![])
-        }
-
-        async fn save(&self) -> Result<()> {
-            Ok(())
+            }))
+        } else {
+            Ok(None)
         }
     }
+
+    async fn update(&mut self, _id: &IssueId, _updates: IssueUpdate) -> Result<Issue> {
+        unimplemented!("MockStorage: update not implemented")
+    }
+
+    async fn delete(&mut self, _id: &IssueId) -> Result<()> {
+        unimplemented!("MockStorage: delete not implemented")
+    }
+
+    async fn add_dependency(
+        &mut self,
+        _from: &IssueId,
+        _to: &IssueId,
+        _dep_type: DependencyType,
+    ) -> Result<()> {
+        unimplemented!("MockStorage: add_dependency not implemented")
+    }
+
+    async fn remove_dependency(&mut self, _from: &IssueId, _to: &IssueId) -> Result<()> {
+        unimplemented!("MockStorage: remove_dependency not implemented")
+    }
+
+    async fn get_dependencies(&self, _id: &IssueId) -> Result<Vec<Dependency>> {
+        Ok(vec![])
+    }
+
+    async fn get_dependents(&self, _id: &IssueId) -> Result<Vec<Dependency>> {
+        Ok(vec![])
+    }
+
+    async fn has_cycle(&self, _from: &IssueId, _to: &IssueId) -> Result<bool> {
+        Ok(false)
+    }
+
+    async fn get_dependency_tree(
+        &self,
+        _id: &IssueId,
+        _max_depth: Option<usize>,
+    ) -> Result<Vec<(Dependency, usize)>> {
+        Ok(vec![])
+    }
+
+    async fn list(&self, _filter: &IssueFilter) -> Result<Vec<Issue>> {
+        Ok(vec![])
+    }
+
+    async fn ready_to_work(
+        &self,
+        _filter: Option<&IssueFilter>,
+        _sort_policy: Option<SortPolicy>,
+    ) -> Result<Vec<Issue>> {
+        Ok(vec![])
+    }
+
+    async fn blocked_issues(&self) -> Result<Vec<(Issue, Vec<Issue>)>> {
+        Ok(vec![])
+    }
+
+    async fn import_issues(&mut self, _issues: Vec<Issue>) -> Result<()> {
+        Ok(())
+    }
+
+    async fn export_all(&self) -> Result<Vec<Issue>> {
+        Ok(vec![])
+    }
+
+    async fn save(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::IssueType;
 
     #[tokio::test]
     async fn test_trait_object_usage() {
         // Verify that IssueStorage is object-safe and can be used with Box<dyn>
-        let mut storage: Box<dyn IssueStorage> = Box::new(MockStorage);
+        let mut storage: Box<dyn IssueStorage> = Box::new(MockStorage::new());
 
         let new_issue = NewIssue {
             title: "Test".to_string(),
@@ -473,7 +563,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_issue() {
-        let storage: Box<dyn IssueStorage> = Box::new(MockStorage);
+        let storage: Box<dyn IssueStorage> = Box::new(MockStorage::new());
 
         // Test existing issue
         let result = storage.get(&IssueId::new("test-1")).await.unwrap();
@@ -487,7 +577,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_queries() {
-        let storage: Box<dyn IssueStorage> = Box::new(MockStorage);
+        let storage: Box<dyn IssueStorage> = Box::new(MockStorage::new());
 
         // Test that query methods return empty results
         let filter = IssueFilter::default();
@@ -498,7 +588,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dependencies() {
-        let storage: Box<dyn IssueStorage> = Box::new(MockStorage);
+        let storage: Box<dyn IssueStorage> = Box::new(MockStorage::new());
 
         let id = IssueId::new("test-1");
         assert!(storage.get_dependencies(&id).await.unwrap().is_empty());
