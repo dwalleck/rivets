@@ -74,7 +74,9 @@ impl RivetsMcpServer {
     }
 
     /// Find issues ready to work on.
-    #[tool(description = "Find tasks that have no blockers and are ready to be worked on.")]
+    #[tool(
+        description = "Find tasks that have no blockers and are ready to be worked on. Uses workspace_root if provided, otherwise uses current context."
+    )]
     async fn ready(
         &self,
         Parameters(params): Parameters<ReadyParams>,
@@ -96,7 +98,7 @@ impl RivetsMcpServer {
 
     /// List issues with optional filters.
     #[tool(
-        description = "List all issues with optional filters (status, priority, type, assignee)."
+        description = "List all issues with optional filters (status, priority, type, assignee). Uses workspace_root if provided, otherwise uses current context."
     )]
     async fn list(
         &self,
@@ -121,7 +123,7 @@ impl RivetsMcpServer {
 
     /// Show detailed information about a specific issue.
     #[tool(
-        description = "Show detailed information about a specific issue including dependencies and dependents."
+        description = "Show detailed information about a specific issue including dependencies and dependents. Uses workspace_root if provided, otherwise uses current context."
     )]
     async fn show(
         &self,
@@ -139,7 +141,7 @@ impl RivetsMcpServer {
 
     /// Get blocked issues and their blockers.
     #[tool(
-        description = "Get blocked issues showing what dependencies are blocking them from being worked on."
+        description = "Get blocked issues showing what dependencies are blocking them from being worked on. Uses workspace_root if provided, otherwise uses current context."
     )]
     async fn blocked(
         &self,
@@ -153,7 +155,7 @@ impl RivetsMcpServer {
 
     /// Create a new issue.
     #[tool(
-        description = "Create a new issue (bug, feature, task, epic, or chore) with optional design, acceptance criteria, and dependencies."
+        description = "Create a new issue (bug, feature, task, epic, or chore) with optional design, acceptance criteria, and dependencies. Uses workspace_root if provided, otherwise uses current context."
     )]
     async fn create(
         &self,
@@ -181,7 +183,7 @@ impl RivetsMcpServer {
 
     /// Update an existing issue.
     #[tool(
-        description = "Update an existing issue's status, priority, assignee, description, design notes, or acceptance criteria. Use empty string for assignee to clear it."
+        description = "Update an existing issue's status, priority, assignee, description, design notes, or acceptance criteria. Use empty string for assignee to clear it. Uses workspace_root if provided, otherwise uses current context."
     )]
     async fn update(
         &self,
@@ -219,7 +221,7 @@ impl RivetsMcpServer {
 
     /// Close an issue.
     #[tool(
-        description = "Close (complete) an issue. Mark work as done when you've finished implementing/fixing it."
+        description = "Close (complete) an issue. Mark work as done when you've finished implementing/fixing it. Uses workspace_root if provided, otherwise uses current context."
     )]
     async fn close(
         &self,
@@ -241,7 +243,7 @@ impl RivetsMcpServer {
 
     /// Add a dependency between issues.
     #[tool(
-        description = "Add a dependency between issues. Types: blocks (hard blocker), related (soft link), parent-child (epic/subtask), discovered-from (found during work)."
+        description = "Add a dependency between issues. Types: blocks (hard blocker), related (soft link), parent-child (epic/subtask), discovered-from (found during work). Uses workspace_root if provided, otherwise uses current context."
     )]
     async fn dep(
         &self,
