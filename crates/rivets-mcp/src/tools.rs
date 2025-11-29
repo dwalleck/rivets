@@ -319,3 +319,217 @@ impl Tools {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rivets::storage::in_memory::new_in_memory_storage;
+    use rstest::{fixture, rstest};
+    use std::path::PathBuf;
+
+    /// Async fixture that creates Tools with in-memory storage.
+    #[fixture]
+    async fn tools() -> Tools {
+        let context = Arc::new(RwLock::new(Context::new()));
+        let tools = Tools::new(context);
+
+        // Set up test workspace with in-memory storage
+        let storage = new_in_memory_storage("test".to_string());
+        let mut ctx = tools.context.write().await;
+        ctx.set_test_workspace(PathBuf::from("/test/workspace"), storage);
+        drop(ctx);
+
+        tools
+    }
+
+    /// Helper to create a simple issue with just a title.
+    async fn create_issue(tools: &Tools, title: &str) -> McpIssue {
+        tools
+            .create(
+                title.to_string(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_create_and_show_issue(#[future] tools: Tools) {
+        let tools = tools.await;
+
+        let issue = tools
+            .create(
+                "Test Issue".to_string(),
+                Some("Test description".to_string()),
+                Some(1),
+                Some("task"),
+                Some("alice".to_string()),
+                Some(vec!["label1".to_string()]),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(issue.title, "Test Issue");
+        assert_eq!(issue.description, "Test description");
+        assert_eq!(issue.priority, 1);
+        assert_eq!(issue.issue_type, "task");
+        assert_eq!(issue.assignee, Some("alice".to_string()));
+
+        // Show the issue
+        let shown = tools.show(&issue.id, None).await.unwrap();
+        assert!(shown.is_some());
+        assert_eq!(shown.unwrap().title, "Test Issue");
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_list_issues(#[future] tools: Tools) {
+        let tools = tools.await;
+
+        create_issue(&tools, "Issue 1").await;
+        create_issue(&tools, "Issue 2").await;
+
+        let issues = tools
+            .list(None, None, None, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(issues.len(), 2);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_update_issue(#[future] tools: Tools) {
+        let tools = tools.await;
+
+        let issue = create_issue(&tools, "Original Title").await;
+
+        let updated = tools
+            .update(
+                &issue.id,
+                Some("Updated Title".to_string()),
+                None,
+                Some("in_progress"),
+                Some(0),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(updated.title, "Updated Title");
+        assert_eq!(updated.status, "in_progress");
+        assert_eq!(updated.priority, 0);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_close_issue(#[future] tools: Tools) {
+        let tools = tools.await;
+
+        let issue = create_issue(&tools, "To Close").await;
+
+        let closed = tools
+            .close(&issue.id, Some("Completed".to_string()), None)
+            .await
+            .unwrap();
+
+        assert_eq!(closed.status, "closed");
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_ready_to_work(#[future] tools: Tools) {
+        let tools = tools.await;
+
+        create_issue(&tools, "Ready Issue").await;
+
+        let ready = tools.ready(None, None, None, None).await.unwrap();
+        assert!(!ready.is_empty());
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_add_dependency(#[future] tools: Tools) {
+        let tools = tools.await;
+
+        let issue1 = create_issue(&tools, "Issue 1").await;
+        let issue2 = create_issue(&tools, "Issue 2").await;
+
+        // Add dependency
+        let result = tools
+            .dep(&issue1.id, &issue2.id, Some("blocks"), None)
+            .await
+            .unwrap();
+
+        assert!(result.contains("Added dependency"));
+        assert!(result.contains("blocks"));
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_blocked_issues(#[future] tools: Tools) {
+        let tools = tools.await;
+
+        // Create two issues: one blocks the other
+        let blocking_issue = create_issue(&tools, "Blocking Issue").await;
+        let dependent_issue = create_issue(&tools, "Dependent Issue").await;
+
+        tools
+            .dep(
+                &dependent_issue.id,
+                &blocking_issue.id,
+                Some("blocks"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Get blocked issues
+        let result = tools.blocked(None).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].issue.id, dependent_issue.id);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_where_am_i_with_context(#[future] tools: Tools) {
+        let tools = tools.await;
+
+        let info = tools.where_am_i().await.unwrap();
+        assert!(info.context_set);
+        assert_eq!(info.workspace_root, Some("/test/workspace".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_where_am_i_without_context() {
+        let context = Arc::new(RwLock::new(Context::new()));
+        let tools = Tools::new(context);
+
+        let info = tools.where_am_i().await.unwrap();
+        assert!(!info.context_set);
+        assert!(info.workspace_root.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_no_context_error() {
+        let context = Arc::new(RwLock::new(Context::new()));
+        let tools = Tools::new(context);
+
+        let result = tools.list(None, None, None, None, None, None).await;
+        assert!(result.is_err());
+    }
+}

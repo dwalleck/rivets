@@ -162,6 +162,19 @@ impl Context {
         let workspace_root = discover_workspace(start)?;
         self.set_workspace(&workspace_root).await
     }
+
+    /// Set up a workspace with injected storage for testing.
+    ///
+    /// This bypasses the normal storage creation flow, allowing tests to inject
+    /// mock or in-memory storage without requiring a real `.rivets/` directory.
+    #[cfg(test)]
+    pub fn set_test_workspace(&mut self, workspace_root: PathBuf, storage: Box<dyn IssueStorage>) {
+        self.current_workspace = Some(workspace_root.clone());
+        self.database_paths
+            .insert(workspace_root.clone(), PathBuf::from("test://memory"));
+        self.storage_cache
+            .insert(workspace_root, Arc::new(RwLock::new(storage)));
+    }
 }
 
 impl Default for Context {
