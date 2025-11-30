@@ -796,20 +796,16 @@ impl Cli {
             );
         }
 
-        match init::init(&current_dir, args.prefix.as_deref()).await {
-            Ok(result) => {
-                if !args.quiet {
-                    println!("Initialized rivets in {}", result.rivets_dir.display());
-                    println!("  Config: {}", result.config_file.display());
-                    println!("  Issues: {}", result.issues_file.display());
-                    println!("  Issue prefix: {}", result.prefix);
-                }
-                Ok(())
-            }
-            Err(e) => {
-                anyhow::bail!("{}", e)
-            }
+        let result = init::init(&current_dir, args.prefix.as_deref()).await?;
+
+        if !args.quiet {
+            println!("Initialized rivets in {}", result.rivets_dir.display());
+            println!("  Config: {}", result.config_file.display());
+            println!("  Issues: {}", result.issues_file.display());
+            println!("  Issue prefix: {}", result.prefix);
         }
+
+        Ok(())
     }
 }
 

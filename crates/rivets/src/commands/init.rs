@@ -7,7 +7,6 @@ use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
 
 /// Default issue prefix if none specified
 pub const DEFAULT_PREFIX: &str = "proj";
@@ -29,6 +28,9 @@ pub const MIN_PREFIX_LENGTH: usize = 2;
 
 /// Maximum prefix length
 pub const MAX_PREFIX_LENGTH: usize = 20;
+
+/// Maximum directory depth to traverse when searching for rivets root
+pub const MAX_TRAVERSAL_DEPTH: usize = 256;
 
 /// Configuration file structure for rivets
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -105,24 +107,24 @@ pub struct InitResult {
 /// - 2-20 characters
 /// - Alphanumeric only (letters and digits)
 /// - No special characters or spaces
+///
+/// Note: Expects pre-trimmed input. Callers should trim whitespace before calling.
 pub fn validate_prefix(prefix: &str) -> Result<()> {
-    let trimmed = prefix.trim();
-
-    if trimmed.len() < MIN_PREFIX_LENGTH {
+    if prefix.len() < MIN_PREFIX_LENGTH {
         return Err(Error::Config(format!(
             "Prefix must be at least {} characters",
             MIN_PREFIX_LENGTH
         )));
     }
 
-    if trimmed.len() > MAX_PREFIX_LENGTH {
+    if prefix.len() > MAX_PREFIX_LENGTH {
         return Err(Error::Config(format!(
             "Prefix cannot exceed {} characters",
             MAX_PREFIX_LENGTH
         )));
     }
 
-    if !trimmed.chars().all(|c| c.is_ascii_alphanumeric()) {
+    if !prefix.chars().all(|c| c.is_ascii_alphanumeric()) {
         return Err(Error::Config(
             "Prefix must contain only alphanumeric characters".to_string(),
         ));
@@ -175,9 +177,7 @@ pub async fn init(base_dir: &Path, prefix: Option<&str>) -> Result<InitResult> {
 
     // Create empty issues.jsonl
     let issues_file = rivets_dir.join(ISSUES_FILE_NAME);
-    let mut file = fs::File::create(&issues_file).await?;
-    // Ensure file is flushed and closed properly
-    file.flush().await?;
+    fs::write(&issues_file, "").await?;
 
     // Create .gitignore inside .rivets
     let gitignore_file = rivets_dir.join(GITIGNORE_FILE_NAME);
@@ -206,21 +206,24 @@ pub fn is_initialized(base_dir: &Path) -> bool {
 /// Find the rivets root directory by searching up the directory tree.
 ///
 /// Starts from the given directory and traverses parent directories
-/// until a `.rivets/` directory is found or the root is reached.
+/// until a `.rivets/` directory is found, the root is reached, or
+/// the maximum traversal depth is exceeded.
 ///
 /// # Returns
 ///
 /// Returns `Some(path)` with the directory containing `.rivets/`,
-/// or `None` if no rivets repository is found.
+/// or `None` if no rivets repository is found within the depth limit.
 pub fn find_rivets_root(start_dir: &Path) -> Option<PathBuf> {
     let mut current = start_dir.to_path_buf();
+    let mut depth = 0;
 
     loop {
         if current.join(RIVETS_DIR_NAME).exists() {
             return Some(current);
         }
 
-        if !current.pop() {
+        depth += 1;
+        if depth > MAX_TRAVERSAL_DEPTH || !current.pop() {
             return None;
         }
     }
@@ -267,9 +270,15 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_prefix_trims_whitespace() {
-        // Prefix with surrounding whitespace should still be validated against the trimmed length
-        assert!(validate_prefix("  ab  ").is_ok());
+    fn test_validate_prefix_rejects_whitespace() {
+        // validate_prefix expects pre-trimmed input; whitespace is not alphanumeric
+        let result = validate_prefix("  ab  ");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .to_lowercase()
+            .contains("alphanumeric"));
     }
 
     // ========== RivetsConfig Tests ==========
