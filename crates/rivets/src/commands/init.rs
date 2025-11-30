@@ -98,7 +98,13 @@ impl RivetsConfig {
     /// Load configuration from a file
     pub async fn load(path: &Path) -> Result<Self> {
         let content = fs::read_to_string(path).await?;
-        serde_yaml::from_str(&content).map_err(|e| Error::Config(e.to_string()))
+        serde_yaml::from_str(&content).map_err(|e| {
+            Error::Config(format!(
+                "Failed to parse config file '{}': {}",
+                path.display(),
+                e
+            ))
+        })
     }
 
     /// Save configuration to a file
@@ -167,8 +173,8 @@ pub fn validate_prefix(prefix: &str) -> Result<()> {
 ///
 /// # Arguments
 ///
-/// * `base_dir` - The base directory where `.rivets/` will be created
-/// * `prefix` - Optional issue ID prefix (defaults to "proj")
+/// - `base_dir` - The base directory where `.rivets/` will be created
+/// - `prefix` - Optional issue ID prefix (defaults to "proj")
 ///
 /// # Returns
 ///
@@ -208,7 +214,7 @@ pub async fn init(base_dir: &Path, prefix: Option<&str>) -> Result<InitResult> {
 
     // Create empty issues.jsonl
     let issues_file = rivets_dir.join(ISSUES_FILE_NAME);
-    fs::write(&issues_file, "").await?;
+    fs::write(&issues_file, &[] as &[u8]).await?;
 
     // Create .gitignore inside .rivets
     let gitignore_file = rivets_dir.join(GITIGNORE_FILE_NAME);

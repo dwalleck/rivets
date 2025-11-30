@@ -3,19 +3,28 @@
 //! These tests verify the end-to-end behavior of the init command,
 //! including the CLI interface and file system operations.
 
+use rstest::{fixture, rstest};
 use tempfile::TempDir;
 
 mod common;
 use common::run_rivets_in_dir;
 
 // ============================================================================
+// Test Fixtures
+// ============================================================================
+
+/// Provides a fresh temporary directory for each test
+#[fixture]
+fn temp_dir() -> TempDir {
+    TempDir::new().expect("Failed to create temp directory")
+}
+
+// ============================================================================
 // Init Command Integration Tests
 // ============================================================================
 
-#[test]
-fn test_init_creates_rivets_directory() {
-    let temp_dir = TempDir::new().unwrap();
-
+#[rstest]
+fn test_init_creates_rivets_directory(temp_dir: TempDir) {
     let output = run_rivets_in_dir(temp_dir.path(), &["init", "--quiet"]);
 
     assert!(output.status.success(), "Init command should succeed");
@@ -26,10 +35,8 @@ fn test_init_creates_rivets_directory() {
     assert!(rivets_dir.is_dir(), ".rivets should be a directory");
 }
 
-#[test]
-fn test_init_creates_config_file() {
-    let temp_dir = TempDir::new().unwrap();
-
+#[rstest]
+fn test_init_creates_config_file(temp_dir: TempDir) {
     let output = run_rivets_in_dir(temp_dir.path(), &["init", "--quiet"]);
     assert!(output.status.success());
 
@@ -52,10 +59,8 @@ fn test_init_creates_config_file() {
     );
 }
 
-#[test]
-fn test_init_creates_issues_file() {
-    let temp_dir = TempDir::new().unwrap();
-
+#[rstest]
+fn test_init_creates_issues_file(temp_dir: TempDir) {
     let output = run_rivets_in_dir(temp_dir.path(), &["init", "--quiet"]);
     assert!(output.status.success());
 
@@ -67,10 +72,8 @@ fn test_init_creates_issues_file() {
     assert!(content.is_empty(), "issues.jsonl should be empty initially");
 }
 
-#[test]
-fn test_init_creates_gitignore() {
-    let temp_dir = TempDir::new().unwrap();
-
+#[rstest]
+fn test_init_creates_gitignore(temp_dir: TempDir) {
     let output = run_rivets_in_dir(temp_dir.path(), &["init", "--quiet"]);
     assert!(output.status.success());
 
@@ -79,10 +82,8 @@ fn test_init_creates_gitignore() {
     assert!(gitignore_path.exists(), ".gitignore should exist");
 }
 
-#[test]
-fn test_init_with_custom_prefix() {
-    let temp_dir = TempDir::new().unwrap();
-
+#[rstest]
+fn test_init_with_custom_prefix(temp_dir: TempDir) {
     let output = run_rivets_in_dir(temp_dir.path(), &["init", "--prefix", "myproj", "--quiet"]);
     assert!(output.status.success());
 
@@ -95,10 +96,8 @@ fn test_init_with_custom_prefix() {
     );
 }
 
-#[test]
-fn test_init_with_default_prefix() {
-    let temp_dir = TempDir::new().unwrap();
-
+#[rstest]
+fn test_init_with_default_prefix(temp_dir: TempDir) {
     let output = run_rivets_in_dir(temp_dir.path(), &["init", "--quiet"]);
     assert!(output.status.success());
 
@@ -111,10 +110,8 @@ fn test_init_with_default_prefix() {
     );
 }
 
-#[test]
-fn test_init_fails_if_already_initialized() {
-    let temp_dir = TempDir::new().unwrap();
-
+#[rstest]
+fn test_init_fails_if_already_initialized(temp_dir: TempDir) {
     // First init should succeed
     let output1 = run_rivets_in_dir(temp_dir.path(), &["init", "--quiet"]);
     assert!(output1.status.success(), "First init should succeed");
@@ -136,10 +133,8 @@ fn test_init_fails_if_already_initialized() {
     );
 }
 
-#[test]
-fn test_init_fails_with_invalid_prefix_too_short() {
-    let temp_dir = TempDir::new().unwrap();
-
+#[rstest]
+fn test_init_fails_with_invalid_prefix_too_short(temp_dir: TempDir) {
     let output = run_rivets_in_dir(temp_dir.path(), &["init", "--prefix", "a"]);
 
     assert!(
@@ -156,10 +151,8 @@ fn test_init_fails_with_invalid_prefix_too_short() {
     );
 }
 
-#[test]
-fn test_init_fails_with_invalid_prefix_special_chars() {
-    let temp_dir = TempDir::new().unwrap();
-
+#[rstest]
+fn test_init_fails_with_invalid_prefix_special_chars(temp_dir: TempDir) {
     let output = run_rivets_in_dir(temp_dir.path(), &["init", "--prefix", "proj-test"]);
 
     assert!(
@@ -175,10 +168,8 @@ fn test_init_fails_with_invalid_prefix_special_chars() {
     );
 }
 
-#[test]
-fn test_init_output_without_quiet_flag() {
-    let temp_dir = TempDir::new().unwrap();
-
+#[rstest]
+fn test_init_output_without_quiet_flag(temp_dir: TempDir) {
     let output = run_rivets_in_dir(temp_dir.path(), &["init"]);
     assert!(output.status.success());
 
@@ -199,10 +190,8 @@ fn test_init_output_without_quiet_flag() {
     );
 }
 
-#[test]
-fn test_init_quiet_flag_suppresses_output() {
-    let temp_dir = TempDir::new().unwrap();
-
+#[rstest]
+fn test_init_quiet_flag_suppresses_output(temp_dir: TempDir) {
     let output = run_rivets_in_dir(temp_dir.path(), &["init", "-q"]);
     assert!(output.status.success());
 
@@ -219,10 +208,8 @@ fn test_init_quiet_flag_suppresses_output() {
     assert!(temp_dir.path().join(".rivets").exists());
 }
 
-#[test]
-fn test_init_with_long_quiet_flag() {
-    let temp_dir = TempDir::new().unwrap();
-
+#[rstest]
+fn test_init_with_long_quiet_flag(temp_dir: TempDir) {
     let output = run_rivets_in_dir(temp_dir.path(), &["init", "--quiet"]);
     assert!(output.status.success());
 
@@ -230,10 +217,8 @@ fn test_init_with_long_quiet_flag() {
     assert!(stdout.is_empty(), "Long quiet flag should also work");
 }
 
-#[test]
-fn test_init_complete_directory_structure() {
-    let temp_dir = TempDir::new().unwrap();
-
+#[rstest]
+fn test_init_complete_directory_structure(temp_dir: TempDir) {
     let output = run_rivets_in_dir(temp_dir.path(), &["init", "--prefix", "test", "--quiet"]);
     assert!(output.status.success());
 
@@ -268,10 +253,8 @@ fn test_init_complete_directory_structure() {
     );
 }
 
-#[test]
-fn test_init_prefix_validation_boundary_2_chars() {
-    let temp_dir = TempDir::new().unwrap();
-
+#[rstest]
+fn test_init_prefix_validation_boundary_2_chars(temp_dir: TempDir) {
     // Exactly 2 characters should work
     let output = run_rivets_in_dir(temp_dir.path(), &["init", "--prefix", "ab", "--quiet"]);
     assert!(output.status.success(), "2-char prefix should be valid");
@@ -281,10 +264,8 @@ fn test_init_prefix_validation_boundary_2_chars() {
     assert!(content.contains("issue-prefix: ab"));
 }
 
-#[test]
-fn test_init_prefix_validation_boundary_20_chars() {
-    let temp_dir = TempDir::new().unwrap();
-
+#[rstest]
+fn test_init_prefix_validation_boundary_20_chars(temp_dir: TempDir) {
     // Exactly 20 characters should work
     let prefix = "a1b2c3d4e5f6g7h8i9j0"; // 20 chars
     let output = run_rivets_in_dir(temp_dir.path(), &["init", "--prefix", prefix, "--quiet"]);
