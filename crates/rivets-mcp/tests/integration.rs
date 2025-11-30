@@ -1113,13 +1113,23 @@ async fn test_list_filters(#[case] test_case: ListFilterCase) {
         results.len()
     );
 
-    // Verify titles if specified
+    // Verify titles if specified (bidirectional check)
     if let Some(expected_titles) = test_case.expected_titles {
         let actual_titles: Vec<&str> = results.iter().map(|i| i.title.as_str()).collect();
-        for title in expected_titles {
+
+        // Check all expected titles are present
+        for title in &expected_titles {
             assert!(
-                actual_titles.contains(&title),
+                actual_titles.contains(title),
                 "Expected title '{title}' not found in results: {actual_titles:?}"
+            );
+        }
+
+        // Check no unexpected titles are present
+        for actual in &actual_titles {
+            assert!(
+                expected_titles.contains(actual),
+                "Unexpected title '{actual}' in results. Expected only: {expected_titles:?}"
             );
         }
     }
@@ -1625,13 +1635,23 @@ async fn test_ready_filters(#[case] test_case: ReadyFilterCase) {
         results.len()
     );
 
-    // Verify titles if specified
+    // Verify titles if specified (bidirectional check)
     if let Some(expected_titles) = test_case.expected_titles {
         let actual_titles: Vec<&str> = results.iter().map(|i| i.title.as_str()).collect();
-        for title in expected_titles {
+
+        // Check all expected titles are present
+        for title in &expected_titles {
             assert!(
-                actual_titles.contains(&title),
+                actual_titles.contains(title),
                 "Expected title '{title}' not found in results: {actual_titles:?}"
+            );
+        }
+
+        // Check no unexpected titles are present
+        for actual in &actual_titles {
+            assert!(
+                expected_titles.contains(actual),
+                "Unexpected title '{actual}' in results. Expected only: {expected_titles:?}"
             );
         }
     }
