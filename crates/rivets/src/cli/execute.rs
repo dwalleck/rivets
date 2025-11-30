@@ -56,11 +56,8 @@ pub async fn execute_create(
             eprint!("Title: ");
             let mut input = String::new();
             std::io::stdin().read_line(&mut input)?;
-            let trimmed = input.trim().to_string();
-            if trimmed.is_empty() {
-                anyhow::bail!("Title cannot be empty");
-            }
-            trimmed
+            // Apply same validation as CLI argument parsing
+            super::validators::validate_title(input.trim()).map_err(|e| anyhow::anyhow!("{}", e))?
         }
     };
 
@@ -242,6 +239,12 @@ pub async fn execute_close(
     let issue_id = IssueId::new(&args.issue_id);
 
     // Build updated notes: append close reason to existing notes if present
+    //
+    // NOTE: There is a TOCTOU (time-of-check-time-of-use) window between reading
+    // the existing notes and updating the issue. In a multi-process scenario,
+    // another process could modify notes between these operations. This is
+    // acceptable for a single-user CLI tool. For concurrent access, consider
+    // adding an atomic "append_notes" operation to the storage trait.
     let new_notes = if args.reason != "Completed" {
         let existing = app
             .storage()
@@ -336,11 +339,11 @@ pub async fn execute_ready(
     use crate::domain::{IssueFilter, SortPolicy};
     use crate::output;
 
+    // Only create filter if we have filtering criteria; limit is applied after via truncate
     let filter = if args.assignee.is_some() || args.priority.is_some() {
         Some(IssueFilter {
             assignee: args.assignee.clone(),
             priority: args.priority,
-            limit: Some(args.limit),
             ..Default::default()
         })
     } else {
