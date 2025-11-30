@@ -1,6 +1,46 @@
 //! Integration tests for the rivets CLI.
 
 use std::process::Command;
+use tempfile::TempDir;
+
+/// Get the workspace root directory
+fn workspace_root() -> std::path::PathBuf {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    // Go up from crates/rivets to workspace root
+    manifest_dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf()
+}
+
+/// Helper that builds the binary once and runs it directly
+fn get_rivets_binary() -> std::path::PathBuf {
+    let workspace = workspace_root();
+
+    // Build the binary first (this should be quick if already built)
+    let status = Command::new("cargo")
+        .args(["build", "--package", "rivets", "--quiet"])
+        .current_dir(&workspace)
+        .status()
+        .expect("Failed to build rivets");
+
+    assert!(status.success(), "Failed to build rivets binary");
+
+    workspace.join("target/debug/rivets")
+}
+
+/// Run the rivets binary directly in the specified directory
+fn run_rivets_in_dir(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    let binary = get_rivets_binary();
+
+    Command::new(&binary)
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("Failed to execute rivets binary")
+}
 
 #[test]
 fn test_cli_help() {
@@ -39,10 +79,9 @@ fn test_cli_no_args() {
 
 #[test]
 fn test_cli_init_command() {
-    let output = Command::new("cargo")
-        .args(["run", "--package", "rivets", "--", "init"])
-        .output()
-        .expect("Failed to execute command");
+    let temp_dir = TempDir::new().unwrap();
+
+    let output = run_rivets_in_dir(temp_dir.path(), &["init"]);
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -366,18 +405,9 @@ fn test_cli_delete_with_force() {
 
 #[test]
 fn test_cli_init_with_prefix() {
-    let output = Command::new("cargo")
-        .args([
-            "run",
-            "--package",
-            "rivets",
-            "--",
-            "init",
-            "--prefix",
-            "myproj",
-        ])
-        .output()
-        .expect("Failed to execute command");
+    let temp_dir = TempDir::new().unwrap();
+
+    let output = run_rivets_in_dir(temp_dir.path(), &["init", "--prefix", "myproj"]);
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -386,18 +416,9 @@ fn test_cli_init_with_prefix() {
 
 #[test]
 fn test_cli_init_invalid_prefix() {
-    let output = Command::new("cargo")
-        .args([
-            "run",
-            "--package",
-            "rivets",
-            "--",
-            "init",
-            "--prefix",
-            "a", // Too short, must be at least 2 chars
-        ])
-        .output()
-        .expect("Failed to execute command");
+    let temp_dir = TempDir::new().unwrap();
+
+    let output = run_rivets_in_dir(temp_dir.path(), &["init", "--prefix", "a"]);
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);

@@ -2,4 +2,4 @@
 //!
 //! This module contains the implementation of all CLI commands.
 
-// Command modules will be added here as they are implemented
+pub mod init;

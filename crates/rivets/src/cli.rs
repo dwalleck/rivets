@@ -697,18 +697,7 @@ impl Cli {
     /// is complete (rivets-cgl).
     pub async fn execute(&self) -> Result<()> {
         match &self.command {
-            Some(Commands::Init(args)) => {
-                if !args.quiet {
-                    println!(
-                        "Initializing rivets repository{}...",
-                        args.prefix
-                            .as_ref()
-                            .map(|p| format!(" with prefix '{}'", p))
-                            .unwrap_or_default()
-                    );
-                }
-                Ok(())
-            }
+            Some(Commands::Init(args)) => Self::execute_init(args).await,
             Some(Commands::Create(args)) => {
                 println!(
                     "Creating issue: {}",
@@ -787,6 +776,38 @@ impl Cli {
                 println!("Rivets issue tracking system");
                 println!("Use --help for more information");
                 Ok(())
+            }
+        }
+    }
+
+    /// Execute the init command
+    async fn execute_init(args: &InitArgs) -> Result<()> {
+        use crate::commands::init;
+
+        let current_dir = std::env::current_dir()?;
+
+        if !args.quiet {
+            println!(
+                "Initializing rivets repository{}...",
+                args.prefix
+                    .as_ref()
+                    .map(|p| format!(" with prefix '{}'", p))
+                    .unwrap_or_default()
+            );
+        }
+
+        match init::init(&current_dir, args.prefix.as_deref()).await {
+            Ok(result) => {
+                if !args.quiet {
+                    println!("Initialized rivets in {}", result.rivets_dir.display());
+                    println!("  Config: {}", result.config_file.display());
+                    println!("  Issues: {}", result.issues_file.display());
+                    println!("  Issue prefix: {}", result.prefix);
+                }
+                Ok(())
+            }
+            Err(e) => {
+                anyhow::bail!("{}", e)
             }
         }
     }
