@@ -27,8 +27,14 @@ pub struct ReadyParams {
     /// Filter by priority level.
     pub priority: Option<u8>,
 
+    /// Filter by issue type.
+    pub issue_type: Option<String>,
+
     /// Filter by assignee.
     pub assignee: Option<String>,
+
+    /// Filter by label.
+    pub label: Option<String>,
 
     /// Optional workspace root (uses current context if not specified).
     pub workspace_root: Option<String>,
@@ -48,6 +54,9 @@ pub struct ListParams {
 
     /// Filter by assignee.
     pub assignee: Option<String>,
+
+    /// Filter by label.
+    pub label: Option<String>,
 
     /// Maximum number of issues to return.
     pub limit: Option<usize>,

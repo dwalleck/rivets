@@ -119,9 +119,14 @@ impl Tools {
         &self,
         limit: Option<usize>,
         priority: Option<u8>,
+        issue_type: Option<&str>,
         assignee: Option<String>,
+        label: Option<String>,
         workspace_root: Option<&str>,
     ) -> Result<Vec<McpIssue>> {
+        // Validate enum values before acquiring locks
+        let issue_type = issue_type.map(validate_issue_type).transpose()?;
+
         // Release context lock before acquiring storage lock to prevent deadlocks
         let storage = {
             let context = self.context.read().await;
@@ -131,7 +136,9 @@ impl Tools {
 
         let filter = IssueFilter {
             priority,
+            issue_type,
             assignee,
+            label,
             limit,
             ..Default::default()
         };
@@ -145,12 +152,14 @@ impl Tools {
     /// # Errors
     ///
     /// Returns an error if no context is set, invalid filter values, or storage operations fail.
+    #[allow(clippy::too_many_arguments)]
     pub async fn list(
         &self,
         status: Option<&str>,
         priority: Option<u8>,
         issue_type: Option<&str>,
         assignee: Option<String>,
+        label: Option<String>,
         limit: Option<usize>,
         workspace_root: Option<&str>,
     ) -> Result<Vec<McpIssue>> {
@@ -169,8 +178,8 @@ impl Tools {
             priority,
             issue_type,
             assignee,
+            label,
             limit,
-            ..Default::default()
         };
 
         let issues = storage.list(&filter).await?;
@@ -462,7 +471,7 @@ mod tests {
         create_issue(&tools, "Issue 2").await;
 
         let issues = tools
-            .list(None, None, None, None, None, None)
+            .list(None, None, None, None, None, None, None)
             .await
             .unwrap();
         assert_eq!(issues.len(), 2);
@@ -519,7 +528,10 @@ mod tests {
 
         create_issue(&tools, "Ready Issue").await;
 
-        let ready = tools.ready(None, None, None, None).await.unwrap();
+        let ready = tools
+            .ready(None, None, None, None, None, None)
+            .await
+            .unwrap();
         assert!(!ready.is_empty());
     }
 
@@ -591,7 +603,7 @@ mod tests {
         let context = Arc::new(RwLock::new(Context::new()));
         let tools = Tools::new(context);
 
-        let result = tools.list(None, None, None, None, None, None).await;
+        let result = tools.list(None, None, None, None, None, None, None).await;
         assert!(result.is_err());
     }
 
@@ -615,8 +627,8 @@ mod tests {
             let tools = Arc::clone(&tools);
             handles.push(tokio::spawn(async move {
                 for _ in 0..10 {
-                    let _ = tools.list(None, None, None, None, None, None).await;
-                    let _ = tools.ready(None, None, None, None).await;
+                    let _ = tools.list(None, None, None, None, None, None, None).await;
+                    let _ = tools.ready(None, None, None, None, None, None).await;
                 }
             }));
         }

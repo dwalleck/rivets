@@ -86,7 +86,9 @@ impl RivetsMcpServer {
             .ready(
                 params.limit,
                 params.priority,
+                params.issue_type.as_deref(),
                 params.assignee,
+                params.label,
                 params.workspace_root.as_deref(),
             )
             .await
@@ -98,7 +100,7 @@ impl RivetsMcpServer {
 
     /// List issues with optional filters.
     #[tool(
-        description = "List all issues with optional filters (status, priority, type, assignee). Uses workspace_root if provided, otherwise uses current context."
+        description = "List all issues with optional filters (status, priority, type, assignee, label). Uses workspace_root if provided, otherwise uses current context."
     )]
     async fn list(
         &self,
@@ -111,6 +113,7 @@ impl RivetsMcpServer {
                 params.priority,
                 params.issue_type.as_deref(),
                 params.assignee,
+                params.label,
                 params.limit,
                 params.workspace_root.as_deref(),
             )
