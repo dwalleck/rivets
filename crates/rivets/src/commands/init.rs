@@ -2,6 +2,36 @@
 //!
 //! This module handles initialization of a new rivets repository, creating
 //! the `.rivets/` directory structure with configuration and data files.
+//!
+//! # Example
+//!
+//! ```no_run
+//! use rivets::commands::init;
+//! use std::path::Path;
+//!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! // Initialize with default prefix "proj"
+//! let result = init::init(Path::new("/my/project"), None).await?;
+//! println!("Initialized at: {}", result.rivets_dir.display());
+//!
+//! // Initialize with custom prefix
+//! let result = init::init(Path::new("/another/project"), Some("myapp")).await?;
+//! assert_eq!(result.prefix, "myapp");
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Validation
+//!
+//! The [`validate_prefix`] function can be used to check prefix validity:
+//!
+//! ```
+//! use rivets::commands::init::validate_prefix;
+//!
+//! assert!(validate_prefix("myproj").is_ok());
+//! assert!(validate_prefix("a").is_err());  // too short
+//! assert!(validate_prefix("my-proj").is_err());  // contains hyphen
+//! ```
 
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -159,16 +189,17 @@ pub async fn init(base_dir: &Path, prefix: Option<&str>) -> Result<InitResult> {
 
     let rivets_dir = base_dir.join(RIVETS_DIR_NAME);
 
-    // Check if already initialized
-    if rivets_dir.exists() {
-        return Err(Error::Config(format!(
-            "Rivets is already initialized in this directory. Found existing '{}'",
-            RIVETS_DIR_NAME
-        )));
+    // Create the .rivets directory atomically (avoids TOCTOU race)
+    match fs::create_dir(&rivets_dir).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(Error::Config(format!(
+                "Rivets is already initialized in this directory. Found existing '{}'",
+                RIVETS_DIR_NAME
+            )));
+        }
+        Err(e) => return Err(e.into()),
     }
-
-    // Create the .rivets directory
-    fs::create_dir_all(&rivets_dir).await?;
 
     // Create config.yaml
     let config_file = rivets_dir.join(CONFIG_FILE_NAME);
@@ -348,6 +379,21 @@ mod tests {
         assert_eq!(result.prefix, "myproj");
 
         // Verify config has the correct prefix
+        let config = RivetsConfig::load(&result.config_file).await.unwrap();
+        assert_eq!(config.issue_prefix, "myproj");
+    }
+
+    #[tokio::test]
+    async fn test_init_trims_prefix_whitespace() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Pass prefix with surrounding whitespace
+        let result = init(temp_dir.path(), Some("  myproj  ")).await.unwrap();
+
+        // Result should have trimmed prefix
+        assert_eq!(result.prefix, "myproj");
+
+        // Config should also have trimmed prefix
         let config = RivetsConfig::load(&result.config_file).await.unwrap();
         assert_eq!(config.issue_prefix, "myproj");
     }
