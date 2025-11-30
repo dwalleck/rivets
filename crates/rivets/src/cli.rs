@@ -518,26 +518,14 @@ impl std::fmt::Display for SortPolicyArg {
 
 /// Validate issue ID prefix format.
 ///
-/// Requirements:
-/// - 2-20 characters
-/// - Alphanumeric only (letters and digits)
-/// - No special characters or spaces
+/// Delegates to the domain validator in `commands::init` to maintain
+/// a single source of truth for validation rules.
 fn validate_prefix(s: &str) -> std::result::Result<String, String> {
-    let s = s.trim();
+    use crate::commands::init;
 
-    if s.len() < 2 {
-        return Err("Prefix must be at least 2 characters".to_string());
-    }
-
-    if s.len() > 20 {
-        return Err("Prefix cannot exceed 20 characters".to_string());
-    }
-
-    if !s.chars().all(|c| c.is_ascii_alphanumeric()) {
-        return Err("Prefix must contain only alphanumeric characters".to_string());
-    }
-
-    Ok(s.to_string())
+    let trimmed = s.trim();
+    init::validate_prefix(trimmed).map_err(|e| e.to_string())?;
+    Ok(trimmed.to_string())
 }
 
 /// Validate issue ID format.
@@ -697,18 +685,7 @@ impl Cli {
     /// is complete (rivets-cgl).
     pub async fn execute(&self) -> Result<()> {
         match &self.command {
-            Some(Commands::Init(args)) => {
-                if !args.quiet {
-                    println!(
-                        "Initializing rivets repository{}...",
-                        args.prefix
-                            .as_ref()
-                            .map(|p| format!(" with prefix '{}'", p))
-                            .unwrap_or_default()
-                    );
-                }
-                Ok(())
-            }
+            Some(Commands::Init(args)) => Self::execute_init(args).await,
             Some(Commands::Create(args)) => {
                 println!(
                     "Creating issue: {}",
@@ -789,6 +766,34 @@ impl Cli {
                 Ok(())
             }
         }
+    }
+
+    /// Execute the init command
+    async fn execute_init(args: &InitArgs) -> Result<()> {
+        use crate::commands::init;
+
+        let current_dir = std::env::current_dir()?;
+
+        if !args.quiet {
+            println!(
+                "Initializing rivets repository{}...",
+                args.prefix
+                    .as_ref()
+                    .map(|p| format!(" with prefix '{}'", p))
+                    .unwrap_or_default()
+            );
+        }
+
+        let result = init::init(&current_dir, args.prefix.as_deref()).await?;
+
+        if !args.quiet {
+            println!("Initialized rivets in {}", result.rivets_dir.display());
+            println!("  Config: {}", result.config_file.display());
+            println!("  Issues: {}", result.issues_file.display());
+            println!("  Issue prefix: {}", result.prefix);
+        }
+
+        Ok(())
     }
 }
 

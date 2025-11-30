@@ -1,6 +1,10 @@
 //! Integration tests for the rivets CLI.
 
 use std::process::Command;
+use tempfile::TempDir;
+
+mod common;
+use common::run_rivets_in_dir;
 
 #[test]
 fn test_cli_help() {
@@ -39,10 +43,9 @@ fn test_cli_no_args() {
 
 #[test]
 fn test_cli_init_command() {
-    let output = Command::new("cargo")
-        .args(["run", "--package", "rivets", "--", "init"])
-        .output()
-        .expect("Failed to execute command");
+    let temp_dir = TempDir::new().unwrap();
+
+    let output = run_rivets_in_dir(temp_dir.path(), &["init"]);
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -366,18 +369,9 @@ fn test_cli_delete_with_force() {
 
 #[test]
 fn test_cli_init_with_prefix() {
-    let output = Command::new("cargo")
-        .args([
-            "run",
-            "--package",
-            "rivets",
-            "--",
-            "init",
-            "--prefix",
-            "myproj",
-        ])
-        .output()
-        .expect("Failed to execute command");
+    let temp_dir = TempDir::new().unwrap();
+
+    let output = run_rivets_in_dir(temp_dir.path(), &["init", "--prefix", "myproj"]);
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -386,18 +380,9 @@ fn test_cli_init_with_prefix() {
 
 #[test]
 fn test_cli_init_invalid_prefix() {
-    let output = Command::new("cargo")
-        .args([
-            "run",
-            "--package",
-            "rivets",
-            "--",
-            "init",
-            "--prefix",
-            "a", // Too short, must be at least 2 chars
-        ])
-        .output()
-        .expect("Failed to execute command");
+    let temp_dir = TempDir::new().unwrap();
+
+    let output = run_rivets_in_dir(temp_dir.path(), &["init", "--prefix", "a"]);
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);

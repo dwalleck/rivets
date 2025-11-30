@@ -52,6 +52,9 @@ rivets = { path = "crates/rivets" }
 # JSON Schema
 schemars = "1.1"
 
+# Configuration file format
+serde_yaml = "0.9"
+
 # Testing utilities
 tempfile = "3.18"
 rstest = "0.26"
