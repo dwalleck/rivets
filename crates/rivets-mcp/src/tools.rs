@@ -28,6 +28,12 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+/// Default limit for list/ready queries when none is specified.
+///
+/// Prevents potential OOM errors with large issue databases by ensuring
+/// queries always have a reasonable upper bound.
+const DEFAULT_QUERY_LIMIT: usize = 100;
+
 /// Parse and validate a status string.
 fn validate_status(status: &str) -> Result<IssueStatus> {
     parse_status(status).ok_or_else(|| Error::InvalidArgument {
@@ -112,6 +118,9 @@ impl Tools {
 
     /// Get issues ready to work on.
     ///
+    /// If no limit is specified, defaults to [`DEFAULT_QUERY_LIMIT`] (100) to prevent
+    /// potential OOM errors with large issue databases.
+    ///
     /// # Errors
     ///
     /// Returns an error if no context is set or storage operations fail.
@@ -119,9 +128,14 @@ impl Tools {
         &self,
         limit: Option<usize>,
         priority: Option<u8>,
+        issue_type: Option<&str>,
         assignee: Option<String>,
+        label: Option<String>,
         workspace_root: Option<&str>,
     ) -> Result<Vec<McpIssue>> {
+        // Validate enum values before acquiring locks
+        let issue_type = issue_type.map(validate_issue_type).transpose()?;
+
         // Release context lock before acquiring storage lock to prevent deadlocks
         let storage = {
             let context = self.context.read().await;
@@ -131,8 +145,10 @@ impl Tools {
 
         let filter = IssueFilter {
             priority,
+            issue_type,
             assignee,
-            limit,
+            label,
+            limit: Some(limit.unwrap_or(DEFAULT_QUERY_LIMIT)),
             ..Default::default()
         };
 
@@ -142,15 +158,20 @@ impl Tools {
 
     /// List issues with optional filters.
     ///
+    /// If no limit is specified, defaults to [`DEFAULT_QUERY_LIMIT`] (100) to prevent
+    /// potential OOM errors with large issue databases.
+    ///
     /// # Errors
     ///
     /// Returns an error if no context is set, invalid filter values, or storage operations fail.
+    #[allow(clippy::too_many_arguments)]
     pub async fn list(
         &self,
         status: Option<&str>,
         priority: Option<u8>,
         issue_type: Option<&str>,
         assignee: Option<String>,
+        label: Option<String>,
         limit: Option<usize>,
         workspace_root: Option<&str>,
     ) -> Result<Vec<McpIssue>> {
@@ -169,8 +190,8 @@ impl Tools {
             priority,
             issue_type,
             assignee,
-            limit,
-            ..Default::default()
+            label,
+            limit: Some(limit.unwrap_or(DEFAULT_QUERY_LIMIT)),
         };
 
         let issues = storage.list(&filter).await?;
@@ -462,7 +483,7 @@ mod tests {
         create_issue(&tools, "Issue 2").await;
 
         let issues = tools
-            .list(None, None, None, None, None, None)
+            .list(None, None, None, None, None, None, None)
             .await
             .unwrap();
         assert_eq!(issues.len(), 2);
@@ -519,7 +540,10 @@ mod tests {
 
         create_issue(&tools, "Ready Issue").await;
 
-        let ready = tools.ready(None, None, None, None).await.unwrap();
+        let ready = tools
+            .ready(None, None, None, None, None, None)
+            .await
+            .unwrap();
         assert!(!ready.is_empty());
     }
 
@@ -591,8 +615,34 @@ mod tests {
         let context = Arc::new(RwLock::new(Context::new()));
         let tools = Tools::new(context);
 
-        let result = tools.list(None, None, None, None, None, None).await;
+        let result = tools.list(None, None, None, None, None, None, None).await;
         assert!(result.is_err());
+    }
+
+    /// Test that explicit limits are respected by list and ready.
+    #[rstest]
+    #[tokio::test]
+    async fn test_explicit_limit_is_respected(#[future] tools: Tools) {
+        let tools = tools.await;
+
+        // Create 5 issues
+        for i in 0..5 {
+            create_issue(&tools, &format!("Issue {i}")).await;
+        }
+
+        // List with limit of 2
+        let issues = tools
+            .list(None, None, None, None, None, Some(2), None)
+            .await
+            .unwrap();
+        assert_eq!(issues.len(), 2, "list should respect explicit limit");
+
+        // Ready with limit of 3
+        let ready = tools
+            .ready(Some(3), None, None, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(ready.len(), 3, "ready should respect explicit limit");
     }
 
     /// Test concurrent access to Tools methods.
@@ -615,8 +665,8 @@ mod tests {
             let tools = Arc::clone(&tools);
             handles.push(tokio::spawn(async move {
                 for _ in 0..10 {
-                    let _ = tools.list(None, None, None, None, None, None).await;
-                    let _ = tools.ready(None, None, None, None).await;
+                    let _ = tools.list(None, None, None, None, None, None, None).await;
+                    let _ = tools.ready(None, None, None, None, None, None).await;
                 }
             }));
         }

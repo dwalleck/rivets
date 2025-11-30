@@ -380,6 +380,11 @@ impl IssueStorage for InMemoryStorage {
         // Sort by created_at (most recent first)
         issues.sort_by(|a, b| b.created_at.cmp(&a.created_at));
 
+        // Apply limit if specified
+        if let Some(limit) = filter.limit {
+            issues.truncate(limit);
+        }
+
         Ok(issues)
     }
 
@@ -446,6 +451,13 @@ impl IssueStorage for InMemoryStorage {
         // Apply sort policy
         let policy = sort_policy.unwrap_or_default();
         sort_by_policy(&mut ready, policy);
+
+        // Apply limit if specified
+        if let Some(filter) = filter {
+            if let Some(limit) = filter.limit {
+                ready.truncate(limit);
+            }
+        }
 
         Ok(ready)
     }

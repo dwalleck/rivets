@@ -303,6 +303,106 @@ pub enum StorageBackend {
     PostgreSQL(String),
 }
 
+/// Wrapper that adds JSONL file persistence to any storage backend.
+///
+/// This wrapper holds a reference to the file path and implements `save()`
+/// by writing all issues to the JSONL file atomically.
+struct JsonlBackedStorage {
+    inner: Box<dyn IssueStorage>,
+    path: PathBuf,
+}
+
+impl JsonlBackedStorage {
+    /// Returns an immutable reference to the inner storage implementation.
+    ///
+    /// This is useful for testing or when you need to access the underlying
+    /// storage without the JSONL persistence wrapper.
+    #[allow(dead_code)]
+    pub(crate) fn inner(&self) -> &dyn IssueStorage {
+        self.inner.as_ref()
+    }
+}
+
+#[async_trait]
+impl IssueStorage for JsonlBackedStorage {
+    async fn create(&mut self, issue: NewIssue) -> Result<Issue> {
+        self.inner.create(issue).await
+    }
+
+    async fn get(&self, id: &IssueId) -> Result<Option<Issue>> {
+        self.inner.get(id).await
+    }
+
+    async fn update(&mut self, id: &IssueId, updates: IssueUpdate) -> Result<Issue> {
+        self.inner.update(id, updates).await
+    }
+
+    async fn delete(&mut self, id: &IssueId) -> Result<()> {
+        self.inner.delete(id).await
+    }
+
+    async fn add_dependency(
+        &mut self,
+        from: &IssueId,
+        to: &IssueId,
+        dep_type: DependencyType,
+    ) -> Result<()> {
+        self.inner.add_dependency(from, to, dep_type).await
+    }
+
+    async fn remove_dependency(&mut self, from: &IssueId, to: &IssueId) -> Result<()> {
+        self.inner.remove_dependency(from, to).await
+    }
+
+    async fn get_dependencies(&self, id: &IssueId) -> Result<Vec<Dependency>> {
+        self.inner.get_dependencies(id).await
+    }
+
+    async fn get_dependents(&self, id: &IssueId) -> Result<Vec<Dependency>> {
+        self.inner.get_dependents(id).await
+    }
+
+    async fn has_cycle(&self, from: &IssueId, to: &IssueId) -> Result<bool> {
+        self.inner.has_cycle(from, to).await
+    }
+
+    async fn get_dependency_tree(
+        &self,
+        id: &IssueId,
+        max_depth: Option<usize>,
+    ) -> Result<Vec<(Dependency, usize)>> {
+        self.inner.get_dependency_tree(id, max_depth).await
+    }
+
+    async fn list(&self, filter: &IssueFilter) -> Result<Vec<Issue>> {
+        self.inner.list(filter).await
+    }
+
+    async fn ready_to_work(
+        &self,
+        filter: Option<&IssueFilter>,
+        sort_policy: Option<SortPolicy>,
+    ) -> Result<Vec<Issue>> {
+        self.inner.ready_to_work(filter, sort_policy).await
+    }
+
+    async fn blocked_issues(&self) -> Result<Vec<(Issue, Vec<Issue>)>> {
+        self.inner.blocked_issues().await
+    }
+
+    async fn import_issues(&mut self, issues: Vec<Issue>) -> Result<()> {
+        self.inner.import_issues(issues).await
+    }
+
+    async fn export_all(&self) -> Result<Vec<Issue>> {
+        self.inner.export_all().await
+    }
+
+    async fn save(&self) -> Result<()> {
+        in_memory::save_to_jsonl(self.inner.as_ref(), &self.path).await
+    }
+}
+
 /// Create a storage instance for the given backend.
 ///
 /// This factory function returns a trait object that can be used
@@ -328,11 +428,24 @@ pub enum StorageBackend {
 pub async fn create_storage(backend: StorageBackend) -> Result<Box<dyn IssueStorage>> {
     match backend {
         StorageBackend::InMemory => Ok(in_memory::new_in_memory_storage("rivets".to_string())),
-        StorageBackend::Jsonl(_path) => {
-            // TODO: Implement JSONL backend
-            Err(crate::error::Error::Storage(
-                "JSONL storage backend not yet implemented".to_string(),
-            ))
+        StorageBackend::Jsonl(path) => {
+            // JSONL backend uses InMemoryStorage with file persistence
+            let inner = if path.exists() {
+                let (storage, warnings) =
+                    in_memory::load_from_jsonl(&path, "rivets".to_string()).await?;
+                if !warnings.is_empty() {
+                    // Log warnings but continue - storage is still usable
+                    for warning in &warnings {
+                        tracing::warn!("JSONL load warning: {:?}", warning);
+                    }
+                }
+                storage
+            } else {
+                // File doesn't exist yet (first run) - create empty storage
+                in_memory::new_in_memory_storage("rivets".to_string())
+            };
+            // Wrap in JsonlBackedStorage so save() writes to file
+            Ok(Box::new(JsonlBackedStorage { inner, path }))
         }
         StorageBackend::PostgreSQL(_conn_str) => {
             // TODO: Implement PostgreSQL backend
