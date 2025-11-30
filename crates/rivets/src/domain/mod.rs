@@ -156,6 +156,17 @@ pub enum IssueStatus {
     Closed,
 }
 
+impl fmt::Display for IssueStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Open => write!(f, "open"),
+            Self::InProgress => write!(f, "in_progress"),
+            Self::Blocked => write!(f, "blocked"),
+            Self::Closed => write!(f, "closed"),
+        }
+    }
+}
+
 /// Type of issue
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -174,6 +185,18 @@ pub enum IssueType {
 
     /// Maintenance/chore
     Chore,
+}
+
+impl fmt::Display for IssueType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Bug => write!(f, "bug"),
+            Self::Feature => write!(f, "feature"),
+            Self::Task => write!(f, "task"),
+            Self::Epic => write!(f, "epic"),
+            Self::Chore => write!(f, "chore"),
+        }
+    }
 }
 
 /// Dependency between issues
@@ -201,6 +224,17 @@ pub enum DependencyType {
 
     /// Found during work
     DiscoveredFrom,
+}
+
+impl fmt::Display for DependencyType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Blocks => write!(f, "blocks"),
+            Self::Related => write!(f, "related"),
+            Self::ParentChild => write!(f, "parent-child"),
+            Self::DiscoveredFrom => write!(f, "discovered-from"),
+        }
+    }
 }
 
 /// Sort policy for ready work queries.
@@ -563,5 +597,35 @@ mod tests {
     fn test_new_issue_default_validates() {
         let issue = NewIssue::default();
         assert!(issue.validate().is_ok());
+    }
+
+    // ===== Display Implementation Tests =====
+
+    #[test]
+    fn test_issue_status_display() {
+        assert_eq!(format!("{}", IssueStatus::Open), "open");
+        assert_eq!(format!("{}", IssueStatus::InProgress), "in_progress");
+        assert_eq!(format!("{}", IssueStatus::Blocked), "blocked");
+        assert_eq!(format!("{}", IssueStatus::Closed), "closed");
+    }
+
+    #[test]
+    fn test_issue_type_display() {
+        assert_eq!(format!("{}", IssueType::Bug), "bug");
+        assert_eq!(format!("{}", IssueType::Feature), "feature");
+        assert_eq!(format!("{}", IssueType::Task), "task");
+        assert_eq!(format!("{}", IssueType::Epic), "epic");
+        assert_eq!(format!("{}", IssueType::Chore), "chore");
+    }
+
+    #[test]
+    fn test_dependency_type_display() {
+        assert_eq!(format!("{}", DependencyType::Blocks), "blocks");
+        assert_eq!(format!("{}", DependencyType::Related), "related");
+        assert_eq!(format!("{}", DependencyType::ParentChild), "parent-child");
+        assert_eq!(
+            format!("{}", DependencyType::DiscoveredFrom),
+            "discovered-from"
+        );
     }
 }
