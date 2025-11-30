@@ -28,6 +28,12 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+/// Default limit for list/ready queries when none is specified.
+///
+/// Prevents potential OOM errors with large issue databases by ensuring
+/// queries always have a reasonable upper bound.
+const DEFAULT_QUERY_LIMIT: usize = 100;
+
 /// Parse and validate a status string.
 fn validate_status(status: &str) -> Result<IssueStatus> {
     parse_status(status).ok_or_else(|| Error::InvalidArgument {
@@ -112,6 +118,9 @@ impl Tools {
 
     /// Get issues ready to work on.
     ///
+    /// If no limit is specified, defaults to [`DEFAULT_QUERY_LIMIT`] (100) to prevent
+    /// potential OOM errors with large issue databases.
+    ///
     /// # Errors
     ///
     /// Returns an error if no context is set or storage operations fail.
@@ -139,7 +148,7 @@ impl Tools {
             issue_type,
             assignee,
             label,
-            limit,
+            limit: Some(limit.unwrap_or(DEFAULT_QUERY_LIMIT)),
             ..Default::default()
         };
 
@@ -148,6 +157,9 @@ impl Tools {
     }
 
     /// List issues with optional filters.
+    ///
+    /// If no limit is specified, defaults to [`DEFAULT_QUERY_LIMIT`] (100) to prevent
+    /// potential OOM errors with large issue databases.
     ///
     /// # Errors
     ///
@@ -179,7 +191,7 @@ impl Tools {
             issue_type,
             assignee,
             label,
-            limit,
+            limit: Some(limit.unwrap_or(DEFAULT_QUERY_LIMIT)),
         };
 
         let issues = storage.list(&filter).await?;
@@ -605,6 +617,32 @@ mod tests {
 
         let result = tools.list(None, None, None, None, None, None, None).await;
         assert!(result.is_err());
+    }
+
+    /// Test that explicit limits are respected by list and ready.
+    #[rstest]
+    #[tokio::test]
+    async fn test_explicit_limit_is_respected(#[future] tools: Tools) {
+        let tools = tools.await;
+
+        // Create 5 issues
+        for i in 0..5 {
+            create_issue(&tools, &format!("Issue {i}")).await;
+        }
+
+        // List with limit of 2
+        let issues = tools
+            .list(None, None, None, None, None, Some(2), None)
+            .await
+            .unwrap();
+        assert_eq!(issues.len(), 2, "list should respect explicit limit");
+
+        // Ready with limit of 3
+        let ready = tools
+            .ready(Some(3), None, None, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(ready.len(), 3, "ready should respect explicit limit");
     }
 
     /// Test concurrent access to Tools methods.
