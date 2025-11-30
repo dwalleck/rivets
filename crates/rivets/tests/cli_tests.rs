@@ -3,44 +3,8 @@
 use std::process::Command;
 use tempfile::TempDir;
 
-/// Get the workspace root directory
-fn workspace_root() -> std::path::PathBuf {
-    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    // Go up from crates/rivets to workspace root
-    manifest_dir
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf()
-}
-
-/// Helper that builds the binary once and runs it directly
-fn get_rivets_binary() -> std::path::PathBuf {
-    let workspace = workspace_root();
-
-    // Build the binary first (this should be quick if already built)
-    let status = Command::new("cargo")
-        .args(["build", "--package", "rivets", "--quiet"])
-        .current_dir(&workspace)
-        .status()
-        .expect("Failed to build rivets");
-
-    assert!(status.success(), "Failed to build rivets binary");
-
-    workspace.join("target/debug/rivets")
-}
-
-/// Run the rivets binary directly in the specified directory
-fn run_rivets_in_dir(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
-    let binary = get_rivets_binary();
-
-    Command::new(&binary)
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .expect("Failed to execute rivets binary")
-}
+mod common;
+use common::run_rivets_in_dir;
 
 #[test]
 fn test_cli_help() {

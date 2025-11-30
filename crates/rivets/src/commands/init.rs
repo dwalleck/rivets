@@ -149,9 +149,10 @@ pub fn validate_prefix(prefix: &str) -> Result<()> {
 /// - The prefix is invalid
 /// - File system operations fail
 pub async fn init(base_dir: &Path, prefix: Option<&str>) -> Result<InitResult> {
-    let prefix = prefix.unwrap_or(DEFAULT_PREFIX);
+    // Trim whitespace and use the trimmed version consistently
+    let prefix = prefix.unwrap_or(DEFAULT_PREFIX).trim();
 
-    // Validate prefix
+    // Validate prefix (uses trimmed value)
     validate_prefix(prefix)?;
 
     let rivets_dir = base_dir.join(RIVETS_DIR_NAME);
@@ -180,8 +181,10 @@ pub async fn init(base_dir: &Path, prefix: Option<&str>) -> Result<InitResult> {
 
     // Create .gitignore inside .rivets
     let gitignore_file = rivets_dir.join(GITIGNORE_FILE_NAME);
-    let gitignore_content = "# Rivets metadata files that should not be tracked\n\
-                             # The issues.jsonl file should be tracked for collaboration\n";
+    let gitignore_content = "\
+# Rivets metadata files that should not be tracked
+# The issues.jsonl file should be tracked for collaboration
+";
     fs::write(&gitignore_file, gitignore_content).await?;
 
     Ok(InitResult {

@@ -14,7 +14,7 @@ pub mod storage;
 // Public CLI module (needed by binary)
 pub mod cli;
 
-// Command implementations
+// Command implementations (public for programmatic access)
 pub mod commands;
 
 // Internal modules (not exposed as public API)
