@@ -312,6 +312,17 @@ struct JsonlBackedStorage {
     path: PathBuf,
 }
 
+impl JsonlBackedStorage {
+    /// Returns an immutable reference to the inner storage implementation.
+    ///
+    /// This is useful for testing or when you need to access the underlying
+    /// storage without the JSONL persistence wrapper.
+    #[allow(dead_code)]
+    pub(crate) fn inner(&self) -> &dyn IssueStorage {
+        self.inner.as_ref()
+    }
+}
+
 #[async_trait]
 impl IssueStorage for JsonlBackedStorage {
     async fn create(&mut self, issue: NewIssue) -> Result<Issue> {

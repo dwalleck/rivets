@@ -200,9 +200,15 @@ mod helpers {
             .expect("create should succeed");
 
         if setup.close_after_create {
-            tools.close(&issue.id, None, None).await.unwrap();
+            tools
+                .close(&issue.id, None, None)
+                .await
+                .expect("Failed to close issue during setup");
             // Fetch updated issue after closing
-            tools.show(&issue.id, None).await.unwrap()
+            tools
+                .show(&issue.id, None)
+                .await
+                .expect("Failed to fetch closed issue")
         } else {
             issue
         }
