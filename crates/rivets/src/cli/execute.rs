@@ -468,11 +468,7 @@ pub async fn execute_dep(
                             println!("Dependencies of {} ({}):", issue_id, deps.len());
                         }
                         for dep in &deps {
-                            println!(
-                                "  {} ({})",
-                                dep.depends_on_id,
-                                output::format_dep_type(&dep.dep_type)
-                            );
+                            println!("  {} ({})", dep.depends_on_id, dep.dep_type);
                         }
                     }
                 }

@@ -3,7 +3,7 @@
 //! This module provides utilities for formatting command output in both
 //! human-readable text format and JSON format for programmatic use.
 
-use crate::domain::{Dependency, Issue, IssueStatus, IssueType};
+use crate::domain::{Dependency, Issue, IssueStatus};
 use serde::Serialize;
 use std::io::{self, Write};
 
@@ -91,7 +91,7 @@ fn print_issue_text<W: Write>(w: &mut W, issue: &Issue) -> io::Result<()> {
         "{} {} [{}] P{} {}",
         status_icon(issue.status),
         issue.id,
-        format_type(issue.issue_type),
+        issue.issue_type,
         issue.priority,
         issue.title
     )?;
@@ -135,8 +135,8 @@ fn print_issue_details_text<W: Write>(
     writeln!(w)?;
 
     writeln!(w, "Title:    {}", issue.title)?;
-    writeln!(w, "Type:     {}", format_type(issue.issue_type))?;
-    writeln!(w, "Status:   {}", format_status(issue.status))?;
+    writeln!(w, "Type:     {}", issue.issue_type)?;
+    writeln!(w, "Status:   {}", issue.status)?;
     writeln!(w, "Priority: P{}", issue.priority)?;
 
     if let Some(ref assignee) = issue.assignee {
@@ -195,12 +195,7 @@ fn print_issue_details_text<W: Write>(
         writeln!(w)?;
         writeln!(w, "Dependencies ({}):", deps.len())?;
         for dep in deps {
-            writeln!(
-                w,
-                "  -> {} ({})",
-                dep.depends_on_id,
-                format_dep_type(&dep.dep_type)
-            )?;
+            writeln!(w, "  -> {} ({})", dep.depends_on_id, dep.dep_type)?;
         }
     }
 
@@ -208,12 +203,7 @@ fn print_issue_details_text<W: Write>(
         writeln!(w)?;
         writeln!(w, "Dependents ({}):", dependents.len())?;
         for dep in dependents {
-            writeln!(
-                w,
-                "  <- {} ({})",
-                dep.depends_on_id,
-                format_dep_type(&dep.dep_type)
-            )?;
+            writeln!(w, "  <- {} ({})", dep.depends_on_id, dep.dep_type)?;
         }
     }
 
@@ -243,12 +233,7 @@ fn print_blocked_text<W: Write>(w: &mut W, blocked: &[(Issue, Vec<Issue>)]) -> i
         )?;
         writeln!(w, "  Blocked by:")?;
         for blocker in blockers {
-            writeln!(
-                w,
-                "    - {} ({})",
-                blocker.id,
-                format_status(blocker.status)
-            )?;
+            writeln!(w, "    - {} ({})", blocker.id, blocker.status)?;
         }
         writeln!(w)?;
     }
@@ -330,35 +315,6 @@ fn status_icon(status: IssueStatus) -> &'static str {
     }
 }
 
-fn format_status(status: IssueStatus) -> &'static str {
-    match status {
-        IssueStatus::Open => "open",
-        IssueStatus::InProgress => "in_progress",
-        IssueStatus::Blocked => "blocked",
-        IssueStatus::Closed => "closed",
-    }
-}
-
-fn format_type(t: IssueType) -> &'static str {
-    match t {
-        IssueType::Bug => "bug",
-        IssueType::Feature => "feature",
-        IssueType::Task => "task",
-        IssueType::Epic => "epic",
-        IssueType::Chore => "chore",
-    }
-}
-
-/// Format a dependency type for display
-pub fn format_dep_type(t: &crate::domain::DependencyType) -> &'static str {
-    match t {
-        crate::domain::DependencyType::Blocks => "blocks",
-        crate::domain::DependencyType::Related => "related",
-        crate::domain::DependencyType::ParentChild => "parent-child",
-        crate::domain::DependencyType::DiscoveredFrom => "discovered-from",
-    }
-}
-
 fn indent_text(text: &str, indent: &str) -> String {
     text.lines()
         .map(|line| format!("{}{}", indent, line))
@@ -369,7 +325,7 @@ fn indent_text(text: &str, indent: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{DependencyType, IssueId};
+    use crate::domain::{DependencyType, IssueId, IssueType};
     use chrono::Utc;
 
     fn test_issue() -> Issue {
@@ -399,15 +355,6 @@ mod tests {
         assert_eq!(status_icon(IssueStatus::InProgress), "[>]");
         assert_eq!(status_icon(IssueStatus::Blocked), "[X]");
         assert_eq!(status_icon(IssueStatus::Closed), "[+]");
-    }
-
-    #[test]
-    fn test_format_type() {
-        assert_eq!(format_type(IssueType::Bug), "bug");
-        assert_eq!(format_type(IssueType::Feature), "feature");
-        assert_eq!(format_type(IssueType::Task), "task");
-        assert_eq!(format_type(IssueType::Epic), "epic");
-        assert_eq!(format_type(IssueType::Chore), "chore");
     }
 
     #[test]
