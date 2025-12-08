@@ -3,6 +3,27 @@
 //! This crate provides an MCP (Model Context Protocol) server that exposes
 //! rivets issue tracking functionality to AI assistants like Claude.
 //!
+//! # Quick Start
+//!
+//! Run the server:
+//!
+//! ```bash
+//! rivets-mcp
+//! ```
+//!
+//! Configure in Claude Code (`~/.config/claude-code/mcp.json`):
+//!
+//! ```json
+//! {
+//!   "mcpServers": {
+//!     "rivets": {
+//!       "command": "rivets-mcp",
+//!       "args": []
+//!     }
+//!   }
+//! }
+//! ```
+//!
 //! # Architecture
 //!
 //! The server uses the `rmcp` crate for MCP protocol handling and directly
@@ -25,6 +46,14 @@
 //! - `update` - Update issue fields
 //! - `close` - Mark an issue as complete
 //! - `dep` - Add a dependency between issues
+//!
+//! # Debugging
+//!
+//! Enable debug logging with the `RUST_LOG` environment variable:
+//!
+//! ```bash
+//! RUST_LOG=debug rivets-mcp
+//! ```
 
 pub mod context;
 pub mod error;

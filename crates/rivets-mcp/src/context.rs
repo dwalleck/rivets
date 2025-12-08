@@ -20,6 +20,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::debug;
 
 /// Maximum number of cached workspaces to prevent resource exhaustion.
 ///
@@ -73,6 +74,8 @@ impl Context {
     /// Returns an error if the workspace path doesn't exist, has no `.rivets/` directory,
     /// or if storage creation fails.
     pub async fn set_workspace(&mut self, workspace_root: &Path) -> Result<WorkspaceInfo> {
+        debug!(path = %workspace_root.display(), "Setting workspace");
+
         // Canonicalize to resolve symlinks and `..` (prevents path traversal)
         let canonical = workspace_root
             .canonicalize()
@@ -87,11 +90,13 @@ impl Context {
         // Verify .rivets directory exists
         let rivets_dir = canonical.join(".rivets");
         if !rivets_dir.exists() {
+            debug!(path = %rivets_dir.display(), "No .rivets directory found");
             return Err(Error::NoRivetsDirectory(canonical.display().to_string()));
         }
 
         // Find the database file
         let db_path = find_database(&rivets_dir)?;
+        debug!(db_path = %db_path.display(), "Found database");
 
         self.current_workspace = Some(canonical.clone());
 
@@ -100,7 +105,10 @@ impl Context {
             .insert(canonical.clone(), db_path.clone());
 
         // Create storage if not cached
-        if !self.storage_cache.contains_key(&canonical) {
+        if self.storage_cache.contains_key(&canonical) {
+            debug!("Using cached storage instance");
+        } else {
+            debug!("Creating new storage instance");
             // Evict oldest workspace if cache is full
             while self.storage_cache.len() >= MAX_CACHED_WORKSPACES {
                 self.evict_oldest();
