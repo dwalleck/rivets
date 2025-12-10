@@ -1,0 +1,15 @@
+[package]
+name = "rivets-format"
+version = "0.1.0"
+edition = "2021"
+description = "Parser and serializer for the .rivet issue format"
+license = "MIT"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "1.0"
+winnow = "0.6"
+
+[dev-dependencies]
+indoc = "2.0"
+pretty_assertions = "1.4"
