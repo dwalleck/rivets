@@ -213,6 +213,7 @@ impl Tools {
     /// # Errors
     ///
     /// Returns an error if no context is set, issue not found, or storage operations fail.
+    #[instrument(skip(self), fields(%issue_id))]
     pub async fn show(&self, issue_id: &str, workspace_root: Option<&str>) -> Result<McpIssue> {
         let storage = {
             let context = self.context.read().await;
@@ -233,6 +234,7 @@ impl Tools {
     /// # Errors
     ///
     /// Returns an error if no context is set or storage operations fail.
+    #[instrument(skip(self))]
     pub async fn blocked(&self, workspace_root: Option<&str>) -> Result<Vec<BlockedIssueResponse>> {
         let storage = {
             let context = self.context.read().await;
@@ -417,10 +419,10 @@ impl Tools {
         storage.add_dependency(&from, &to, dep_type).await?;
         storage.save().await?;
 
-        debug!(dep_type = %dep_type_to_str(dep_type), "Added dependency");
+        let dep_type_str = dep_type_to_str(dep_type);
+        debug!(dep_type = %dep_type_str, "Added dependency");
         Ok(format!(
-            "Added dependency: {issue_id} depends on {depends_on_id} ({})",
-            dep_type_to_str(dep_type)
+            "Added dependency: {issue_id} depends on {depends_on_id} ({dep_type_str})"
         ))
     }
 }

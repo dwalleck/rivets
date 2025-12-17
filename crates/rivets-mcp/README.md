@@ -127,7 +127,7 @@ RUST_LOG=debug rivets-mcp
   "assignee": "bob",                  // optional
   "labels": ["urgent", "auth"],       // optional
   "design": "## Approach\n...",       // optional
-  "acceptance": "- [ ] Tests pass",   // optional
+  "acceptance_criteria": "- [ ] Tests pass",   // optional
   "workspace_root": "/path"           // optional
 }
 ```
