@@ -5,7 +5,10 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "A Rust-based issue tracking system using JSONL storage"
-repository = "https://github.com/yourusername/rivets"
+repository = "https://github.com/dwalleck/rivets"
+homepage = "https://github.com/dwalleck/rivets"
+documentation = "https://docs.rs/rivets"
+readme = "README.md"
 keywords = ["issue-tracker", "project-management", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 

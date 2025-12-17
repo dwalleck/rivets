@@ -13,10 +13,11 @@ Rivets is a modern issue tracking system written in Rust that provides fast, eff
 
 ## Project Structure
 
-This workspace contains two crates:
+This workspace contains three crates:
 
 - **rivets-jsonl**: A general-purpose JSONL library for efficient reading, writing, streaming, and querying of JSON Lines data
-- **rivets**: The CLI application for issue tracking built on top of rivets-jsonl
+- **rivets**: The CLI application and library for issue tracking built on top of rivets-jsonl
+- **rivets-mcp**: An MCP (Model Context Protocol) server for AI assistant integration
 
 ## Installation
 
@@ -67,6 +68,29 @@ cargo fmt
 ```
 
 **Note**: The pre-commit hook is automatically installed in `.git/hooks/pre-commit`. If you need to bypass it (not recommended), use `git commit --no-verify`.
+
+## Publishing to crates.io
+
+The crates must be published in dependency order since they depend on each other:
+
+```bash
+# 1. Publish the JSONL library first (no internal dependencies)
+cargo publish -p rivets-jsonl
+
+# 2. Publish the core rivets crate (depends on rivets-jsonl)
+cargo publish -p rivets
+
+# 3. Publish the MCP server (depends on rivets)
+cargo publish -p rivets-mcp
+```
+
+Wait for each crate to be indexed on crates.io before publishing the next one (usually takes a few minutes).
+
+To verify packaging before publishing:
+
+```bash
+cargo publish --dry-run -p rivets-jsonl
+```
 
 ## License
 

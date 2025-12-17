@@ -5,7 +5,10 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "A high-performance JSONL (JSON Lines) library for Rust"
-repository = "https://github.com/yourusername/rivets"
+repository = "https://github.com/dwalleck/rivets"
+homepage = "https://github.com/dwalleck/rivets"
+documentation = "https://docs.rs/rivets-jsonl"
+readme = "README.md"
 keywords = ["jsonl", "json-lines", "streaming", "parser"]
 categories = ["parsing", "encoding"]
 
