@@ -22,6 +22,56 @@ This project uses Beads (bd) for issue tracking instead of Markdown or external 
 
 > **Note**: This section will be populated as the build system and project structure are established.
 
+## Commit Message Convention
+
+This project uses [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/).
+
+### Format
+
+```
+<type>[optional scope]: <description>
+
+[optional body]
+
+[optional footer(s)]
+```
+
+### Types
+
+- `feat`: New feature (MINOR version bump)
+- `fix`: Bug fix (PATCH version bump)
+- `docs`: Documentation changes
+- `style`: Code style (formatting, semicolons, etc.)
+- `refactor`: Code refactoring
+- `perf`: Performance improvements
+- `test`: Adding or updating tests
+- `build`: Build system or dependencies
+- `ci`: CI/CD configuration
+- `chore`: Maintenance tasks
+
+### Suggested Scopes (Optional)
+
+Scopes must be lowercase. Common scopes:
+
+- `cli`: CLI commands and interface
+- `storage`: Storage layer and persistence
+- `mcp`: MCP server functionality
+- `jsonl`: JSONL library
+
+### Breaking Changes
+
+Use `!` after type or add `BREAKING CHANGE:` footer for MAJOR version bumps.
+
+### Examples
+
+```
+feat(cli): add export command
+fix(storage): handle empty files gracefully
+docs: update installation instructions
+feat!: redesign API (breaking change)
+refactor(mcp): simplify tool registration
+```
+
 ## Architecture
 
 > **Note**: This section will be populated as the codebase architecture is designed and implemented.

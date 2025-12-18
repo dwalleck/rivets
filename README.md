@@ -69,6 +69,33 @@ cargo fmt
 
 **Note**: The pre-commit hook is automatically installed in `.git/hooks/pre-commit`. If you need to bypass it (not recommended), use `git commit --no-verify`.
 
+### Commit Messages
+
+This project follows [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/).
+
+To set up the commit-msg hook:
+
+```bash
+./scripts/setup-hooks.sh
+```
+
+Example commits:
+- `feat(cli): add new export command`
+- `fix(storage): handle empty files gracefully`
+- `docs: update installation instructions`
+
+### Generating Changelogs
+
+Changelogs are generated automatically using [git-cliff](https://git-cliff.org/):
+
+```bash
+# Install git-cliff
+cargo install git-cliff
+
+# Generate changelog for next release
+git cliff --unreleased --bump --prepend CHANGELOG.md
+```
+
 ## Publishing to crates.io
 
 The crates must be published in dependency order since they depend on each other:

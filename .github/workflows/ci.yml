@@ -11,6 +11,56 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # Validate commit messages follow conventional commits
+  commitlint:
+    name: Validate Commits
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check commit messages
+        run: |
+          # Fetch base branch to ensure it's available
+          git fetch origin ${{ github.base_ref }}
+
+          # Get commits in PR
+          COMMITS=$(git log --format="%s" origin/${{ github.base_ref }}..HEAD)
+
+          # Regex for conventional commits
+          # - Type is required (feat, fix, etc.)
+          # - Scope is optional, lowercase with hyphens (e.g., cli, mcp)
+          # - Breaking change indicator (!) is optional
+          # - Description must be at least 3 characters
+          PATTERN="^(feat|fix|docs|style|refactor|perf|test|build|ci|chore)(\([a-z][a-z0-9-]*\))?!?: .{3,}"
+
+          FAILED=0
+          while IFS= read -r msg; do
+            if [[ -z "$msg" ]]; then
+              continue
+            fi
+            if [[ ! "$msg" =~ $PATTERN ]] && [[ ! "$msg" =~ ^Merge ]]; then
+              echo "❌ Invalid commit: $msg"
+              FAILED=1
+            else
+              echo "✅ Valid commit: $msg"
+            fi
+          done <<< "$COMMITS"
+
+          if [[ $FAILED -eq 1 ]]; then
+            echo ""
+            echo "Expected format: <type>[optional scope]: <description>"
+            echo "Valid types: feat, fix, docs, style, refactor, perf, test, build, ci, chore"
+            echo "Scopes should be lowercase (e.g., cli, storage, mcp, jsonl)"
+            echo "Description must be at least 3 characters"
+            exit 1
+          fi
+          echo ""
+          echo "All commits follow conventional format!"
+
   format:
     name: Format
     runs-on: ubuntu-latest
@@ -171,11 +221,17 @@ jobs:
   ci-success:
     name: CI Success
     if: always()
-    needs: [format, lint, test, build, cargo-deny, coverage]
+    needs: [commitlint, format, lint, test, build, cargo-deny, coverage]
     runs-on: ubuntu-latest
     steps:
       - name: Check all jobs
         run: |
+          # commitlint is skipped on push events, so we allow "skipped" result
+          if [[ "${{ needs.commitlint.result }}" != "success" ]] && \
+             [[ "${{ needs.commitlint.result }}" != "skipped" ]]; then
+            echo "Commit validation failed"
+            exit 1
+          fi
           if [[ "${{ needs.format.result }}" != "success" ]] || \
              [[ "${{ needs.lint.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
