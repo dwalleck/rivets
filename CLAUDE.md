@@ -51,6 +51,8 @@ This project uses [Conventional Commits](https://www.conventionalcommits.org/en/
 
 ### Suggested Scopes (Optional)
 
+Scopes must be lowercase. Common scopes:
+
 - `cli`: CLI commands and interface
 - `storage`: Storage layer and persistence
 - `mcp`: MCP server functionality
