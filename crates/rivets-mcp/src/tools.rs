@@ -27,6 +27,7 @@ use rivets::domain::{
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::{debug, instrument};
 
 /// Default limit for list/ready queries when none is specified.
 ///
@@ -78,11 +79,14 @@ impl Tools {
     /// # Errors
     ///
     /// Returns an error if the workspace path is invalid or has no `.rivets/` directory.
+    #[instrument(skip(self), fields(workspace = %workspace_root))]
     pub async fn set_context(&self, workspace_root: &str) -> Result<SetContextResponse> {
+        debug!("Setting workspace context");
         let path = Path::new(workspace_root);
         let mut context = self.context.write().await;
         let info = context.set_workspace(path).await?;
 
+        debug!(db_path = %info.database_path.display(), "Context set successfully");
         Ok(SetContextResponse {
             workspace_root: info.workspace_root.display().to_string(),
             database_path: info.database_path.display().to_string(),
@@ -124,6 +128,7 @@ impl Tools {
     /// # Errors
     ///
     /// Returns an error if no context is set or storage operations fail.
+    #[instrument(skip(self, assignee, label), fields(limit, priority))]
     pub async fn ready(
         &self,
         limit: Option<usize>,
@@ -133,6 +138,7 @@ impl Tools {
         label: Option<String>,
         workspace_root: Option<&str>,
     ) -> Result<Vec<McpIssue>> {
+        debug!("Finding ready issues");
         // Validate enum values before acquiring locks
         let issue_type = issue_type.map(validate_issue_type).transpose()?;
 
@@ -153,6 +159,7 @@ impl Tools {
         };
 
         let issues = storage.ready_to_work(Some(&filter), None).await?;
+        debug!(count = issues.len(), "Found ready issues");
         Ok(issues.into_iter().map(Into::into).collect())
     }
 
@@ -165,6 +172,7 @@ impl Tools {
     ///
     /// Returns an error if no context is set, invalid filter values, or storage operations fail.
     #[allow(clippy::too_many_arguments)]
+    #[instrument(skip(self, assignee, label), fields(limit, priority))]
     pub async fn list(
         &self,
         status: Option<&str>,
@@ -175,6 +183,7 @@ impl Tools {
         limit: Option<usize>,
         workspace_root: Option<&str>,
     ) -> Result<Vec<McpIssue>> {
+        debug!("Listing issues");
         // Validate enum values before acquiring locks
         let status = status.map(validate_status).transpose()?;
         let issue_type = issue_type.map(validate_issue_type).transpose()?;
@@ -195,6 +204,7 @@ impl Tools {
         };
 
         let issues = storage.list(&filter).await?;
+        debug!(count = issues.len(), "Listed issues");
         Ok(issues.into_iter().map(Into::into).collect())
     }
 
@@ -203,6 +213,7 @@ impl Tools {
     /// # Errors
     ///
     /// Returns an error if no context is set, issue not found, or storage operations fail.
+    #[instrument(skip(self), fields(%issue_id))]
     pub async fn show(&self, issue_id: &str, workspace_root: Option<&str>) -> Result<McpIssue> {
         let storage = {
             let context = self.context.read().await;
@@ -223,6 +234,7 @@ impl Tools {
     /// # Errors
     ///
     /// Returns an error if no context is set or storage operations fail.
+    #[instrument(skip(self))]
     pub async fn blocked(&self, workspace_root: Option<&str>) -> Result<Vec<BlockedIssueResponse>> {
         let storage = {
             let context = self.context.read().await;
@@ -246,6 +258,7 @@ impl Tools {
     ///
     /// Returns an error if no context is set, invalid `issue_type`, or storage operations fail.
     #[allow(clippy::too_many_arguments)]
+    #[instrument(skip(self, description, labels, design, acceptance_criteria), fields(%title))]
     pub async fn create(
         &self,
         title: String,
@@ -258,6 +271,7 @@ impl Tools {
         acceptance_criteria: Option<String>,
         workspace_root: Option<&str>,
     ) -> Result<McpIssue> {
+        debug!("Creating issue");
         // Validate issue_type before acquiring locks
         let issue_type = issue_type
             .map(validate_issue_type)
@@ -286,6 +300,7 @@ impl Tools {
 
         let issue = storage.create(new_issue).await?;
         storage.save().await?;
+        debug!(issue_id = %issue.id, "Created issue");
         Ok(issue.into())
     }
 
@@ -295,6 +310,7 @@ impl Tools {
     ///
     /// Returns an error if no context is set, invalid status, issue not found, or storage fails.
     #[allow(clippy::too_many_arguments)]
+    #[instrument(skip(self, title, description, design, acceptance_criteria, notes, external_ref), fields(%issue_id))]
     pub async fn update(
         &self,
         issue_id: &str,
@@ -309,6 +325,7 @@ impl Tools {
         external_ref: Option<String>,
         workspace_root: Option<&str>,
     ) -> Result<McpIssue> {
+        debug!("Updating issue");
         // Validate status before acquiring locks
         let status = status.map(validate_status).transpose()?;
 
@@ -333,6 +350,7 @@ impl Tools {
 
         let issue = storage.update(&id, updates).await?;
         storage.save().await?;
+        debug!("Updated issue");
         Ok(issue.into())
     }
 
@@ -341,12 +359,14 @@ impl Tools {
     /// # Errors
     ///
     /// Returns an error if no context is set, issue not found, or storage operations fail.
+    #[instrument(skip(self, reason), fields(%issue_id))]
     pub async fn close(
         &self,
         issue_id: &str,
         reason: Option<String>,
         workspace_root: Option<&str>,
     ) -> Result<McpIssue> {
+        debug!("Closing issue");
         let storage = {
             let context = self.context.read().await;
             context.storage_for(workspace_root.map(Path::new))?
@@ -362,6 +382,7 @@ impl Tools {
 
         let issue = storage.update(&id, updates).await?;
         storage.save().await?;
+        debug!("Closed issue");
         Ok(issue.into())
     }
 
@@ -371,6 +392,7 @@ impl Tools {
     ///
     /// Returns an error if no context is set, invalid `dep_type`, issues not found, cycle detected,
     /// or storage fails.
+    #[instrument(skip(self), fields(%issue_id, %depends_on_id))]
     pub async fn dep(
         &self,
         issue_id: &str,
@@ -378,6 +400,7 @@ impl Tools {
         dep_type: Option<&str>,
         workspace_root: Option<&str>,
     ) -> Result<String> {
+        debug!("Adding dependency");
         // Validate dep_type before acquiring locks
         let dep_type = dep_type
             .map(validate_dep_type)
@@ -396,9 +419,10 @@ impl Tools {
         storage.add_dependency(&from, &to, dep_type).await?;
         storage.save().await?;
 
+        let dep_type_str = dep_type_to_str(dep_type);
+        debug!(dep_type = %dep_type_str, "Added dependency");
         Ok(format!(
-            "Added dependency: {issue_id} depends on {depends_on_id} ({})",
-            dep_type_to_str(dep_type)
+            "Added dependency: {issue_id} depends on {depends_on_id} ({dep_type_str})"
         ))
     }
 }
