@@ -11,6 +11,47 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # Validate commit messages follow conventional commits
+  commitlint:
+    name: Validate Commits
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check commit messages
+        run: |
+          # Get commits in PR
+          COMMITS=$(git log --format="%s" origin/${{ github.base_ref }}..HEAD)
+
+          # Regex for conventional commits
+          PATTERN="^(feat|fix|docs|style|refactor|perf|test|build|ci|chore)(\([a-zA-Z0-9_-]+\))?\!?: .+"
+
+          FAILED=0
+          while IFS= read -r msg; do
+            if [[ -z "$msg" ]]; then
+              continue
+            fi
+            if [[ ! "$msg" =~ $PATTERN ]] && [[ ! "$msg" =~ ^Merge ]]; then
+              echo "❌ Invalid commit: $msg"
+              FAILED=1
+            else
+              echo "✅ Valid commit: $msg"
+            fi
+          done <<< "$COMMITS"
+
+          if [[ $FAILED -eq 1 ]]; then
+            echo ""
+            echo "Expected format: <type>[optional scope]: <description>"
+            echo "Valid types: feat, fix, docs, style, refactor, perf, test, build, ci, chore"
+            exit 1
+          fi
+          echo ""
+          echo "All commits follow conventional format!"
+
   format:
     name: Format
     runs-on: ubuntu-latest
@@ -171,11 +212,17 @@ jobs:
   ci-success:
     name: CI Success
     if: always()
-    needs: [format, lint, test, build, cargo-deny, coverage]
+    needs: [commitlint, format, lint, test, build, cargo-deny, coverage]
     runs-on: ubuntu-latest
     steps:
       - name: Check all jobs
         run: |
+          # commitlint is skipped on push events, so we allow "skipped" result
+          if [[ "${{ needs.commitlint.result }}" != "success" ]] && \
+             [[ "${{ needs.commitlint.result }}" != "skipped" ]]; then
+            echo "Commit validation failed"
+            exit 1
+          fi
           if [[ "${{ needs.format.result }}" != "success" ]] || \
              [[ "${{ needs.lint.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
