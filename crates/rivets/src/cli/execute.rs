@@ -834,11 +834,11 @@ async fn execute_dep_tree(
             output::print_json(&serde_json::json!({
                 "issue_id": issue_id,
                 "title": issue.title,
-                "dependencies": tree.iter().map(|(dep, dep_depth)| {
+                "dependencies": tree.iter().map(|(dep, tree_depth)| {
                     serde_json::json!({
                         "depends_on_id": dep.depends_on_id.to_string(),
                         "dep_type": format!("{}", dep.dep_type),
-                        "depth": dep_depth
+                        "depth": tree_depth
                     })
                 }).collect::<Vec<_>>(),
                 "dependents": dependents.iter().map(|dep| {
@@ -873,12 +873,12 @@ async fn execute_dep_tree(
             } else {
                 println!("  ↓ Depends on ({}):", tree.len());
                 const MAX_VISUAL_DEPTH: usize = 10;
-                for (dep, dep_depth) in &tree {
+                for (dep, tree_depth) in &tree {
                     // Cap visual indentation at MAX_VISUAL_DEPTH to prevent extremely wide output
-                    let visual_depth = (*dep_depth).min(MAX_VISUAL_DEPTH);
+                    let visual_depth = (*tree_depth).min(MAX_VISUAL_DEPTH);
                     let indent = "  ".repeat(visual_depth);
-                    let depth_indicator = if *dep_depth > MAX_VISUAL_DEPTH {
-                        format!(" [depth: {}]", dep_depth)
+                    let depth_indicator = if *tree_depth > MAX_VISUAL_DEPTH {
+                        format!(" [depth: {}]", tree_depth)
                     } else {
                         String::new()
                     };
