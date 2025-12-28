@@ -14,6 +14,32 @@ use chrono::Utc;
 use petgraph::visit::EdgeRef;
 use petgraph::Direction;
 
+/// Check if an issue matches all criteria in the filter.
+///
+/// This is shared logic used by both `list()` and `ready_to_work()` to apply
+/// optional filters for status, priority, type, assignee, and label.
+fn matches_filter(issue: &Issue, filter: &IssueFilter) -> bool {
+    filter
+        .status
+        .as_ref()
+        .is_none_or(|status| &issue.status == status)
+        && filter
+            .priority
+            .is_none_or(|priority| issue.priority == priority)
+        && filter
+            .issue_type
+            .as_ref()
+            .is_none_or(|issue_type| &issue.issue_type == issue_type)
+        && filter
+            .assignee
+            .as_ref()
+            .is_none_or(|assignee| issue.assignee.as_ref() == Some(assignee))
+        && filter
+            .label
+            .as_ref()
+            .is_none_or(|label| issue.labels.contains(label))
+}
+
 #[async_trait]
 impl IssueStorage for InMemoryStorage {
     async fn create(&mut self, new_issue: NewIssue) -> Result<Issue> {
@@ -339,44 +365,7 @@ impl IssueStorage for InMemoryStorage {
         let mut issues: Vec<Issue> = inner
             .issues
             .values()
-            .filter(|issue| {
-                // Apply status filter
-                if let Some(status) = &filter.status {
-                    if &issue.status != status {
-                        return false;
-                    }
-                }
-
-                // Apply priority filter
-                if let Some(priority) = filter.priority {
-                    if issue.priority != priority {
-                        return false;
-                    }
-                }
-
-                // Apply type filter
-                if let Some(issue_type) = &filter.issue_type {
-                    if &issue.issue_type != issue_type {
-                        return false;
-                    }
-                }
-
-                // Apply assignee filter
-                if let Some(assignee) = &filter.assignee {
-                    if issue.assignee.as_ref() != Some(assignee) {
-                        return false;
-                    }
-                }
-
-                // Apply label filter
-                if let Some(label) = &filter.label {
-                    if !issue.labels.contains(label) {
-                        return false;
-                    }
-                }
-
-                true
-            })
+            .filter(|issue| matches_filter(issue, filter))
             .cloned()
             .collect();
 
@@ -411,44 +400,7 @@ impl IssueStorage for InMemoryStorage {
 
         // Apply additional filter if provided
         if let Some(filter) = filter {
-            ready.retain(|issue| {
-                // Apply status filter
-                if let Some(status) = &filter.status {
-                    if &issue.status != status {
-                        return false;
-                    }
-                }
-
-                // Apply priority filter
-                if let Some(priority) = filter.priority {
-                    if issue.priority != priority {
-                        return false;
-                    }
-                }
-
-                // Apply type filter
-                if let Some(issue_type) = &filter.issue_type {
-                    if &issue.issue_type != issue_type {
-                        return false;
-                    }
-                }
-
-                // Apply assignee filter
-                if let Some(assignee) = &filter.assignee {
-                    if issue.assignee.as_ref() != Some(assignee) {
-                        return false;
-                    }
-                }
-
-                // Apply label filter
-                if let Some(label) = &filter.label {
-                    if !issue.labels.contains(label) {
-                        return false;
-                    }
-                }
-
-                true
-            });
+            ready.retain(|issue| matches_filter(issue, filter));
         }
 
         // Apply sort policy
@@ -587,5 +539,127 @@ impl IssueStorage for InMemoryStorage {
         // In-memory storage has no backing store to reload from
         // This is a no-op for this implementation
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{IssueFilter, IssueStatus, IssueType};
+    use rstest::rstest;
+
+    fn create_test_issue() -> Issue {
+        Issue {
+            id: IssueId::new("test-123"),
+            title: "Test Issue".to_string(),
+            description: String::new(),
+            status: IssueStatus::Open,
+            priority: 2,
+            issue_type: IssueType::Task,
+            assignee: Some("alice".to_string()),
+            labels: vec!["bug".to_string(), "urgent".to_string()],
+            design: None,
+            acceptance_criteria: None,
+            notes: None,
+            external_ref: None,
+            dependencies: Vec::new(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            closed_at: None,
+        }
+    }
+
+    #[test]
+    fn test_matches_filter_empty_filter_matches_all() {
+        let issue = create_test_issue();
+        let filter = IssueFilter::default();
+        assert!(matches_filter(&issue, &filter));
+    }
+
+    #[rstest]
+    #[case::status_matches(Some(IssueStatus::Open), true)]
+    #[case::status_does_not_match(Some(IssueStatus::Closed), false)]
+    fn test_matches_filter_status(#[case] status: Option<IssueStatus>, #[case] expected: bool) {
+        let issue = create_test_issue();
+        let filter = IssueFilter {
+            status,
+            ..Default::default()
+        };
+        assert_eq!(matches_filter(&issue, &filter), expected);
+    }
+
+    #[rstest]
+    #[case::priority_matches(Some(2), true)]
+    #[case::priority_does_not_match(Some(1), false)]
+    fn test_matches_filter_priority(#[case] priority: Option<u8>, #[case] expected: bool) {
+        let issue = create_test_issue();
+        let filter = IssueFilter {
+            priority,
+            ..Default::default()
+        };
+        assert_eq!(matches_filter(&issue, &filter), expected);
+    }
+
+    #[rstest]
+    #[case::type_matches(Some(IssueType::Task), true)]
+    #[case::type_does_not_match(Some(IssueType::Bug), false)]
+    fn test_matches_filter_issue_type(
+        #[case] issue_type: Option<IssueType>,
+        #[case] expected: bool,
+    ) {
+        let issue = create_test_issue();
+        let filter = IssueFilter {
+            issue_type,
+            ..Default::default()
+        };
+        assert_eq!(matches_filter(&issue, &filter), expected);
+    }
+
+    #[rstest]
+    #[case::assignee_matches(Some("alice".to_string()), true)]
+    #[case::assignee_does_not_match(Some("bob".to_string()), false)]
+    fn test_matches_filter_assignee(#[case] assignee: Option<String>, #[case] expected: bool) {
+        let issue = create_test_issue();
+        let filter = IssueFilter {
+            assignee,
+            ..Default::default()
+        };
+        assert_eq!(matches_filter(&issue, &filter), expected);
+    }
+
+    #[rstest]
+    #[case::label_matches(Some("bug".to_string()), true)]
+    #[case::label_does_not_match(Some("feature".to_string()), false)]
+    fn test_matches_filter_label(#[case] label: Option<String>, #[case] expected: bool) {
+        let issue = create_test_issue();
+        let filter = IssueFilter {
+            label,
+            ..Default::default()
+        };
+        assert_eq!(matches_filter(&issue, &filter), expected);
+    }
+
+    #[test]
+    fn test_matches_filter_multiple_criteria() {
+        let issue = create_test_issue();
+
+        // All criteria match
+        let filter = IssueFilter {
+            status: Some(IssueStatus::Open),
+            priority: Some(2),
+            issue_type: Some(IssueType::Task),
+            assignee: Some("alice".to_string()),
+            label: Some("bug".to_string()),
+            limit: None,
+        };
+        assert!(matches_filter(&issue, &filter));
+
+        // One criterion doesn't match
+        let filter = IssueFilter {
+            status: Some(IssueStatus::Open),
+            priority: Some(1), // Doesn't match
+            ..Default::default()
+        };
+        assert!(!matches_filter(&issue, &filter));
     }
 }
