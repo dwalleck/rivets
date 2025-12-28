@@ -145,6 +145,9 @@ impl IssueStorage for InMemoryStorage {
         if let Some(external_ref) = updates.external_ref {
             issue.external_ref = Some(external_ref);
         }
+        if let Some(labels) = updates.labels {
+            issue.labels = labels;
+        }
 
         // Validate the updated issue to ensure data integrity
         // This catches invalid titles, descriptions, or priorities that may have been set

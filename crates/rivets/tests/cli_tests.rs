@@ -749,3 +749,546 @@ fn test_cli_requires_initialized_repository(temp_dir: TempDir) {
         stderr
     );
 }
+
+// ============================================================================
+// Reopen Command Tests
+// ============================================================================
+
+#[rstest]
+fn test_cli_reopen_issue(initialized_dir: TempDir) {
+    let issue_id = create_issue(initialized_dir.path(), "Issue to reopen", &[]);
+
+    // Close the issue first
+    run_rivets_in_dir(initialized_dir.path(), &["close", &issue_id]);
+
+    // Reopen it
+    let output = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["reopen", &issue_id, "--reason", "Needs more work"],
+    );
+
+    assert!(
+        output.status.success(),
+        "Reopen failed: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Reopened issue:"));
+    assert!(stdout.contains("Needs more work"));
+
+    // Verify status is now open
+    let show_output = run_rivets_in_dir(initialized_dir.path(), &["show", &issue_id]);
+    let show_stdout = String::from_utf8_lossy(&show_output.stdout);
+    assert!(show_stdout.contains("open"));
+}
+
+#[rstest]
+fn test_cli_reopen_multiple_issues(initialized_dir: TempDir) {
+    let id1 = create_issue(initialized_dir.path(), "Issue 1", &[]);
+    let id2 = create_issue(initialized_dir.path(), "Issue 2", &[]);
+
+    // Close both issues
+    run_rivets_in_dir(initialized_dir.path(), &["close", &id1, &id2]);
+
+    // Reopen both at once
+    let output = run_rivets_in_dir(initialized_dir.path(), &["reopen", &id1, &id2]);
+
+    assert!(
+        output.status.success(),
+        "Reopen multiple failed: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(&id1));
+    assert!(stdout.contains(&id2));
+}
+
+#[rstest]
+fn test_cli_reopen_already_open_issue(initialized_dir: TempDir) {
+    let issue_id = create_issue(initialized_dir.path(), "Open issue", &[]);
+
+    // Try to reopen an already open issue
+    let output = run_rivets_in_dir(initialized_dir.path(), &["reopen", &issue_id]);
+
+    assert!(
+        output.status.success(),
+        "Reopen should succeed even for open issues: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// ============================================================================
+// Info Command Tests
+// ============================================================================
+
+#[rstest]
+fn test_cli_info_command(initialized_dir: TempDir) {
+    let output = run_rivets_in_dir(initialized_dir.path(), &["info"]);
+
+    assert!(
+        output.status.success(),
+        "Info failed: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Rivets Repository Information"));
+    assert!(stdout.contains("Database:"));
+    assert!(stdout.contains("Issue prefix:"));
+    assert!(stdout.contains("Issues:"));
+}
+
+#[rstest]
+fn test_cli_info_with_issues(initialized_dir: TempDir) {
+    // Create some issues with different statuses
+    create_issue(initialized_dir.path(), "Open issue", &[]);
+    let id2 = create_issue(initialized_dir.path(), "In progress issue", &[]);
+    let id3 = create_issue(initialized_dir.path(), "Closed issue", &[]);
+
+    run_rivets_in_dir(
+        initialized_dir.path(),
+        &["update", &id2, "--status", "in_progress"],
+    );
+    run_rivets_in_dir(initialized_dir.path(), &["close", &id3]);
+
+    let output = run_rivets_in_dir(initialized_dir.path(), &["info"]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("3 total"));
+    assert!(stdout.contains("1 open"));
+    assert!(stdout.contains("1 in progress"));
+    assert!(stdout.contains("1 closed"));
+}
+
+#[rstest]
+fn test_cli_info_json_output(initialized_dir: TempDir) {
+    create_issue(initialized_dir.path(), "Test issue", &[]);
+
+    let output = run_rivets_in_dir(initialized_dir.path(), &["--json", "info"]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("Output should be valid JSON");
+    assert!(json["database_path"].is_string());
+    assert!(json["issue_prefix"].is_string());
+    assert!(json["issues"]["total"].is_number());
+}
+
+// ============================================================================
+// Label Command Tests
+// ============================================================================
+
+#[rstest]
+fn test_cli_label_add(initialized_dir: TempDir) {
+    let issue_id = create_issue(initialized_dir.path(), "Issue for labeling", &[]);
+
+    let output = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["label", "add", &issue_id, "urgent"],
+    );
+
+    assert!(
+        output.status.success(),
+        "Label add failed: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Added label"));
+
+    // Verify the label was added
+    let show_output = run_rivets_in_dir(initialized_dir.path(), &["show", &issue_id]);
+    let show_stdout = String::from_utf8_lossy(&show_output.stdout);
+    assert!(show_stdout.contains("urgent"));
+}
+
+#[rstest]
+fn test_cli_label_add_multiple_issues(initialized_dir: TempDir) {
+    let id1 = create_issue(initialized_dir.path(), "Issue 1", &[]);
+    let id2 = create_issue(initialized_dir.path(), "Issue 2", &[]);
+
+    let output = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["label", "add", &id1, &id2, "backend"],
+    );
+
+    assert!(
+        output.status.success(),
+        "Label add multiple failed: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(&id1));
+    assert!(stdout.contains(&id2));
+}
+
+#[rstest]
+fn test_cli_label_remove(initialized_dir: TempDir) {
+    let issue_id = create_issue(
+        initialized_dir.path(),
+        "Labeled issue",
+        &["--labels", "bug"],
+    );
+
+    let output = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["label", "remove", &issue_id, "bug"],
+    );
+
+    assert!(
+        output.status.success(),
+        "Label remove failed: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Removed label"));
+}
+
+#[rstest]
+fn test_cli_label_list(initialized_dir: TempDir) {
+    let issue_id = create_issue(
+        initialized_dir.path(),
+        "Multi-label issue",
+        &["--labels", "bug,urgent,backend"],
+    );
+
+    let output = run_rivets_in_dir(initialized_dir.path(), &["label", "list", &issue_id]);
+
+    assert!(
+        output.status.success(),
+        "Label list failed: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("bug"));
+    assert!(stdout.contains("urgent"));
+    assert!(stdout.contains("backend"));
+}
+
+#[rstest]
+fn test_cli_label_list_all(initialized_dir: TempDir) {
+    create_issue(
+        initialized_dir.path(),
+        "Issue 1",
+        &["--labels", "bug,frontend"],
+    );
+    create_issue(
+        initialized_dir.path(),
+        "Issue 2",
+        &["--labels", "feature,backend"],
+    );
+
+    let output = run_rivets_in_dir(initialized_dir.path(), &["label", "list-all"]);
+
+    assert!(
+        output.status.success(),
+        "Label list-all failed: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("bug"));
+    assert!(stdout.contains("frontend"));
+    assert!(stdout.contains("feature"));
+    assert!(stdout.contains("backend"));
+}
+
+#[rstest]
+fn test_cli_label_add_duplicate(initialized_dir: TempDir) {
+    let issue_id = create_issue(initialized_dir.path(), "Issue", &["--labels", "existing"]);
+
+    // Try to add the same label again
+    let output = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["label", "add", &issue_id, "existing"],
+    );
+
+    // Should succeed but not duplicate
+    assert!(output.status.success());
+}
+
+// ============================================================================
+// Stale Command Tests
+// ============================================================================
+
+#[rstest]
+fn test_cli_stale_empty(initialized_dir: TempDir) {
+    let output = run_rivets_in_dir(initialized_dir.path(), &["stale"]);
+
+    assert!(
+        output.status.success(),
+        "Stale failed: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("No stale issues found"));
+}
+
+#[rstest]
+fn test_cli_stale_with_days_option(initialized_dir: TempDir) {
+    create_issue(initialized_dir.path(), "Recent issue", &[]);
+
+    // Look for issues stale for 0 days (should find all open issues)
+    let output = run_rivets_in_dir(initialized_dir.path(), &["stale", "--days", "0"]);
+
+    assert!(
+        output.status.success(),
+        "Stale with days failed: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // With 0 days, all open issues are considered stale
+    assert!(stdout.contains("Recent issue"));
+}
+
+#[rstest]
+fn test_cli_stale_with_status_filter(initialized_dir: TempDir) {
+    create_issue(initialized_dir.path(), "Open issue", &[]);
+    let id2 = create_issue(initialized_dir.path(), "In progress issue", &[]);
+
+    run_rivets_in_dir(
+        initialized_dir.path(),
+        &["update", &id2, "--status", "in_progress"],
+    );
+
+    // Look for stale open issues only
+    let output = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["stale", "--days", "0", "--status", "open"],
+    );
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Open issue"));
+    assert!(!stdout.contains("In progress issue"));
+}
+
+#[rstest]
+fn test_cli_stale_with_limit(initialized_dir: TempDir) {
+    create_issue(initialized_dir.path(), "Issue 1", &[]);
+    create_issue(initialized_dir.path(), "Issue 2", &[]);
+    create_issue(initialized_dir.path(), "Issue 3", &[]);
+
+    let output = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["stale", "--days", "0", "--limit", "2"],
+    );
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Should show "Stale issues (2 not updated in 0 days):" in the output
+    assert!(
+        stdout.contains("Stale issues (2 not updated"),
+        "Should show 2 stale issues due to limit. Got: {}",
+        stdout
+    );
+}
+
+#[rstest]
+fn test_cli_stale_json_output(initialized_dir: TempDir) {
+    create_issue(initialized_dir.path(), "Test issue", &[]);
+
+    let output = run_rivets_in_dir(initialized_dir.path(), &["--json", "stale", "--days", "0"]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("Output should be valid JSON");
+    assert!(json.is_array());
+}
+
+// ============================================================================
+// Dep Tree Command Tests
+// ============================================================================
+
+#[rstest]
+fn test_cli_dep_tree(initialized_dir: TempDir) {
+    let id1 = create_issue(initialized_dir.path(), "Parent issue", &[]);
+    let id2 = create_issue(initialized_dir.path(), "Child issue", &[]);
+
+    // Create dependency
+    run_rivets_in_dir(
+        initialized_dir.path(),
+        &["dep", "add", &id1, &id2, "-t", "blocks"],
+    );
+
+    let output = run_rivets_in_dir(initialized_dir.path(), &["dep", "tree", &id1]);
+
+    assert!(
+        output.status.success(),
+        "Dep tree failed: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Dependency tree for:"));
+    assert!(stdout.contains("Parent issue"));
+    assert!(stdout.contains(&id2));
+    assert!(stdout.contains("blocks"));
+}
+
+#[rstest]
+fn test_cli_dep_tree_shows_dependents(initialized_dir: TempDir) {
+    let id1 = create_issue(initialized_dir.path(), "Dependent issue", &[]);
+    let id2 = create_issue(initialized_dir.path(), "Blocker issue", &[]);
+
+    // id1 depends on id2 (id1 is blocked by id2)
+    run_rivets_in_dir(
+        initialized_dir.path(),
+        &["dep", "add", &id1, &id2, "-t", "blocks"],
+    );
+
+    // Check tree from blocker's perspective
+    let output = run_rivets_in_dir(initialized_dir.path(), &["dep", "tree", &id2]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Depended on by"));
+    assert!(stdout.contains(&id1));
+}
+
+#[rstest]
+fn test_cli_dep_tree_with_depth_limit(initialized_dir: TempDir) {
+    let id1 = create_issue(initialized_dir.path(), "Level 1", &[]);
+    let id2 = create_issue(initialized_dir.path(), "Level 2", &[]);
+    let id3 = create_issue(initialized_dir.path(), "Level 3", &[]);
+
+    // Create chain: id1 -> id2 -> id3
+    run_rivets_in_dir(
+        initialized_dir.path(),
+        &["dep", "add", &id1, &id2, "-t", "blocks"],
+    );
+    run_rivets_in_dir(
+        initialized_dir.path(),
+        &["dep", "add", &id2, &id3, "-t", "blocks"],
+    );
+
+    // Tree with depth 1 should only show immediate dependencies
+    let output = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["dep", "tree", &id1, "--depth", "1"],
+    );
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(&id2));
+    // id3 might not be shown due to depth limit
+}
+
+#[rstest]
+fn test_cli_dep_tree_json_output(initialized_dir: TempDir) {
+    let id1 = create_issue(initialized_dir.path(), "Parent", &[]);
+    let id2 = create_issue(initialized_dir.path(), "Child", &[]);
+
+    run_rivets_in_dir(
+        initialized_dir.path(),
+        &["dep", "add", &id1, &id2, "-t", "blocks"],
+    );
+
+    let output = run_rivets_in_dir(initialized_dir.path(), &["--json", "dep", "tree", &id1]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("Output should be valid JSON");
+    assert!(json["issue_id"].is_string());
+    assert!(json["title"].is_string());
+    assert!(json["dependencies"].is_array());
+    assert!(json["dependents"].is_array());
+}
+
+#[rstest]
+fn test_cli_dep_tree_no_dependencies(initialized_dir: TempDir) {
+    let issue_id = create_issue(initialized_dir.path(), "Standalone issue", &[]);
+
+    let output = run_rivets_in_dir(initialized_dir.path(), &["dep", "tree", &issue_id]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("No issues depend on this"));
+    assert!(stdout.contains("No dependencies"));
+}
+
+// ============================================================================
+// Multi-ID Support Tests
+// ============================================================================
+
+#[rstest]
+fn test_cli_show_multiple_issues(initialized_dir: TempDir) {
+    let id1 = create_issue(initialized_dir.path(), "Issue One", &[]);
+    let id2 = create_issue(initialized_dir.path(), "Issue Two", &[]);
+
+    let output = run_rivets_in_dir(initialized_dir.path(), &["show", &id1, &id2]);
+
+    assert!(
+        output.status.success(),
+        "Show multiple failed: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Issue One"));
+    assert!(stdout.contains("Issue Two"));
+}
+
+#[rstest]
+fn test_cli_update_multiple_issues(initialized_dir: TempDir) {
+    let id1 = create_issue(initialized_dir.path(), "Issue 1", &[]);
+    let id2 = create_issue(initialized_dir.path(), "Issue 2", &[]);
+
+    let output = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["update", &id1, &id2, "--priority", "0"],
+    );
+
+    assert!(
+        output.status.success(),
+        "Update multiple failed: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify both were updated
+    let show1 = run_rivets_in_dir(initialized_dir.path(), &["show", &id1]);
+    let show2 = run_rivets_in_dir(initialized_dir.path(), &["show", &id2]);
+    assert!(String::from_utf8_lossy(&show1.stdout).contains("P0"));
+    assert!(String::from_utf8_lossy(&show2.stdout).contains("P0"));
+}
+
+#[rstest]
+fn test_cli_close_multiple_issues(initialized_dir: TempDir) {
+    let id1 = create_issue(initialized_dir.path(), "Issue 1", &[]);
+    let id2 = create_issue(initialized_dir.path(), "Issue 2", &[]);
+    let id3 = create_issue(initialized_dir.path(), "Issue 3", &[]);
+
+    let output = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["close", &id1, &id2, &id3, "--reason", "Batch close"],
+    );
+
+    assert!(
+        output.status.success(),
+        "Close multiple failed: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify all were closed
+    let list_output = run_rivets_in_dir(initialized_dir.path(), &["list", "--status", "closed"]);
+    let stdout = String::from_utf8_lossy(&list_output.stdout);
+    assert!(stdout.contains("3 issue(s)"));
+}
+
+#[rstest]
+fn test_cli_show_multiple_json_output(initialized_dir: TempDir) {
+    let id1 = create_issue(initialized_dir.path(), "Issue 1", &[]);
+    let id2 = create_issue(initialized_dir.path(), "Issue 2", &[]);
+
+    let output = run_rivets_in_dir(initialized_dir.path(), &["--json", "show", &id1, &id2]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("Output should be valid JSON");
+    assert!(json.is_array());
+    assert_eq!(json.as_array().unwrap().len(), 2);
+}

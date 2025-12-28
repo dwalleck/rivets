@@ -404,6 +404,9 @@ pub struct IssueUpdate {
 
     /// New external reference (if updating)
     pub external_ref: Option<String>,
+
+    /// New labels (if updating) - replaces existing labels
+    pub labels: Option<Vec<String>>,
 }
 
 /// Filter for querying issues

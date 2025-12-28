@@ -346,6 +346,7 @@ impl Tools {
             acceptance_criteria,
             notes,
             external_ref,
+            labels: None,
         };
 
         let issue = storage.update(&id, updates).await?;

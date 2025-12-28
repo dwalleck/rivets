@@ -5,8 +5,9 @@
 use anyhow::Result;
 
 use super::args::{
-    BlockedArgs, CloseArgs, CreateArgs, DeleteArgs, DepAction, DepArgs, InitArgs, ListArgs,
-    ReadyArgs, ShowArgs, StatsArgs, UpdateArgs,
+    BlockedArgs, CloseArgs, CreateArgs, DeleteArgs, DepAction, DepArgs, InfoArgs, InitArgs,
+    LabelAction, LabelArgs, ListArgs, ReadyArgs, ReopenArgs, ShowArgs, StaleArgs, StatsArgs,
+    UpdateArgs,
 };
 use super::types::{SortOrderArg, SortPolicyArg};
 use crate::output::OutputMode;
@@ -34,6 +35,65 @@ pub async fn execute_init(args: &InitArgs) -> Result<()> {
         println!("  Config: {}", result.config_file.display());
         println!("  Issues: {}", result.issues_file.display());
         println!("  Issue prefix: {}", result.prefix);
+    }
+
+    Ok(())
+}
+
+/// Execute the info command
+pub async fn execute_info(
+    app: &crate::app::App,
+    _args: &InfoArgs,
+    output_mode: OutputMode,
+) -> Result<()> {
+    use crate::domain::{IssueFilter, IssueStatus};
+    use crate::output;
+
+    let rivets_dir = app.rivets_dir();
+    let database_path = rivets_dir.join("issues.jsonl");
+    let issue_prefix = app.prefix();
+
+    // Get issue counts
+    let all_issues = app.storage().list(&IssueFilter::default()).await?;
+    let total = all_issues.len();
+    let open = all_issues
+        .iter()
+        .filter(|i| i.status == IssueStatus::Open)
+        .count();
+    let in_progress = all_issues
+        .iter()
+        .filter(|i| i.status == IssueStatus::InProgress)
+        .count();
+    let closed = all_issues
+        .iter()
+        .filter(|i| i.status == IssueStatus::Closed)
+        .count();
+
+    match output_mode {
+        output::OutputMode::Json => {
+            output::print_json(&serde_json::json!({
+                "database_path": database_path.display().to_string(),
+                "issue_prefix": issue_prefix,
+                "issues": {
+                    "total": total,
+                    "open": open,
+                    "in_progress": in_progress,
+                    "closed": closed
+                }
+            }))?;
+        }
+        output::OutputMode::Text => {
+            println!("Rivets Repository Information");
+            println!("==============================");
+            println!();
+            println!("Database:     {}", database_path.display());
+            println!("Issue prefix: {}", issue_prefix);
+            println!();
+            println!(
+                "Issues: {} total ({} open, {} in progress, {} closed)",
+                total, open, in_progress, closed
+            );
+        }
     }
 
     Ok(())
@@ -172,18 +232,70 @@ pub async fn execute_show(
     use crate::domain::IssueId;
     use crate::output;
 
-    let issue_id = IssueId::new(&args.issue_id);
+    let mut results = Vec::new();
 
-    let issue = app
-        .storage()
-        .get(&issue_id)
-        .await?
-        .ok_or_else(|| crate::error::Error::IssueNotFound(issue_id.clone()))?;
+    for id_str in &args.issue_ids {
+        let issue_id = IssueId::new(id_str);
 
-    let deps = app.storage().get_dependencies(&issue_id).await?;
-    let dependents = app.storage().get_dependents(&issue_id).await?;
+        let issue = app
+            .storage()
+            .get(&issue_id)
+            .await?
+            .ok_or_else(|| crate::error::Error::IssueNotFound(issue_id.clone()))?;
 
-    output::print_issue_details(&issue, &deps, &dependents, output_mode)?;
+        let deps = app.storage().get_dependencies(&issue_id).await?;
+        let dependents = app.storage().get_dependents(&issue_id).await?;
+
+        results.push((issue, deps, dependents));
+    }
+
+    // Output all results
+    match output_mode {
+        output::OutputMode::Json => {
+            if results.len() == 1 {
+                let (issue, deps, dependents) = &results[0];
+                output::print_issue_details(issue, deps, dependents, output_mode)?;
+            } else {
+                // For multiple issues, output as array
+                let json_results: Vec<_> = results
+                    .iter()
+                    .map(|(issue, deps, dependents)| {
+                        serde_json::json!({
+                            "id": issue.id.to_string(),
+                            "title": issue.title,
+                            "description": issue.description,
+                            "status": format!("{}", issue.status),
+                            "priority": issue.priority,
+                            "issue_type": format!("{}", issue.issue_type),
+                            "assignee": issue.assignee,
+                            "labels": issue.labels,
+                            "design": issue.design,
+                            "acceptance_criteria": issue.acceptance_criteria,
+                            "notes": issue.notes,
+                            "external_ref": issue.external_ref,
+                            "dependencies": deps,
+                            "created_at": issue.created_at,
+                            "updated_at": issue.updated_at,
+                            "closed_at": issue.closed_at,
+                            "dependency_details": deps,
+                            "dependent_details": dependents,
+                        })
+                    })
+                    .collect();
+                output::print_json(&json_results)?;
+            }
+        }
+        output::OutputMode::Text => {
+            for (i, (issue, deps, dependents)) in results.iter().enumerate() {
+                if i > 0 {
+                    println!();
+                    println!("---");
+                    println!();
+                }
+                output::print_issue_details(issue, deps, dependents, output_mode)?;
+            }
+        }
+    }
 
     Ok(())
 }
@@ -197,30 +309,43 @@ pub async fn execute_update(
     use crate::domain::{IssueId, IssueUpdate};
     use crate::output;
 
-    let issue_id = IssueId::new(&args.issue_id);
+    let mut updated_issues = Vec::new();
 
-    // Build the update
-    let update = IssueUpdate {
-        title: args.title.clone(),
-        description: args.description.clone(),
-        status: args.status.map(|s| s.into()),
-        priority: args.priority,
-        assignee: args.assignee.clone().map(Some),
-        design: args.design.clone(),
-        acceptance_criteria: args.acceptance.clone(),
-        notes: args.notes.clone(),
-        external_ref: args.external_ref.clone(),
-    };
+    for id_str in &args.issue_ids {
+        let issue_id = IssueId::new(id_str);
 
-    let issue = app.storage_mut().update(&issue_id, update).await?;
+        // Build the update (same for all issues)
+        let update = IssueUpdate {
+            title: args.title.clone(),
+            description: args.description.clone(),
+            status: args.status.map(|s| s.into()),
+            priority: args.priority,
+            assignee: args.assignee.clone().map(Some),
+            design: args.design.clone(),
+            acceptance_criteria: args.acceptance.clone(),
+            notes: args.notes.clone(),
+            external_ref: args.external_ref.clone(),
+            ..Default::default()
+        };
+
+        let issue = app.storage_mut().update(&issue_id, update).await?;
+        updated_issues.push(issue);
+    }
+
     app.save().await?;
 
     match output_mode {
         output::OutputMode::Json => {
-            output::print_json(&issue)?;
+            if updated_issues.len() == 1 {
+                output::print_json(&updated_issues[0])?;
+            } else {
+                output::print_json(&updated_issues)?;
+            }
         }
         output::OutputMode::Text => {
-            println!("Updated issue: {}", issue.id);
+            for issue in &updated_issues {
+                println!("Updated issue: {}", issue.id);
+            }
         }
     }
 
@@ -236,46 +361,118 @@ pub async fn execute_close(
     use crate::domain::{IssueId, IssueStatus, IssueUpdate};
     use crate::output;
 
-    let issue_id = IssueId::new(&args.issue_id);
+    let mut closed_issues = Vec::new();
 
-    // Build updated notes: append close reason to existing notes if present
-    //
-    // NOTE: There is a TOCTOU (time-of-check-time-of-use) window between reading
-    // the existing notes and updating the issue. In a multi-process scenario,
-    // another process could modify notes between these operations. This is
-    // acceptable for a single-user CLI tool. For concurrent access, consider
-    // adding an atomic "append_notes" operation to the storage trait.
-    let new_notes = if args.reason != "Completed" {
-        let existing = app
-            .storage()
-            .get(&issue_id)
-            .await?
-            .ok_or_else(|| crate::error::Error::IssueNotFound(issue_id.clone()))?;
+    for id_str in &args.issue_ids {
+        let issue_id = IssueId::new(id_str);
 
-        let close_note = format!("Closed: {}", args.reason);
-        Some(match existing.notes {
-            Some(existing_notes) => format!("{}\n\n{}", existing_notes, close_note),
-            None => close_note,
-        })
-    } else {
-        None
-    };
+        // Build updated notes: append close reason to existing notes if present
+        let new_notes = if args.reason != "Completed" {
+            let existing = app
+                .storage()
+                .get(&issue_id)
+                .await?
+                .ok_or_else(|| crate::error::Error::IssueNotFound(issue_id.clone()))?;
 
-    let update = IssueUpdate {
-        status: Some(IssueStatus::Closed),
-        notes: new_notes,
-        ..Default::default()
-    };
+            let close_note = format!("Closed: {}", args.reason);
+            Some(match existing.notes {
+                Some(existing_notes) => format!("{}\n\n{}", existing_notes, close_note),
+                None => close_note,
+            })
+        } else {
+            None
+        };
 
-    let issue = app.storage_mut().update(&issue_id, update).await?;
+        let update = IssueUpdate {
+            status: Some(IssueStatus::Closed),
+            notes: new_notes,
+            ..Default::default()
+        };
+
+        let issue = app.storage_mut().update(&issue_id, update).await?;
+        closed_issues.push(issue);
+    }
+
     app.save().await?;
 
     match output_mode {
         output::OutputMode::Json => {
-            output::print_json(&issue)?;
+            if closed_issues.len() == 1 {
+                output::print_json(&closed_issues[0])?;
+            } else {
+                output::print_json(&closed_issues)?;
+            }
         }
         output::OutputMode::Text => {
-            println!("Closed issue: {} ({})", issue.id, args.reason);
+            for issue in &closed_issues {
+                println!("Closed issue: {} ({})", issue.id, args.reason);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Execute the reopen command
+pub async fn execute_reopen(
+    app: &mut crate::app::App,
+    args: &ReopenArgs,
+    output_mode: OutputMode,
+) -> Result<()> {
+    use crate::domain::{IssueId, IssueStatus, IssueUpdate};
+    use crate::output;
+
+    let mut reopened_issues = Vec::new();
+
+    for id_str in &args.issue_ids {
+        let issue_id = IssueId::new(id_str);
+
+        // Build updated notes: append reopen reason to existing notes if provided
+        let new_notes = if let Some(reason) = &args.reason {
+            let existing = app
+                .storage()
+                .get(&issue_id)
+                .await?
+                .ok_or_else(|| crate::error::Error::IssueNotFound(issue_id.clone()))?;
+
+            let reopen_note = format!("Reopened: {}", reason);
+            Some(match existing.notes {
+                Some(existing_notes) => format!("{}\n\n{}", existing_notes, reopen_note),
+                None => reopen_note,
+            })
+        } else {
+            None
+        };
+
+        let update = IssueUpdate {
+            status: Some(IssueStatus::Open),
+            notes: new_notes,
+            ..Default::default()
+        };
+
+        let issue = app.storage_mut().update(&issue_id, update).await?;
+        reopened_issues.push(issue);
+    }
+
+    app.save().await?;
+
+    match output_mode {
+        output::OutputMode::Json => {
+            if reopened_issues.len() == 1 {
+                output::print_json(&reopened_issues[0])?;
+            } else {
+                output::print_json(&reopened_issues)?;
+            }
+        }
+        output::OutputMode::Text => {
+            let reason_msg = args
+                .reason
+                .as_ref()
+                .map(|r| format!(" ({})", r))
+                .unwrap_or_default();
+            for issue in &reopened_issues {
+                println!("Reopened issue: {}{}", issue.id, reason_msg);
+            }
         }
     }
 
@@ -471,6 +668,294 @@ pub async fn execute_dep(
                             println!("  {} ({})", dep.depends_on_id, dep.dep_type);
                         }
                     }
+                }
+            }
+        }
+        DepAction::Tree { issue_id, depth } => {
+            let id = IssueId::new(issue_id);
+
+            // Get the issue to verify it exists
+            let issue = app
+                .storage()
+                .get(&id)
+                .await?
+                .ok_or_else(|| crate::error::Error::IssueNotFound(id.clone()))?;
+
+            // Get dependency tree
+            let tree = app.storage().get_dependency_tree(&id, *depth).await?;
+
+            // Also get dependents (reverse tree)
+            let dependents = app.storage().get_dependents(&id).await?;
+
+            match output_mode {
+                output::OutputMode::Json => {
+                    output::print_json(&serde_json::json!({
+                        "issue_id": issue_id,
+                        "title": issue.title,
+                        "dependencies": tree.iter().map(|(dep, depth)| {
+                            serde_json::json!({
+                                "depends_on_id": dep.depends_on_id.to_string(),
+                                "dep_type": format!("{}", dep.dep_type),
+                                "depth": depth
+                            })
+                        }).collect::<Vec<_>>(),
+                        "dependents": dependents.iter().map(|dep| {
+                            serde_json::json!({
+                                "depends_on_id": dep.depends_on_id.to_string(),
+                                "dep_type": format!("{}", dep.dep_type)
+                            })
+                        }).collect::<Vec<_>>()
+                    }))?;
+                }
+                output::OutputMode::Text => {
+                    println!("Dependency tree for: {} ({})", issue_id, issue.title);
+                    println!();
+
+                    // Print dependents (what depends on this issue)
+                    if dependents.is_empty() {
+                        println!("  ↑ No issues depend on this");
+                    } else {
+                        println!("  ↑ Depended on by ({}):", dependents.len());
+                        for dep in &dependents {
+                            println!("    {} ({})", dep.depends_on_id, dep.dep_type);
+                        }
+                    }
+
+                    println!("  │");
+                    println!("  ◆ {} [P{}]", issue_id, issue.priority);
+                    println!("  │");
+
+                    // Print dependencies (what this issue depends on)
+                    if tree.is_empty() {
+                        println!("  ↓ No dependencies");
+                    } else {
+                        println!("  ↓ Depends on ({}):", tree.len());
+                        for (dep, dep_depth) in &tree {
+                            let indent = "  ".repeat(*dep_depth);
+                            println!("    {}└── {} ({})", indent, dep.depends_on_id, dep.dep_type);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Execute the label command
+pub async fn execute_label(
+    app: &mut crate::app::App,
+    args: &LabelArgs,
+    output_mode: OutputMode,
+) -> Result<()> {
+    use crate::domain::{IssueFilter, IssueId};
+    use crate::output;
+    use std::collections::BTreeSet;
+
+    match &args.action {
+        LabelAction::Add { issue_ids, label } => {
+            let mut updated_issues = Vec::new();
+
+            for id_str in issue_ids {
+                let issue_id = IssueId::new(id_str);
+
+                let issue = app
+                    .storage()
+                    .get(&issue_id)
+                    .await?
+                    .ok_or_else(|| crate::error::Error::IssueNotFound(issue_id.clone()))?;
+
+                // Add label if not already present
+                let mut labels = issue.labels.clone();
+                if !labels.contains(&label.to_string()) {
+                    labels.push(label.clone());
+
+                    let update = crate::domain::IssueUpdate {
+                        labels: Some(labels),
+                        ..Default::default()
+                    };
+                    let updated = app.storage_mut().update(&issue_id, update).await?;
+                    updated_issues.push(updated);
+                } else {
+                    updated_issues.push(issue);
+                }
+            }
+
+            app.save().await?;
+
+            match output_mode {
+                output::OutputMode::Json => {
+                    output::print_json(&serde_json::json!({
+                        "action": "add",
+                        "label": label,
+                        "issues": updated_issues.iter().map(|i| i.id.to_string()).collect::<Vec<_>>(),
+                        "status": "success"
+                    }))?;
+                }
+                output::OutputMode::Text => {
+                    for issue in &updated_issues {
+                        println!("Added label '{}' to {}", label, issue.id);
+                    }
+                }
+            }
+        }
+        LabelAction::Remove { issue_ids, label } => {
+            let mut updated_issues = Vec::new();
+
+            for id_str in issue_ids {
+                let issue_id = IssueId::new(id_str);
+
+                let issue = app
+                    .storage()
+                    .get(&issue_id)
+                    .await?
+                    .ok_or_else(|| crate::error::Error::IssueNotFound(issue_id.clone()))?;
+
+                // Remove label if present
+                let labels: Vec<String> = issue
+                    .labels
+                    .iter()
+                    .filter(|l| *l != label)
+                    .cloned()
+                    .collect();
+
+                if labels.len() != issue.labels.len() {
+                    let update = crate::domain::IssueUpdate {
+                        labels: Some(labels),
+                        ..Default::default()
+                    };
+                    let updated = app.storage_mut().update(&issue_id, update).await?;
+                    updated_issues.push(updated);
+                } else {
+                    updated_issues.push(issue);
+                }
+            }
+
+            app.save().await?;
+
+            match output_mode {
+                output::OutputMode::Json => {
+                    output::print_json(&serde_json::json!({
+                        "action": "remove",
+                        "label": label,
+                        "issues": updated_issues.iter().map(|i| i.id.to_string()).collect::<Vec<_>>(),
+                        "status": "success"
+                    }))?;
+                }
+                output::OutputMode::Text => {
+                    for issue in &updated_issues {
+                        println!("Removed label '{}' from {}", label, issue.id);
+                    }
+                }
+            }
+        }
+        LabelAction::List { issue_id } => {
+            let id = IssueId::new(issue_id);
+            let issue = app
+                .storage()
+                .get(&id)
+                .await?
+                .ok_or_else(|| crate::error::Error::IssueNotFound(id.clone()))?;
+
+            match output_mode {
+                output::OutputMode::Json => {
+                    output::print_json(&issue.labels)?;
+                }
+                output::OutputMode::Text => {
+                    if issue.labels.is_empty() {
+                        println!("{} has no labels", issue_id);
+                    } else {
+                        println!("Labels for {} ({}):", issue_id, issue.labels.len());
+                        for label in &issue.labels {
+                            println!("  {}", label);
+                        }
+                    }
+                }
+            }
+        }
+        LabelAction::ListAll => {
+            let all_issues = app.storage().list(&IssueFilter::default()).await?;
+
+            // Collect all unique labels
+            let all_labels: BTreeSet<String> = all_issues
+                .iter()
+                .flat_map(|i| i.labels.iter().cloned())
+                .collect();
+
+            match output_mode {
+                output::OutputMode::Json => {
+                    output::print_json(&all_labels.iter().collect::<Vec<_>>())?;
+                }
+                output::OutputMode::Text => {
+                    if all_labels.is_empty() {
+                        println!("No labels found in any issues.");
+                    } else {
+                        println!("All labels ({}):", all_labels.len());
+                        for label in &all_labels {
+                            println!("  {}", label);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Execute the stale command
+pub async fn execute_stale(
+    app: &crate::app::App,
+    args: &StaleArgs,
+    output_mode: OutputMode,
+) -> Result<()> {
+    use crate::domain::{IssueFilter, IssueStatus};
+    use crate::output;
+    use chrono::{Duration, Utc};
+
+    let cutoff = Utc::now() - Duration::days(i64::from(args.days));
+
+    // Build filter based on status if provided
+    let filter = IssueFilter {
+        status: args.status.map(|s| s.into()),
+        ..Default::default()
+    };
+
+    let all_issues = app.storage().list(&filter).await?;
+
+    // Filter to stale issues (not updated since cutoff) and exclude closed
+    let mut stale_issues: Vec<_> = all_issues
+        .into_iter()
+        .filter(|i| i.updated_at < cutoff && i.status != IssueStatus::Closed)
+        .collect();
+
+    // Sort by updated_at (oldest first)
+    stale_issues.sort_by(|a, b| a.updated_at.cmp(&b.updated_at));
+
+    // Apply limit
+    stale_issues.truncate(args.limit);
+
+    match output_mode {
+        output::OutputMode::Json => {
+            output::print_json(&stale_issues)?;
+        }
+        output::OutputMode::Text => {
+            if stale_issues.is_empty() {
+                println!("No stale issues found (not updated in {} days).", args.days);
+            } else {
+                println!(
+                    "Stale issues ({} not updated in {} days):",
+                    stale_issues.len(),
+                    args.days
+                );
+                println!();
+                for issue in &stale_issues {
+                    let days_stale = (Utc::now() - issue.updated_at).num_days();
+                    println!(
+                        "  {} [P{}] {} ({} days stale)",
+                        issue.id, issue.priority, issue.title, days_stale
+                    );
                 }
             }
         }
