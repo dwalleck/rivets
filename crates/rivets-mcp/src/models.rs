@@ -182,6 +182,78 @@ pub struct DepParams {
     pub workspace_root: Option<String>,
 }
 
+/// Parameters for the `reopen` tool.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReopenParams {
+    /// The issue ID to reopen.
+    pub issue_id: String,
+
+    /// Reason for reopening.
+    pub reason: Option<String>,
+
+    /// Optional workspace root (uses current context if not specified).
+    pub workspace_root: Option<String>,
+}
+
+/// Parameters for the `stale` tool.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct StaleParams {
+    /// Number of days since last update to consider stale (default: 30).
+    pub days: Option<u32>,
+
+    /// Filter by status.
+    pub status: Option<String>,
+
+    /// Maximum number of issues to return.
+    pub limit: Option<usize>,
+
+    /// Optional workspace root (uses current context if not specified).
+    pub workspace_root: Option<String>,
+}
+
+/// Parameters for the `label_add` tool.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct LabelAddParams {
+    /// The issue ID to add the label to.
+    pub issue_id: String,
+
+    /// The label to add.
+    pub label: String,
+
+    /// Optional workspace root (uses current context if not specified).
+    pub workspace_root: Option<String>,
+}
+
+/// Parameters for the `label_remove` tool.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct LabelRemoveParams {
+    /// The issue ID to remove the label from.
+    pub issue_id: String,
+
+    /// The label to remove.
+    pub label: String,
+
+    /// Optional workspace root (uses current context if not specified).
+    pub workspace_root: Option<String>,
+}
+
+/// Parameters for the `label_list` tool.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct LabelListParams {
+    /// The issue ID to list labels for.
+    pub issue_id: String,
+
+    /// Optional workspace root (uses current context if not specified).
+    pub workspace_root: Option<String>,
+}
+
+/// Parameters for the `label_list_all` tool.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct LabelListAllParams {
+    /// Optional workspace root (uses current context if not specified).
+    pub workspace_root: Option<String>,
+}
+
 // ============================================================================
 // Tool Output Responses
 // ============================================================================
@@ -210,6 +282,9 @@ pub struct WhereAmIResponse {
 
     /// Whether a context is currently set.
     pub context_set: bool,
+
+    /// The issue ID prefix (e.g., "proj" for "proj-abc"), if available.
+    pub issue_prefix: Option<String>,
 }
 
 /// Issue representation for MCP responses.

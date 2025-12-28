@@ -106,16 +106,29 @@ impl Tools {
             Some(workspace) => {
                 let db_path = context.current_database_path();
 
+                // Try to load the config to get the issue prefix
+                let config_path = workspace.join(".rivets").join("config.yaml");
+                let issue_prefix = if config_path.exists() {
+                    match rivets::commands::init::RivetsConfig::load(&config_path).await {
+                        Ok(config) => Some(config.issue_prefix),
+                        Err(_) => None,
+                    }
+                } else {
+                    None
+                };
+
                 Ok(WhereAmIResponse {
                     workspace_root: Some(workspace.display().to_string()),
                     database_path: db_path.map(|p| p.display().to_string()),
                     context_set: true,
+                    issue_prefix,
                 })
             }
             None => Ok(WhereAmIResponse {
                 workspace_root: None,
                 database_path: None,
                 context_set: false,
+                issue_prefix: None,
             }),
         }
     }
@@ -451,6 +464,203 @@ impl Tools {
             "Added dependency: {issue_id} depends on {depends_on_id} ({dep_type_str})"
         ))
     }
+
+    /// Reopen a closed issue.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no context is set, issue not found, or storage operations fail.
+    #[instrument(skip(self, reason), fields(%issue_id))]
+    pub async fn reopen(
+        &self,
+        issue_id: &str,
+        reason: Option<String>,
+        workspace_root: Option<&str>,
+    ) -> Result<McpIssue> {
+        debug!("Reopening issue");
+        let storage = {
+            let context = self.context.read().await;
+            context.storage_for(workspace_root.map(Path::new))?
+        };
+        let mut storage = storage.write().await;
+
+        let id = IssueId::new(issue_id);
+        let updates = IssueUpdate {
+            status: Some(IssueStatus::Open),
+            notes: reason,
+            ..Default::default()
+        };
+
+        let issue = storage.update(&id, updates).await?;
+        if let Err(e) = storage.save().await {
+            if let Err(reload_err) = storage.reload().await {
+                tracing::error!("Failed to reload after save error: {}", reload_err);
+            }
+            return Err(e.into());
+        }
+        debug!("Reopened issue");
+        Ok(issue.into())
+    }
+
+    /// Find stale issues that haven't been updated recently.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no context is set or storage operations fail.
+    #[instrument(skip(self), fields(days, limit))]
+    pub async fn stale(
+        &self,
+        days: Option<u32>,
+        status: Option<&str>,
+        limit: Option<usize>,
+        workspace_root: Option<&str>,
+    ) -> Result<Vec<McpIssue>> {
+        debug!("Finding stale issues");
+        let status = status.map(validate_status).transpose()?;
+        let days = days.unwrap_or(30);
+        let limit = limit.unwrap_or(DEFAULT_QUERY_LIMIT);
+
+        let storage = {
+            let context = self.context.read().await;
+            context.storage_for(workspace_root.map(Path::new))?
+        };
+        let storage = storage.read().await;
+
+        // Get all issues with optional status filter
+        let filter = IssueFilter {
+            status,
+            ..Default::default()
+        };
+
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(i64::from(days));
+        let issues = storage.list(&filter).await?;
+
+        // Filter by updated_at timestamp and apply limit
+        let stale_issues: Vec<McpIssue> = issues
+            .into_iter()
+            .filter(|issue| issue.updated_at < cutoff)
+            .take(limit)
+            .map(Into::into)
+            .collect();
+
+        debug!(count = stale_issues.len(), "Found stale issues");
+        Ok(stale_issues)
+    }
+
+    /// Add a label to an issue.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no context is set, issue not found, or storage operations fail.
+    #[instrument(skip(self), fields(%issue_id, %label))]
+    pub async fn label_add(
+        &self,
+        issue_id: &str,
+        label: &str,
+        workspace_root: Option<&str>,
+    ) -> Result<McpIssue> {
+        debug!("Adding label to issue");
+        let storage = {
+            let context = self.context.read().await;
+            context.storage_for(workspace_root.map(Path::new))?
+        };
+        let mut storage = storage.write().await;
+
+        let id = IssueId::new(issue_id);
+        let issue = storage.add_label(&id, label).await?;
+        if let Err(e) = storage.save().await {
+            if let Err(reload_err) = storage.reload().await {
+                tracing::error!("Failed to reload after save error: {}", reload_err);
+            }
+            return Err(e.into());
+        }
+        debug!("Added label");
+        Ok(issue.into())
+    }
+
+    /// Remove a label from an issue.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no context is set, issue not found, or storage operations fail.
+    #[instrument(skip(self), fields(%issue_id, %label))]
+    pub async fn label_remove(
+        &self,
+        issue_id: &str,
+        label: &str,
+        workspace_root: Option<&str>,
+    ) -> Result<McpIssue> {
+        debug!("Removing label from issue");
+        let storage = {
+            let context = self.context.read().await;
+            context.storage_for(workspace_root.map(Path::new))?
+        };
+        let mut storage = storage.write().await;
+
+        let id = IssueId::new(issue_id);
+        let issue = storage.remove_label(&id, label).await?;
+        if let Err(e) = storage.save().await {
+            if let Err(reload_err) = storage.reload().await {
+                tracing::error!("Failed to reload after save error: {}", reload_err);
+            }
+            return Err(e.into());
+        }
+        debug!("Removed label");
+        Ok(issue.into())
+    }
+
+    /// List labels for a specific issue.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no context is set, issue not found, or storage operations fail.
+    #[instrument(skip(self), fields(%issue_id))]
+    pub async fn label_list(
+        &self,
+        issue_id: &str,
+        workspace_root: Option<&str>,
+    ) -> Result<Vec<String>> {
+        debug!("Listing labels for issue");
+        let storage = {
+            let context = self.context.read().await;
+            context.storage_for(workspace_root.map(Path::new))?
+        };
+        let storage = storage.read().await;
+
+        let id = IssueId::new(issue_id);
+        let issue = storage
+            .get(&id)
+            .await?
+            .ok_or_else(|| Error::IssueNotFound(issue_id.to_string()))?;
+
+        debug!(count = issue.labels.len(), "Found labels");
+        Ok(issue.labels)
+    }
+
+    /// List all unique labels across all issues.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no context is set or storage operations fail.
+    #[instrument(skip(self))]
+    pub async fn label_list_all(&self, workspace_root: Option<&str>) -> Result<Vec<String>> {
+        debug!("Listing all labels");
+        let storage = {
+            let context = self.context.read().await;
+            context.storage_for(workspace_root.map(Path::new))?
+        };
+        let storage = storage.read().await;
+
+        let issues = storage.list(&IssueFilter::default()).await?;
+
+        // Collect unique labels
+        let mut labels: Vec<String> = issues.into_iter().flat_map(|issue| issue.labels).collect();
+        labels.sort();
+        labels.dedup();
+
+        debug!(count = labels.len(), "Found unique labels");
+        Ok(labels)
+    }
 }
 
 #[cfg(test)]
@@ -649,6 +859,8 @@ mod tests {
         let info = tools.where_am_i().await.unwrap();
         assert!(info.context_set);
         assert_eq!(info.workspace_root, Some("/test/workspace".to_string()));
+        // issue_prefix is None for test workspaces without config file
+        assert!(info.issue_prefix.is_none());
     }
 
     #[tokio::test]
@@ -659,6 +871,7 @@ mod tests {
         let info = tools.where_am_i().await.unwrap();
         assert!(!info.context_set);
         assert!(info.workspace_root.is_none());
+        assert!(info.issue_prefix.is_none());
     }
 
     #[tokio::test]
@@ -756,5 +969,114 @@ mod tests {
             result.is_ok(),
             "Concurrent operations timed out - possible deadlock"
         );
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_reopen_issue(#[future] tools: Tools) {
+        let tools = tools.await;
+
+        // Create and close an issue
+        let issue = create_issue(&tools, "To Reopen").await;
+        let closed = tools
+            .close(&issue.id, Some("Completed".to_string()), None)
+            .await
+            .unwrap();
+        assert_eq!(closed.status, "closed");
+
+        // Reopen the issue
+        let reopened = tools
+            .reopen(&issue.id, Some("Work not done".to_string()), None)
+            .await
+            .unwrap();
+        assert_eq!(reopened.status, "open");
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_label_add_and_list(#[future] tools: Tools) {
+        let tools = tools.await;
+
+        let issue = create_issue(&tools, "Labeled Issue").await;
+
+        // Add a label
+        let updated = tools.label_add(&issue.id, "feature", None).await.unwrap();
+        assert!(updated.labels.contains(&"feature".to_string()));
+
+        // List labels
+        let labels = tools.label_list(&issue.id, None).await.unwrap();
+        assert!(labels.contains(&"feature".to_string()));
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_label_remove(#[future] tools: Tools) {
+        let tools = tools.await;
+
+        // Create issue with label
+        let issue = tools
+            .create(
+                "Issue with Label".to_string(),
+                None,
+                None,
+                None,
+                None,
+                Some(vec!["bug".to_string()]),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(issue.labels.contains(&"bug".to_string()));
+
+        // Remove the label
+        let updated = tools.label_remove(&issue.id, "bug", None).await.unwrap();
+        assert!(!updated.labels.contains(&"bug".to_string()));
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_label_list_all(#[future] tools: Tools) {
+        let tools = tools.await;
+
+        // Create issues with different labels
+        tools
+            .create(
+                "Issue 1".to_string(),
+                None,
+                None,
+                None,
+                None,
+                Some(vec!["feature".to_string(), "backend".to_string()]),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        tools
+            .create(
+                "Issue 2".to_string(),
+                None,
+                None,
+                None,
+                None,
+                Some(vec!["feature".to_string(), "frontend".to_string()]),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // List all labels (should be deduplicated)
+        let labels = tools.label_list_all(None).await.unwrap();
+        assert!(labels.contains(&"feature".to_string()));
+        assert!(labels.contains(&"backend".to_string()));
+        assert!(labels.contains(&"frontend".to_string()));
+        // Feature should only appear once
+        assert_eq!(labels.iter().filter(|&l| l == "feature").count(), 1);
     }
 }
