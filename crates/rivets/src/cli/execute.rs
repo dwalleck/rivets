@@ -352,8 +352,14 @@ pub async fn execute_update(
 /// This helper encapsulates the common pattern of:
 /// 1. Checking the result of a storage operation
 /// 2. Saving to disk on success
-/// 3. Reloading on save failure to restore consistency
+/// 3. Reloading on save failure to restore consistency and prevent partial state
 /// 4. Recording success or failure in the batch result
+///
+/// # Arguments
+/// * `app` - Application instance with storage
+/// * `result` - Batch result to record success/failure
+/// * `issue_id` - Issue identifier for error reporting
+/// * `storage_result` - Result from the storage operation
 async fn save_or_record_failure(
     app: &mut crate::app::App,
     result: &mut super::types::BatchResult,
@@ -366,7 +372,7 @@ async fn save_or_record_failure(
         Ok(issue) => {
             if let Err(save_err) = app.save().await {
                 if let Err(reload_err) = app.storage_mut().reload().await {
-                    eprintln!("Warning: Failed to reload after save error: {}", reload_err);
+                    tracing::warn!("Failed to reload after save error: {}", reload_err);
                 }
                 result.failed.push(BatchError {
                     issue_id: issue_id.to_string(),
