@@ -299,14 +299,15 @@ pub async fn execute_show(
 ///
 /// # Atomicity
 ///
-/// This operation is NOT atomic. When updating multiple issues, changes are applied
-/// sequentially in memory. If the process fails mid-operation:
-/// - Some issues may be updated while others are not
-/// - Successfully updated IDs are reported to stderr before the error
-/// - Storage is only persisted if ALL operations succeed
+/// Changes are applied sequentially in memory, then persisted to disk at the end.
+/// If ANY operation fails mid-batch:
+/// - Processing stops immediately
+/// - In-memory state may contain partial updates (but these are not persisted)
+/// - On-disk state remains unchanged (save is never called)
+/// - Successfully processed IDs are reported to stderr to help with debugging
 ///
-/// For concurrent access scenarios, each individual storage operation is atomic,
-/// but the batch as a whole is not.
+/// From a persistence perspective, this is all-or-nothing: either all changes
+/// are saved to disk, or none are.
 pub async fn execute_update(
     app: &mut crate::app::App,
     args: &UpdateArgs,
@@ -379,14 +380,15 @@ pub async fn execute_update(
 ///
 /// # Atomicity
 ///
-/// This operation is NOT atomic. When closing multiple issues, changes are applied
-/// sequentially in memory. If the process fails mid-operation:
-/// - Some issues may be closed while others are not
-/// - Successfully closed IDs are reported to stderr before the error
-/// - Storage is only persisted if ALL operations succeed
+/// Changes are applied sequentially in memory, then persisted to disk at the end.
+/// If ANY operation fails mid-batch:
+/// - Processing stops immediately
+/// - In-memory state may contain partial updates (but these are not persisted)
+/// - On-disk state remains unchanged (save is never called)
+/// - Successfully processed IDs are reported to stderr to help with debugging
 ///
-/// For concurrent access scenarios, each individual storage operation is atomic,
-/// but the batch as a whole is not.
+/// From a persistence perspective, this is all-or-nothing: either all changes
+/// are saved to disk, or none are.
 pub async fn execute_close(
     app: &mut crate::app::App,
     args: &CloseArgs,
@@ -474,14 +476,15 @@ pub async fn execute_close(
 ///
 /// # Atomicity
 ///
-/// This operation is NOT atomic. When reopening multiple issues, changes are applied
-/// sequentially in memory. If the process fails mid-operation:
-/// - Some issues may be reopened while others are not
-/// - Successfully reopened IDs are reported to stderr before the error
-/// - Storage is only persisted if ALL operations succeed
+/// Changes are applied sequentially in memory, then persisted to disk at the end.
+/// If ANY operation fails mid-batch:
+/// - Processing stops immediately
+/// - In-memory state may contain partial updates (but these are not persisted)
+/// - On-disk state remains unchanged (save is never called)
+/// - Successfully processed IDs are reported to stderr to help with debugging
 ///
-/// For concurrent access scenarios, each individual storage operation is atomic,
-/// but the batch as a whole is not.
+/// From a persistence perspective, this is all-or-nothing: either all changes
+/// are saved to disk, or none are.
 pub async fn execute_reopen(
     app: &mut crate::app::App,
     args: &ReopenArgs,
