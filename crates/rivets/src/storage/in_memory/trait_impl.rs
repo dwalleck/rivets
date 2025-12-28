@@ -497,6 +497,41 @@ impl IssueStorage for InMemoryStorage {
         Ok(blocked_list)
     }
 
+    async fn add_label(&mut self, id: &IssueId, label: &str) -> Result<Issue> {
+        let mut inner = self.lock().await;
+
+        let issue = inner
+            .issues
+            .get_mut(id)
+            .ok_or_else(|| Error::IssueNotFound(id.clone()))?;
+
+        // Only add if not already present (idempotent)
+        if !issue.labels.contains(&label.to_string()) {
+            issue.labels.push(label.to_string());
+            issue.updated_at = chrono::Utc::now();
+        }
+
+        Ok(issue.clone())
+    }
+
+    async fn remove_label(&mut self, id: &IssueId, label: &str) -> Result<Issue> {
+        let mut inner = self.lock().await;
+
+        let issue = inner
+            .issues
+            .get_mut(id)
+            .ok_or_else(|| Error::IssueNotFound(id.clone()))?;
+
+        // Only remove if present (idempotent)
+        let original_len = issue.labels.len();
+        issue.labels.retain(|l| l != label);
+        if issue.labels.len() != original_len {
+            issue.updated_at = chrono::Utc::now();
+        }
+
+        Ok(issue.clone())
+    }
+
     async fn import_issues(&mut self, issues: Vec<Issue>) -> Result<()> {
         let mut inner = self.lock().await;
 

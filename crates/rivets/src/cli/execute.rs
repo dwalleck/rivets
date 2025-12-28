@@ -297,9 +297,16 @@ pub async fn execute_show(
 
 /// Execute the update command
 ///
-/// Note: When updating multiple issues, changes are applied sequentially and saved
-/// at the end. If the process fails mid-operation, some issues may be updated while
-/// others are not. Successfully updated IDs are reported before the error.
+/// # Atomicity
+///
+/// This operation is NOT atomic. When updating multiple issues, changes are applied
+/// sequentially in memory. If the process fails mid-operation:
+/// - Some issues may be updated while others are not
+/// - Successfully updated IDs are reported to stderr before the error
+/// - Storage is only persisted if ALL operations succeed
+///
+/// For concurrent access scenarios, each individual storage operation is atomic,
+/// but the batch as a whole is not.
 pub async fn execute_update(
     app: &mut crate::app::App,
     args: &UpdateArgs,
@@ -309,6 +316,21 @@ pub async fn execute_update(
     use crate::output;
 
     let mut updated_issues = Vec::new();
+
+    /// Helper to report successful updates before returning an error
+    fn report_partial_success(updated: &[crate::domain::Issue]) {
+        if !updated.is_empty() {
+            eprintln!(
+                "Successfully updated {} issue(s) before error: {}",
+                updated.len(),
+                updated
+                    .iter()
+                    .map(|i| i.id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
 
     for id_str in &args.issue_ids {
         let issue_id = IssueId::new(id_str);
@@ -330,18 +352,7 @@ pub async fn execute_update(
         match app.storage_mut().update(&issue_id, update).await {
             Ok(issue) => updated_issues.push(issue),
             Err(e) => {
-                // Report successful updates before returning error
-                if !updated_issues.is_empty() {
-                    eprintln!(
-                        "Successfully updated {} issue(s) before error: {}",
-                        updated_issues.len(),
-                        updated_issues
-                            .iter()
-                            .map(|i| i.id.to_string())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
-                }
+                report_partial_success(&updated_issues);
                 return Err(e.into());
             }
         }
@@ -366,9 +377,16 @@ pub async fn execute_update(
 
 /// Execute the close command
 ///
-/// Note: When closing multiple issues, changes are applied sequentially and saved
-/// at the end. If the process fails mid-operation, some issues may be closed while
-/// others are not. Successfully closed IDs are reported before the error.
+/// # Atomicity
+///
+/// This operation is NOT atomic. When closing multiple issues, changes are applied
+/// sequentially in memory. If the process fails mid-operation:
+/// - Some issues may be closed while others are not
+/// - Successfully closed IDs are reported to stderr before the error
+/// - Storage is only persisted if ALL operations succeed
+///
+/// For concurrent access scenarios, each individual storage operation is atomic,
+/// but the batch as a whole is not.
 pub async fn execute_close(
     app: &mut crate::app::App,
     args: &CloseArgs,
@@ -454,9 +472,16 @@ pub async fn execute_close(
 
 /// Execute the reopen command
 ///
-/// Note: When reopening multiple issues, changes are applied sequentially and saved
-/// at the end. If the process fails mid-operation, some issues may be reopened while
-/// others are not. Successfully reopened IDs are reported before the error.
+/// # Atomicity
+///
+/// This operation is NOT atomic. When reopening multiple issues, changes are applied
+/// sequentially in memory. If the process fails mid-operation:
+/// - Some issues may be reopened while others are not
+/// - Successfully reopened IDs are reported to stderr before the error
+/// - Storage is only persisted if ALL operations succeed
+///
+/// For concurrent access scenarios, each individual storage operation is atomic,
+/// but the batch as a whole is not.
 pub async fn execute_reopen(
     app: &mut crate::app::App,
     args: &ReopenArgs,
@@ -836,31 +861,13 @@ pub async fn execute_label(
 
     match &args.action {
         LabelAction::Add { issue_ids, label } => {
+            // Use atomic add_label operation to avoid TOCTOU race conditions
             let mut updated_issues = Vec::new();
 
             for id_str in issue_ids {
                 let issue_id = IssueId::new(id_str);
-
-                let issue = app
-                    .storage()
-                    .get(&issue_id)
-                    .await?
-                    .ok_or_else(|| crate::error::Error::IssueNotFound(issue_id.clone()))?;
-
-                // Add label if not already present
-                let mut labels = issue.labels.clone();
-                if !labels.contains(&label.to_string()) {
-                    labels.push(label.clone());
-
-                    let update = crate::domain::IssueUpdate {
-                        labels: Some(labels),
-                        ..Default::default()
-                    };
-                    let updated = app.storage_mut().update(&issue_id, update).await?;
-                    updated_issues.push(updated);
-                } else {
-                    updated_issues.push(issue);
-                }
+                let updated = app.storage_mut().add_label(&issue_id, label).await?;
+                updated_issues.push(updated);
             }
 
             app.save().await?;
@@ -882,35 +889,13 @@ pub async fn execute_label(
             }
         }
         LabelAction::Remove { issue_ids, label } => {
+            // Use atomic remove_label operation to avoid TOCTOU race conditions
             let mut updated_issues = Vec::new();
 
             for id_str in issue_ids {
                 let issue_id = IssueId::new(id_str);
-
-                let issue = app
-                    .storage()
-                    .get(&issue_id)
-                    .await?
-                    .ok_or_else(|| crate::error::Error::IssueNotFound(issue_id.clone()))?;
-
-                // Remove label if present
-                let labels: Vec<String> = issue
-                    .labels
-                    .iter()
-                    .filter(|l| *l != label)
-                    .cloned()
-                    .collect();
-
-                if labels.len() != issue.labels.len() {
-                    let update = crate::domain::IssueUpdate {
-                        labels: Some(labels),
-                        ..Default::default()
-                    };
-                    let updated = app.storage_mut().update(&issue_id, update).await?;
-                    updated_issues.push(updated);
-                } else {
-                    updated_issues.push(issue);
-                }
+                let updated = app.storage_mut().remove_label(&issue_id, label).await?;
+                updated_issues.push(updated);
             }
 
             app.save().await?;

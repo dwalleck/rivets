@@ -258,6 +258,28 @@ pub trait IssueStorage: Send + Sync {
     /// Returns tuples of (blocked issue, blocking issues).
     async fn blocked_issues(&self) -> Result<Vec<(Issue, Vec<Issue>)>>;
 
+    // ========== Atomic Label Operations ==========
+
+    /// Atomically add a label to an issue.
+    ///
+    /// This operation is atomic - no TOCTOU race condition between read and write.
+    /// If the label already exists, this is a no-op and returns success.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::IssueNotFound` if the issue doesn't exist
+    async fn add_label(&mut self, id: &IssueId, label: &str) -> Result<Issue>;
+
+    /// Atomically remove a label from an issue.
+    ///
+    /// This operation is atomic - no TOCTOU race condition between read and write.
+    /// If the label doesn't exist, this is a no-op and returns success.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::IssueNotFound` if the issue doesn't exist
+    async fn remove_label(&mut self, id: &IssueId, label: &str) -> Result<Issue>;
+
     // ========== Batch Operations ==========
 
     /// Import multiple issues.
@@ -388,6 +410,14 @@ impl IssueStorage for JsonlBackedStorage {
 
     async fn blocked_issues(&self) -> Result<Vec<(Issue, Vec<Issue>)>> {
         self.inner.blocked_issues().await
+    }
+
+    async fn add_label(&mut self, id: &IssueId, label: &str) -> Result<Issue> {
+        self.inner.add_label(id, label).await
+    }
+
+    async fn remove_label(&mut self, id: &IssueId, label: &str) -> Result<Issue> {
+        self.inner.remove_label(id, label).await
     }
 
     async fn import_issues(&mut self, issues: Vec<Issue>) -> Result<()> {
@@ -661,6 +691,18 @@ impl IssueStorage for MockStorage {
 
     async fn blocked_issues(&self) -> Result<Vec<(Issue, Vec<Issue>)>> {
         Ok(vec![])
+    }
+
+    async fn add_label(&mut self, _id: &IssueId, _label: &str) -> Result<Issue> {
+        unimplemented!(
+            "MockStorage::add_label() is not implemented. Use in_memory::new_in_memory_storage() for full CRUD."
+        )
+    }
+
+    async fn remove_label(&mut self, _id: &IssueId, _label: &str) -> Result<Issue> {
+        unimplemented!(
+            "MockStorage::remove_label() is not implemented. Use in_memory::new_in_memory_storage() for full CRUD."
+        )
     }
 
     async fn import_issues(&mut self, _issues: Vec<Issue>) -> Result<()> {
