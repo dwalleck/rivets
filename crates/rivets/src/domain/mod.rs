@@ -112,29 +112,11 @@ impl Issue {
     ///
     /// Checks:
     /// - Title is not empty and within MAX_TITLE_LENGTH
-    /// - Priority is within valid range (0-4)
+    /// - Priority is within valid range (0-MAX_PRIORITY)
     ///
     /// Returns Ok(()) if valid, Err with description if invalid.
     pub fn validate(&self) -> Result<(), String> {
-        let trimmed_title = self.title.trim();
-
-        if trimmed_title.is_empty() {
-            return Err("Title cannot be empty".to_string());
-        }
-
-        if self.title.len() > MAX_TITLE_LENGTH {
-            return Err(format!(
-                "Title length ({}) exceeds maximum of {}",
-                self.title.len(),
-                MAX_TITLE_LENGTH
-            ));
-        }
-
-        if self.priority > 4 {
-            return Err(format!("Priority {} exceeds maximum of 4", self.priority));
-        }
-
-        Ok(())
+        validate_title_and_priority(&self.title, self.priority)
     }
 }
 
@@ -273,6 +255,41 @@ pub const MIN_PRIORITY: u8 = 0;
 /// Maximum priority level (4 = backlog)
 pub const MAX_PRIORITY: u8 = 4;
 
+/// Validate title and priority fields.
+///
+/// Shared validation logic used by both `Issue::validate()` and `NewIssue::validate()`.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Title (after trimming) is empty
+/// - Title (after trimming) exceeds MAX_TITLE_LENGTH
+/// - Priority exceeds MAX_PRIORITY
+fn validate_title_and_priority(title: &str, priority: u8) -> Result<(), String> {
+    let trimmed = title.trim();
+
+    if trimmed.is_empty() {
+        return Err("Title cannot be empty".to_string());
+    }
+
+    if trimmed.len() > MAX_TITLE_LENGTH {
+        return Err(format!(
+            "Title cannot exceed {} characters (got {})",
+            MAX_TITLE_LENGTH,
+            trimmed.len()
+        ));
+    }
+
+    if priority > MAX_PRIORITY {
+        return Err(format!(
+            "Priority must be in range {}-{} (got {})",
+            MIN_PRIORITY, MAX_PRIORITY, priority
+        ));
+    }
+
+    Ok(())
+}
+
 /// Data for creating a new issue
 #[derive(Debug, Clone)]
 pub struct NewIssue {
@@ -317,30 +334,9 @@ impl NewIssue {
     ///
     /// Returns an error if:
     /// - Title is empty or exceeds MAX_TITLE_LENGTH
-    /// - Priority is not in range 0-4
+    /// - Priority is not in range 0-MAX_PRIORITY
     pub fn validate(&self) -> Result<(), String> {
-        let trimmed_title = self.title.trim();
-
-        if trimmed_title.is_empty() {
-            return Err("Title cannot be empty".to_string());
-        }
-
-        if trimmed_title.len() > MAX_TITLE_LENGTH {
-            return Err(format!(
-                "Title cannot exceed {} characters (got {})",
-                MAX_TITLE_LENGTH,
-                trimmed_title.len()
-            ));
-        }
-
-        if self.priority > 4 {
-            return Err(format!(
-                "Priority must be in range 0-4 (got {})",
-                self.priority
-            ));
-        }
-
-        Ok(())
+        validate_title_and_priority(&self.title, self.priority)
     }
 }
 
@@ -579,6 +575,52 @@ mod tests {
                 "Priority {} should be valid",
                 priority
             );
+        }
+    }
+
+    // ===== validate_title_and_priority() Tests =====
+
+    mod validate_title_and_priority_tests {
+        use super::super::{
+            validate_title_and_priority, MAX_PRIORITY, MAX_TITLE_LENGTH, MIN_PRIORITY,
+        };
+        use rstest::rstest;
+
+        #[rstest]
+        #[case::valid_title_and_priority("Valid Title", 2, true)]
+        #[case::empty_title("", 2, false)]
+        #[case::whitespace_only_title("   ", 2, false)]
+        #[case::priority_zero("Valid", 0, true)]
+        #[case::priority_max("Valid", MAX_PRIORITY, true)]
+        #[case::priority_too_high("Valid", MAX_PRIORITY + 1, false)]
+        fn test_validate_title_and_priority(
+            #[case] title: &str,
+            #[case] priority: u8,
+            #[case] should_pass: bool,
+        ) {
+            let result = validate_title_and_priority(title, priority);
+            assert_eq!(result.is_ok(), should_pass);
+        }
+
+        #[test]
+        fn test_title_exactly_max_length() {
+            let title = "x".repeat(MAX_TITLE_LENGTH);
+            assert!(validate_title_and_priority(&title, 2).is_ok());
+        }
+
+        #[test]
+        fn test_title_exceeds_max_length() {
+            let title = "x".repeat(MAX_TITLE_LENGTH + 1);
+            let result = validate_title_and_priority(&title, 2);
+            assert!(result.is_err());
+            assert!(result.unwrap_err().contains("cannot exceed"));
+        }
+
+        #[test]
+        fn test_priority_error_message_includes_range() {
+            let result = validate_title_and_priority("Valid", MAX_PRIORITY + 1);
+            let err = result.unwrap_err();
+            assert!(err.contains(&format!("{}-{}", MIN_PRIORITY, MAX_PRIORITY)));
         }
     }
 
