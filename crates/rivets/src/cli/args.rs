@@ -150,10 +150,12 @@ pub struct UpdateArgs {
     ///
     /// Note: To unassign, use `--no-assignee` flag instead. Clap does not
     /// support empty strings ("") as argument values by default.
-    ///
-    /// TODO: Implement --no-assignee flag for explicit unassignment
-    #[arg(short, long)]
+    #[arg(short, long, conflicts_with = "no_assignee")]
     pub assignee: Option<String>,
+
+    /// Remove the current assignee (unassign the issue)
+    #[arg(long, conflicts_with = "assignee")]
+    pub no_assignee: bool,
 
     /// New design notes
     #[arg(long)]

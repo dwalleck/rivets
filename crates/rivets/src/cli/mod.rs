@@ -724,4 +724,33 @@ mod tests {
             _ => panic!("Expected Stats command"),
         }
     }
+
+    #[test]
+    fn test_parse_update_no_assignee() {
+        let cli = Cli::try_parse_from(["rivets", "update", "proj-abc", "--no-assignee"]).unwrap();
+        match cli.command {
+            Some(Commands::Update(args)) => {
+                assert!(args.no_assignee);
+                assert!(args.assignee.is_none());
+            }
+            _ => panic!("Expected Update command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_update_assignee_and_no_assignee_conflict() {
+        // --assignee and --no-assignee should conflict
+        let result = Cli::try_parse_from([
+            "rivets",
+            "update",
+            "proj-abc",
+            "--assignee",
+            "alice",
+            "--no-assignee",
+        ]);
+        assert!(
+            result.is_err(),
+            "Expected conflict error for --assignee and --no-assignee"
+        );
+    }
 }

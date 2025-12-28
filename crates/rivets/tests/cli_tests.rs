@@ -1306,6 +1306,43 @@ fn test_cli_update_multiple_issues(initialized_dir: TempDir) {
 }
 
 #[rstest]
+fn test_cli_update_no_assignee_flag(initialized_dir: TempDir) {
+    // Create an issue with an assignee
+    let issue_id = create_issue(
+        initialized_dir.path(),
+        "Issue with assignee",
+        &["--assignee", "alice"],
+    );
+
+    // Verify the assignee is set
+    let show_before = run_rivets_in_dir(initialized_dir.path(), &["show", &issue_id]);
+    let stdout_before = String::from_utf8_lossy(&show_before.stdout);
+    assert!(
+        stdout_before.contains("Assignee: alice"),
+        "Assignee should be set initially"
+    );
+
+    // Update with --no-assignee to remove the assignee
+    let update_output = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["update", &issue_id, "--no-assignee"],
+    );
+    assert!(
+        update_output.status.success(),
+        "Update with --no-assignee failed: {:?}",
+        String::from_utf8_lossy(&update_output.stderr)
+    );
+
+    // Verify the assignee was removed
+    let show_after = run_rivets_in_dir(initialized_dir.path(), &["show", &issue_id]);
+    let stdout_after = String::from_utf8_lossy(&show_after.stdout);
+    assert!(
+        !stdout_after.contains("Assignee:"),
+        "Assignee should be removed after --no-assignee"
+    );
+}
+
+#[rstest]
 fn test_cli_close_multiple_issues(initialized_dir: TempDir) {
     let id1 = create_issue(initialized_dir.path(), "Issue 1", &[]);
     let id2 = create_issue(initialized_dir.path(), "Issue 2", &[]);
