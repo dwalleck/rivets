@@ -679,8 +679,11 @@ pub async fn execute_dep(
                 .await?
                 .ok_or_else(|| crate::error::Error::IssueNotFound(id.clone()))?;
 
+            // Convert depth: 0 means unlimited (None), otherwise Some(depth)
+            let max_depth = if *depth == 0 { None } else { Some(*depth) };
+
             // Get dependency tree
-            let tree = app.storage().get_dependency_tree(&id, *depth).await?;
+            let tree = app.storage().get_dependency_tree(&id, max_depth).await?;
 
             // Also get dependents (reverse tree)
             let dependents = app.storage().get_dependents(&id).await?;

@@ -273,9 +273,9 @@ pub enum DepAction {
         #[arg(value_parser = validate_issue_id)]
         issue_id: String,
 
-        /// Maximum depth to traverse (default: unlimited)
-        #[arg(short, long)]
-        depth: Option<usize>,
+        /// Maximum depth to traverse (use 0 for unlimited)
+        #[arg(short, long, default_value = "5")]
+        depth: usize,
     },
 }
 
