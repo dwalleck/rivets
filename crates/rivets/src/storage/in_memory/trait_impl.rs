@@ -582,4 +582,10 @@ impl IssueStorage for InMemoryStorage {
         // This is a no-op for this implementation
         Ok(())
     }
+
+    async fn reload(&mut self) -> Result<()> {
+        // In-memory storage has no backing store to reload from
+        // This is a no-op for this implementation
+        Ok(())
+    }
 }

@@ -297,41 +297,22 @@ pub async fn execute_show(
 
 /// Execute the update command
 ///
-/// # Atomicity
+/// # Batch Processing
 ///
-/// Changes are applied sequentially in memory, then persisted to disk at the end.
-/// If ANY operation fails mid-batch:
-/// - Processing stops immediately
-/// - In-memory state may contain partial updates (but these are not persisted)
-/// - On-disk state remains unchanged (save is never called)
-/// - Successfully processed IDs are reported to stderr to help with debugging
-///
-/// From a persistence perspective, this is all-or-nothing: either all changes
-/// are saved to disk, or none are.
+/// Each issue is processed independently with save-after-each-success semantics:
+/// - Each successful update is immediately saved to disk
+/// - Processing continues even if some updates fail
+/// - Returns a structured result showing both succeeded and failed operations
+/// - Exit code is non-zero if any failures occurred
 pub async fn execute_update(
     app: &mut crate::app::App,
     args: &UpdateArgs,
     output_mode: OutputMode,
 ) -> Result<()> {
+    use super::types::{BatchError, BatchResult};
     use crate::domain::{IssueId, IssueUpdate};
-    use crate::output;
 
-    let mut updated_issues = Vec::new();
-
-    /// Helper to report successful updates before returning an error
-    fn report_partial_success(updated: &[crate::domain::Issue]) {
-        if !updated.is_empty() {
-            eprintln!(
-                "Successfully updated {} issue(s) before error: {}",
-                updated.len(),
-                updated
-                    .iter()
-                    .map(|i| i.id.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        }
-    }
+    let mut result = BatchResult::new();
 
     for id_str in &args.issue_ids {
         let issue_id = IssueId::new(id_str);
@@ -351,24 +332,75 @@ pub async fn execute_update(
         };
 
         match app.storage_mut().update(&issue_id, update).await {
-            Ok(issue) => updated_issues.push(issue),
+            Ok(issue) => {
+                // Save immediately after each successful update
+                if let Err(save_err) = app.save().await {
+                    // Save failed - reload to restore consistency and record as failure
+                    if let Err(reload_err) = app.storage_mut().reload().await {
+                        eprintln!("Warning: Failed to reload after save error: {}", reload_err);
+                    }
+                    result.failed.push(BatchError {
+                        issue_id: id_str.clone(),
+                        error: format!("Save failed: {}", save_err),
+                    });
+                } else {
+                    result.succeeded.push(issue);
+                }
+            }
             Err(e) => {
-                report_partial_success(&updated_issues);
-                return Err(e.into());
+                result.failed.push(BatchError {
+                    issue_id: id_str.clone(),
+                    error: e.to_string(),
+                });
             }
         }
     }
 
-    app.save().await?;
+    // Output results
+    output_batch_result(&result, "Updated", output_mode)?;
+
+    // Return error if any failures occurred
+    if result.has_failures() {
+        anyhow::bail!(
+            "{} of {} update(s) failed",
+            result.failed.len(),
+            result.total()
+        );
+    }
+
+    Ok(())
+}
+
+/// Output batch operation results in the appropriate format
+fn output_batch_result(
+    result: &super::types::BatchResult,
+    action: &str,
+    output_mode: OutputMode,
+) -> Result<()> {
+    use crate::output;
 
     match output_mode {
         output::OutputMode::Json => {
-            // Always return array for consistency in programmatic usage
-            output::print_json(&updated_issues)?;
+            output::print_json(result)?;
         }
         output::OutputMode::Text => {
-            for issue in &updated_issues {
-                println!("Updated issue: {}", issue.id);
+            // Print successes
+            if !result.succeeded.is_empty() {
+                let ids: Vec<_> = result.succeeded.iter().map(|i| i.id.to_string()).collect();
+                println!(
+                    "{} {} issue(s): {}",
+                    action,
+                    result.succeeded.len(),
+                    ids.join(", ")
+                );
+            }
+
+            // Print failures
+            if !result.failed.is_empty() {
+                eprintln!("Failed {} issue(s):", result.failed.len());
+                for err in &result.failed {
+                    eprintln!("  {}: {}", err.issue_id, err.error);
+                }
             }
         }
     }
@@ -378,64 +410,51 @@ pub async fn execute_update(
 
 /// Execute the close command
 ///
-/// # Atomicity
+/// # Batch Processing
 ///
-/// Changes are applied sequentially in memory, then persisted to disk at the end.
-/// If ANY operation fails mid-batch:
-/// - Processing stops immediately
-/// - In-memory state may contain partial updates (but these are not persisted)
-/// - On-disk state remains unchanged (save is never called)
-/// - Successfully processed IDs are reported to stderr to help with debugging
-///
-/// From a persistence perspective, this is all-or-nothing: either all changes
-/// are saved to disk, or none are.
+/// Each issue is processed independently with save-after-each-success semantics:
+/// - Each successful close is immediately saved to disk
+/// - Processing continues even if some closes fail
+/// - Returns a structured result showing both succeeded and failed operations
+/// - Exit code is non-zero if any failures occurred
 pub async fn execute_close(
     app: &mut crate::app::App,
     args: &CloseArgs,
     output_mode: OutputMode,
 ) -> Result<()> {
+    use super::types::{BatchError, BatchResult};
     use crate::domain::{IssueId, IssueStatus, IssueUpdate};
-    use crate::output;
 
-    let mut closed_issues = Vec::new();
-
-    /// Helper to report successful closures before returning an error
-    fn report_partial_success(closed: &[crate::domain::Issue]) {
-        if !closed.is_empty() {
-            eprintln!(
-                "Successfully closed {} issue(s) before error: {}",
-                closed.len(),
-                closed
-                    .iter()
-                    .map(|i| i.id.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        }
-    }
+    let mut result = BatchResult::new();
 
     for id_str in &args.issue_ids {
         let issue_id = IssueId::new(id_str);
 
         // Build updated notes: append close reason to existing notes if present
         let new_notes = if args.reason != "Completed" {
-            let existing = match app.storage().get(&issue_id).await {
-                Ok(Some(issue)) => issue,
+            match app.storage().get(&issue_id).await {
+                Ok(Some(existing)) => {
+                    let close_note = format!("Closed: {}", args.reason);
+                    Some(match existing.notes {
+                        Some(existing_notes) => format!("{}\n\n{}", existing_notes, close_note),
+                        None => close_note,
+                    })
+                }
                 Ok(None) => {
-                    report_partial_success(&closed_issues);
-                    return Err(crate::error::Error::IssueNotFound(issue_id.clone()).into());
+                    result.failed.push(BatchError {
+                        issue_id: id_str.clone(),
+                        error: "Issue not found".to_string(),
+                    });
+                    continue;
                 }
                 Err(e) => {
-                    report_partial_success(&closed_issues);
-                    return Err(e.into());
+                    result.failed.push(BatchError {
+                        issue_id: id_str.clone(),
+                        error: e.to_string(),
+                    });
+                    continue;
                 }
-            };
-
-            let close_note = format!("Closed: {}", args.reason);
-            Some(match existing.notes {
-                Some(existing_notes) => format!("{}\n\n{}", existing_notes, close_note),
-                None => close_note,
-            })
+            }
         } else {
             None
         };
@@ -447,26 +466,39 @@ pub async fn execute_close(
         };
 
         match app.storage_mut().update(&issue_id, update).await {
-            Ok(issue) => closed_issues.push(issue),
+            Ok(issue) => {
+                // Save immediately after each successful close
+                if let Err(save_err) = app.save().await {
+                    if let Err(reload_err) = app.storage_mut().reload().await {
+                        eprintln!("Warning: Failed to reload after save error: {}", reload_err);
+                    }
+                    result.failed.push(BatchError {
+                        issue_id: id_str.clone(),
+                        error: format!("Save failed: {}", save_err),
+                    });
+                } else {
+                    result.succeeded.push(issue);
+                }
+            }
             Err(e) => {
-                report_partial_success(&closed_issues);
-                return Err(e.into());
+                result.failed.push(BatchError {
+                    issue_id: id_str.clone(),
+                    error: e.to_string(),
+                });
             }
         }
     }
 
-    app.save().await?;
+    // Output results
+    output_batch_result(&result, "Closed", output_mode)?;
 
-    match output_mode {
-        output::OutputMode::Json => {
-            // Always return array for consistency in programmatic usage
-            output::print_json(&closed_issues)?;
-        }
-        output::OutputMode::Text => {
-            for issue in &closed_issues {
-                println!("Closed issue: {} ({})", issue.id, args.reason);
-            }
-        }
+    // Return error if any failures occurred
+    if result.has_failures() {
+        anyhow::bail!(
+            "{} of {} close(s) failed",
+            result.failed.len(),
+            result.total()
+        );
     }
 
     Ok(())
@@ -474,64 +506,51 @@ pub async fn execute_close(
 
 /// Execute the reopen command
 ///
-/// # Atomicity
+/// # Batch Processing
 ///
-/// Changes are applied sequentially in memory, then persisted to disk at the end.
-/// If ANY operation fails mid-batch:
-/// - Processing stops immediately
-/// - In-memory state may contain partial updates (but these are not persisted)
-/// - On-disk state remains unchanged (save is never called)
-/// - Successfully processed IDs are reported to stderr to help with debugging
-///
-/// From a persistence perspective, this is all-or-nothing: either all changes
-/// are saved to disk, or none are.
+/// Each issue is processed independently with save-after-each-success semantics:
+/// - Each successful reopen is immediately saved to disk
+/// - Processing continues even if some reopens fail
+/// - Returns a structured result showing both succeeded and failed operations
+/// - Exit code is non-zero if any failures occurred
 pub async fn execute_reopen(
     app: &mut crate::app::App,
     args: &ReopenArgs,
     output_mode: OutputMode,
 ) -> Result<()> {
+    use super::types::{BatchError, BatchResult};
     use crate::domain::{IssueId, IssueStatus, IssueUpdate};
-    use crate::output;
 
-    let mut reopened_issues = Vec::new();
-
-    /// Helper to report successful reopens before returning an error
-    fn report_partial_success(reopened: &[crate::domain::Issue]) {
-        if !reopened.is_empty() {
-            eprintln!(
-                "Successfully reopened {} issue(s) before error: {}",
-                reopened.len(),
-                reopened
-                    .iter()
-                    .map(|i| i.id.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        }
-    }
+    let mut result = BatchResult::new();
 
     for id_str in &args.issue_ids {
         let issue_id = IssueId::new(id_str);
 
         // Build updated notes: append reopen reason to existing notes if provided
         let new_notes = if let Some(reason) = &args.reason {
-            let existing = match app.storage().get(&issue_id).await {
-                Ok(Some(issue)) => issue,
+            match app.storage().get(&issue_id).await {
+                Ok(Some(existing)) => {
+                    let reopen_note = format!("Reopened: {}", reason);
+                    Some(match existing.notes {
+                        Some(existing_notes) => format!("{}\n\n{}", existing_notes, reopen_note),
+                        None => reopen_note,
+                    })
+                }
                 Ok(None) => {
-                    report_partial_success(&reopened_issues);
-                    return Err(crate::error::Error::IssueNotFound(issue_id.clone()).into());
+                    result.failed.push(BatchError {
+                        issue_id: id_str.clone(),
+                        error: "Issue not found".to_string(),
+                    });
+                    continue;
                 }
                 Err(e) => {
-                    report_partial_success(&reopened_issues);
-                    return Err(e.into());
+                    result.failed.push(BatchError {
+                        issue_id: id_str.clone(),
+                        error: e.to_string(),
+                    });
+                    continue;
                 }
-            };
-
-            let reopen_note = format!("Reopened: {}", reason);
-            Some(match existing.notes {
-                Some(existing_notes) => format!("{}\n\n{}", existing_notes, reopen_note),
-                None => reopen_note,
-            })
+            }
         } else {
             None
         };
@@ -543,31 +562,39 @@ pub async fn execute_reopen(
         };
 
         match app.storage_mut().update(&issue_id, update).await {
-            Ok(issue) => reopened_issues.push(issue),
+            Ok(issue) => {
+                // Save immediately after each successful reopen
+                if let Err(save_err) = app.save().await {
+                    if let Err(reload_err) = app.storage_mut().reload().await {
+                        eprintln!("Warning: Failed to reload after save error: {}", reload_err);
+                    }
+                    result.failed.push(BatchError {
+                        issue_id: id_str.clone(),
+                        error: format!("Save failed: {}", save_err),
+                    });
+                } else {
+                    result.succeeded.push(issue);
+                }
+            }
             Err(e) => {
-                report_partial_success(&reopened_issues);
-                return Err(e.into());
+                result.failed.push(BatchError {
+                    issue_id: id_str.clone(),
+                    error: e.to_string(),
+                });
             }
         }
     }
 
-    app.save().await?;
+    // Output results
+    output_batch_result(&result, "Reopened", output_mode)?;
 
-    match output_mode {
-        output::OutputMode::Json => {
-            // Always return array for consistency in programmatic usage
-            output::print_json(&reopened_issues)?;
-        }
-        output::OutputMode::Text => {
-            let reason_msg = args
-                .reason
-                .as_ref()
-                .map(|r| format!(" ({})", r))
-                .unwrap_or_default();
-            for issue in &reopened_issues {
-                println!("Reopened issue: {}{}", issue.id, reason_msg);
-            }
-        }
+    // Return error if any failures occurred
+    if result.has_failures() {
+        anyhow::bail!(
+            "{} of {} reopen(s) failed",
+            result.failed.len(),
+            result.total()
+        );
     }
 
     Ok(())
@@ -853,70 +880,154 @@ pub async fn execute_dep(
 }
 
 /// Execute the label command
+///
+/// # Batch Processing (for Add/Remove)
+///
+/// Each issue is processed independently with save-after-each-success semantics:
+/// - Each successful label operation is immediately saved to disk
+/// - Processing continues even if some operations fail
+/// - Returns a structured result showing both succeeded and failed operations
+/// - Exit code is non-zero if any failures occurred
 pub async fn execute_label(
     app: &mut crate::app::App,
     args: &LabelArgs,
     output_mode: OutputMode,
 ) -> Result<()> {
+    use super::types::{BatchError, BatchResult};
     use crate::domain::{IssueFilter, IssueId};
     use crate::output;
     use std::collections::BTreeSet;
 
     match &args.action {
         LabelAction::Add { issue_ids, label } => {
-            // Use atomic add_label operation to avoid TOCTOU race conditions
-            let mut updated_issues = Vec::new();
+            let mut result = BatchResult::new();
 
             for id_str in issue_ids {
                 let issue_id = IssueId::new(id_str);
-                let updated = app.storage_mut().add_label(&issue_id, label).await?;
-                updated_issues.push(updated);
-            }
-
-            app.save().await?;
-
-            match output_mode {
-                output::OutputMode::Json => {
-                    output::print_json(&serde_json::json!({
-                        "action": "add",
-                        "label": label,
-                        "issues": updated_issues.iter().map(|i| i.id.to_string()).collect::<Vec<_>>(),
-                        "status": "success"
-                    }))?;
-                }
-                output::OutputMode::Text => {
-                    for issue in &updated_issues {
-                        println!("Added label '{}' to {}", label, issue.id);
+                match app.storage_mut().add_label(&issue_id, label).await {
+                    Ok(updated) => {
+                        if let Err(save_err) = app.save().await {
+                            if let Err(reload_err) = app.storage_mut().reload().await {
+                                eprintln!(
+                                    "Warning: Failed to reload after save error: {}",
+                                    reload_err
+                                );
+                            }
+                            result.failed.push(BatchError {
+                                issue_id: id_str.clone(),
+                                error: format!("Save failed: {}", save_err),
+                            });
+                        } else {
+                            result.succeeded.push(updated);
+                        }
+                    }
+                    Err(e) => {
+                        result.failed.push(BatchError {
+                            issue_id: id_str.clone(),
+                            error: e.to_string(),
+                        });
                     }
                 }
+            }
+
+            // Output results
+            match output_mode {
+                output::OutputMode::Json => {
+                    output::print_json(&result)?;
+                }
+                output::OutputMode::Text => {
+                    if !result.succeeded.is_empty() {
+                        let ids: Vec<_> =
+                            result.succeeded.iter().map(|i| i.id.to_string()).collect();
+                        println!(
+                            "Added label '{}' to {} issue(s): {}",
+                            label,
+                            result.succeeded.len(),
+                            ids.join(", ")
+                        );
+                    }
+                    if !result.failed.is_empty() {
+                        eprintln!("Failed to add label to {} issue(s):", result.failed.len());
+                        for err in &result.failed {
+                            eprintln!("  {}: {}", err.issue_id, err.error);
+                        }
+                    }
+                }
+            }
+
+            if result.has_failures() {
+                anyhow::bail!(
+                    "{} of {} label add(s) failed",
+                    result.failed.len(),
+                    result.total()
+                );
             }
         }
         LabelAction::Remove { issue_ids, label } => {
-            // Use atomic remove_label operation to avoid TOCTOU race conditions
-            let mut updated_issues = Vec::new();
+            let mut result = BatchResult::new();
 
             for id_str in issue_ids {
                 let issue_id = IssueId::new(id_str);
-                let updated = app.storage_mut().remove_label(&issue_id, label).await?;
-                updated_issues.push(updated);
-            }
-
-            app.save().await?;
-
-            match output_mode {
-                output::OutputMode::Json => {
-                    output::print_json(&serde_json::json!({
-                        "action": "remove",
-                        "label": label,
-                        "issues": updated_issues.iter().map(|i| i.id.to_string()).collect::<Vec<_>>(),
-                        "status": "success"
-                    }))?;
-                }
-                output::OutputMode::Text => {
-                    for issue in &updated_issues {
-                        println!("Removed label '{}' from {}", label, issue.id);
+                match app.storage_mut().remove_label(&issue_id, label).await {
+                    Ok(updated) => {
+                        if let Err(save_err) = app.save().await {
+                            if let Err(reload_err) = app.storage_mut().reload().await {
+                                eprintln!(
+                                    "Warning: Failed to reload after save error: {}",
+                                    reload_err
+                                );
+                            }
+                            result.failed.push(BatchError {
+                                issue_id: id_str.clone(),
+                                error: format!("Save failed: {}", save_err),
+                            });
+                        } else {
+                            result.succeeded.push(updated);
+                        }
+                    }
+                    Err(e) => {
+                        result.failed.push(BatchError {
+                            issue_id: id_str.clone(),
+                            error: e.to_string(),
+                        });
                     }
                 }
+            }
+
+            // Output results
+            match output_mode {
+                output::OutputMode::Json => {
+                    output::print_json(&result)?;
+                }
+                output::OutputMode::Text => {
+                    if !result.succeeded.is_empty() {
+                        let ids: Vec<_> =
+                            result.succeeded.iter().map(|i| i.id.to_string()).collect();
+                        println!(
+                            "Removed label '{}' from {} issue(s): {}",
+                            label,
+                            result.succeeded.len(),
+                            ids.join(", ")
+                        );
+                    }
+                    if !result.failed.is_empty() {
+                        eprintln!(
+                            "Failed to remove label from {} issue(s):",
+                            result.failed.len()
+                        );
+                        for err in &result.failed {
+                            eprintln!("  {}: {}", err.issue_id, err.error);
+                        }
+                    }
+                }
+            }
+
+            if result.has_failures() {
+                anyhow::bail!(
+                    "{} of {} label remove(s) failed",
+                    result.failed.len(),
+                    result.total()
+                );
             }
         }
         LabelAction::List { issue_id } => {

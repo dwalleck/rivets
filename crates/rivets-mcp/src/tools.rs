@@ -299,7 +299,13 @@ impl Tools {
         };
 
         let issue = storage.create(new_issue).await?;
-        storage.save().await?;
+        if let Err(e) = storage.save().await {
+            // Reload from disk to restore consistent state
+            if let Err(reload_err) = storage.reload().await {
+                tracing::error!("Failed to reload after save error: {}", reload_err);
+            }
+            return Err(e.into());
+        }
         debug!(issue_id = %issue.id, "Created issue");
         Ok(issue.into())
     }
@@ -351,7 +357,13 @@ impl Tools {
         };
 
         let issue = storage.update(&id, updates).await?;
-        storage.save().await?;
+        if let Err(e) = storage.save().await {
+            // Reload from disk to restore consistent state
+            if let Err(reload_err) = storage.reload().await {
+                tracing::error!("Failed to reload after save error: {}", reload_err);
+            }
+            return Err(e.into());
+        }
         debug!("Updated issue");
         Ok(issue.into())
     }
@@ -383,7 +395,13 @@ impl Tools {
         };
 
         let issue = storage.update(&id, updates).await?;
-        storage.save().await?;
+        if let Err(e) = storage.save().await {
+            // Reload from disk to restore consistent state
+            if let Err(reload_err) = storage.reload().await {
+                tracing::error!("Failed to reload after save error: {}", reload_err);
+            }
+            return Err(e.into());
+        }
         debug!("Closed issue");
         Ok(issue.into())
     }
@@ -419,7 +437,13 @@ impl Tools {
         let to = IssueId::new(depends_on_id);
 
         storage.add_dependency(&from, &to, dep_type).await?;
-        storage.save().await?;
+        if let Err(e) = storage.save().await {
+            // Reload from disk to restore consistent state
+            if let Err(reload_err) = storage.reload().await {
+                tracing::error!("Failed to reload after save error: {}", reload_err);
+            }
+            return Err(e.into());
+        }
 
         let dep_type_str = dep_type_to_str(dep_type);
         debug!(dep_type = %dep_type_str, "Added dependency");

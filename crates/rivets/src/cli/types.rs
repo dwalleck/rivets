@@ -4,8 +4,71 @@
 //! and their conversions to/from domain types.
 
 use clap::ValueEnum;
+use serde::Serialize;
 
-use crate::domain::{DependencyType, IssueStatus, IssueType};
+use crate::domain::{DependencyType, Issue, IssueStatus, IssueType};
+
+// ============================================================================
+// Batch Operation Results
+// ============================================================================
+
+/// Result of a batch operation on multiple issues.
+///
+/// Batch operations (update, close, reopen, label add/remove) process each
+/// issue independently and save after each success. This allows partial
+/// progress to be preserved even when some operations fail.
+#[derive(Debug, Clone, Serialize)]
+pub struct BatchResult {
+    /// Issues that were successfully processed and saved
+    pub succeeded: Vec<Issue>,
+    /// Issues that failed with their error messages
+    pub failed: Vec<BatchError>,
+}
+
+impl BatchResult {
+    /// Create a new empty batch result
+    pub fn new() -> Self {
+        Self {
+            succeeded: Vec::new(),
+            failed: Vec::new(),
+        }
+    }
+
+    /// Check if all operations succeeded (no failures)
+    pub fn is_complete_success(&self) -> bool {
+        self.failed.is_empty()
+    }
+
+    /// Check if all operations failed (no successes)
+    pub fn is_complete_failure(&self) -> bool {
+        self.succeeded.is_empty() && !self.failed.is_empty()
+    }
+
+    /// Check if there were any failures
+    pub fn has_failures(&self) -> bool {
+        !self.failed.is_empty()
+    }
+
+    /// Get the total number of operations attempted
+    pub fn total(&self) -> usize {
+        self.succeeded.len() + self.failed.len()
+    }
+}
+
+impl Default for BatchResult {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Error details for a failed batch operation on a single issue
+#[derive(Debug, Clone, Serialize)]
+pub struct BatchError {
+    /// The issue ID that failed
+    pub issue_id: String,
+    /// Human-readable error message
+    pub error: String,
+}
 
 // ============================================================================
 // Value Enums

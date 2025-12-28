@@ -307,6 +307,32 @@ pub trait IssueStorage: Send + Sync {
     /// For in-memory storage with JSONL backing, this writes to disk.
     /// For database backends, this is typically a no-op (auto-committed).
     async fn save(&self) -> Result<()>;
+
+    /// Reload state from persistent storage, discarding in-memory changes.
+    ///
+    /// This method restores the storage to match the on-disk state, discarding
+    /// any in-memory modifications that haven't been saved. It's essential for
+    /// maintaining consistency in long-running processes (like MCP servers)
+    /// when a `save()` operation fails.
+    ///
+    /// # Use Case
+    ///
+    /// When an operation modifies in-memory state but `save()` fails:
+    /// 1. In-memory state has unsaved changes
+    /// 2. On-disk state is unchanged
+    /// 3. Subsequent operations would see inconsistent state
+    /// 4. Call `reload()` to restore in-memory state to match disk
+    ///
+    /// # Implementation Notes
+    ///
+    /// - **JSONL backend**: Re-reads the file and rebuilds in-memory state
+    /// - **In-memory only**: No-op (there's no persistent state to reload from)
+    /// - **Database backends**: No-op (state is always consistent with DB)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing file cannot be read or parsed.
+    async fn reload(&mut self) -> Result<()>;
 }
 
 /// Storage backend configuration.
@@ -430,6 +456,24 @@ impl IssueStorage for JsonlBackedStorage {
 
     async fn save(&self) -> Result<()> {
         in_memory::save_to_jsonl(self.inner.as_ref(), &self.path).await
+    }
+
+    async fn reload(&mut self) -> Result<()> {
+        // Reload from the JSONL file, replacing the inner storage
+        if self.path.exists() {
+            let (new_storage, warnings) =
+                in_memory::load_from_jsonl(&self.path, "rivets".to_string()).await?;
+            if !warnings.is_empty() {
+                for warning in &warnings {
+                    tracing::warn!("JSONL reload warning: {:?}", warning);
+                }
+            }
+            self.inner = new_storage;
+        } else {
+            // File doesn't exist - reset to empty storage
+            self.inner = in_memory::new_in_memory_storage("rivets".to_string());
+        }
+        Ok(())
     }
 }
 
@@ -716,6 +760,11 @@ impl IssueStorage for MockStorage {
     async fn save(&self) -> Result<()> {
         Ok(())
     }
+
+    async fn reload(&mut self) -> Result<()> {
+        // MockStorage has no backing store, so reload is a no-op
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -791,5 +840,126 @@ mod tests {
         let _copy1 = mock;
         let _copy2 = mock; // Still usable - Copy semantics work
         let _: Box<dyn IssueStorage> = Box::new(mock);
+    }
+
+    #[tokio::test]
+    async fn test_jsonl_reload_restores_disk_state() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let jsonl_path = temp_dir.path().join("issues.jsonl");
+
+        // Create storage and add an issue
+        let mut storage = create_storage(StorageBackend::Jsonl(jsonl_path.clone()))
+            .await
+            .unwrap();
+
+        let new_issue = NewIssue {
+            title: "Original Title".to_string(),
+            description: "Original description".to_string(),
+            priority: 2,
+            issue_type: IssueType::Task,
+            assignee: None,
+            labels: vec![],
+            design: None,
+            acceptance_criteria: None,
+            notes: None,
+            external_ref: None,
+            dependencies: vec![],
+        };
+
+        let created = storage.create(new_issue).await.unwrap();
+        let issue_id = created.id.clone();
+        storage.save().await.unwrap();
+
+        // Modify in memory without saving
+        let update = IssueUpdate {
+            title: Some("Modified Title".to_string()),
+            ..Default::default()
+        };
+        let modified = storage.update(&issue_id, update).await.unwrap();
+        assert_eq!(modified.title, "Modified Title");
+
+        // Verify in-memory state is modified
+        let before_reload = storage.get(&issue_id).await.unwrap().unwrap();
+        assert_eq!(before_reload.title, "Modified Title");
+
+        // Reload from disk
+        storage.reload().await.unwrap();
+
+        // Verify in-memory state matches disk (original title)
+        let after_reload = storage.get(&issue_id).await.unwrap().unwrap();
+        assert_eq!(after_reload.title, "Original Title");
+    }
+
+    #[tokio::test]
+    async fn test_jsonl_reload_empty_file() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let jsonl_path = temp_dir.path().join("issues.jsonl");
+
+        // Create storage, add issue, save
+        let mut storage = create_storage(StorageBackend::Jsonl(jsonl_path.clone()))
+            .await
+            .unwrap();
+
+        let new_issue = NewIssue {
+            title: "Test Issue".to_string(),
+            description: "".to_string(),
+            priority: 2,
+            issue_type: IssueType::Task,
+            assignee: None,
+            labels: vec![],
+            design: None,
+            acceptance_criteria: None,
+            notes: None,
+            external_ref: None,
+            dependencies: vec![],
+        };
+
+        let created = storage.create(new_issue).await.unwrap();
+        let issue_id = created.id.clone();
+        storage.save().await.unwrap();
+
+        // Delete the file to simulate corruption/missing file
+        std::fs::remove_file(&jsonl_path).unwrap();
+
+        // Reload should reset to empty storage
+        storage.reload().await.unwrap();
+
+        // Issue should no longer exist
+        let result = storage.get(&issue_id).await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_reload_is_noop() {
+        let mut storage = create_storage(StorageBackend::InMemory).await.unwrap();
+
+        let new_issue = NewIssue {
+            title: "Test Issue".to_string(),
+            description: "".to_string(),
+            priority: 2,
+            issue_type: IssueType::Task,
+            assignee: None,
+            labels: vec![],
+            design: None,
+            acceptance_criteria: None,
+            notes: None,
+            external_ref: None,
+            dependencies: vec![],
+        };
+
+        let created = storage.create(new_issue).await.unwrap();
+        let issue_id = created.id.clone();
+
+        // Reload for in-memory is a no-op, data should persist
+        storage.reload().await.unwrap();
+
+        // Issue should still exist
+        let result = storage.get(&issue_id).await.unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().title, "Test Issue");
     }
 }

@@ -486,7 +486,7 @@ fn test_cli_update_issue(initialized_dir: TempDir) {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Updated issue:"));
+    assert!(stdout.contains("Updated 1 issue(s):"));
 
     // Verify the update
     let show_output = run_rivets_in_dir(initialized_dir.path(), &["show", &issue_id]);
@@ -514,8 +514,7 @@ fn test_cli_close_issue(initialized_dir: TempDir) {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Closed issue:"));
-    assert!(stdout.contains("Fixed in PR #42"));
+    assert!(stdout.contains("Closed 1 issue(s):"));
 }
 
 // ============================================================================
@@ -773,8 +772,7 @@ fn test_cli_reopen_issue(initialized_dir: TempDir) {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Reopened issue:"));
-    assert!(stdout.contains("Needs more work"));
+    assert!(stdout.contains("Reopened 1 issue(s):"));
 
     // Verify status is now open
     let show_output = run_rivets_in_dir(initialized_dir.path(), &["show", &issue_id]);

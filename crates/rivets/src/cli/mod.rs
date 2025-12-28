@@ -43,7 +43,10 @@ pub use args::{
 };
 
 // Re-export types
-pub use types::{DependencyTypeArg, IssueStatusArg, IssueTypeArg, SortOrderArg, SortPolicyArg};
+pub use types::{
+    BatchError, BatchResult, DependencyTypeArg, IssueStatusArg, IssueTypeArg, SortOrderArg,
+    SortPolicyArg,
+};
 
 // Re-export validators for external use
 pub use validators::{validate_description, validate_issue_id, validate_prefix, validate_title};
