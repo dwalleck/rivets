@@ -884,7 +884,7 @@ fn test_cli_label_add(initialized_dir: TempDir) {
 
     let output = run_rivets_in_dir(
         initialized_dir.path(),
-        &["label", "add", &issue_id, "urgent"],
+        &["label", "add", "urgent", &issue_id],
     );
 
     assert!(
@@ -908,7 +908,7 @@ fn test_cli_label_add_multiple_issues(initialized_dir: TempDir) {
 
     let output = run_rivets_in_dir(
         initialized_dir.path(),
-        &["label", "add", &id1, &id2, "backend"],
+        &["label", "add", "backend", "--ids", &id1, &id2],
     );
 
     assert!(
@@ -931,7 +931,7 @@ fn test_cli_label_remove(initialized_dir: TempDir) {
 
     let output = run_rivets_in_dir(
         initialized_dir.path(),
-        &["label", "remove", &issue_id, "bug"],
+        &["label", "remove", "bug", &issue_id],
     );
 
     assert!(
@@ -998,7 +998,7 @@ fn test_cli_label_add_duplicate(initialized_dir: TempDir) {
     // Try to add the same label again
     let output = run_rivets_in_dir(
         initialized_dir.path(),
-        &["label", "add", &issue_id, "existing"],
+        &["label", "add", "existing", &issue_id],
     );
 
     // Should succeed but not duplicate

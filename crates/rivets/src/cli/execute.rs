@@ -900,10 +900,30 @@ pub async fn execute_label(
     use std::collections::BTreeSet;
 
     match &args.action {
-        LabelAction::Add { issue_ids, label } => {
+        LabelAction::Add {
+            label,
+            issue_id,
+            ids,
+        } => {
+            // Validate: exactly one of issue_id or ids must be provided
+            let issue_ids: Vec<String> = match (issue_id, ids.is_empty()) {
+                (Some(id), true) => vec![id.clone()],
+                (None, false) => ids.clone(),
+                (Some(_), false) => {
+                    anyhow::bail!(
+                        "Cannot use both positional issue ID and --ids flag. Use one or the other."
+                    );
+                }
+                (None, true) => {
+                    anyhow::bail!(
+                        "Must provide an issue ID (positional) or use --ids flag with one or more IDs."
+                    );
+                }
+            };
+
             let mut result = BatchResult::new();
 
-            for id_str in issue_ids {
+            for id_str in &issue_ids {
                 let issue_id = IssueId::new(id_str);
                 match app.storage_mut().add_label(&issue_id, label).await {
                     Ok(updated) => {
@@ -964,10 +984,30 @@ pub async fn execute_label(
                 );
             }
         }
-        LabelAction::Remove { issue_ids, label } => {
+        LabelAction::Remove {
+            label,
+            issue_id,
+            ids,
+        } => {
+            // Validate: exactly one of issue_id or ids must be provided
+            let issue_ids: Vec<String> = match (issue_id, ids.is_empty()) {
+                (Some(id), true) => vec![id.clone()],
+                (None, false) => ids.clone(),
+                (Some(_), false) => {
+                    anyhow::bail!(
+                        "Cannot use both positional issue ID and --ids flag. Use one or the other."
+                    );
+                }
+                (None, true) => {
+                    anyhow::bail!(
+                        "Must provide an issue ID (positional) or use --ids flag with one or more IDs."
+                    );
+                }
+            };
+
             let mut result = BatchResult::new();
 
-            for id_str in issue_ids {
+            for id_str in &issue_ids {
                 let issue_id = IssueId::new(id_str);
                 match app.storage_mut().remove_label(&issue_id, label).await {
                     Ok(updated) => {

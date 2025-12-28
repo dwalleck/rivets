@@ -6,7 +6,9 @@
 use clap::{Parser, Subcommand};
 
 use super::types::{DependencyTypeArg, IssueStatusArg, IssueTypeArg, SortOrderArg, SortPolicyArg};
-use super::validators::{validate_description, validate_issue_id, validate_prefix, validate_title};
+use super::validators::{
+    validate_description, validate_issue_id, validate_label, validate_prefix, validate_title,
+};
 use crate::domain::{MAX_PRIORITY, MIN_PRIORITY};
 
 /// Arguments for the `init` command
@@ -115,6 +117,13 @@ pub struct ShowArgs {
 }
 
 /// Arguments for the `update` command
+///
+/// # Labels
+///
+/// Labels are intentionally not modifiable via `update`. Use the dedicated
+/// `label add` and `label remove` commands instead. This avoids ambiguity
+/// about replace-vs-add semantics - the dedicated commands make the intent
+/// explicit.
 #[derive(Parser, Debug, Clone)]
 pub struct UpdateArgs {
     /// Issue ID(s) to update, space-separated (e.g., rivets-abc rivets-def)
@@ -330,24 +339,32 @@ pub struct LabelArgs {
 pub enum LabelAction {
     /// Add a label to one or more issues
     Add {
-        /// Issue ID(s), space-separated (e.g., rivets-abc rivets-def)
-        #[arg(required = true, value_parser = validate_issue_id)]
-        issue_ids: Vec<String>,
-
-        /// Label to add
-        #[arg(required = true)]
+        /// Label to add (lowercase, alphanumeric with hyphens/underscores)
+        #[arg(value_parser = validate_label)]
         label: String,
+
+        /// Issue ID (for single issue)
+        #[arg(value_parser = validate_issue_id)]
+        issue_id: Option<String>,
+
+        /// Issue ID(s), space-separated (for multiple issues)
+        #[arg(long = "ids", num_args = 1.., value_parser = validate_issue_id)]
+        ids: Vec<String>,
     },
 
     /// Remove a label from one or more issues
     Remove {
-        /// Issue ID(s), space-separated (e.g., rivets-abc rivets-def)
-        #[arg(required = true, value_parser = validate_issue_id)]
-        issue_ids: Vec<String>,
-
-        /// Label to remove
-        #[arg(required = true)]
+        /// Label to remove (lowercase, alphanumeric with hyphens/underscores)
+        #[arg(value_parser = validate_label)]
         label: String,
+
+        /// Issue ID (for single issue)
+        #[arg(value_parser = validate_issue_id)]
+        issue_id: Option<String>,
+
+        /// Issue ID(s), space-separated (for multiple issues)
+        #[arg(long = "ids", num_args = 1.., value_parser = validate_issue_id)]
+        ids: Vec<String>,
     },
 
     /// List labels for a specific issue
