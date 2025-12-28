@@ -186,7 +186,7 @@ impl RivetsMcpServer {
 
     /// Update an existing issue.
     #[tool(
-        description = "Update an existing issue's status, priority, assignee, description, design notes, or acceptance criteria. Use empty string for assignee to clear it. Uses workspace_root if provided, otherwise uses current context."
+        description = "Update an existing issue's status, priority, assignee, labels, description, design notes, or acceptance criteria. Use empty string for assignee to clear it. Labels replace existing labels when provided. Uses workspace_root if provided, otherwise uses current context."
     )]
     async fn update(
         &self,
@@ -213,6 +213,7 @@ impl RivetsMcpServer {
                 params.acceptance_criteria,
                 params.notes,
                 params.external_ref,
+                params.labels,
                 params.workspace_root.as_deref(),
             )
             .await

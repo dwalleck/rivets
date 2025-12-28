@@ -107,7 +107,6 @@ impl App {
     }
 
     /// Get the path to the rivets directory.
-    #[allow(dead_code)]
     pub fn rivets_dir(&self) -> &Path {
         &self.rivets_dir
     }

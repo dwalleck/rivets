@@ -5,8 +5,9 @@
 use anyhow::Result;
 
 use super::args::{
-    BlockedArgs, CloseArgs, CreateArgs, DeleteArgs, DepAction, DepArgs, InitArgs, ListArgs,
-    ReadyArgs, ShowArgs, StatsArgs, UpdateArgs,
+    BlockedArgs, CloseArgs, CreateArgs, DeleteArgs, DepAction, DepArgs, InfoArgs, InitArgs,
+    LabelAction, LabelArgs, ListArgs, ReadyArgs, ReopenArgs, ShowArgs, StaleArgs, StatsArgs,
+    UpdateArgs,
 };
 use super::types::{SortOrderArg, SortPolicyArg};
 use crate::output::OutputMode;
@@ -34,6 +35,61 @@ pub async fn execute_init(args: &InitArgs) -> Result<()> {
         println!("  Config: {}", result.config_file.display());
         println!("  Issues: {}", result.issues_file.display());
         println!("  Issue prefix: {}", result.prefix);
+    }
+
+    Ok(())
+}
+
+/// Execute the info command
+pub async fn execute_info(
+    app: &crate::app::App,
+    _args: &InfoArgs,
+    output_mode: OutputMode,
+) -> Result<()> {
+    use crate::domain::{IssueFilter, IssueStatus};
+    use crate::output;
+
+    let rivets_dir = app.rivets_dir();
+    let database_path = rivets_dir.join("issues.jsonl");
+    let issue_prefix = app.prefix();
+
+    // Get issue counts in a single pass
+    let all_issues = app.storage().list(&IssueFilter::default()).await?;
+    let (total, open, in_progress, closed) =
+        all_issues
+            .iter()
+            .fold((0, 0, 0, 0), |(t, o, ip, c), issue| match issue.status {
+                IssueStatus::Open => (t + 1, o + 1, ip, c),
+                IssueStatus::InProgress => (t + 1, o, ip + 1, c),
+                IssueStatus::Closed => (t + 1, o, ip, c + 1),
+                IssueStatus::Blocked => (t + 1, o, ip, c),
+            });
+
+    match output_mode {
+        output::OutputMode::Json => {
+            output::print_json(&serde_json::json!({
+                "database_path": database_path.display().to_string(),
+                "issue_prefix": issue_prefix,
+                "issues": {
+                    "total": total,
+                    "open": open,
+                    "in_progress": in_progress,
+                    "closed": closed
+                }
+            }))?;
+        }
+        output::OutputMode::Text => {
+            println!("Rivets Repository Information");
+            println!("==============================");
+            println!();
+            println!("Database:     {}", database_path.display());
+            println!("Issue prefix: {}", issue_prefix);
+            println!();
+            println!(
+                "Issues: {} total ({} open, {} in progress, {} closed)",
+                total, open, in_progress, closed
+            );
+        }
     }
 
     Ok(())
@@ -172,55 +228,177 @@ pub async fn execute_show(
     use crate::domain::IssueId;
     use crate::output;
 
-    let issue_id = IssueId::new(&args.issue_id);
+    let mut results = Vec::new();
 
-    let issue = app
-        .storage()
-        .get(&issue_id)
-        .await?
-        .ok_or_else(|| crate::error::Error::IssueNotFound(issue_id.clone()))?;
+    for id_str in &args.issue_ids {
+        let issue_id = IssueId::new(id_str);
 
-    let deps = app.storage().get_dependencies(&issue_id).await?;
-    let dependents = app.storage().get_dependents(&issue_id).await?;
+        let issue = app
+            .storage()
+            .get(&issue_id)
+            .await?
+            .ok_or_else(|| crate::error::Error::IssueNotFound(issue_id.clone()))?;
 
-    output::print_issue_details(&issue, &deps, &dependents, output_mode)?;
+        let deps = app.storage().get_dependencies(&issue_id).await?;
+        let dependents = app.storage().get_dependents(&issue_id).await?;
+
+        results.push((issue, deps, dependents));
+    }
+
+    // Output all results
+    match output_mode {
+        output::OutputMode::Json => {
+            // Always return array for consistency in programmatic usage
+            let json_results: Vec<_> = results
+                .iter()
+                .map(|(issue, deps, dependents)| {
+                    serde_json::json!({
+                        "id": issue.id.to_string(),
+                        "title": issue.title,
+                        "description": issue.description,
+                        "status": format!("{}", issue.status),
+                        "priority": issue.priority,
+                        "issue_type": format!("{}", issue.issue_type),
+                        "assignee": issue.assignee,
+                        "labels": issue.labels,
+                        "design": issue.design,
+                        "acceptance_criteria": issue.acceptance_criteria,
+                        "notes": issue.notes,
+                        "external_ref": issue.external_ref,
+                        "created_at": issue.created_at,
+                        "updated_at": issue.updated_at,
+                        "closed_at": issue.closed_at,
+                        // Dependencies this issue has (issues it depends on)
+                        "dependencies": deps,
+                        // Issues that depend on this issue
+                        "dependents": dependents,
+                    })
+                })
+                .collect();
+            output::print_json(&json_results)?;
+        }
+        output::OutputMode::Text => {
+            for (i, (issue, deps, dependents)) in results.iter().enumerate() {
+                if i > 0 {
+                    println!();
+                    println!("---");
+                    println!();
+                }
+                output::print_issue_details(issue, deps, dependents, output_mode)?;
+            }
+        }
+    }
 
     Ok(())
 }
 
 /// Execute the update command
+///
+/// # Batch Processing
+///
+/// Each issue is processed independently with save-after-each-success semantics:
+/// - Each successful update is immediately saved to disk
+/// - Processing continues even if some updates fail
+/// - Returns a structured result showing both succeeded and failed operations
+/// - Exit code is non-zero if any failures occurred
 pub async fn execute_update(
     app: &mut crate::app::App,
     args: &UpdateArgs,
     output_mode: OutputMode,
 ) -> Result<()> {
+    use super::types::{BatchError, BatchResult};
     use crate::domain::{IssueId, IssueUpdate};
+
+    let mut result = BatchResult::new();
+
+    for id_str in &args.issue_ids {
+        let issue_id = IssueId::new(id_str);
+
+        // Build the update (same for all issues)
+        let update = IssueUpdate {
+            title: args.title.clone(),
+            description: args.description.clone(),
+            status: args.status.map(|s| s.into()),
+            priority: args.priority,
+            assignee: args.assignee.clone().map(Some),
+            design: args.design.clone(),
+            acceptance_criteria: args.acceptance.clone(),
+            notes: args.notes.clone(),
+            external_ref: args.external_ref.clone(),
+            ..Default::default()
+        };
+
+        match app.storage_mut().update(&issue_id, update).await {
+            Ok(issue) => {
+                // Save immediately after each successful update
+                if let Err(save_err) = app.save().await {
+                    // Save failed - reload to restore consistency and record as failure
+                    if let Err(reload_err) = app.storage_mut().reload().await {
+                        eprintln!("Warning: Failed to reload after save error: {}", reload_err);
+                    }
+                    result.failed.push(BatchError {
+                        issue_id: id_str.clone(),
+                        error: format!("Save failed: {}", save_err),
+                    });
+                } else {
+                    result.succeeded.push(issue);
+                }
+            }
+            Err(e) => {
+                result.failed.push(BatchError {
+                    issue_id: id_str.clone(),
+                    error: e.to_string(),
+                });
+            }
+        }
+    }
+
+    // Output results
+    output_batch_result(&result, "Updated", output_mode)?;
+
+    // Return error if any failures occurred
+    if result.has_failures() {
+        anyhow::bail!(
+            "{} of {} update(s) failed",
+            result.failed.len(),
+            result.total()
+        );
+    }
+
+    Ok(())
+}
+
+/// Output batch operation results in the appropriate format
+fn output_batch_result(
+    result: &super::types::BatchResult,
+    action: &str,
+    output_mode: OutputMode,
+) -> Result<()> {
     use crate::output;
-
-    let issue_id = IssueId::new(&args.issue_id);
-
-    // Build the update
-    let update = IssueUpdate {
-        title: args.title.clone(),
-        description: args.description.clone(),
-        status: args.status.map(|s| s.into()),
-        priority: args.priority,
-        assignee: args.assignee.clone().map(Some),
-        design: args.design.clone(),
-        acceptance_criteria: args.acceptance.clone(),
-        notes: args.notes.clone(),
-        external_ref: args.external_ref.clone(),
-    };
-
-    let issue = app.storage_mut().update(&issue_id, update).await?;
-    app.save().await?;
 
     match output_mode {
         output::OutputMode::Json => {
-            output::print_json(&issue)?;
+            output::print_json(result)?;
         }
         output::OutputMode::Text => {
-            println!("Updated issue: {}", issue.id);
+            // Print successes
+            if !result.succeeded.is_empty() {
+                let ids: Vec<_> = result.succeeded.iter().map(|i| i.id.to_string()).collect();
+                println!(
+                    "{} {} issue(s): {}",
+                    action,
+                    result.succeeded.len(),
+                    ids.join(", ")
+                );
+            }
+
+            // Print failures
+            if !result.failed.is_empty() {
+                eprintln!("Failed {} issue(s):", result.failed.len());
+                for err in &result.failed {
+                    eprintln!("  {}: {}", err.issue_id, err.error);
+                }
+            }
         }
     }
 
@@ -228,55 +406,192 @@ pub async fn execute_update(
 }
 
 /// Execute the close command
+///
+/// # Batch Processing
+///
+/// Each issue is processed independently with save-after-each-success semantics:
+/// - Each successful close is immediately saved to disk
+/// - Processing continues even if some closes fail
+/// - Returns a structured result showing both succeeded and failed operations
+/// - Exit code is non-zero if any failures occurred
 pub async fn execute_close(
     app: &mut crate::app::App,
     args: &CloseArgs,
     output_mode: OutputMode,
 ) -> Result<()> {
+    use super::types::{BatchError, BatchResult};
     use crate::domain::{IssueId, IssueStatus, IssueUpdate};
-    use crate::output;
 
-    let issue_id = IssueId::new(&args.issue_id);
+    let mut result = BatchResult::new();
 
-    // Build updated notes: append close reason to existing notes if present
-    //
-    // NOTE: There is a TOCTOU (time-of-check-time-of-use) window between reading
-    // the existing notes and updating the issue. In a multi-process scenario,
-    // another process could modify notes between these operations. This is
-    // acceptable for a single-user CLI tool. For concurrent access, consider
-    // adding an atomic "append_notes" operation to the storage trait.
-    let new_notes = if args.reason != "Completed" {
-        let existing = app
-            .storage()
-            .get(&issue_id)
-            .await?
-            .ok_or_else(|| crate::error::Error::IssueNotFound(issue_id.clone()))?;
+    for id_str in &args.issue_ids {
+        let issue_id = IssueId::new(id_str);
 
-        let close_note = format!("Closed: {}", args.reason);
-        Some(match existing.notes {
-            Some(existing_notes) => format!("{}\n\n{}", existing_notes, close_note),
-            None => close_note,
-        })
-    } else {
-        None
-    };
+        // Build updated notes: append close reason to existing notes if present
+        let new_notes = if args.reason != "Completed" {
+            match app.storage().get(&issue_id).await {
+                Ok(Some(existing)) => {
+                    let close_note = format!("Closed: {}", args.reason);
+                    Some(match existing.notes {
+                        Some(existing_notes) => format!("{}\n\n{}", existing_notes, close_note),
+                        None => close_note,
+                    })
+                }
+                Ok(None) => {
+                    result.failed.push(BatchError {
+                        issue_id: id_str.clone(),
+                        error: format!("Issue not found: {}", id_str),
+                    });
+                    continue;
+                }
+                Err(e) => {
+                    result.failed.push(BatchError {
+                        issue_id: id_str.clone(),
+                        error: e.to_string(),
+                    });
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
 
-    let update = IssueUpdate {
-        status: Some(IssueStatus::Closed),
-        notes: new_notes,
-        ..Default::default()
-    };
+        let update = IssueUpdate {
+            status: Some(IssueStatus::Closed),
+            notes: new_notes,
+            ..Default::default()
+        };
 
-    let issue = app.storage_mut().update(&issue_id, update).await?;
-    app.save().await?;
-
-    match output_mode {
-        output::OutputMode::Json => {
-            output::print_json(&issue)?;
+        match app.storage_mut().update(&issue_id, update).await {
+            Ok(issue) => {
+                // Save immediately after each successful close
+                if let Err(save_err) = app.save().await {
+                    if let Err(reload_err) = app.storage_mut().reload().await {
+                        eprintln!("Warning: Failed to reload after save error: {}", reload_err);
+                    }
+                    result.failed.push(BatchError {
+                        issue_id: id_str.clone(),
+                        error: format!("Save failed: {}", save_err),
+                    });
+                } else {
+                    result.succeeded.push(issue);
+                }
+            }
+            Err(e) => {
+                result.failed.push(BatchError {
+                    issue_id: id_str.clone(),
+                    error: e.to_string(),
+                });
+            }
         }
-        output::OutputMode::Text => {
-            println!("Closed issue: {} ({})", issue.id, args.reason);
+    }
+
+    // Output results
+    output_batch_result(&result, "Closed", output_mode)?;
+
+    // Return error if any failures occurred
+    if result.has_failures() {
+        anyhow::bail!(
+            "{} of {} close(s) failed",
+            result.failed.len(),
+            result.total()
+        );
+    }
+
+    Ok(())
+}
+
+/// Execute the reopen command
+///
+/// # Batch Processing
+///
+/// Each issue is processed independently with save-after-each-success semantics:
+/// - Each successful reopen is immediately saved to disk
+/// - Processing continues even if some reopens fail
+/// - Returns a structured result showing both succeeded and failed operations
+/// - Exit code is non-zero if any failures occurred
+pub async fn execute_reopen(
+    app: &mut crate::app::App,
+    args: &ReopenArgs,
+    output_mode: OutputMode,
+) -> Result<()> {
+    use super::types::{BatchError, BatchResult};
+    use crate::domain::{IssueId, IssueStatus, IssueUpdate};
+
+    let mut result = BatchResult::new();
+
+    for id_str in &args.issue_ids {
+        let issue_id = IssueId::new(id_str);
+
+        // Build updated notes: append reopen reason to existing notes if provided
+        let new_notes = if let Some(reason) = &args.reason {
+            match app.storage().get(&issue_id).await {
+                Ok(Some(existing)) => {
+                    let reopen_note = format!("Reopened: {}", reason);
+                    Some(match existing.notes {
+                        Some(existing_notes) => format!("{}\n\n{}", existing_notes, reopen_note),
+                        None => reopen_note,
+                    })
+                }
+                Ok(None) => {
+                    result.failed.push(BatchError {
+                        issue_id: id_str.clone(),
+                        error: format!("Issue not found: {}", id_str),
+                    });
+                    continue;
+                }
+                Err(e) => {
+                    result.failed.push(BatchError {
+                        issue_id: id_str.clone(),
+                        error: e.to_string(),
+                    });
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+
+        let update = IssueUpdate {
+            status: Some(IssueStatus::Open),
+            notes: new_notes,
+            ..Default::default()
+        };
+
+        match app.storage_mut().update(&issue_id, update).await {
+            Ok(issue) => {
+                // Save immediately after each successful reopen
+                if let Err(save_err) = app.save().await {
+                    if let Err(reload_err) = app.storage_mut().reload().await {
+                        eprintln!("Warning: Failed to reload after save error: {}", reload_err);
+                    }
+                    result.failed.push(BatchError {
+                        issue_id: id_str.clone(),
+                        error: format!("Save failed: {}", save_err),
+                    });
+                } else {
+                    result.succeeded.push(issue);
+                }
+            }
+            Err(e) => {
+                result.failed.push(BatchError {
+                    issue_id: id_str.clone(),
+                    error: e.to_string(),
+                });
+            }
         }
+    }
+
+    // Output results
+    output_batch_result(&result, "Reopened", output_mode)?;
+
+    // Return error if any failures occurred
+    if result.has_failures() {
+        anyhow::bail!(
+            "{} of {} reopen(s) failed",
+            result.failed.len(),
+            result.total()
+        );
     }
 
     Ok(())
@@ -457,20 +772,416 @@ pub async fn execute_dep(
                 output::OutputMode::Text => {
                     if deps.is_empty() {
                         if *reverse {
-                            println!("No issues depend on {}", issue_id);
+                            println!("↑ No issues depend on {}", issue_id);
                         } else {
-                            println!("{} has no dependencies", issue_id);
+                            println!("↓ {} has no dependencies", issue_id);
+                        }
+                    } else if *reverse {
+                        println!("↑ Issues depending on {} ({}):", issue_id, deps.len());
+                        for dep in &deps {
+                            println!("  └── {} ({})", dep.depends_on_id, dep.dep_type);
                         }
                     } else {
-                        if *reverse {
-                            println!("Issues depending on {} ({}):", issue_id, deps.len());
-                        } else {
-                            println!("Dependencies of {} ({}):", issue_id, deps.len());
-                        }
+                        println!("↓ Dependencies of {} ({}):", issue_id, deps.len());
                         for dep in &deps {
-                            println!("  {} ({})", dep.depends_on_id, dep.dep_type);
+                            println!("  └── {} ({})", dep.depends_on_id, dep.dep_type);
                         }
                     }
+                }
+            }
+        }
+        DepAction::Tree { issue_id, depth } => {
+            let id = IssueId::new(issue_id);
+
+            // Get the issue to verify it exists
+            let issue = app
+                .storage()
+                .get(&id)
+                .await?
+                .ok_or_else(|| crate::error::Error::IssueNotFound(id.clone()))?;
+
+            // Convert depth: 0 means unlimited (None), otherwise Some(depth)
+            let max_depth = if *depth == 0 { None } else { Some(*depth) };
+
+            // Get dependency tree
+            let tree = app.storage().get_dependency_tree(&id, max_depth).await?;
+
+            // Also get dependents (reverse tree)
+            let dependents = app.storage().get_dependents(&id).await?;
+
+            match output_mode {
+                output::OutputMode::Json => {
+                    output::print_json(&serde_json::json!({
+                        "issue_id": issue_id,
+                        "title": issue.title,
+                        "dependencies": tree.iter().map(|(dep, depth)| {
+                            serde_json::json!({
+                                "depends_on_id": dep.depends_on_id.to_string(),
+                                "dep_type": format!("{}", dep.dep_type),
+                                "depth": depth
+                            })
+                        }).collect::<Vec<_>>(),
+                        "dependents": dependents.iter().map(|dep| {
+                            serde_json::json!({
+                                "depends_on_id": dep.depends_on_id.to_string(),
+                                "dep_type": format!("{}", dep.dep_type)
+                            })
+                        }).collect::<Vec<_>>()
+                    }))?;
+                }
+                output::OutputMode::Text => {
+                    println!("Dependency tree for: {} ({})", issue_id, issue.title);
+                    println!();
+
+                    // Print dependents (what depends on this issue)
+                    if dependents.is_empty() {
+                        println!("  ↑ No issues depend on this");
+                    } else {
+                        println!("  ↑ Depended on by ({}):", dependents.len());
+                        for dep in &dependents {
+                            println!("    {} ({})", dep.depends_on_id, dep.dep_type);
+                        }
+                    }
+
+                    println!("  │");
+                    println!("  ◆ {} [P{}]", issue_id, issue.priority);
+                    println!("  │");
+
+                    // Print dependencies (what this issue depends on)
+                    if tree.is_empty() {
+                        println!("  ↓ No dependencies");
+                    } else {
+                        println!("  ↓ Depends on ({}):", tree.len());
+                        const MAX_VISUAL_DEPTH: usize = 10;
+                        for (dep, dep_depth) in &tree {
+                            // Cap visual indentation at MAX_VISUAL_DEPTH to prevent extremely wide output
+                            let visual_depth = (*dep_depth).min(MAX_VISUAL_DEPTH);
+                            let indent = "  ".repeat(visual_depth);
+                            let depth_indicator = if *dep_depth > MAX_VISUAL_DEPTH {
+                                format!(" [depth: {}]", dep_depth)
+                            } else {
+                                String::new()
+                            };
+                            println!(
+                                "    {}└── {} ({}){}",
+                                indent, dep.depends_on_id, dep.dep_type, depth_indicator
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Execute the label command
+///
+/// # Batch Processing (for Add/Remove)
+///
+/// Each issue is processed independently with save-after-each-success semantics:
+/// - Each successful label operation is immediately saved to disk
+/// - Processing continues even if some operations fail
+/// - Returns a structured result showing both succeeded and failed operations
+/// - Exit code is non-zero if any failures occurred
+pub async fn execute_label(
+    app: &mut crate::app::App,
+    args: &LabelArgs,
+    output_mode: OutputMode,
+) -> Result<()> {
+    use super::types::{BatchError, BatchResult};
+    use crate::domain::{IssueFilter, IssueId};
+    use crate::output;
+    use std::collections::BTreeSet;
+
+    match &args.action {
+        LabelAction::Add {
+            label,
+            issue_id,
+            ids,
+        } => {
+            // Validate: exactly one of issue_id or ids must be provided
+            let issue_ids: Vec<String> = match (issue_id, ids.is_empty()) {
+                (Some(id), true) => vec![id.clone()],
+                (None, false) => ids.clone(),
+                (Some(_), false) => {
+                    anyhow::bail!(
+                        "Cannot use both positional issue ID and --ids flag. Use one or the other."
+                    );
+                }
+                (None, true) => {
+                    anyhow::bail!(
+                        "Must provide an issue ID (positional) or use --ids flag with one or more IDs."
+                    );
+                }
+            };
+
+            let mut result = BatchResult::new();
+
+            for id_str in &issue_ids {
+                let issue_id = IssueId::new(id_str);
+                match app.storage_mut().add_label(&issue_id, label).await {
+                    Ok(updated) => {
+                        if let Err(save_err) = app.save().await {
+                            if let Err(reload_err) = app.storage_mut().reload().await {
+                                eprintln!(
+                                    "Warning: Failed to reload after save error: {}",
+                                    reload_err
+                                );
+                            }
+                            result.failed.push(BatchError {
+                                issue_id: id_str.clone(),
+                                error: format!("Save failed: {}", save_err),
+                            });
+                        } else {
+                            result.succeeded.push(updated);
+                        }
+                    }
+                    Err(e) => {
+                        result.failed.push(BatchError {
+                            issue_id: id_str.clone(),
+                            error: e.to_string(),
+                        });
+                    }
+                }
+            }
+
+            // Output results
+            match output_mode {
+                output::OutputMode::Json => {
+                    output::print_json(&result)?;
+                }
+                output::OutputMode::Text => {
+                    if !result.succeeded.is_empty() {
+                        let ids: Vec<_> =
+                            result.succeeded.iter().map(|i| i.id.to_string()).collect();
+                        println!(
+                            "Added label '{}' to {} issue(s): {}",
+                            label,
+                            result.succeeded.len(),
+                            ids.join(", ")
+                        );
+                    }
+                    if !result.failed.is_empty() {
+                        eprintln!("Failed to add label to {} issue(s):", result.failed.len());
+                        for err in &result.failed {
+                            eprintln!("  {}: {}", err.issue_id, err.error);
+                        }
+                    }
+                }
+            }
+
+            if result.has_failures() {
+                anyhow::bail!(
+                    "{} of {} label add(s) failed",
+                    result.failed.len(),
+                    result.total()
+                );
+            }
+        }
+        LabelAction::Remove {
+            label,
+            issue_id,
+            ids,
+        } => {
+            // Validate: exactly one of issue_id or ids must be provided
+            let issue_ids: Vec<String> = match (issue_id, ids.is_empty()) {
+                (Some(id), true) => vec![id.clone()],
+                (None, false) => ids.clone(),
+                (Some(_), false) => {
+                    anyhow::bail!(
+                        "Cannot use both positional issue ID and --ids flag. Use one or the other."
+                    );
+                }
+                (None, true) => {
+                    anyhow::bail!(
+                        "Must provide an issue ID (positional) or use --ids flag with one or more IDs."
+                    );
+                }
+            };
+
+            let mut result = BatchResult::new();
+
+            for id_str in &issue_ids {
+                let issue_id = IssueId::new(id_str);
+                match app.storage_mut().remove_label(&issue_id, label).await {
+                    Ok(updated) => {
+                        if let Err(save_err) = app.save().await {
+                            if let Err(reload_err) = app.storage_mut().reload().await {
+                                eprintln!(
+                                    "Warning: Failed to reload after save error: {}",
+                                    reload_err
+                                );
+                            }
+                            result.failed.push(BatchError {
+                                issue_id: id_str.clone(),
+                                error: format!("Save failed: {}", save_err),
+                            });
+                        } else {
+                            result.succeeded.push(updated);
+                        }
+                    }
+                    Err(e) => {
+                        result.failed.push(BatchError {
+                            issue_id: id_str.clone(),
+                            error: e.to_string(),
+                        });
+                    }
+                }
+            }
+
+            // Output results
+            match output_mode {
+                output::OutputMode::Json => {
+                    output::print_json(&result)?;
+                }
+                output::OutputMode::Text => {
+                    if !result.succeeded.is_empty() {
+                        let ids: Vec<_> =
+                            result.succeeded.iter().map(|i| i.id.to_string()).collect();
+                        println!(
+                            "Removed label '{}' from {} issue(s): {}",
+                            label,
+                            result.succeeded.len(),
+                            ids.join(", ")
+                        );
+                    }
+                    if !result.failed.is_empty() {
+                        eprintln!(
+                            "Failed to remove label from {} issue(s):",
+                            result.failed.len()
+                        );
+                        for err in &result.failed {
+                            eprintln!("  {}: {}", err.issue_id, err.error);
+                        }
+                    }
+                }
+            }
+
+            if result.has_failures() {
+                anyhow::bail!(
+                    "{} of {} label remove(s) failed",
+                    result.failed.len(),
+                    result.total()
+                );
+            }
+        }
+        LabelAction::List { issue_id } => {
+            let id = IssueId::new(issue_id);
+            let issue = app
+                .storage()
+                .get(&id)
+                .await?
+                .ok_or_else(|| crate::error::Error::IssueNotFound(id.clone()))?;
+
+            match output_mode {
+                output::OutputMode::Json => {
+                    output::print_json(&issue.labels)?;
+                }
+                output::OutputMode::Text => {
+                    if issue.labels.is_empty() {
+                        println!("{} has no labels", issue_id);
+                    } else {
+                        println!("Labels for {} ({}):", issue_id, issue.labels.len());
+                        for label in &issue.labels {
+                            println!("  {}", label);
+                        }
+                    }
+                }
+            }
+        }
+        LabelAction::ListAll => {
+            let all_issues = app.storage().list(&IssueFilter::default()).await?;
+
+            // Collect all unique labels
+            let all_labels: BTreeSet<String> = all_issues
+                .iter()
+                .flat_map(|i| i.labels.iter().cloned())
+                .collect();
+
+            match output_mode {
+                output::OutputMode::Json => {
+                    output::print_json(&all_labels.iter().collect::<Vec<_>>())?;
+                }
+                output::OutputMode::Text => {
+                    if all_labels.is_empty() {
+                        println!("No labels found in any issues.");
+                    } else {
+                        println!("All labels ({}):", all_labels.len());
+                        for label in &all_labels {
+                            println!("  {}", label);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Execute the stale command
+///
+/// By default, closed issues are excluded from staleness checks (since they're done).
+/// Use `--status closed` to explicitly find stale closed issues if needed.
+pub async fn execute_stale(
+    app: &crate::app::App,
+    args: &StaleArgs,
+    output_mode: OutputMode,
+) -> Result<()> {
+    use crate::domain::{IssueFilter, IssueStatus};
+    use crate::output;
+    use chrono::{Duration, Utc};
+
+    let cutoff = Utc::now() - Duration::days(i64::from(args.days));
+
+    // Build filter based on status if provided
+    let filter = IssueFilter {
+        status: args.status.map(|s| s.into()),
+        ..Default::default()
+    };
+
+    let all_issues = app.storage().list(&filter).await?;
+
+    // Filter to stale issues (not updated since cutoff)
+    // When no status filter is provided, exclude closed issues by default
+    // When a status filter IS provided (e.g., --status closed), respect it
+    let mut stale_issues: Vec<_> = all_issues
+        .into_iter()
+        .filter(|i| {
+            let is_stale = i.updated_at < cutoff;
+            let include_issue = args.status.is_some() || i.status != IssueStatus::Closed;
+            is_stale && include_issue
+        })
+        .collect();
+
+    // Sort by updated_at (oldest first)
+    stale_issues.sort_by(|a, b| a.updated_at.cmp(&b.updated_at));
+
+    // Apply limit
+    stale_issues.truncate(args.limit);
+
+    match output_mode {
+        output::OutputMode::Json => {
+            output::print_json(&stale_issues)?;
+        }
+        output::OutputMode::Text => {
+            if stale_issues.is_empty() {
+                println!("No stale issues found (not updated in {} days).", args.days);
+            } else {
+                println!(
+                    "Stale issues ({} not updated in {} days):",
+                    stale_issues.len(),
+                    args.days
+                );
+                println!();
+                for issue in &stale_issues {
+                    let days_stale = (Utc::now() - issue.updated_at).num_days();
+                    println!(
+                        "  {} [P{}] {} ({} days stale)",
+                        issue.id, issue.priority, issue.title, days_stale
+                    );
                 }
             }
         }

@@ -149,9 +149,79 @@ pub fn validate_description(s: &str) -> Result<String, String> {
     validate_text_field(s, "Description")
 }
 
+/// Maximum length for labels
+pub const MAX_LABEL_LENGTH: usize = 50;
+
+/// Validate label format.
+///
+/// Labels must be:
+/// - 1-50 characters
+/// - Lowercase alphanumeric, hyphens, and underscores only
+/// - Must start and end with alphanumeric character
+/// - No consecutive hyphens or underscores
+///
+/// Examples: `bug`, `high-priority`, `needs_review`, `v2`
+pub fn validate_label(s: &str) -> Result<String, String> {
+    let s = s.trim();
+
+    if s.is_empty() {
+        return Err("Label cannot be empty".to_string());
+    }
+
+    if s.len() > MAX_LABEL_LENGTH {
+        return Err(format!(
+            "Label cannot exceed {} characters, got {} characters",
+            MAX_LABEL_LENGTH,
+            s.len()
+        ));
+    }
+
+    // Check for valid characters (lowercase alphanumeric, hyphens, underscores)
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    {
+        // Check if it contains uppercase to give a more specific error
+        if s.chars().any(|c| c.is_ascii_uppercase()) {
+            return Err(
+                "Label must be lowercase. Use hyphens or underscores instead of spaces".to_string(),
+            );
+        }
+        return Err(
+            "Label must contain only lowercase letters, numbers, hyphens, and underscores"
+                .to_string(),
+        );
+    }
+
+    // Must start with alphanumeric
+    if let Some(first) = s.chars().next() {
+        if !first.is_ascii_alphanumeric() {
+            return Err("Label must start with a letter or number".to_string());
+        }
+    }
+
+    // Must end with alphanumeric
+    if let Some(last) = s.chars().last() {
+        if !last.is_ascii_alphanumeric() {
+            return Err("Label must end with a letter or number".to_string());
+        }
+    }
+
+    // No consecutive hyphens or underscores
+    if s.contains("--") {
+        return Err("Label cannot contain consecutive hyphens".to_string());
+    }
+    if s.contains("__") {
+        return Err("Label cannot contain consecutive underscores".to_string());
+    }
+
+    Ok(s.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     // ========== Prefix Validation ==========
 
@@ -402,5 +472,126 @@ mod tests {
         let result = validate_description("");
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "");
+    }
+
+    // ========== Label Validation ==========
+
+    #[test]
+    fn test_validate_label_valid() {
+        assert!(validate_label("bug").is_ok());
+        assert!(validate_label("feature").is_ok());
+        assert!(validate_label("high-priority").is_ok());
+        assert!(validate_label("needs_review").is_ok());
+        assert!(validate_label("v2").is_ok());
+        assert!(validate_label("p0").is_ok());
+        assert!(validate_label("front-end").is_ok());
+        assert!(validate_label("back_end").is_ok());
+    }
+
+    #[test]
+    fn test_validate_label_empty() {
+        let result = validate_label("");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn test_validate_label_whitespace_only() {
+        let result = validate_label("   ");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn test_validate_label_trims_whitespace() {
+        assert_eq!(validate_label("  bug  ").unwrap(), "bug");
+    }
+
+    #[test]
+    fn test_validate_label_too_long() {
+        let long_label = "a".repeat(51);
+        let result = validate_label(&long_label);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cannot exceed 50"));
+    }
+
+    #[test]
+    fn test_validate_label_exactly_max_length() {
+        let max_label = "a".repeat(50);
+        assert!(validate_label(&max_label).is_ok());
+        assert_eq!(validate_label(&max_label).unwrap().len(), 50);
+    }
+
+    #[test]
+    fn test_validate_label_uppercase_rejected() {
+        let result = validate_label("Bug");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("lowercase"));
+    }
+
+    #[test]
+    fn test_validate_label_space_rejected() {
+        let result = validate_label("high priority");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("lowercase letters, numbers, hyphens"));
+    }
+
+    #[test]
+    fn test_validate_label_special_chars_rejected() {
+        assert!(validate_label("bug!").is_err());
+        assert!(validate_label("feature@v2").is_err());
+        assert!(validate_label("needs.review").is_err());
+        assert!(validate_label("test/label").is_err());
+    }
+
+    #[test]
+    fn test_validate_label_must_start_with_alphanumeric() {
+        let result = validate_label("-bug");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("must start with"));
+
+        let result = validate_label("_bug");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("must start with"));
+    }
+
+    #[test]
+    fn test_validate_label_must_end_with_alphanumeric() {
+        let result = validate_label("bug-");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("must end with"));
+
+        let result = validate_label("bug_");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("must end with"));
+    }
+
+    #[rstest]
+    #[case::two_hyphens("high--priority")]
+    #[case::three_hyphens("high---priority")]
+    #[case::four_hyphens("high----priority")]
+    fn test_validate_label_no_consecutive_hyphens(#[case] input: &str) {
+        let result = validate_label(input);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("consecutive hyphens"));
+    }
+
+    #[rstest]
+    #[case::two_underscores("needs__review")]
+    #[case::three_underscores("needs___review")]
+    #[case::four_underscores("needs____review")]
+    fn test_validate_label_no_consecutive_underscores(#[case] input: &str) {
+        let result = validate_label(input);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("consecutive underscores"));
+    }
+
+    #[test]
+    fn test_validate_label_mixed_separators_allowed() {
+        // Mixing hyphens and underscores is allowed
+        assert!(validate_label("high-priority_v2").is_ok());
+        assert!(validate_label("needs_review-urgent").is_ok());
     }
 }

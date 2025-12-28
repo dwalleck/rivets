@@ -145,6 +145,9 @@ impl IssueStorage for InMemoryStorage {
         if let Some(external_ref) = updates.external_ref {
             issue.external_ref = Some(external_ref);
         }
+        if let Some(labels) = updates.labels {
+            issue.labels = labels;
+        }
 
         // Validate the updated issue to ensure data integrity
         // This catches invalid titles, descriptions, or priorities that may have been set
@@ -494,6 +497,41 @@ impl IssueStorage for InMemoryStorage {
         Ok(blocked_list)
     }
 
+    async fn add_label(&mut self, id: &IssueId, label: &str) -> Result<Issue> {
+        let mut inner = self.lock().await;
+
+        let issue = inner
+            .issues
+            .get_mut(id)
+            .ok_or_else(|| Error::IssueNotFound(id.clone()))?;
+
+        // Only add if not already present (idempotent)
+        if !issue.labels.contains(&label.to_string()) {
+            issue.labels.push(label.to_string());
+            issue.updated_at = chrono::Utc::now();
+        }
+
+        Ok(issue.clone())
+    }
+
+    async fn remove_label(&mut self, id: &IssueId, label: &str) -> Result<Issue> {
+        let mut inner = self.lock().await;
+
+        let issue = inner
+            .issues
+            .get_mut(id)
+            .ok_or_else(|| Error::IssueNotFound(id.clone()))?;
+
+        // Only remove if present (idempotent)
+        let original_len = issue.labels.len();
+        issue.labels.retain(|l| l != label);
+        if issue.labels.len() != original_len {
+            issue.updated_at = chrono::Utc::now();
+        }
+
+        Ok(issue.clone())
+    }
+
     async fn import_issues(&mut self, issues: Vec<Issue>) -> Result<()> {
         let mut inner = self.lock().await;
 
@@ -541,6 +579,12 @@ impl IssueStorage for InMemoryStorage {
 
     async fn save(&self) -> Result<()> {
         // In-memory storage doesn't persist to disk
+        // This is a no-op for this implementation
+        Ok(())
+    }
+
+    async fn reload(&mut self) -> Result<()> {
+        // In-memory storage has no backing store to reload from
         // This is a no-op for this implementation
         Ok(())
     }

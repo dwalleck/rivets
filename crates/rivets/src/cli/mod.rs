@@ -37,12 +37,16 @@ use clap::{Parser, Subcommand};
 
 // Re-export argument structs
 pub use args::{
-    BlockedArgs, CloseArgs, CreateArgs, DeleteArgs, DepAction, DepArgs, InitArgs, ListArgs,
-    ReadyArgs, ShowArgs, StatsArgs, UpdateArgs,
+    BlockedArgs, CloseArgs, CreateArgs, DeleteArgs, DepAction, DepArgs, InfoArgs, InitArgs,
+    LabelAction, LabelArgs, ListArgs, ReadyArgs, ReopenArgs, ShowArgs, StaleArgs, StatsArgs,
+    UpdateArgs,
 };
 
 // Re-export types
-pub use types::{DependencyTypeArg, IssueStatusArg, IssueTypeArg, SortOrderArg, SortPolicyArg};
+pub use types::{
+    BatchError, BatchResult, DependencyTypeArg, IssueStatusArg, IssueTypeArg, SortOrderArg,
+    SortPolicyArg,
+};
 
 // Re-export validators for external use
 pub use validators::{validate_description, validate_issue_id, validate_prefix, validate_title};
@@ -74,6 +78,11 @@ pub enum Commands {
     /// Run this once in your project root to start tracking issues.
     Init(InitArgs),
 
+    /// Show repository information
+    ///
+    /// Displays database path, issue prefix, and summary statistics.
+    Info(InfoArgs),
+
     /// Create a new issue
     ///
     /// Creates a new issue with the given properties. If title is not provided,
@@ -103,6 +112,11 @@ pub enum Commands {
     /// Marks an issue as completed. Optionally provide a reason for closing.
     Close(CloseArgs),
 
+    /// Reopen a closed issue
+    ///
+    /// Changes a closed issue's status back to open. Optionally provide a reason.
+    Reopen(ReopenArgs),
+
     /// Delete an issue permanently
     ///
     /// Removes an issue from the database. This cannot be undone.
@@ -119,6 +133,16 @@ pub enum Commands {
     ///
     /// Creates a dependency relationship where one issue depends on another.
     Dep(DepArgs),
+
+    /// Manage issue labels
+    ///
+    /// Add, remove, or list labels on issues.
+    Label(LabelArgs),
+
+    /// Find stale issues
+    ///
+    /// Lists issues that haven't been updated in a specified number of days.
+    Stale(StaleArgs),
 
     /// Show blocked issues
     ///
@@ -159,6 +183,10 @@ impl Cli {
 
         match &self.command {
             Some(Commands::Init(args)) => execute::execute_init(args).await,
+            Some(Commands::Info(args)) => {
+                let app = App::from_directory(&std::env::current_dir()?).await?;
+                execute::execute_info(&app, args, output_mode).await
+            }
             Some(Commands::Create(args)) => {
                 let mut app = App::from_directory(&std::env::current_dir()?).await?;
                 execute::execute_create(&mut app, args, output_mode).await
@@ -179,6 +207,10 @@ impl Cli {
                 let mut app = App::from_directory(&std::env::current_dir()?).await?;
                 execute::execute_close(&mut app, args, output_mode).await
             }
+            Some(Commands::Reopen(args)) => {
+                let mut app = App::from_directory(&std::env::current_dir()?).await?;
+                execute::execute_reopen(&mut app, args, output_mode).await
+            }
             Some(Commands::Delete(args)) => {
                 let mut app = App::from_directory(&std::env::current_dir()?).await?;
                 execute::execute_delete(&mut app, args, output_mode).await
@@ -190,6 +222,14 @@ impl Cli {
             Some(Commands::Dep(args)) => {
                 let mut app = App::from_directory(&std::env::current_dir()?).await?;
                 execute::execute_dep(&mut app, args, output_mode).await
+            }
+            Some(Commands::Label(args)) => {
+                let mut app = App::from_directory(&std::env::current_dir()?).await?;
+                execute::execute_label(&mut app, args, output_mode).await
+            }
+            Some(Commands::Stale(args)) => {
+                let app = App::from_directory(&std::env::current_dir()?).await?;
+                execute::execute_stale(&app, args, output_mode).await
             }
             Some(Commands::Blocked(args)) => {
                 let app = App::from_directory(&std::env::current_dir()?).await?;
@@ -260,6 +300,19 @@ mod tests {
             }
             _ => panic!("Expected Init command"),
         }
+    }
+
+    #[test]
+    fn test_parse_info() {
+        let cli = Cli::try_parse_from(["rivets", "info"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Info(_))));
+    }
+
+    #[test]
+    fn test_parse_info_with_json() {
+        let cli = Cli::try_parse_from(["rivets", "--json", "info"]).unwrap();
+        assert!(cli.json);
+        assert!(matches!(cli.command, Some(Commands::Info(_))));
     }
 
     #[test]
@@ -385,7 +438,19 @@ mod tests {
         let cli = Cli::try_parse_from(["rivets", "show", "proj-abc"]).unwrap();
         match cli.command {
             Some(Commands::Show(args)) => {
-                assert_eq!(args.issue_id, "proj-abc");
+                assert_eq!(args.issue_ids, vec!["proj-abc"]);
+            }
+            _ => panic!("Expected Show command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_show_multiple_ids() {
+        let cli =
+            Cli::try_parse_from(["rivets", "show", "proj-abc", "proj-def", "proj-ghi"]).unwrap();
+        match cli.command {
+            Some(Commands::Show(args)) => {
+                assert_eq!(args.issue_ids, vec!["proj-abc", "proj-def", "proj-ghi"]);
             }
             _ => panic!("Expected Show command"),
         }
@@ -414,10 +479,31 @@ mod tests {
 
         match cli.command {
             Some(Commands::Update(args)) => {
-                assert_eq!(args.issue_id, "proj-abc");
+                assert_eq!(args.issue_ids, vec!["proj-abc"]);
                 assert_eq!(args.title, Some("New title".to_string()));
                 assert_eq!(args.status, Some(IssueStatusArg::InProgress));
                 assert_eq!(args.priority, Some(0));
+            }
+            _ => panic!("Expected Update command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_update_multiple_ids() {
+        let cli = Cli::try_parse_from([
+            "rivets",
+            "update",
+            "proj-abc",
+            "proj-def",
+            "--status",
+            "in_progress",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Some(Commands::Update(args)) => {
+                assert_eq!(args.issue_ids, vec!["proj-abc", "proj-def"]);
+                assert_eq!(args.status, Some(IssueStatusArg::InProgress));
             }
             _ => panic!("Expected Update command"),
         }
@@ -428,8 +514,28 @@ mod tests {
         let cli = Cli::try_parse_from(["rivets", "close", "proj-abc"]).unwrap();
         match cli.command {
             Some(Commands::Close(args)) => {
-                assert_eq!(args.issue_id, "proj-abc");
+                assert_eq!(args.issue_ids, vec!["proj-abc"]);
                 assert_eq!(args.reason, "Completed"); // default
+            }
+            _ => panic!("Expected Close command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_close_multiple_ids() {
+        let cli = Cli::try_parse_from([
+            "rivets",
+            "close",
+            "proj-abc",
+            "proj-def",
+            "--reason",
+            "Batch done",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Commands::Close(args)) => {
+                assert_eq!(args.issue_ids, vec!["proj-abc", "proj-def"]);
+                assert_eq!(args.reason, "Batch done");
             }
             _ => panic!("Expected Close command"),
         }
@@ -445,6 +551,48 @@ mod tests {
                 assert_eq!(args.reason, "Fixed in PR #42");
             }
             _ => panic!("Expected Close command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_reopen() {
+        let cli = Cli::try_parse_from(["rivets", "reopen", "proj-abc"]).unwrap();
+        match cli.command {
+            Some(Commands::Reopen(args)) => {
+                assert_eq!(args.issue_ids, vec!["proj-abc"]);
+                assert!(args.reason.is_none());
+            }
+            _ => panic!("Expected Reopen command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_reopen_multiple_ids() {
+        let cli = Cli::try_parse_from(["rivets", "reopen", "proj-abc", "proj-def"]).unwrap();
+        match cli.command {
+            Some(Commands::Reopen(args)) => {
+                assert_eq!(args.issue_ids, vec!["proj-abc", "proj-def"]);
+            }
+            _ => panic!("Expected Reopen command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_reopen_with_reason() {
+        let cli = Cli::try_parse_from([
+            "rivets",
+            "reopen",
+            "proj-abc",
+            "--reason",
+            "Needs more work",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Commands::Reopen(args)) => {
+                assert_eq!(args.issue_ids, vec!["proj-abc"]);
+                assert_eq!(args.reason, Some("Needs more work".to_string()));
+            }
+            _ => panic!("Expected Reopen command"),
         }
     }
 
