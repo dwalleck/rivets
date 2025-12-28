@@ -269,12 +269,13 @@ pub async fn execute_show(
                         "acceptance_criteria": issue.acceptance_criteria,
                         "notes": issue.notes,
                         "external_ref": issue.external_ref,
-                        "dependencies": deps,
                         "created_at": issue.created_at,
                         "updated_at": issue.updated_at,
                         "closed_at": issue.closed_at,
-                        "dependency_details": deps,
-                        "dependent_details": dependents,
+                        // Dependencies this issue has (issues it depends on)
+                        "dependencies": deps,
+                        // Issues that depend on this issue
+                        "dependents": dependents,
                     })
                 })
                 .collect();
