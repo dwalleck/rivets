@@ -131,7 +131,7 @@ impl Context {
         if let Some(oldest) = self.cache_order.pop_front() {
             self.storage_cache.remove(&oldest);
             self.database_paths.remove(&oldest);
-            tracing::debug!("Evicted workspace from cache: {}", oldest.display());
+            tracing::debug!(workspace = %oldest.display(), "Evicted workspace from cache");
         }
     }
 

@@ -373,7 +373,10 @@ async fn save_or_record_failure(
         Ok(issue) => {
             if let Err(save_err) = app.save().await {
                 if let Err(reload_err) = app.storage_mut().reload().await {
-                    tracing::warn!("Failed to reload after save error: {}", reload_err);
+                    tracing::warn!(
+                        error = %reload_err,
+                        "Failed to reload after save error"
+                    );
                 }
                 result.failed.push(BatchError {
                     issue_id: issue_id.to_string(),
