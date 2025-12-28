@@ -9,7 +9,7 @@ use super::args::{
     LabelAction, LabelArgs, ListArgs, ReadyArgs, ReopenArgs, ShowArgs, StaleArgs, StatsArgs,
     UpdateArgs,
 };
-use super::types::{SortOrderArg, SortPolicyArg};
+use super::types::{DependencyTypeArg, SortOrderArg, SortPolicyArg};
 use crate::output::OutputMode;
 
 /// Execute the init command
@@ -686,175 +686,432 @@ pub async fn execute_ready(
     Ok(())
 }
 
+/// Add a dependency between two issues.
+async fn execute_dep_add(
+    app: &mut crate::app::App,
+    from: &str,
+    to: &str,
+    dep_type: DependencyTypeArg,
+    output_mode: OutputMode,
+) -> Result<()> {
+    use crate::domain::IssueId;
+    use crate::output;
+
+    let from_id = IssueId::new(from);
+    let to_id = IssueId::new(to);
+
+    app.storage_mut()
+        .add_dependency(&from_id, &to_id, dep_type.into())
+        .await?;
+    app.save().await?;
+
+    match output_mode {
+        output::OutputMode::Json => {
+            output::print_json(&serde_json::json!({
+                "action": "add",
+                "from": from,
+                "to": to,
+                "type": format!("{}", dep_type),
+                "status": "success"
+            }))?;
+        }
+        output::OutputMode::Text => {
+            println!("Added dependency: {} --[{}]--> {}", from, dep_type, to);
+        }
+    }
+
+    Ok(())
+}
+
+/// Remove a dependency between two issues.
+async fn execute_dep_remove(
+    app: &mut crate::app::App,
+    from: &str,
+    to: &str,
+    output_mode: OutputMode,
+) -> Result<()> {
+    use crate::domain::IssueId;
+    use crate::output;
+
+    let from_id = IssueId::new(from);
+    let to_id = IssueId::new(to);
+
+    app.storage_mut()
+        .remove_dependency(&from_id, &to_id)
+        .await?;
+    app.save().await?;
+
+    match output_mode {
+        output::OutputMode::Json => {
+            output::print_json(&serde_json::json!({
+                "action": "remove",
+                "from": from,
+                "to": to,
+                "status": "success"
+            }))?;
+        }
+        output::OutputMode::Text => {
+            println!("Removed dependency: {} --> {}", from, to);
+        }
+    }
+
+    Ok(())
+}
+
+/// List dependencies for an issue.
+async fn execute_dep_list(
+    app: &crate::app::App,
+    issue_id: &str,
+    reverse: bool,
+    output_mode: OutputMode,
+) -> Result<()> {
+    use crate::domain::IssueId;
+    use crate::output;
+
+    let id = IssueId::new(issue_id);
+
+    let deps = if reverse {
+        app.storage().get_dependents(&id).await?
+    } else {
+        app.storage().get_dependencies(&id).await?
+    };
+
+    match output_mode {
+        output::OutputMode::Json => {
+            output::print_json(&deps)?;
+        }
+        output::OutputMode::Text => {
+            if deps.is_empty() {
+                if reverse {
+                    println!("↑ No issues depend on {}", issue_id);
+                } else {
+                    println!("↓ {} has no dependencies", issue_id);
+                }
+            } else if reverse {
+                println!("↑ Issues depending on {} ({}):", issue_id, deps.len());
+                for dep in &deps {
+                    println!("  └── {} ({})", dep.depends_on_id, dep.dep_type);
+                }
+            } else {
+                println!("↓ Dependencies of {} ({}):", issue_id, deps.len());
+                for dep in &deps {
+                    println!("  └── {} ({})", dep.depends_on_id, dep.dep_type);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Display dependency tree for an issue.
+async fn execute_dep_tree(
+    app: &crate::app::App,
+    issue_id: &str,
+    depth: usize,
+    output_mode: OutputMode,
+) -> Result<()> {
+    use crate::domain::IssueId;
+    use crate::output;
+
+    let id = IssueId::new(issue_id);
+
+    // Get the issue to verify it exists
+    let issue = app
+        .storage()
+        .get(&id)
+        .await?
+        .ok_or_else(|| crate::error::Error::IssueNotFound(id.clone()))?;
+
+    // Convert depth: 0 means unlimited (None), otherwise Some(depth)
+    let max_depth = if depth == 0 { None } else { Some(depth) };
+
+    // Get dependency tree
+    let tree = app.storage().get_dependency_tree(&id, max_depth).await?;
+
+    // Also get dependents (reverse tree)
+    let dependents = app.storage().get_dependents(&id).await?;
+
+    match output_mode {
+        output::OutputMode::Json => {
+            output::print_json(&serde_json::json!({
+                "issue_id": issue_id,
+                "title": issue.title,
+                "dependencies": tree.iter().map(|(dep, tree_depth)| {
+                    serde_json::json!({
+                        "depends_on_id": dep.depends_on_id.to_string(),
+                        "dep_type": format!("{}", dep.dep_type),
+                        "depth": tree_depth
+                    })
+                }).collect::<Vec<_>>(),
+                "dependents": dependents.iter().map(|dep| {
+                    serde_json::json!({
+                        "depends_on_id": dep.depends_on_id.to_string(),
+                        "dep_type": format!("{}", dep.dep_type)
+                    })
+                }).collect::<Vec<_>>()
+            }))?;
+        }
+        output::OutputMode::Text => {
+            println!("Dependency tree for: {} ({})", issue_id, issue.title);
+            println!();
+
+            // Print dependents (what depends on this issue)
+            if dependents.is_empty() {
+                println!("  ↑ No issues depend on this");
+            } else {
+                println!("  ↑ Depended on by ({}):", dependents.len());
+                for dep in &dependents {
+                    println!("    {} ({})", dep.depends_on_id, dep.dep_type);
+                }
+            }
+
+            println!("  │");
+            println!("  ◆ {} [P{}]", issue_id, issue.priority);
+            println!("  │");
+
+            // Print dependencies (what this issue depends on)
+            if tree.is_empty() {
+                println!("  ↓ No dependencies");
+            } else {
+                println!("  ↓ Depends on ({}):", tree.len());
+                const MAX_VISUAL_DEPTH: usize = 10;
+                for (dep, tree_depth) in &tree {
+                    // Cap visual indentation at MAX_VISUAL_DEPTH to prevent extremely wide output
+                    let visual_depth = (*tree_depth).min(MAX_VISUAL_DEPTH);
+                    let indent = "  ".repeat(visual_depth);
+                    let depth_indicator = if *tree_depth > MAX_VISUAL_DEPTH {
+                        format!(" [depth: {}]", tree_depth)
+                    } else {
+                        String::new()
+                    };
+                    println!(
+                        "    {}└── {} ({}){}",
+                        indent, dep.depends_on_id, dep.dep_type, depth_indicator
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Execute the dep command
 pub async fn execute_dep(
     app: &mut crate::app::App,
     args: &DepArgs,
     output_mode: OutputMode,
 ) -> Result<()> {
+    match &args.action {
+        DepAction::Add { from, to, dep_type } => {
+            execute_dep_add(app, from, to, *dep_type, output_mode).await
+        }
+        DepAction::Remove { from, to } => execute_dep_remove(app, from, to, output_mode).await,
+        DepAction::List { issue_id, reverse } => {
+            execute_dep_list(app, issue_id, *reverse, output_mode).await
+        }
+        DepAction::Tree { issue_id, depth } => {
+            execute_dep_tree(app, issue_id, *depth, output_mode).await
+        }
+    }
+}
+
+/// Resolve issue IDs from either a single ID or a list of IDs.
+///
+/// Validates that exactly one of issue_id or ids is provided.
+fn resolve_label_issue_ids(issue_id: &Option<String>, ids: &[String]) -> Result<Vec<String>> {
+    match (issue_id, ids.is_empty()) {
+        (Some(id), true) => Ok(vec![id.clone()]),
+        (None, false) => Ok(ids.to_vec()),
+        (Some(_), false) => {
+            anyhow::bail!(
+                "Cannot use both positional issue ID and --ids flag. Use one or the other."
+            );
+        }
+        (None, true) => {
+            anyhow::bail!(
+                "Must provide an issue ID (positional) or use --ids flag with one or more IDs."
+            );
+        }
+    }
+}
+
+/// Add a label to one or more issues.
+async fn execute_label_add(
+    app: &mut crate::app::App,
+    label: &str,
+    issue_id: &Option<String>,
+    ids: &[String],
+    output_mode: OutputMode,
+) -> Result<()> {
+    use super::types::BatchResult;
     use crate::domain::IssueId;
     use crate::output;
 
-    match &args.action {
-        DepAction::Add { from, to, dep_type } => {
-            let from_id = IssueId::new(from);
-            let to_id = IssueId::new(to);
+    let issue_ids = resolve_label_issue_ids(issue_id, ids)?;
+    let mut result = BatchResult::new();
 
-            app.storage_mut()
-                .add_dependency(&from_id, &to_id, (*dep_type).into())
-                .await?;
-            app.save().await?;
+    for id_str in &issue_ids {
+        let issue_id = IssueId::new(id_str);
+        let storage_result = app.storage_mut().add_label(&issue_id, label).await;
+        save_or_record_failure(app, &mut result, id_str, storage_result).await;
+    }
 
-            match output_mode {
-                output::OutputMode::Json => {
-                    output::print_json(&serde_json::json!({
-                        "action": "add",
-                        "from": from,
-                        "to": to,
-                        "type": format!("{}", dep_type),
-                        "status": "success"
-                    }))?;
-                }
-                output::OutputMode::Text => {
-                    println!("Added dependency: {} --[{}]--> {}", from, dep_type, to);
+    // Output results
+    match output_mode {
+        output::OutputMode::Json => {
+            output::print_json(&result)?;
+        }
+        output::OutputMode::Text => {
+            if !result.succeeded.is_empty() {
+                let ids: Vec<_> = result.succeeded.iter().map(|i| i.id.to_string()).collect();
+                println!(
+                    "Added label '{}' to {} issue(s): {}",
+                    label,
+                    result.succeeded.len(),
+                    ids.join(", ")
+                );
+            }
+            if !result.failed.is_empty() {
+                eprintln!("Failed to add label to {} issue(s):", result.failed.len());
+                for err in &result.failed {
+                    eprintln!("  {}: {}", err.issue_id, err.error);
                 }
             }
         }
-        DepAction::Remove { from, to } => {
-            let from_id = IssueId::new(from);
-            let to_id = IssueId::new(to);
+    }
 
-            app.storage_mut()
-                .remove_dependency(&from_id, &to_id)
-                .await?;
-            app.save().await?;
+    if result.has_failures() {
+        anyhow::bail!(
+            "{} of {} label add(s) failed",
+            result.failed.len(),
+            result.total()
+        );
+    }
 
-            match output_mode {
-                output::OutputMode::Json => {
-                    output::print_json(&serde_json::json!({
-                        "action": "remove",
-                        "from": from,
-                        "to": to,
-                        "status": "success"
-                    }))?;
-                }
-                output::OutputMode::Text => {
-                    println!("Removed dependency: {} --> {}", from, to);
+    Ok(())
+}
+
+/// Remove a label from one or more issues.
+async fn execute_label_remove(
+    app: &mut crate::app::App,
+    label: &str,
+    issue_id: &Option<String>,
+    ids: &[String],
+    output_mode: OutputMode,
+) -> Result<()> {
+    use super::types::BatchResult;
+    use crate::domain::IssueId;
+    use crate::output;
+
+    let issue_ids = resolve_label_issue_ids(issue_id, ids)?;
+    let mut result = BatchResult::new();
+
+    for id_str in &issue_ids {
+        let issue_id = IssueId::new(id_str);
+        let storage_result = app.storage_mut().remove_label(&issue_id, label).await;
+        save_or_record_failure(app, &mut result, id_str, storage_result).await;
+    }
+
+    // Output results
+    match output_mode {
+        output::OutputMode::Json => {
+            output::print_json(&result)?;
+        }
+        output::OutputMode::Text => {
+            if !result.succeeded.is_empty() {
+                let ids: Vec<_> = result.succeeded.iter().map(|i| i.id.to_string()).collect();
+                println!(
+                    "Removed label '{}' from {} issue(s): {}",
+                    label,
+                    result.succeeded.len(),
+                    ids.join(", ")
+                );
+            }
+            if !result.failed.is_empty() {
+                eprintln!(
+                    "Failed to remove label from {} issue(s):",
+                    result.failed.len()
+                );
+                for err in &result.failed {
+                    eprintln!("  {}: {}", err.issue_id, err.error);
                 }
             }
         }
-        DepAction::List { issue_id, reverse } => {
-            let id = IssueId::new(issue_id);
+    }
 
-            let deps = if *reverse {
-                app.storage().get_dependents(&id).await?
+    if result.has_failures() {
+        anyhow::bail!(
+            "{} of {} label remove(s) failed",
+            result.failed.len(),
+            result.total()
+        );
+    }
+
+    Ok(())
+}
+
+/// List labels for a specific issue.
+async fn execute_label_list(
+    app: &crate::app::App,
+    issue_id: &str,
+    output_mode: OutputMode,
+) -> Result<()> {
+    use crate::domain::IssueId;
+    use crate::output;
+
+    let id = IssueId::new(issue_id);
+    let issue = app
+        .storage()
+        .get(&id)
+        .await?
+        .ok_or_else(|| crate::error::Error::IssueNotFound(id.clone()))?;
+
+    match output_mode {
+        output::OutputMode::Json => {
+            output::print_json(&issue.labels)?;
+        }
+        output::OutputMode::Text => {
+            if issue.labels.is_empty() {
+                println!("{} has no labels", issue_id);
             } else {
-                app.storage().get_dependencies(&id).await?
-            };
-
-            match output_mode {
-                output::OutputMode::Json => {
-                    output::print_json(&deps)?;
-                }
-                output::OutputMode::Text => {
-                    if deps.is_empty() {
-                        if *reverse {
-                            println!("↑ No issues depend on {}", issue_id);
-                        } else {
-                            println!("↓ {} has no dependencies", issue_id);
-                        }
-                    } else if *reverse {
-                        println!("↑ Issues depending on {} ({}):", issue_id, deps.len());
-                        for dep in &deps {
-                            println!("  └── {} ({})", dep.depends_on_id, dep.dep_type);
-                        }
-                    } else {
-                        println!("↓ Dependencies of {} ({}):", issue_id, deps.len());
-                        for dep in &deps {
-                            println!("  └── {} ({})", dep.depends_on_id, dep.dep_type);
-                        }
-                    }
+                println!("Labels for {} ({}):", issue_id, issue.labels.len());
+                for label in &issue.labels {
+                    println!("  {}", label);
                 }
             }
         }
-        DepAction::Tree { issue_id, depth } => {
-            let id = IssueId::new(issue_id);
+    }
 
-            // Get the issue to verify it exists
-            let issue = app
-                .storage()
-                .get(&id)
-                .await?
-                .ok_or_else(|| crate::error::Error::IssueNotFound(id.clone()))?;
+    Ok(())
+}
 
-            // Convert depth: 0 means unlimited (None), otherwise Some(depth)
-            let max_depth = if *depth == 0 { None } else { Some(*depth) };
+/// List all labels used across all issues.
+async fn execute_label_list_all(app: &crate::app::App, output_mode: OutputMode) -> Result<()> {
+    use crate::domain::IssueFilter;
+    use crate::output;
+    use std::collections::BTreeSet;
 
-            // Get dependency tree
-            let tree = app.storage().get_dependency_tree(&id, max_depth).await?;
+    let all_issues = app.storage().list(&IssueFilter::default()).await?;
 
-            // Also get dependents (reverse tree)
-            let dependents = app.storage().get_dependents(&id).await?;
+    // Collect all unique labels
+    let all_labels: BTreeSet<String> = all_issues
+        .iter()
+        .flat_map(|i| i.labels.iter().cloned())
+        .collect();
 
-            match output_mode {
-                output::OutputMode::Json => {
-                    output::print_json(&serde_json::json!({
-                        "issue_id": issue_id,
-                        "title": issue.title,
-                        "dependencies": tree.iter().map(|(dep, depth)| {
-                            serde_json::json!({
-                                "depends_on_id": dep.depends_on_id.to_string(),
-                                "dep_type": format!("{}", dep.dep_type),
-                                "depth": depth
-                            })
-                        }).collect::<Vec<_>>(),
-                        "dependents": dependents.iter().map(|dep| {
-                            serde_json::json!({
-                                "depends_on_id": dep.depends_on_id.to_string(),
-                                "dep_type": format!("{}", dep.dep_type)
-                            })
-                        }).collect::<Vec<_>>()
-                    }))?;
-                }
-                output::OutputMode::Text => {
-                    println!("Dependency tree for: {} ({})", issue_id, issue.title);
-                    println!();
-
-                    // Print dependents (what depends on this issue)
-                    if dependents.is_empty() {
-                        println!("  ↑ No issues depend on this");
-                    } else {
-                        println!("  ↑ Depended on by ({}):", dependents.len());
-                        for dep in &dependents {
-                            println!("    {} ({})", dep.depends_on_id, dep.dep_type);
-                        }
-                    }
-
-                    println!("  │");
-                    println!("  ◆ {} [P{}]", issue_id, issue.priority);
-                    println!("  │");
-
-                    // Print dependencies (what this issue depends on)
-                    if tree.is_empty() {
-                        println!("  ↓ No dependencies");
-                    } else {
-                        println!("  ↓ Depends on ({}):", tree.len());
-                        const MAX_VISUAL_DEPTH: usize = 10;
-                        for (dep, dep_depth) in &tree {
-                            // Cap visual indentation at MAX_VISUAL_DEPTH to prevent extremely wide output
-                            let visual_depth = (*dep_depth).min(MAX_VISUAL_DEPTH);
-                            let indent = "  ".repeat(visual_depth);
-                            let depth_indicator = if *dep_depth > MAX_VISUAL_DEPTH {
-                                format!(" [depth: {}]", dep_depth)
-                            } else {
-                                String::new()
-                            };
-                            println!(
-                                "    {}└── {} ({}){}",
-                                indent, dep.depends_on_id, dep.dep_type, depth_indicator
-                            );
-                        }
-                    }
+    match output_mode {
+        output::OutputMode::Json => {
+            output::print_json(&all_labels.iter().collect::<Vec<_>>())?;
+        }
+        output::OutputMode::Text => {
+            if all_labels.is_empty() {
+                println!("No labels found in any issues.");
+            } else {
+                println!("All labels ({}):", all_labels.len());
+                for label in &all_labels {
+                    println!("  {}", label);
                 }
             }
         }
@@ -877,191 +1134,20 @@ pub async fn execute_label(
     args: &LabelArgs,
     output_mode: OutputMode,
 ) -> Result<()> {
-    use super::types::BatchResult;
-    use crate::domain::{IssueFilter, IssueId};
-    use crate::output;
-    use std::collections::BTreeSet;
-
     match &args.action {
         LabelAction::Add {
             label,
             issue_id,
             ids,
-        } => {
-            // Validate: exactly one of issue_id or ids must be provided
-            let issue_ids: Vec<String> = match (issue_id, ids.is_empty()) {
-                (Some(id), true) => vec![id.clone()],
-                (None, false) => ids.clone(),
-                (Some(_), false) => {
-                    anyhow::bail!(
-                        "Cannot use both positional issue ID and --ids flag. Use one or the other."
-                    );
-                }
-                (None, true) => {
-                    anyhow::bail!(
-                        "Must provide an issue ID (positional) or use --ids flag with one or more IDs."
-                    );
-                }
-            };
-
-            let mut result = BatchResult::new();
-
-            for id_str in &issue_ids {
-                let issue_id = IssueId::new(id_str);
-                let storage_result = app.storage_mut().add_label(&issue_id, label).await;
-                save_or_record_failure(app, &mut result, id_str, storage_result).await;
-            }
-
-            // Output results
-            match output_mode {
-                output::OutputMode::Json => {
-                    output::print_json(&result)?;
-                }
-                output::OutputMode::Text => {
-                    if !result.succeeded.is_empty() {
-                        let ids: Vec<_> =
-                            result.succeeded.iter().map(|i| i.id.to_string()).collect();
-                        println!(
-                            "Added label '{}' to {} issue(s): {}",
-                            label,
-                            result.succeeded.len(),
-                            ids.join(", ")
-                        );
-                    }
-                    if !result.failed.is_empty() {
-                        eprintln!("Failed to add label to {} issue(s):", result.failed.len());
-                        for err in &result.failed {
-                            eprintln!("  {}: {}", err.issue_id, err.error);
-                        }
-                    }
-                }
-            }
-
-            if result.has_failures() {
-                anyhow::bail!(
-                    "{} of {} label add(s) failed",
-                    result.failed.len(),
-                    result.total()
-                );
-            }
-        }
+        } => execute_label_add(app, label, issue_id, ids, output_mode).await,
         LabelAction::Remove {
             label,
             issue_id,
             ids,
-        } => {
-            // Validate: exactly one of issue_id or ids must be provided
-            let issue_ids: Vec<String> = match (issue_id, ids.is_empty()) {
-                (Some(id), true) => vec![id.clone()],
-                (None, false) => ids.clone(),
-                (Some(_), false) => {
-                    anyhow::bail!(
-                        "Cannot use both positional issue ID and --ids flag. Use one or the other."
-                    );
-                }
-                (None, true) => {
-                    anyhow::bail!(
-                        "Must provide an issue ID (positional) or use --ids flag with one or more IDs."
-                    );
-                }
-            };
-
-            let mut result = BatchResult::new();
-
-            for id_str in &issue_ids {
-                let issue_id = IssueId::new(id_str);
-                let storage_result = app.storage_mut().remove_label(&issue_id, label).await;
-                save_or_record_failure(app, &mut result, id_str, storage_result).await;
-            }
-
-            // Output results
-            match output_mode {
-                output::OutputMode::Json => {
-                    output::print_json(&result)?;
-                }
-                output::OutputMode::Text => {
-                    if !result.succeeded.is_empty() {
-                        let ids: Vec<_> =
-                            result.succeeded.iter().map(|i| i.id.to_string()).collect();
-                        println!(
-                            "Removed label '{}' from {} issue(s): {}",
-                            label,
-                            result.succeeded.len(),
-                            ids.join(", ")
-                        );
-                    }
-                    if !result.failed.is_empty() {
-                        eprintln!(
-                            "Failed to remove label from {} issue(s):",
-                            result.failed.len()
-                        );
-                        for err in &result.failed {
-                            eprintln!("  {}: {}", err.issue_id, err.error);
-                        }
-                    }
-                }
-            }
-
-            if result.has_failures() {
-                anyhow::bail!(
-                    "{} of {} label remove(s) failed",
-                    result.failed.len(),
-                    result.total()
-                );
-            }
-        }
-        LabelAction::List { issue_id } => {
-            let id = IssueId::new(issue_id);
-            let issue = app
-                .storage()
-                .get(&id)
-                .await?
-                .ok_or_else(|| crate::error::Error::IssueNotFound(id.clone()))?;
-
-            match output_mode {
-                output::OutputMode::Json => {
-                    output::print_json(&issue.labels)?;
-                }
-                output::OutputMode::Text => {
-                    if issue.labels.is_empty() {
-                        println!("{} has no labels", issue_id);
-                    } else {
-                        println!("Labels for {} ({}):", issue_id, issue.labels.len());
-                        for label in &issue.labels {
-                            println!("  {}", label);
-                        }
-                    }
-                }
-            }
-        }
-        LabelAction::ListAll => {
-            let all_issues = app.storage().list(&IssueFilter::default()).await?;
-
-            // Collect all unique labels
-            let all_labels: BTreeSet<String> = all_issues
-                .iter()
-                .flat_map(|i| i.labels.iter().cloned())
-                .collect();
-
-            match output_mode {
-                output::OutputMode::Json => {
-                    output::print_json(&all_labels.iter().collect::<Vec<_>>())?;
-                }
-                output::OutputMode::Text => {
-                    if all_labels.is_empty() {
-                        println!("No labels found in any issues.");
-                    } else {
-                        println!("All labels ({}):", all_labels.len());
-                        for label in &all_labels {
-                            println!("  {}", label);
-                        }
-                    }
-                }
-            }
-        }
+        } => execute_label_remove(app, label, issue_id, ids, output_mode).await,
+        LabelAction::List { issue_id } => execute_label_list(app, issue_id, output_mode).await,
+        LabelAction::ListAll => execute_label_list_all(app, output_mode).await,
     }
-
-    Ok(())
 }
 
 /// Execute the stale command
@@ -1415,5 +1501,42 @@ mod tests {
         assert!(result.failed[0].error.contains("Save failed"));
 
         // Guard will restore permissions on drop
+    }
+
+    mod resolve_label_issue_ids_tests {
+        use super::super::resolve_label_issue_ids;
+
+        #[test]
+        fn test_single_positional_id() {
+            let result = resolve_label_issue_ids(&Some("test-abc".to_string()), &[]);
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap(), vec!["test-abc".to_string()]);
+        }
+
+        #[test]
+        fn test_multiple_ids_via_flag() {
+            let ids = vec!["test-1".to_string(), "test-2".to_string()];
+            let result = resolve_label_issue_ids(&None, &ids);
+            assert!(result.is_ok());
+            assert_eq!(
+                result.unwrap(),
+                vec!["test-1".to_string(), "test-2".to_string()]
+            );
+        }
+
+        #[test]
+        fn test_both_positional_and_flag_fails() {
+            let ids = vec!["test-2".to_string()];
+            let result = resolve_label_issue_ids(&Some("test-1".to_string()), &ids);
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("Cannot use both"));
+        }
+
+        #[test]
+        fn test_neither_positional_nor_flag_fails() {
+            let result = resolve_label_issue_ids(&None, &[]);
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("Must provide"));
+        }
     }
 }
