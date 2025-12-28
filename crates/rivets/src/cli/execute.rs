@@ -432,6 +432,16 @@ fn output_batch_result(
     Ok(())
 }
 
+/// Append a new note to existing notes, separated by blank line.
+///
+/// Used by close/reopen commands to append reason notes to existing issue notes.
+fn append_note(existing: Option<&str>, new_note: &str) -> String {
+    match existing {
+        Some(notes) => format!("{}\n\n{}", notes, new_note),
+        None => new_note.to_string(),
+    }
+}
+
 /// Execute the close command
 ///
 /// # Batch Processing
@@ -459,10 +469,7 @@ pub async fn execute_close(
             match app.storage().get(&issue_id).await {
                 Ok(Some(existing)) => {
                     let close_note = format!("Closed: {}", args.reason);
-                    Some(match existing.notes {
-                        Some(existing_notes) => format!("{}\n\n{}", existing_notes, close_note),
-                        None => close_note,
-                    })
+                    Some(append_note(existing.notes.as_deref(), &close_note))
                 }
                 Ok(None) => {
                     result.failed.push(BatchError {
@@ -535,10 +542,7 @@ pub async fn execute_reopen(
             match app.storage().get(&issue_id).await {
                 Ok(Some(existing)) => {
                     let reopen_note = format!("Reopened: {}", reason);
-                    Some(match existing.notes {
-                        Some(existing_notes) => format!("{}\n\n{}", existing_notes, reopen_note),
-                        None => reopen_note,
-                    })
+                    Some(append_note(existing.notes.as_deref(), &reopen_note))
                 }
                 Ok(None) => {
                     result.failed.push(BatchError {
@@ -1537,6 +1541,50 @@ mod tests {
             let result = resolve_label_issue_ids(&None, &[]);
             assert!(result.is_err());
             assert!(result.unwrap_err().to_string().contains("Must provide"));
+        }
+    }
+
+    mod append_note_tests {
+        use super::super::append_note;
+        use rstest::rstest;
+
+        #[rstest]
+        #[case::no_existing_notes(None, "New note", "New note")]
+        #[case::with_existing_notes(
+            Some("Existing notes"),
+            "New note",
+            "Existing notes\n\nNew note"
+        )]
+        #[case::empty_existing_notes(Some(""), "New note", "\n\nNew note")]
+        #[case::multiline_existing(
+            Some("Line 1\nLine 2"),
+            "New note",
+            "Line 1\nLine 2\n\nNew note"
+        )]
+        fn test_append_note(
+            #[case] existing: Option<&str>,
+            #[case] new_note: &str,
+            #[case] expected: &str,
+        ) {
+            let result = append_note(existing, new_note);
+            assert_eq!(result, expected);
+        }
+
+        #[test]
+        fn test_append_note_close_reason() {
+            let close_note = format!("Closed: {}", "Fixed the bug");
+            let result = append_note(Some("Initial description"), &close_note);
+            assert_eq!(result, "Initial description\n\nClosed: Fixed the bug");
+        }
+
+        #[test]
+        fn test_append_note_reopen_reason() {
+            let reopen_note = format!("Reopened: {}", "Bug still present");
+            let result = append_note(Some("Closed: Fixed the bug"), &reopen_note);
+            assert_eq!(
+                result,
+                "Closed: Fixed the bug\n\nReopened: Bug still present"
+            );
         }
     }
 }
