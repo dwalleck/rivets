@@ -111,7 +111,10 @@ impl Tools {
                 let issue_prefix = if config_path.exists() {
                     match rivets::commands::init::RivetsConfig::load(&config_path).await {
                         Ok(config) => Some(config.issue_prefix),
-                        Err(_) => None,
+                        Err(e) => {
+                            debug!("Failed to load config for issue_prefix: {}", e);
+                            None
+                        }
                     }
                 } else {
                     None
@@ -504,10 +507,16 @@ impl Tools {
 
     /// Find stale issues that haven't been updated recently.
     ///
+    /// # Performance Note
+    ///
+    /// This method loads all issues matching the optional status filter into memory,
+    /// then filters by `updated_at` timestamp. For very large issue databases (10,000+),
+    /// consider adding a storage-level query method that filters at the database layer.
+    ///
     /// # Errors
     ///
     /// Returns an error if no context is set or storage operations fail.
-    #[instrument(skip(self), fields(days, limit))]
+    #[instrument(skip(self), fields(days, ?status, limit))]
     pub async fn stale(
         &self,
         days: Option<u32>,
@@ -1071,12 +1080,71 @@ mod tests {
             .await
             .unwrap();
 
-        // List all labels (should be deduplicated)
+        // List all labels (should be deduplicated and sorted)
         let labels = tools.label_list_all(None).await.unwrap();
         assert!(labels.contains(&"feature".to_string()));
         assert!(labels.contains(&"backend".to_string()));
         assert!(labels.contains(&"frontend".to_string()));
-        // Feature should only appear once
+        // Feature should only appear once (deduplicated)
         assert_eq!(labels.iter().filter(|&l| l == "feature").count(), 1);
+        // Verify labels are sorted alphabetically
+        let mut sorted = labels.clone();
+        sorted.sort();
+        assert_eq!(labels, sorted, "Labels should be sorted alphabetically");
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_stale_issues(#[future] tools: Tools) {
+        let tools = tools.await;
+
+        // Create an issue (will have current timestamp)
+        create_issue(&tools, "Fresh Issue").await;
+
+        // Finding stale issues from the last 30 days should return empty
+        // (issue was just created, so it's not stale)
+        let stale = tools.stale(Some(30), None, None, None).await.unwrap();
+        assert_eq!(stale.len(), 0, "Newly created issue should not be stale");
+
+        // Finding stale issues from 0 days should return the issue
+        // (0 days means anything older than right now)
+        let stale = tools.stale(Some(0), None, None, None).await.unwrap();
+        assert_eq!(
+            stale.len(),
+            1,
+            "Issue should be stale with 0 days threshold"
+        );
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_stale_with_status_filter(#[future] tools: Tools) {
+        let tools = tools.await;
+
+        // Create an open issue
+        let open_issue = create_issue(&tools, "Open Issue").await;
+
+        // Create and close another issue
+        let closed_issue = create_issue(&tools, "Closed Issue").await;
+        tools
+            .close(&closed_issue.id, Some("Done".to_string()), None)
+            .await
+            .unwrap();
+
+        // Find stale open issues with 0-day threshold
+        let stale_open = tools
+            .stale(Some(0), Some("open"), None, None)
+            .await
+            .unwrap();
+        assert_eq!(stale_open.len(), 1);
+        assert_eq!(stale_open[0].id, open_issue.id);
+
+        // Find stale closed issues with 0-day threshold
+        let stale_closed = tools
+            .stale(Some(0), Some("closed"), None, None)
+            .await
+            .unwrap();
+        assert_eq!(stale_closed.len(), 1);
+        assert_eq!(stale_closed[0].id, closed_issue.id);
     }
 }
