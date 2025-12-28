@@ -720,18 +720,19 @@ pub async fn execute_dep(
                 output::OutputMode::Text => {
                     if deps.is_empty() {
                         if *reverse {
-                            println!("No issues depend on {}", issue_id);
+                            println!("↑ No issues depend on {}", issue_id);
                         } else {
-                            println!("{} has no dependencies", issue_id);
+                            println!("↓ {} has no dependencies", issue_id);
+                        }
+                    } else if *reverse {
+                        println!("↑ Issues depending on {} ({}):", issue_id, deps.len());
+                        for dep in &deps {
+                            println!("  └── {} ({})", dep.depends_on_id, dep.dep_type);
                         }
                     } else {
-                        if *reverse {
-                            println!("Issues depending on {} ({}):", issue_id, deps.len());
-                        } else {
-                            println!("Dependencies of {} ({}):", issue_id, deps.len());
-                        }
+                        println!("↓ Dependencies of {} ({}):", issue_id, deps.len());
                         for dep in &deps {
-                            println!("  {} ({})", dep.depends_on_id, dep.dep_type);
+                            println!("  └── {} ({})", dep.depends_on_id, dep.dep_type);
                         }
                     }
                 }

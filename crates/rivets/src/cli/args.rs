@@ -109,7 +109,7 @@ pub struct ListArgs {
 /// Arguments for the `show` command
 #[derive(Parser, Debug, Clone)]
 pub struct ShowArgs {
-    /// Issue ID(s) to display (one or more)
+    /// Issue ID(s) to display, space-separated (e.g., rivets-abc rivets-def)
     #[arg(required = true, value_parser = validate_issue_id)]
     pub issue_ids: Vec<String>,
 }
@@ -117,7 +117,7 @@ pub struct ShowArgs {
 /// Arguments for the `update` command
 #[derive(Parser, Debug, Clone)]
 pub struct UpdateArgs {
-    /// Issue ID(s) to update (one or more)
+    /// Issue ID(s) to update, space-separated (e.g., rivets-abc rivets-def)
     #[arg(required = true, value_parser = validate_issue_id)]
     pub issue_ids: Vec<String>,
 
@@ -166,7 +166,7 @@ pub struct UpdateArgs {
 /// Arguments for the `close` command
 #[derive(Parser, Debug, Clone)]
 pub struct CloseArgs {
-    /// Issue ID(s) to close (one or more)
+    /// Issue ID(s) to close, space-separated (e.g., rivets-abc rivets-def)
     #[arg(required = true, value_parser = validate_issue_id)]
     pub issue_ids: Vec<String>,
 
@@ -178,7 +178,7 @@ pub struct CloseArgs {
 /// Arguments for the `reopen` command
 #[derive(Parser, Debug, Clone)]
 pub struct ReopenArgs {
-    /// Issue ID(s) to reopen (one or more)
+    /// Issue ID(s) to reopen, space-separated (e.g., rivets-abc rivets-def)
     #[arg(required = true, value_parser = validate_issue_id)]
     pub issue_ids: Vec<String>,
 
@@ -330,7 +330,7 @@ pub struct LabelArgs {
 pub enum LabelAction {
     /// Add a label to one or more issues
     Add {
-        /// Issue ID(s) to add the label to
+        /// Issue ID(s), space-separated (e.g., rivets-abc rivets-def)
         #[arg(required = true, value_parser = validate_issue_id)]
         issue_ids: Vec<String>,
 
@@ -341,7 +341,7 @@ pub enum LabelAction {
 
     /// Remove a label from one or more issues
     Remove {
-        /// Issue ID(s) to remove the label from
+        /// Issue ID(s), space-separated (e.g., rivets-abc rivets-def)
         #[arg(required = true, value_parser = validate_issue_id)]
         issue_ids: Vec<String>,
 
