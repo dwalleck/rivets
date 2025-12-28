@@ -1256,6 +1256,7 @@ mod tests {
     use crate::domain::{Issue, IssueId, IssueStatus, IssueType};
     use crate::error::Error;
     use chrono::Utc;
+    use rstest::rstest;
     use tempfile::TempDir;
 
     /// Create a test issue with the given ID for use in unit tests.
@@ -1280,9 +1281,39 @@ mod tests {
         }
     }
 
+    #[rstest]
+    #[case::success(true, 1, 0)]
+    #[case::storage_error(false, 0, 1)]
     #[tokio::test]
-    async fn test_save_or_record_failure_success() {
-        // Create a temp directory and initialize rivets
+    async fn test_save_or_record_failure_outcomes(
+        #[case] is_success: bool,
+        #[case] expected_succeeded: usize,
+        #[case] expected_failed: usize,
+    ) {
+        let temp_dir = TempDir::new().unwrap();
+        crate::commands::init::init(temp_dir.path(), None)
+            .await
+            .unwrap();
+
+        let mut app = crate::app::App::from_directory(temp_dir.path())
+            .await
+            .unwrap();
+        let mut result = BatchResult::new();
+
+        let storage_result: Result<Issue, Error> = if is_success {
+            Ok(create_test_issue("test-abc"))
+        } else {
+            Err(Error::IssueNotFound(IssueId::new("test-abc")))
+        };
+
+        save_or_record_failure(&mut app, &mut result, "test-abc", storage_result).await;
+
+        assert_eq!(result.succeeded.len(), expected_succeeded);
+        assert_eq!(result.failed.len(), expected_failed);
+    }
+
+    #[tokio::test]
+    async fn test_save_or_record_failure_success_records_issue() {
         let temp_dir = TempDir::new().unwrap();
         crate::commands::init::init(temp_dir.path(), None)
             .await
@@ -1298,14 +1329,11 @@ mod tests {
 
         save_or_record_failure(&mut app, &mut result, "test-abc", storage_result).await;
 
-        assert_eq!(result.succeeded.len(), 1);
-        assert_eq!(result.failed.len(), 0);
         assert_eq!(result.succeeded[0].id.as_str(), "test-abc");
     }
 
     #[tokio::test]
-    async fn test_save_or_record_failure_storage_error() {
-        // Create a temp directory and initialize rivets
+    async fn test_save_or_record_failure_error_contains_message() {
         let temp_dir = TempDir::new().unwrap();
         crate::commands::init::init(temp_dir.path(), None)
             .await
@@ -1316,42 +1344,13 @@ mod tests {
             .unwrap();
         let mut result = BatchResult::new();
 
-        // Simulate a storage error (e.g., issue not found)
         let storage_result: Result<Issue, Error> =
             Err(Error::IssueNotFound(IssueId::new("test-abc")));
 
         save_or_record_failure(&mut app, &mut result, "test-abc", storage_result).await;
 
-        assert_eq!(result.succeeded.len(), 0);
-        assert_eq!(result.failed.len(), 1);
         assert_eq!(result.failed[0].issue_id, "test-abc");
         assert!(result.failed[0].error.contains("not found"));
-    }
-
-    #[tokio::test]
-    async fn test_save_or_record_failure_records_correct_issue_id() {
-        // Verify that the issue ID passed to the function is used in the result,
-        // not the ID from the issue itself (they should match in practice,
-        // but the function uses the passed-in ID for error reporting)
-        let temp_dir = TempDir::new().unwrap();
-        crate::commands::init::init(temp_dir.path(), None)
-            .await
-            .unwrap();
-
-        let mut app = crate::app::App::from_directory(temp_dir.path())
-            .await
-            .unwrap();
-        let mut result = BatchResult::new();
-
-        // Create issue with one ID but pass a different ID string
-        let issue = create_test_issue("test-xyz");
-        let storage_result: Result<Issue, Error> = Ok(issue);
-
-        // The function should record success with the issue from storage_result
-        save_or_record_failure(&mut app, &mut result, "test-xyz", storage_result).await;
-
-        assert_eq!(result.succeeded.len(), 1);
-        assert_eq!(result.succeeded[0].id.as_str(), "test-xyz");
     }
 
     #[cfg(unix)]
