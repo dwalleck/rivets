@@ -465,7 +465,7 @@ impl IssueStorage for JsonlBackedStorage {
                 in_memory::load_from_jsonl(&self.path, "rivets".to_string()).await?;
             if !warnings.is_empty() {
                 for warning in &warnings {
-                    tracing::warn!("JSONL reload warning: {:?}", warning);
+                    tracing::warn!(warning = ?warning, "JSONL reload warning");
                 }
             }
             self.inner = new_storage;
@@ -510,7 +510,7 @@ pub async fn create_storage(backend: StorageBackend) -> Result<Box<dyn IssueStor
                 if !warnings.is_empty() {
                     // Log warnings but continue - storage is still usable
                     for warning in &warnings {
-                        tracing::warn!("JSONL load warning: {:?}", warning);
+                        tracing::warn!(warning = ?warning, "JSONL load warning");
                     }
                 }
                 storage

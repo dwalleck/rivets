@@ -209,6 +209,60 @@ fn test_valid_priority(#[values(1, 2, 3, 4, 5)] priority: u8) {
 - Don't force rstest on tests that don't benefit from parameterization
 - Works with `#[tokio::test]` for async tests (place `#[rstest]` before `#[tokio::test]`)
 
+### Structured Logging with tracing
+
+This project uses the [`tracing`](https://docs.rs/tracing) crate for structured logging. Always use structured fields instead of string interpolation.
+
+**Do this (structured):**
+
+```rust
+tracing::warn!(
+    error = %reload_err,
+    issue_id = %id,
+    "Failed to reload after save error"
+);
+
+tracing::info!(
+    workspace = %path.display(),
+    issue_count = count,
+    "Loaded workspace"
+);
+
+tracing::debug!(
+    operation = "update",
+    issue_id = %id,
+    fields_changed = ?changed_fields,
+    "Issue updated"
+);
+```
+
+**Don't do this (string interpolation):**
+
+```rust
+// BAD - loses structured data
+tracing::warn!("Failed to reload after save error: {}", reload_err);
+tracing::info!("Loaded {} issues from {}", count, path.display());
+```
+
+**Field formatting:**
+
+- `%value` - Use `Display` trait (for user-friendly output)
+- `?value` - Use `Debug` trait (for developer debugging)
+- `value` - Use directly if it implements `tracing::Value`
+
+**Log levels:**
+
+- `error!` - Unrecoverable errors, operation failed
+- `warn!` - Recoverable issues, degraded operation
+- `info!` - Significant events (startup, shutdown, major operations)
+- `debug!` - Detailed diagnostic information
+- `trace!` - Very verbose, step-by-step execution
+
+**When to use logging vs user output:**
+
+- Use `tracing::*` for **internal diagnostics** (debugging, monitoring, troubleshooting)
+- Use `println!/eprintln!` for **user-facing output** (command results, error messages shown to users)
+
 ## ⚠️ CRITICAL: Before Making ANY Code Changes
 
 **MANDATORY**: Always consult project guidelines before:

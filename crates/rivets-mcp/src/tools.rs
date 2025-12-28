@@ -318,7 +318,7 @@ impl Tools {
         if let Err(e) = storage.save().await {
             // Reload from disk to restore consistent state
             if let Err(reload_err) = storage.reload().await {
-                tracing::error!("Failed to reload after save error: {}", reload_err);
+                tracing::error!(error = %reload_err, "Failed to reload after save error");
             }
             return Err(e.into());
         }
@@ -376,7 +376,7 @@ impl Tools {
         if let Err(e) = storage.save().await {
             // Reload from disk to restore consistent state
             if let Err(reload_err) = storage.reload().await {
-                tracing::error!("Failed to reload after save error: {}", reload_err);
+                tracing::error!(error = %reload_err, "Failed to reload after save error");
             }
             return Err(e.into());
         }
@@ -414,7 +414,7 @@ impl Tools {
         if let Err(e) = storage.save().await {
             // Reload from disk to restore consistent state
             if let Err(reload_err) = storage.reload().await {
-                tracing::error!("Failed to reload after save error: {}", reload_err);
+                tracing::error!(error = %reload_err, "Failed to reload after save error");
             }
             return Err(e.into());
         }
@@ -456,7 +456,7 @@ impl Tools {
         if let Err(e) = storage.save().await {
             // Reload from disk to restore consistent state
             if let Err(reload_err) = storage.reload().await {
-                tracing::error!("Failed to reload after save error: {}", reload_err);
+                tracing::error!(error = %reload_err, "Failed to reload after save error");
             }
             return Err(e.into());
         }
@@ -497,7 +497,7 @@ impl Tools {
         let issue = storage.update(&id, updates).await?;
         if let Err(e) = storage.save().await {
             if let Err(reload_err) = storage.reload().await {
-                tracing::error!("Failed to reload after save error: {}", reload_err);
+                tracing::error!(error = %reload_err, "Failed to reload after save error");
             }
             return Err(e.into());
         }
@@ -579,7 +579,7 @@ impl Tools {
         let issue = storage.add_label(&id, label).await?;
         if let Err(e) = storage.save().await {
             if let Err(reload_err) = storage.reload().await {
-                tracing::error!("Failed to reload after save error: {}", reload_err);
+                tracing::error!(error = %reload_err, "Failed to reload after save error");
             }
             return Err(e.into());
         }
@@ -610,7 +610,7 @@ impl Tools {
         let issue = storage.remove_label(&id, label).await?;
         if let Err(e) = storage.save().await {
             if let Err(reload_err) = storage.reload().await {
-                tracing::error!("Failed to reload after save error: {}", reload_err);
+                tracing::error!(error = %reload_err, "Failed to reload after save error");
             }
             return Err(e.into());
         }
