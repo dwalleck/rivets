@@ -5,8 +5,9 @@
 use crate::context::Context;
 use crate::error::Error;
 use crate::models::{
-    BlockedParams, CloseParams, CreateParams, DepParams, ListParams, ReadyParams, SetContextParams,
-    ShowParams, UpdateParams,
+    BlockedParams, CloseParams, CreateParams, DepParams, LabelAddParams, LabelListAllParams,
+    LabelListParams, LabelRemoveParams, ListParams, ReadyParams, ReopenParams, SetContextParams,
+    ShowParams, StaleParams, UpdateParams,
 };
 use crate::tools::Tools;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -267,6 +268,131 @@ impl RivetsMcpServer {
             Err(e) => Err(to_mcp_error(&e)),
         }
     }
+
+    /// Reopen a closed issue.
+    #[tool(
+        description = "Reopen a previously closed issue. Use when work needs to continue or was not actually complete. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn reopen(
+        &self,
+        Parameters(params): Parameters<ReopenParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .tools
+            .reopen(
+                &params.issue_id,
+                params.reason,
+                params.workspace_root.as_deref(),
+            )
+            .await
+        {
+            Ok(issue) => Ok(CallToolResult::success(vec![Content::json(issue)?])),
+            Err(e) => Err(to_mcp_error(&e)),
+        }
+    }
+
+    /// Find stale issues.
+    #[tool(
+        description = "Find issues that haven't been updated recently. Default is 30 days. Useful for identifying forgotten work or issues needing attention. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn stale(
+        &self,
+        Parameters(params): Parameters<StaleParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .tools
+            .stale(
+                params.days,
+                params.status.as_deref(),
+                params.limit,
+                params.workspace_root.as_deref(),
+            )
+            .await
+        {
+            Ok(issues) => Ok(CallToolResult::success(vec![Content::json(issues)?])),
+            Err(e) => Err(to_mcp_error(&e)),
+        }
+    }
+
+    /// Add a label to an issue.
+    #[tool(
+        description = "Add a label to an issue for categorization. Labels should be lowercase, alphanumeric with hyphens/underscores. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn label_add(
+        &self,
+        Parameters(params): Parameters<LabelAddParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .tools
+            .label_add(
+                &params.issue_id,
+                &params.label,
+                params.workspace_root.as_deref(),
+            )
+            .await
+        {
+            Ok(issue) => Ok(CallToolResult::success(vec![Content::json(issue)?])),
+            Err(e) => Err(to_mcp_error(&e)),
+        }
+    }
+
+    /// Remove a label from an issue.
+    #[tool(
+        description = "Remove a label from an issue. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn label_remove(
+        &self,
+        Parameters(params): Parameters<LabelRemoveParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .tools
+            .label_remove(
+                &params.issue_id,
+                &params.label,
+                params.workspace_root.as_deref(),
+            )
+            .await
+        {
+            Ok(issue) => Ok(CallToolResult::success(vec![Content::json(issue)?])),
+            Err(e) => Err(to_mcp_error(&e)),
+        }
+    }
+
+    /// List labels for a specific issue.
+    #[tool(
+        description = "List all labels assigned to a specific issue. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn label_list(
+        &self,
+        Parameters(params): Parameters<LabelListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .tools
+            .label_list(&params.issue_id, params.workspace_root.as_deref())
+            .await
+        {
+            Ok(labels) => Ok(CallToolResult::success(vec![Content::json(labels)?])),
+            Err(e) => Err(to_mcp_error(&e)),
+        }
+    }
+
+    /// List all unique labels across all issues.
+    #[tool(
+        description = "List all unique labels used across all issues in the workspace. Useful for understanding available categorizations. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn label_list_all(
+        &self,
+        Parameters(params): Parameters<LabelListAllParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .tools
+            .label_list_all(params.workspace_root.as_deref())
+            .await
+        {
+            Ok(labels) => Ok(CallToolResult::success(vec![Content::json(labels)?])),
+            Err(e) => Err(to_mcp_error(&e)),
+        }
+    }
 }
 
 impl RivetsMcpServer {
@@ -363,7 +489,13 @@ mod tests {
         assert!(tool_names.contains(&"update"));
         assert!(tool_names.contains(&"close"));
         assert!(tool_names.contains(&"dep"));
-        assert_eq!(tools.len(), 10);
+        assert!(tool_names.contains(&"reopen"));
+        assert!(tool_names.contains(&"stale"));
+        assert!(tool_names.contains(&"label_add"));
+        assert!(tool_names.contains(&"label_remove"));
+        assert!(tool_names.contains(&"label_list"));
+        assert!(tool_names.contains(&"label_list_all"));
+        assert_eq!(tools.len(), 16);
     }
 
     // =========================================================================
