@@ -1357,8 +1357,22 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn test_save_or_record_failure_save_error() {
-        use std::fs;
+        use std::fs::{self, Permissions};
         use std::os::unix::fs::PermissionsExt;
+        use std::path::PathBuf;
+
+        /// RAII guard that restores directory permissions on drop.
+        /// Ensures cleanup happens even if assertions panic.
+        struct PermissionGuard {
+            path: PathBuf,
+            original: Permissions,
+        }
+
+        impl Drop for PermissionGuard {
+            fn drop(&mut self) {
+                let _ = fs::set_permissions(&self.path, self.original.clone());
+            }
+        }
 
         // Create a temp directory and initialize rivets
         let temp_dir = TempDir::new().unwrap();
@@ -1375,7 +1389,14 @@ mod tests {
         // (save uses atomic write with temp file + rename, so we need to block directory writes)
         let rivets_dir = temp_dir.path().join(".rivets");
         let original_perms = fs::metadata(&rivets_dir).unwrap().permissions();
-        let mut perms = original_perms.clone();
+
+        // Create guard to restore permissions even if test panics
+        let _guard = PermissionGuard {
+            path: rivets_dir.clone(),
+            original: original_perms,
+        };
+
+        let mut perms = fs::metadata(&rivets_dir).unwrap().permissions();
         perms.set_mode(0o555); // read + execute only (no write)
         fs::set_permissions(&rivets_dir, perms).unwrap();
 
@@ -1390,7 +1411,6 @@ mod tests {
         assert_eq!(result.failed[0].issue_id, "test-save-fail");
         assert!(result.failed[0].error.contains("Save failed"));
 
-        // Restore permissions for cleanup
-        fs::set_permissions(&rivets_dir, original_perms).unwrap();
+        // Guard will restore permissions on drop
     }
 }
