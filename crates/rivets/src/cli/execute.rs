@@ -299,7 +299,7 @@ pub async fn execute_show(
 ///
 /// Note: When updating multiple issues, changes are applied sequentially and saved
 /// at the end. If the process fails mid-operation, some issues may be updated while
-/// others are not. This is acceptable for a local CLI tool.
+/// others are not. Successfully updated IDs are reported before the error.
 pub async fn execute_update(
     app: &mut crate::app::App,
     args: &UpdateArgs,
@@ -327,8 +327,24 @@ pub async fn execute_update(
             ..Default::default()
         };
 
-        let issue = app.storage_mut().update(&issue_id, update).await?;
-        updated_issues.push(issue);
+        match app.storage_mut().update(&issue_id, update).await {
+            Ok(issue) => updated_issues.push(issue),
+            Err(e) => {
+                // Report successful updates before returning error
+                if !updated_issues.is_empty() {
+                    eprintln!(
+                        "Successfully updated {} issue(s) before error: {}",
+                        updated_issues.len(),
+                        updated_issues
+                            .iter()
+                            .map(|i| i.id.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+                return Err(e.into());
+            }
+        }
     }
 
     app.save().await?;
@@ -352,7 +368,7 @@ pub async fn execute_update(
 ///
 /// Note: When closing multiple issues, changes are applied sequentially and saved
 /// at the end. If the process fails mid-operation, some issues may be closed while
-/// others are not. This is acceptable for a local CLI tool.
+/// others are not. Successfully closed IDs are reported before the error.
 pub async fn execute_close(
     app: &mut crate::app::App,
     args: &CloseArgs,
@@ -363,16 +379,37 @@ pub async fn execute_close(
 
     let mut closed_issues = Vec::new();
 
+    /// Helper to report successful closures before returning an error
+    fn report_partial_success(closed: &[crate::domain::Issue]) {
+        if !closed.is_empty() {
+            eprintln!(
+                "Successfully closed {} issue(s) before error: {}",
+                closed.len(),
+                closed
+                    .iter()
+                    .map(|i| i.id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+
     for id_str in &args.issue_ids {
         let issue_id = IssueId::new(id_str);
 
         // Build updated notes: append close reason to existing notes if present
         let new_notes = if args.reason != "Completed" {
-            let existing = app
-                .storage()
-                .get(&issue_id)
-                .await?
-                .ok_or_else(|| crate::error::Error::IssueNotFound(issue_id.clone()))?;
+            let existing = match app.storage().get(&issue_id).await {
+                Ok(Some(issue)) => issue,
+                Ok(None) => {
+                    report_partial_success(&closed_issues);
+                    return Err(crate::error::Error::IssueNotFound(issue_id.clone()).into());
+                }
+                Err(e) => {
+                    report_partial_success(&closed_issues);
+                    return Err(e.into());
+                }
+            };
 
             let close_note = format!("Closed: {}", args.reason);
             Some(match existing.notes {
@@ -389,8 +426,13 @@ pub async fn execute_close(
             ..Default::default()
         };
 
-        let issue = app.storage_mut().update(&issue_id, update).await?;
-        closed_issues.push(issue);
+        match app.storage_mut().update(&issue_id, update).await {
+            Ok(issue) => closed_issues.push(issue),
+            Err(e) => {
+                report_partial_success(&closed_issues);
+                return Err(e.into());
+            }
+        }
     }
 
     app.save().await?;
@@ -414,7 +456,7 @@ pub async fn execute_close(
 ///
 /// Note: When reopening multiple issues, changes are applied sequentially and saved
 /// at the end. If the process fails mid-operation, some issues may be reopened while
-/// others are not. This is acceptable for a local CLI tool.
+/// others are not. Successfully reopened IDs are reported before the error.
 pub async fn execute_reopen(
     app: &mut crate::app::App,
     args: &ReopenArgs,
@@ -425,16 +467,37 @@ pub async fn execute_reopen(
 
     let mut reopened_issues = Vec::new();
 
+    /// Helper to report successful reopens before returning an error
+    fn report_partial_success(reopened: &[crate::domain::Issue]) {
+        if !reopened.is_empty() {
+            eprintln!(
+                "Successfully reopened {} issue(s) before error: {}",
+                reopened.len(),
+                reopened
+                    .iter()
+                    .map(|i| i.id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+
     for id_str in &args.issue_ids {
         let issue_id = IssueId::new(id_str);
 
         // Build updated notes: append reopen reason to existing notes if provided
         let new_notes = if let Some(reason) = &args.reason {
-            let existing = app
-                .storage()
-                .get(&issue_id)
-                .await?
-                .ok_or_else(|| crate::error::Error::IssueNotFound(issue_id.clone()))?;
+            let existing = match app.storage().get(&issue_id).await {
+                Ok(Some(issue)) => issue,
+                Ok(None) => {
+                    report_partial_success(&reopened_issues);
+                    return Err(crate::error::Error::IssueNotFound(issue_id.clone()).into());
+                }
+                Err(e) => {
+                    report_partial_success(&reopened_issues);
+                    return Err(e.into());
+                }
+            };
 
             let reopen_note = format!("Reopened: {}", reason);
             Some(match existing.notes {
@@ -451,8 +514,13 @@ pub async fn execute_reopen(
             ..Default::default()
         };
 
-        let issue = app.storage_mut().update(&issue_id, update).await?;
-        reopened_issues.push(issue);
+        match app.storage_mut().update(&issue_id, update).await {
+            Ok(issue) => reopened_issues.push(issue),
+            Err(e) => {
+                report_partial_success(&reopened_issues);
+                return Err(e.into());
+            }
+        }
     }
 
     app.save().await?;
@@ -731,9 +799,20 @@ pub async fn execute_dep(
                         println!("  ↓ No dependencies");
                     } else {
                         println!("  ↓ Depends on ({}):", tree.len());
+                        const MAX_VISUAL_DEPTH: usize = 10;
                         for (dep, dep_depth) in &tree {
-                            let indent = "  ".repeat(*dep_depth);
-                            println!("    {}└── {} ({})", indent, dep.depends_on_id, dep.dep_type);
+                            // Cap visual indentation at MAX_VISUAL_DEPTH to prevent extremely wide output
+                            let visual_depth = (*dep_depth).min(MAX_VISUAL_DEPTH);
+                            let indent = "  ".repeat(visual_depth);
+                            let depth_indicator = if *dep_depth > MAX_VISUAL_DEPTH {
+                                format!(" [depth: {}]", dep_depth)
+                            } else {
+                                String::new()
+                            };
+                            println!(
+                                "    {}└── {} ({}){}",
+                                indent, dep.depends_on_id, dep.dep_type, depth_indicator
+                            );
                         }
                     }
                 }
@@ -929,11 +1008,15 @@ pub async fn execute_stale(
     let all_issues = app.storage().list(&filter).await?;
 
     // Filter to stale issues (not updated since cutoff)
-    // Only exclude closed issues if no specific status was requested
-    let exclude_closed = args.status.is_none();
+    // When no status filter is provided, exclude closed issues by default
+    // When a status filter IS provided (e.g., --status closed), respect it
     let mut stale_issues: Vec<_> = all_issues
         .into_iter()
-        .filter(|i| i.updated_at < cutoff && (!exclude_closed || i.status != IssueStatus::Closed))
+        .filter(|i| {
+            let is_stale = i.updated_at < cutoff;
+            let include_issue = args.status.is_some() || i.status != IssueStatus::Closed;
+            is_stale && include_issue
+        })
         .collect();
 
     // Sort by updated_at (oldest first)
