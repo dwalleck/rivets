@@ -55,14 +55,16 @@ pub async fn execute_info(
 
     // Get issue counts in a single pass
     let all_issues = app.storage().list(&IssueFilter::default()).await?;
-    let (total, open, in_progress, closed) =
+    let (total, open, in_progress, blocked, closed) =
         all_issues
             .iter()
-            .fold((0, 0, 0, 0), |(t, o, ip, c), issue| match issue.status {
-                IssueStatus::Open => (t + 1, o + 1, ip, c),
-                IssueStatus::InProgress => (t + 1, o, ip + 1, c),
-                IssueStatus::Closed => (t + 1, o, ip, c + 1),
-                IssueStatus::Blocked => (t + 1, o, ip, c),
+            .fold((0, 0, 0, 0, 0), |(t, o, ip, b, c), issue| {
+                match issue.status {
+                    IssueStatus::Open => (t + 1, o + 1, ip, b, c),
+                    IssueStatus::InProgress => (t + 1, o, ip + 1, b, c),
+                    IssueStatus::Blocked => (t + 1, o, ip, b + 1, c),
+                    IssueStatus::Closed => (t + 1, o, ip, b, c + 1),
+                }
             });
 
     match output_mode {
@@ -74,6 +76,7 @@ pub async fn execute_info(
                     "total": total,
                     "open": open,
                     "in_progress": in_progress,
+                    "blocked": blocked,
                     "closed": closed
                 }
             }))?;
@@ -86,8 +89,8 @@ pub async fn execute_info(
             println!("Issue prefix: {}", issue_prefix);
             println!();
             println!(
-                "Issues: {} total ({} open, {} in progress, {} closed)",
-                total, open, in_progress, closed
+                "Issues: {} total ({} open, {} in progress, {} blocked, {} closed)",
+                total, open, in_progress, blocked, closed
             );
         }
     }
