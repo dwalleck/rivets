@@ -162,6 +162,7 @@ pub enum Commands {
 /// This helper centralizes the common pattern of initializing the App
 /// from `std::env::current_dir()`, reducing duplication in command handlers.
 async fn load_app_from_cwd() -> Result<App> {
+    // Ok(...?) pattern converts crate::error::Error to anyhow::Error
     Ok(App::from_directory(&std::env::current_dir()?).await?)
 }
 
