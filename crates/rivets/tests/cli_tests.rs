@@ -874,6 +874,59 @@ fn test_cli_info_json_output(initialized_dir: TempDir) {
     assert!(json["issues"]["total"].is_number());
 }
 
+#[rstest]
+fn test_cli_info_with_blocked_status(initialized_dir: TempDir) {
+    // Create issues with all statuses including blocked
+    create_issue(initialized_dir.path(), "Open issue", &[]);
+    let id2 = create_issue(initialized_dir.path(), "In progress issue", &[]);
+    let id3 = create_issue(initialized_dir.path(), "Blocked issue", &[]);
+    let id4 = create_issue(initialized_dir.path(), "Closed issue", &[]);
+
+    run_rivets_in_dir(
+        initialized_dir.path(),
+        &["update", &id2, "--status", "in_progress"],
+    );
+    run_rivets_in_dir(
+        initialized_dir.path(),
+        &["update", &id3, "--status", "blocked"],
+    );
+    run_rivets_in_dir(initialized_dir.path(), &["close", &id4]);
+
+    let output = run_rivets_in_dir(initialized_dir.path(), &["info"]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("4 total"));
+    assert!(stdout.contains("1 open"));
+    assert!(stdout.contains("1 in progress"));
+    assert!(stdout.contains("1 blocked"));
+    assert!(stdout.contains("1 closed"));
+}
+
+#[rstest]
+fn test_cli_info_json_includes_blocked_count(initialized_dir: TempDir) {
+    // Create issues with all statuses
+    create_issue(initialized_dir.path(), "Open issue", &[]);
+    let id2 = create_issue(initialized_dir.path(), "Blocked issue", &[]);
+
+    run_rivets_in_dir(
+        initialized_dir.path(),
+        &["update", &id2, "--status", "blocked"],
+    );
+
+    let output = run_rivets_in_dir(initialized_dir.path(), &["--json", "info"]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("Output should be valid JSON");
+    assert_eq!(json["issues"]["total"], 2, "Should have 2 total issues");
+    assert_eq!(json["issues"]["open"], 1, "Should have 1 open issue");
+    assert_eq!(json["issues"]["blocked"], 1, "Should have 1 blocked issue");
+    assert_eq!(json["issues"]["closed"], 0, "Should have 0 closed issues");
+}
+
 // ============================================================================
 // Label Command Tests
 // ============================================================================
