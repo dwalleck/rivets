@@ -896,31 +896,11 @@ fn test_cli_info_with_blocked_status(initialized_dir: TempDir) {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("4 total"),
-        "Should show 4 total issues. Got: {}",
-        stdout
-    );
-    assert!(
-        stdout.contains("1 open"),
-        "Should show 1 open issue. Got: {}",
-        stdout
-    );
-    assert!(
-        stdout.contains("1 in progress"),
-        "Should show 1 in progress issue. Got: {}",
-        stdout
-    );
-    assert!(
-        stdout.contains("1 blocked"),
-        "Should show 1 blocked issue. Got: {}",
-        stdout
-    );
-    assert!(
-        stdout.contains("1 closed"),
-        "Should show 1 closed issue. Got: {}",
-        stdout
-    );
+    assert!(stdout.contains("4 total"));
+    assert!(stdout.contains("1 open"));
+    assert!(stdout.contains("1 in progress"));
+    assert!(stdout.contains("1 blocked"));
+    assert!(stdout.contains("1 closed"));
 }
 
 #[rstest]

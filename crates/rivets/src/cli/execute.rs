@@ -55,17 +55,15 @@ pub async fn execute_info(
 
     // Get issue counts in a single pass
     let all_issues = app.storage().list(&IssueFilter::default()).await?;
-    let (total, open, in_progress, blocked, closed) =
-        all_issues
-            .iter()
-            .fold((0, 0, 0, 0, 0), |(t, o, ip, b, c), issue| {
-                match issue.status {
-                    IssueStatus::Open => (t + 1, o + 1, ip, b, c),
-                    IssueStatus::InProgress => (t + 1, o, ip + 1, b, c),
-                    IssueStatus::Blocked => (t + 1, o, ip, b + 1, c),
-                    IssueStatus::Closed => (t + 1, o, ip, b, c + 1),
-                }
-            });
+    let (total, open, in_progress, blocked, closed) = all_issues.iter().fold(
+        (0, 0, 0, 0, 0),
+        |(total, open, in_progress, blocked, closed), issue| match issue.status {
+            IssueStatus::Open => (total + 1, open + 1, in_progress, blocked, closed),
+            IssueStatus::InProgress => (total + 1, open, in_progress + 1, blocked, closed),
+            IssueStatus::Blocked => (total + 1, open, in_progress, blocked + 1, closed),
+            IssueStatus::Closed => (total + 1, open, in_progress, blocked, closed + 1),
+        },
+    );
 
     match output_mode {
         output::OutputMode::Json => {
