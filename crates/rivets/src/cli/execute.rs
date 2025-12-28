@@ -53,21 +53,17 @@ pub async fn execute_info(
     let database_path = rivets_dir.join("issues.jsonl");
     let issue_prefix = app.prefix();
 
-    // Get issue counts
+    // Get issue counts in a single pass
     let all_issues = app.storage().list(&IssueFilter::default()).await?;
-    let total = all_issues.len();
-    let open = all_issues
-        .iter()
-        .filter(|i| i.status == IssueStatus::Open)
-        .count();
-    let in_progress = all_issues
-        .iter()
-        .filter(|i| i.status == IssueStatus::InProgress)
-        .count();
-    let closed = all_issues
-        .iter()
-        .filter(|i| i.status == IssueStatus::Closed)
-        .count();
+    let (total, open, in_progress, closed) =
+        all_issues
+            .iter()
+            .fold((0, 0, 0, 0), |(t, o, ip, c), issue| match issue.status {
+                IssueStatus::Open => (t + 1, o + 1, ip, c),
+                IssueStatus::InProgress => (t + 1, o, ip + 1, c),
+                IssueStatus::Closed => (t + 1, o, ip, c + 1),
+                IssueStatus::Blocked => (t + 1, o, ip, c),
+            });
 
     match output_mode {
         output::OutputMode::Json => {
@@ -444,7 +440,7 @@ pub async fn execute_close(
                 Ok(None) => {
                     result.failed.push(BatchError {
                         issue_id: id_str.clone(),
-                        error: "Issue not found".to_string(),
+                        error: format!("Issue not found: {}", id_str),
                     });
                     continue;
                 }
@@ -540,7 +536,7 @@ pub async fn execute_reopen(
                 Ok(None) => {
                     result.failed.push(BatchError {
                         issue_id: id_str.clone(),
-                        error: "Issue not found".to_string(),
+                        error: format!("Issue not found: {}", id_str),
                     });
                     continue;
                 }
