@@ -310,7 +310,7 @@ impl Tools {
     ///
     /// Returns an error if no context is set, invalid status, issue not found, or storage fails.
     #[allow(clippy::too_many_arguments)]
-    #[instrument(skip(self, title, description, design, acceptance_criteria, notes, external_ref), fields(%issue_id))]
+    #[instrument(skip(self, title, description, design, acceptance_criteria, notes, external_ref, labels), fields(%issue_id))]
     pub async fn update(
         &self,
         issue_id: &str,
@@ -323,6 +323,7 @@ impl Tools {
         acceptance_criteria: Option<String>,
         notes: Option<String>,
         external_ref: Option<String>,
+        labels: Option<Vec<String>>,
         workspace_root: Option<&str>,
     ) -> Result<McpIssue> {
         debug!("Updating issue");
@@ -346,7 +347,7 @@ impl Tools {
             acceptance_criteria,
             notes,
             external_ref,
-            labels: None,
+            labels,
         };
 
         let issue = storage.update(&id, updates).await?;
@@ -533,7 +534,8 @@ mod tests {
                 None,
                 None,
                 None,
-                None,
+                None, // labels
+                None, // workspace_root
             )
             .await
             .unwrap();

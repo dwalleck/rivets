@@ -146,6 +146,9 @@ pub struct UpdateParams {
     /// New external reference.
     pub external_ref: Option<String>,
 
+    /// New labels (replaces existing labels).
+    pub labels: Option<Vec<String>>,
+
     /// Optional workspace root (uses current context if not specified).
     pub workspace_root: Option<String>,
 }

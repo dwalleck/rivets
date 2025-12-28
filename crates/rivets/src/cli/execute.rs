@@ -252,38 +252,33 @@ pub async fn execute_show(
     // Output all results
     match output_mode {
         output::OutputMode::Json => {
-            if results.len() == 1 {
-                let (issue, deps, dependents) = &results[0];
-                output::print_issue_details(issue, deps, dependents, output_mode)?;
-            } else {
-                // For multiple issues, output as array
-                let json_results: Vec<_> = results
-                    .iter()
-                    .map(|(issue, deps, dependents)| {
-                        serde_json::json!({
-                            "id": issue.id.to_string(),
-                            "title": issue.title,
-                            "description": issue.description,
-                            "status": format!("{}", issue.status),
-                            "priority": issue.priority,
-                            "issue_type": format!("{}", issue.issue_type),
-                            "assignee": issue.assignee,
-                            "labels": issue.labels,
-                            "design": issue.design,
-                            "acceptance_criteria": issue.acceptance_criteria,
-                            "notes": issue.notes,
-                            "external_ref": issue.external_ref,
-                            "dependencies": deps,
-                            "created_at": issue.created_at,
-                            "updated_at": issue.updated_at,
-                            "closed_at": issue.closed_at,
-                            "dependency_details": deps,
-                            "dependent_details": dependents,
-                        })
+            // Always return array for consistency in programmatic usage
+            let json_results: Vec<_> = results
+                .iter()
+                .map(|(issue, deps, dependents)| {
+                    serde_json::json!({
+                        "id": issue.id.to_string(),
+                        "title": issue.title,
+                        "description": issue.description,
+                        "status": format!("{}", issue.status),
+                        "priority": issue.priority,
+                        "issue_type": format!("{}", issue.issue_type),
+                        "assignee": issue.assignee,
+                        "labels": issue.labels,
+                        "design": issue.design,
+                        "acceptance_criteria": issue.acceptance_criteria,
+                        "notes": issue.notes,
+                        "external_ref": issue.external_ref,
+                        "dependencies": deps,
+                        "created_at": issue.created_at,
+                        "updated_at": issue.updated_at,
+                        "closed_at": issue.closed_at,
+                        "dependency_details": deps,
+                        "dependent_details": dependents,
                     })
-                    .collect();
-                output::print_json(&json_results)?;
-            }
+                })
+                .collect();
+            output::print_json(&json_results)?;
         }
         output::OutputMode::Text => {
             for (i, (issue, deps, dependents)) in results.iter().enumerate() {
@@ -301,6 +296,10 @@ pub async fn execute_show(
 }
 
 /// Execute the update command
+///
+/// Note: When updating multiple issues, changes are applied sequentially and saved
+/// at the end. If the process fails mid-operation, some issues may be updated while
+/// others are not. This is acceptable for a local CLI tool.
 pub async fn execute_update(
     app: &mut crate::app::App,
     args: &UpdateArgs,
@@ -336,11 +335,8 @@ pub async fn execute_update(
 
     match output_mode {
         output::OutputMode::Json => {
-            if updated_issues.len() == 1 {
-                output::print_json(&updated_issues[0])?;
-            } else {
-                output::print_json(&updated_issues)?;
-            }
+            // Always return array for consistency in programmatic usage
+            output::print_json(&updated_issues)?;
         }
         output::OutputMode::Text => {
             for issue in &updated_issues {
@@ -353,6 +349,10 @@ pub async fn execute_update(
 }
 
 /// Execute the close command
+///
+/// Note: When closing multiple issues, changes are applied sequentially and saved
+/// at the end. If the process fails mid-operation, some issues may be closed while
+/// others are not. This is acceptable for a local CLI tool.
 pub async fn execute_close(
     app: &mut crate::app::App,
     args: &CloseArgs,
@@ -397,11 +397,8 @@ pub async fn execute_close(
 
     match output_mode {
         output::OutputMode::Json => {
-            if closed_issues.len() == 1 {
-                output::print_json(&closed_issues[0])?;
-            } else {
-                output::print_json(&closed_issues)?;
-            }
+            // Always return array for consistency in programmatic usage
+            output::print_json(&closed_issues)?;
         }
         output::OutputMode::Text => {
             for issue in &closed_issues {
@@ -414,6 +411,10 @@ pub async fn execute_close(
 }
 
 /// Execute the reopen command
+///
+/// Note: When reopening multiple issues, changes are applied sequentially and saved
+/// at the end. If the process fails mid-operation, some issues may be reopened while
+/// others are not. This is acceptable for a local CLI tool.
 pub async fn execute_reopen(
     app: &mut crate::app::App,
     args: &ReopenArgs,
@@ -458,11 +459,8 @@ pub async fn execute_reopen(
 
     match output_mode {
         output::OutputMode::Json => {
-            if reopened_issues.len() == 1 {
-                output::print_json(&reopened_issues[0])?;
-            } else {
-                output::print_json(&reopened_issues)?;
-            }
+            // Always return array for consistency in programmatic usage
+            output::print_json(&reopened_issues)?;
         }
         output::OutputMode::Text => {
             let reason_msg = args
@@ -905,6 +903,9 @@ pub async fn execute_label(
 }
 
 /// Execute the stale command
+///
+/// By default, closed issues are excluded from staleness checks (since they're done).
+/// Use `--status closed` to explicitly find stale closed issues if needed.
 pub async fn execute_stale(
     app: &crate::app::App,
     args: &StaleArgs,
@@ -924,10 +925,12 @@ pub async fn execute_stale(
 
     let all_issues = app.storage().list(&filter).await?;
 
-    // Filter to stale issues (not updated since cutoff) and exclude closed
+    // Filter to stale issues (not updated since cutoff)
+    // Only exclude closed issues if no specific status was requested
+    let exclude_closed = args.status.is_none();
     let mut stale_issues: Vec<_> = all_issues
         .into_iter()
-        .filter(|i| i.updated_at < cutoff && i.status != IssueStatus::Closed)
+        .filter(|i| i.updated_at < cutoff && (!exclude_closed || i.status != IssueStatus::Closed))
         .collect();
 
     // Sort by updated_at (oldest first)

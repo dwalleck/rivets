@@ -247,7 +247,8 @@ async fn test_issue_lifecycle_create_update_close() {
             None,
             None,
             None,
-            None,
+            None, // labels
+            None, // workspace_root
         )
         .await
         .expect("update should succeed");
@@ -1177,7 +1178,8 @@ async fn test_assignee_clearing() {
             None,
             None,
             None,
-            None,
+            None, // labels
+            None, // workspace_root
         )
         .await
         .unwrap();
@@ -1220,7 +1222,8 @@ async fn test_assignee_update_vs_noop() {
             None,
             None,
             None,
-            None,
+            None, // labels
+            None, // workspace_root
         )
         .await
         .unwrap();
@@ -1239,7 +1242,8 @@ async fn test_assignee_update_vs_noop() {
             None,
             None,
             None,
-            None,
+            None, // labels
+            None, // workspace_root
         )
         .await
         .unwrap();
@@ -1325,7 +1329,8 @@ async fn test_update_persistence() {
                 None,
                 None,
                 None,
-                None,
+                None, // labels
+                None, // workspace_root
             )
             .await
             .unwrap();
@@ -2272,7 +2277,8 @@ async fn test_invalid_status_in_update(#[case] invalid_value: &str) {
             None,
             None,
             None,
-            None,
+            None, // labels
+            None, // workspace_root
         )
         .await;
 
@@ -2362,7 +2368,8 @@ async fn test_complete_issue_lifecycle_all_states() {
             None,
             Some("Started working on this".to_string()),
             None,
-            None,
+            None, // labels
+            None, // workspace_root
         )
         .await
         .expect("update to in_progress should succeed");
@@ -2386,7 +2393,8 @@ async fn test_complete_issue_lifecycle_all_states() {
             None,
             Some("Waiting for dependency".to_string()),
             None,
-            None,
+            None, // labels
+            None, // workspace_root
         )
         .await
         .expect("update to blocked should succeed");
@@ -2411,7 +2419,8 @@ async fn test_complete_issue_lifecycle_all_states() {
             None,
             Some("Resumed work".to_string()),
             None,
-            None,
+            None, // labels
+            None, // workspace_root
         )
         .await
         .expect("update back to in_progress should succeed");
@@ -2479,7 +2488,8 @@ async fn test_update_preserves_unmodified_fields() {
             None, // Don't update acceptance
             None, // Don't update notes
             None, // Don't update external_ref
-            None,
+            None, // labels
+            None, // workspace_root
         )
         .await
         .expect("update should succeed");
@@ -2642,7 +2652,8 @@ async fn test_all_tools_with_storage_backend() {
             None,
             None,
             None,
-            None,
+            None, // labels
+            None, // workspace_root
         )
         .await
         .expect("update should succeed");
@@ -2816,7 +2827,8 @@ async fn test_issue_counts_accurate() {
             None,
             None,
             None,
-            None,
+            None, // labels
+            None, // workspace_root
         )
         .await
         .unwrap();
