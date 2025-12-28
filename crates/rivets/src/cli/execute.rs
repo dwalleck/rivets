@@ -307,7 +307,7 @@ pub async fn execute_update(
     args: &UpdateArgs,
     output_mode: OutputMode,
 ) -> Result<()> {
-    use super::types::{BatchError, BatchResult};
+    use super::types::BatchResult;
     use crate::domain::{IssueId, IssueUpdate};
 
     let mut result = BatchResult::new();
@@ -329,29 +329,8 @@ pub async fn execute_update(
             ..Default::default()
         };
 
-        match app.storage_mut().update(&issue_id, update).await {
-            Ok(issue) => {
-                // Save immediately after each successful update
-                if let Err(save_err) = app.save().await {
-                    // Save failed - reload to restore consistency and record as failure
-                    if let Err(reload_err) = app.storage_mut().reload().await {
-                        eprintln!("Warning: Failed to reload after save error: {}", reload_err);
-                    }
-                    result.failed.push(BatchError {
-                        issue_id: id_str.clone(),
-                        error: format!("Save failed: {}", save_err),
-                    });
-                } else {
-                    result.succeeded.push(issue);
-                }
-            }
-            Err(e) => {
-                result.failed.push(BatchError {
-                    issue_id: id_str.clone(),
-                    error: e.to_string(),
-                });
-            }
-        }
+        let storage_result = app.storage_mut().update(&issue_id, update).await;
+        save_or_record_failure(app, &mut result, id_str, storage_result).await;
     }
 
     // Output results
@@ -367,6 +346,50 @@ pub async fn execute_update(
     }
 
     Ok(())
+}
+
+/// Handle save-or-record-failure for batch operations.
+///
+/// This helper encapsulates the common pattern of:
+/// 1. Checking the result of a storage operation
+/// 2. Saving to disk on success
+/// 3. Reloading on save failure to restore consistency and prevent partial state
+/// 4. Recording success or failure in the batch result
+///
+/// # Arguments
+/// * `app` - Application instance with storage
+/// * `result` - Batch result to record success/failure
+/// * `issue_id` - Issue identifier for error reporting
+/// * `storage_result` - Result from the storage operation
+async fn save_or_record_failure(
+    app: &mut crate::app::App,
+    result: &mut super::types::BatchResult,
+    issue_id: &str,
+    storage_result: Result<crate::domain::Issue, crate::error::Error>,
+) {
+    use super::types::BatchError;
+
+    match storage_result {
+        Ok(issue) => {
+            if let Err(save_err) = app.save().await {
+                if let Err(reload_err) = app.storage_mut().reload().await {
+                    tracing::warn!("Failed to reload after save error: {}", reload_err);
+                }
+                result.failed.push(BatchError {
+                    issue_id: issue_id.to_string(),
+                    error: format!("Save failed: {}", save_err),
+                });
+            } else {
+                result.succeeded.push(issue);
+            }
+        }
+        Err(e) => {
+            result.failed.push(BatchError {
+                issue_id: issue_id.to_string(),
+                error: e.to_string(),
+            });
+        }
+    }
 }
 
 /// Output batch operation results in the appropriate format
@@ -463,28 +486,8 @@ pub async fn execute_close(
             ..Default::default()
         };
 
-        match app.storage_mut().update(&issue_id, update).await {
-            Ok(issue) => {
-                // Save immediately after each successful close
-                if let Err(save_err) = app.save().await {
-                    if let Err(reload_err) = app.storage_mut().reload().await {
-                        eprintln!("Warning: Failed to reload after save error: {}", reload_err);
-                    }
-                    result.failed.push(BatchError {
-                        issue_id: id_str.clone(),
-                        error: format!("Save failed: {}", save_err),
-                    });
-                } else {
-                    result.succeeded.push(issue);
-                }
-            }
-            Err(e) => {
-                result.failed.push(BatchError {
-                    issue_id: id_str.clone(),
-                    error: e.to_string(),
-                });
-            }
-        }
+        let storage_result = app.storage_mut().update(&issue_id, update).await;
+        save_or_record_failure(app, &mut result, id_str, storage_result).await;
     }
 
     // Output results
@@ -559,28 +562,8 @@ pub async fn execute_reopen(
             ..Default::default()
         };
 
-        match app.storage_mut().update(&issue_id, update).await {
-            Ok(issue) => {
-                // Save immediately after each successful reopen
-                if let Err(save_err) = app.save().await {
-                    if let Err(reload_err) = app.storage_mut().reload().await {
-                        eprintln!("Warning: Failed to reload after save error: {}", reload_err);
-                    }
-                    result.failed.push(BatchError {
-                        issue_id: id_str.clone(),
-                        error: format!("Save failed: {}", save_err),
-                    });
-                } else {
-                    result.succeeded.push(issue);
-                }
-            }
-            Err(e) => {
-                result.failed.push(BatchError {
-                    issue_id: id_str.clone(),
-                    error: e.to_string(),
-                });
-            }
-        }
+        let storage_result = app.storage_mut().update(&issue_id, update).await;
+        save_or_record_failure(app, &mut result, id_str, storage_result).await;
     }
 
     // Output results
@@ -891,7 +874,7 @@ pub async fn execute_label(
     args: &LabelArgs,
     output_mode: OutputMode,
 ) -> Result<()> {
-    use super::types::{BatchError, BatchResult};
+    use super::types::BatchResult;
     use crate::domain::{IssueFilter, IssueId};
     use crate::output;
     use std::collections::BTreeSet;
@@ -922,30 +905,8 @@ pub async fn execute_label(
 
             for id_str in &issue_ids {
                 let issue_id = IssueId::new(id_str);
-                match app.storage_mut().add_label(&issue_id, label).await {
-                    Ok(updated) => {
-                        if let Err(save_err) = app.save().await {
-                            if let Err(reload_err) = app.storage_mut().reload().await {
-                                eprintln!(
-                                    "Warning: Failed to reload after save error: {}",
-                                    reload_err
-                                );
-                            }
-                            result.failed.push(BatchError {
-                                issue_id: id_str.clone(),
-                                error: format!("Save failed: {}", save_err),
-                            });
-                        } else {
-                            result.succeeded.push(updated);
-                        }
-                    }
-                    Err(e) => {
-                        result.failed.push(BatchError {
-                            issue_id: id_str.clone(),
-                            error: e.to_string(),
-                        });
-                    }
-                }
+                let storage_result = app.storage_mut().add_label(&issue_id, label).await;
+                save_or_record_failure(app, &mut result, id_str, storage_result).await;
             }
 
             // Output results
@@ -1006,30 +967,8 @@ pub async fn execute_label(
 
             for id_str in &issue_ids {
                 let issue_id = IssueId::new(id_str);
-                match app.storage_mut().remove_label(&issue_id, label).await {
-                    Ok(updated) => {
-                        if let Err(save_err) = app.save().await {
-                            if let Err(reload_err) = app.storage_mut().reload().await {
-                                eprintln!(
-                                    "Warning: Failed to reload after save error: {}",
-                                    reload_err
-                                );
-                            }
-                            result.failed.push(BatchError {
-                                issue_id: id_str.clone(),
-                                error: format!("Save failed: {}", save_err),
-                            });
-                        } else {
-                            result.succeeded.push(updated);
-                        }
-                    }
-                    Err(e) => {
-                        result.failed.push(BatchError {
-                            issue_id: id_str.clone(),
-                            error: e.to_string(),
-                        });
-                    }
-                }
+                let storage_result = app.storage_mut().remove_label(&issue_id, label).await;
+                save_or_record_failure(app, &mut result, id_str, storage_result).await;
             }
 
             // Output results
@@ -1309,4 +1248,169 @@ pub async fn execute_stats(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::types::BatchResult;
+    use crate::domain::{Issue, IssueId, IssueStatus, IssueType};
+    use crate::error::Error;
+    use chrono::Utc;
+    use rstest::rstest;
+    use tempfile::TempDir;
+
+    /// Create a test issue with the given ID for use in unit tests.
+    fn create_test_issue(id: &str) -> Issue {
+        Issue {
+            id: IssueId::new(id),
+            title: "Test Issue".to_string(),
+            description: String::new(),
+            status: IssueStatus::Open,
+            priority: 2,
+            issue_type: IssueType::Task,
+            assignee: None,
+            labels: vec![],
+            design: None,
+            acceptance_criteria: None,
+            notes: None,
+            external_ref: None,
+            dependencies: vec![],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            closed_at: None,
+        }
+    }
+
+    #[rstest]
+    #[case::success(true, 1, 0)]
+    #[case::storage_error(false, 0, 1)]
+    #[tokio::test]
+    async fn test_save_or_record_failure_outcomes(
+        #[case] is_success: bool,
+        #[case] expected_succeeded: usize,
+        #[case] expected_failed: usize,
+    ) {
+        let temp_dir = TempDir::new().unwrap();
+        crate::commands::init::init(temp_dir.path(), None)
+            .await
+            .unwrap();
+
+        let mut app = crate::app::App::from_directory(temp_dir.path())
+            .await
+            .unwrap();
+        let mut result = BatchResult::new();
+
+        let storage_result: Result<Issue, Error> = if is_success {
+            Ok(create_test_issue("test-abc"))
+        } else {
+            Err(Error::IssueNotFound(IssueId::new("test-abc")))
+        };
+
+        save_or_record_failure(&mut app, &mut result, "test-abc", storage_result).await;
+
+        assert_eq!(result.succeeded.len(), expected_succeeded);
+        assert_eq!(result.failed.len(), expected_failed);
+    }
+
+    #[tokio::test]
+    async fn test_save_or_record_failure_success_records_issue() {
+        let temp_dir = TempDir::new().unwrap();
+        crate::commands::init::init(temp_dir.path(), None)
+            .await
+            .unwrap();
+
+        let mut app = crate::app::App::from_directory(temp_dir.path())
+            .await
+            .unwrap();
+        let mut result = BatchResult::new();
+
+        let issue = create_test_issue("test-abc");
+        let storage_result: Result<Issue, Error> = Ok(issue);
+
+        save_or_record_failure(&mut app, &mut result, "test-abc", storage_result).await;
+
+        assert_eq!(result.succeeded[0].id.as_str(), "test-abc");
+    }
+
+    #[tokio::test]
+    async fn test_save_or_record_failure_error_contains_message() {
+        let temp_dir = TempDir::new().unwrap();
+        crate::commands::init::init(temp_dir.path(), None)
+            .await
+            .unwrap();
+
+        let mut app = crate::app::App::from_directory(temp_dir.path())
+            .await
+            .unwrap();
+        let mut result = BatchResult::new();
+
+        let storage_result: Result<Issue, Error> =
+            Err(Error::IssueNotFound(IssueId::new("test-abc")));
+
+        save_or_record_failure(&mut app, &mut result, "test-abc", storage_result).await;
+
+        assert_eq!(result.failed[0].issue_id, "test-abc");
+        assert!(result.failed[0].error.contains("not found"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_save_or_record_failure_save_error() {
+        use std::fs::{self, Permissions};
+        use std::os::unix::fs::PermissionsExt;
+        use std::path::PathBuf;
+
+        /// RAII guard that restores directory permissions on drop.
+        /// Ensures cleanup happens even if assertions panic.
+        struct PermissionGuard {
+            path: PathBuf,
+            original: Permissions,
+        }
+
+        impl Drop for PermissionGuard {
+            fn drop(&mut self) {
+                let _ = fs::set_permissions(&self.path, self.original.clone());
+            }
+        }
+
+        // Create a temp directory and initialize rivets
+        let temp_dir = TempDir::new().unwrap();
+        crate::commands::init::init(temp_dir.path(), None)
+            .await
+            .unwrap();
+
+        let mut app = crate::app::App::from_directory(temp_dir.path())
+            .await
+            .unwrap();
+        let mut result = BatchResult::new();
+
+        // Make the .rivets directory read-only to cause a save failure
+        // (save uses atomic write with temp file + rename, so we need to block directory writes)
+        let rivets_dir = temp_dir.path().join(".rivets");
+        let original_perms = fs::metadata(&rivets_dir).unwrap().permissions();
+
+        // Create guard to restore permissions even if test panics
+        let _guard = PermissionGuard {
+            path: rivets_dir.clone(),
+            original: original_perms,
+        };
+
+        let mut perms = fs::metadata(&rivets_dir).unwrap().permissions();
+        perms.set_mode(0o555); // read + execute only (no write)
+        fs::set_permissions(&rivets_dir, perms).unwrap();
+
+        let issue = create_test_issue("test-save-fail");
+        let storage_result: Result<Issue, Error> = Ok(issue);
+
+        save_or_record_failure(&mut app, &mut result, "test-save-fail", storage_result).await;
+
+        // Should record as failure due to save error
+        assert_eq!(result.succeeded.len(), 0);
+        assert_eq!(result.failed.len(), 1);
+        assert_eq!(result.failed[0].issue_id, "test-save-fail");
+        assert!(result.failed[0].error.contains("Save failed"));
+
+        // Guard will restore permissions on drop
+    }
 }
