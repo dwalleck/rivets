@@ -35,6 +35,8 @@ mod validators;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+use crate::app::App;
+
 // Re-export argument structs
 pub use args::{
     BlockedArgs, CloseArgs, CreateArgs, DeleteArgs, DepAction, DepArgs, InfoArgs, InitArgs,
@@ -155,6 +157,15 @@ pub enum Commands {
     Stats(StatsArgs),
 }
 
+/// Load the App from the current working directory.
+///
+/// This helper centralizes the common pattern of initializing the App
+/// from `std::env::current_dir()`, reducing duplication in command handlers.
+async fn load_app_from_cwd() -> Result<App> {
+    // Ok(...?) pattern converts crate::error::Error to anyhow::Error
+    Ok(App::from_directory(&std::env::current_dir()?).await?)
+}
+
 impl Cli {
     /// Parse CLI arguments from command line
     pub fn parse_args() -> Self {
@@ -172,7 +183,6 @@ impl Cli {
 
     /// Execute the CLI command
     pub async fn execute(&self) -> Result<()> {
-        use crate::app::App;
         use crate::output::OutputMode;
 
         let output_mode = if self.json {
@@ -184,59 +194,59 @@ impl Cli {
         match &self.command {
             Some(Commands::Init(args)) => execute::execute_init(args).await,
             Some(Commands::Info(args)) => {
-                let app = App::from_directory(&std::env::current_dir()?).await?;
+                let app = load_app_from_cwd().await?;
                 execute::execute_info(&app, args, output_mode).await
             }
             Some(Commands::Create(args)) => {
-                let mut app = App::from_directory(&std::env::current_dir()?).await?;
+                let mut app = load_app_from_cwd().await?;
                 execute::execute_create(&mut app, args, output_mode).await
             }
             Some(Commands::List(args)) => {
-                let app = App::from_directory(&std::env::current_dir()?).await?;
+                let app = load_app_from_cwd().await?;
                 execute::execute_list(&app, args, output_mode).await
             }
             Some(Commands::Show(args)) => {
-                let app = App::from_directory(&std::env::current_dir()?).await?;
+                let app = load_app_from_cwd().await?;
                 execute::execute_show(&app, args, output_mode).await
             }
             Some(Commands::Update(args)) => {
-                let mut app = App::from_directory(&std::env::current_dir()?).await?;
+                let mut app = load_app_from_cwd().await?;
                 execute::execute_update(&mut app, args, output_mode).await
             }
             Some(Commands::Close(args)) => {
-                let mut app = App::from_directory(&std::env::current_dir()?).await?;
+                let mut app = load_app_from_cwd().await?;
                 execute::execute_close(&mut app, args, output_mode).await
             }
             Some(Commands::Reopen(args)) => {
-                let mut app = App::from_directory(&std::env::current_dir()?).await?;
+                let mut app = load_app_from_cwd().await?;
                 execute::execute_reopen(&mut app, args, output_mode).await
             }
             Some(Commands::Delete(args)) => {
-                let mut app = App::from_directory(&std::env::current_dir()?).await?;
+                let mut app = load_app_from_cwd().await?;
                 execute::execute_delete(&mut app, args, output_mode).await
             }
             Some(Commands::Ready(args)) => {
-                let app = App::from_directory(&std::env::current_dir()?).await?;
+                let app = load_app_from_cwd().await?;
                 execute::execute_ready(&app, args, output_mode).await
             }
             Some(Commands::Dep(args)) => {
-                let mut app = App::from_directory(&std::env::current_dir()?).await?;
+                let mut app = load_app_from_cwd().await?;
                 execute::execute_dep(&mut app, args, output_mode).await
             }
             Some(Commands::Label(args)) => {
-                let mut app = App::from_directory(&std::env::current_dir()?).await?;
+                let mut app = load_app_from_cwd().await?;
                 execute::execute_label(&mut app, args, output_mode).await
             }
             Some(Commands::Stale(args)) => {
-                let app = App::from_directory(&std::env::current_dir()?).await?;
+                let app = load_app_from_cwd().await?;
                 execute::execute_stale(&app, args, output_mode).await
             }
             Some(Commands::Blocked(args)) => {
-                let app = App::from_directory(&std::env::current_dir()?).await?;
+                let app = load_app_from_cwd().await?;
                 execute::execute_blocked(&app, args, output_mode).await
             }
             Some(Commands::Stats(args)) => {
-                let app = App::from_directory(&std::env::current_dir()?).await?;
+                let app = load_app_from_cwd().await?;
                 execute::execute_stats(&app, args, output_mode).await
             }
             None => {
