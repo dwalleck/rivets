@@ -63,6 +63,9 @@ pub const MAX_PREFIX_LENGTH: usize = 20;
 /// Maximum directory depth to traverse when searching for rivets root
 pub const MAX_TRAVERSAL_DEPTH: usize = 256;
 
+/// Default storage backend type
+pub const DEFAULT_BACKEND: &str = "jsonl";
+
 /// Configuration file structure for rivets
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RivetsConfig {
@@ -94,7 +97,9 @@ impl StorageConfig {
     /// # Errors
     ///
     /// Returns an error if the backend type is not recognized or not supported.
-    pub fn to_backend(&self, root_dir: &Path) -> Result<StorageBackend> {
+    pub fn to_backend(&self, root_dir: impl AsRef<Path>) -> Result<StorageBackend> {
+        let root_dir = root_dir.as_ref();
+
         // Validate that data_file is a relative path
         let data_file_path = Path::new(&self.data_file);
         if data_file_path.is_absolute() {
@@ -108,7 +113,9 @@ impl StorageConfig {
         match self.backend.as_str() {
             "jsonl" => Ok(StorageBackend::Jsonl(data_path)),
             "postgresql" => Err(Error::Config(
-                "PostgreSQL backend is not yet implemented. Use 'jsonl'.".to_string(),
+                "PostgreSQL backend is not yet implemented. \
+                 See https://github.com/dwalleck/rivets/issues for tracking."
+                    .to_string(),
             )),
             other => Err(Error::Config(format!(
                 "Unknown storage backend '{other}'. Supported backends: jsonl, postgresql"
@@ -123,7 +130,7 @@ impl RivetsConfig {
         Self {
             issue_prefix: prefix.to_string(),
             storage: StorageConfig {
-                backend: "jsonl".to_string(),
+                backend: DEFAULT_BACKEND.to_string(),
                 data_file: format!("{}/{}", RIVETS_DIR_NAME, ISSUES_FILE_NAME),
             },
         }

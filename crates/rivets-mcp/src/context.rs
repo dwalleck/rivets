@@ -97,7 +97,12 @@ impl Context {
 
         // Load config to get storage settings
         let config_path = rivets_dir.join("config.yaml");
-        let config = RivetsConfig::load(&config_path).await?;
+        let config = RivetsConfig::load(&config_path).await.map_err(|e| {
+            Error::ConfigLoad {
+                path: config_path.display().to_string(),
+                reason: e.to_string(),
+            }
+        })?;
         debug!(prefix = %config.issue_prefix, backend = %config.storage.backend, "Loaded config");
 
         // Create backend configuration (this resolves the data path)

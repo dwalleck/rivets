@@ -44,8 +44,9 @@
 //!
 //! #[tokio::main(flavor = "current_thread")]
 //! async fn main() -> anyhow::Result<()> {
-//!     // Create in-memory storage with "proj" prefix for issue IDs
-//!     let mut storage = create_storage(StorageBackend::InMemory, "proj".to_string()).await?;
+//!     // Create in-memory storage with a prefix for issue IDs.
+//!     // In real applications, the prefix comes from RivetsConfig.issue_prefix.
+//!     let mut storage = create_storage(StorageBackend::InMemory, "myapp".to_string()).await?;
 //!
 //!     // Create an issue
 //!     let new_issue = NewIssue {
