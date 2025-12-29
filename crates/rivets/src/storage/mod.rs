@@ -74,7 +74,7 @@ use crate::domain::{
 };
 use crate::error::Result;
 use async_trait::async_trait;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // Storage backend implementations
 pub mod in_memory;
@@ -349,6 +349,19 @@ pub enum StorageBackend {
     /// PostgreSQL database (persistent, production-ready)
     #[allow(dead_code)]
     PostgreSQL(String),
+}
+
+impl StorageBackend {
+    /// Returns the data file path for file-based backends.
+    ///
+    /// Returns `Some(path)` for backends that use a file (e.g., JSONL),
+    /// or `None` for backends that don't (e.g., InMemory, PostgreSQL).
+    pub fn data_path(&self) -> Option<&Path> {
+        match self {
+            StorageBackend::Jsonl(path) => Some(path),
+            StorageBackend::InMemory | StorageBackend::PostgreSQL(_) => None,
+        }
+    }
 }
 
 /// Wrapper that adds JSONL file persistence to any storage backend.
