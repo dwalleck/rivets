@@ -5,7 +5,7 @@ use super::sorting::sort_by_policy;
 use super::InMemoryStorage;
 use crate::domain::{
     Dependency, DependencyType, Issue, IssueFilter, IssueId, IssueStatus, IssueUpdate, NewIssue,
-    SortPolicy,
+    SortPolicy, MAX_PRIORITY,
 };
 use crate::error::{Error, Result};
 use crate::storage::IssueStorage;
@@ -151,7 +151,7 @@ impl IssueStorage for InMemoryStorage {
             }
         }
         if let Some(priority) = updates.priority {
-            if priority > 4 {
+            if priority > MAX_PRIORITY {
                 return Err(Error::InvalidPriority(priority));
             }
             issue.priority = priority;
