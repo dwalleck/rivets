@@ -321,7 +321,11 @@ pub async fn execute_update(
             description: args.description.clone(),
             status: args.status.map(|s| s.into()),
             priority: args.priority,
-            assignee: args.assignee.clone().map(Some),
+            assignee: if args.no_assignee {
+                Some(None) // Clear the assignee
+            } else {
+                args.assignee.clone().map(Some)
+            },
             design: args.design.clone(),
             acceptance_criteria: args.acceptance.clone(),
             notes: args.notes.clone(),
