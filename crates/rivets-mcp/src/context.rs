@@ -97,20 +97,20 @@ impl Context {
 
         // Load config to get storage settings
         let config_path = rivets_dir.join("config.yaml");
-        let config = RivetsConfig::load(&config_path).await.map_err(|e| {
-            Error::ConfigLoad {
+        let config = RivetsConfig::load(&config_path)
+            .await
+            .map_err(|e| Error::ConfigLoad {
                 path: config_path.display().to_string(),
                 reason: e.to_string(),
-            }
-        })?;
+            })?;
         debug!(prefix = %config.issue_prefix, backend = %config.storage.backend, "Loaded config");
 
         // Create backend configuration (this resolves the data path)
         let backend = config.storage.to_backend(&canonical)?;
-        let db_path = backend
-            .data_path()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| canonical.join(&config.storage.data_file));
+        let db_path = backend.data_path().map_or_else(
+            || canonical.join(&config.storage.data_file),
+            Path::to_path_buf,
+        );
         debug!(db_path = %db_path.display(), "Database path from backend");
 
         self.current_workspace = Some(canonical.clone());

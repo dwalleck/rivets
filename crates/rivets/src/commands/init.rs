@@ -421,7 +421,9 @@ storage:
   backend: jsonl
   data_file: .rivets/issues.jsonl
 "#;
-        tokio::fs::write(&config_path, invalid_config).await.unwrap();
+        tokio::fs::write(&config_path, invalid_config)
+            .await
+            .unwrap();
 
         let result = RivetsConfig::load(&config_path).await;
         assert!(result.is_err());

@@ -528,8 +528,7 @@ pub async fn create_storage(
         StorageBackend::Jsonl(path) => {
             // JSONL backend uses InMemoryStorage with file persistence
             let inner = if path.exists() {
-                let (storage, warnings) =
-                    in_memory::load_from_jsonl(&path, prefix.clone()).await?;
+                let (storage, warnings) = in_memory::load_from_jsonl(&path, prefix.clone()).await?;
                 if !warnings.is_empty() {
                     // Log warnings but continue - storage is still usable
                     for warning in &warnings {
