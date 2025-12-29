@@ -5,7 +5,8 @@
 //! semantics, and sort policies.
 
 use rivets::domain::{
-    DependencyType, IssueFilter, IssueId, IssueStatus, IssueType, IssueUpdate, NewIssue, SortPolicy,
+    DependencyType, IssueFilter, IssueId, IssueStatus, IssueType, IssueUpdate, NewIssue,
+    SortPolicy, MAX_PRIORITY,
 };
 use rivets::error::Error;
 use rivets::storage::in_memory::{load_from_jsonl, new_in_memory_storage, save_to_jsonl};
@@ -98,6 +99,26 @@ async fn test_update_issue() {
     assert_eq!(updated.title, "Updated Title");
     assert_eq!(updated.status, IssueStatus::InProgress);
     assert_eq!(updated.priority, 1);
+}
+
+#[tokio::test]
+async fn test_update_rejects_invalid_priority() {
+    let mut storage = new_in_memory_storage("test".to_string());
+
+    let new_issue = create_test_issue("Test Issue");
+    let created = storage.create(new_issue).await.unwrap();
+
+    let result = storage
+        .update(
+            &created.id,
+            IssueUpdate {
+                priority: Some(MAX_PRIORITY + 1),
+                ..Default::default()
+            },
+        )
+        .await;
+
+    assert!(matches!(result, Err(Error::InvalidPriority(_))));
 }
 
 #[tokio::test]
