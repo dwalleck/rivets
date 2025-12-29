@@ -748,9 +748,9 @@ mod tests {
             "alice",
             "--no-assignee",
         ]);
-        assert!(
-            result.is_err(),
-            "Expected conflict error for --assignee and --no-assignee"
-        );
+        match result {
+            Ok(_) => panic!("Expected a conflict error, but parsing succeeded."),
+            Err(e) => assert!(e.to_string().contains("cannot be used with")),
+        }
     }
 }
