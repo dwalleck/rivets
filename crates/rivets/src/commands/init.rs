@@ -34,6 +34,7 @@
 //! ```
 
 use crate::error::{Error, Result};
+use crate::storage::StorageBackend;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::fs;
@@ -76,11 +77,36 @@ pub struct RivetsConfig {
 /// Storage configuration section
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StorageConfig {
-    /// Storage backend type ("memory" for in-memory with JSONL persistence)
+    /// Storage backend type ("jsonl" or "postgresql")
     pub backend: String,
 
     /// Path to the data file
     pub data_file: String,
+}
+
+impl StorageConfig {
+    /// Convert the storage config to a [`StorageBackend`].
+    ///
+    /// # Arguments
+    ///
+    /// * `root_dir` - The workspace root directory to resolve relative paths
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend type is not recognized or not supported.
+    pub fn to_backend(&self, root_dir: &Path) -> Result<StorageBackend> {
+        let data_path = root_dir.join(&self.data_file);
+
+        match self.backend.as_str() {
+            "jsonl" => Ok(StorageBackend::Jsonl(data_path)),
+            "postgresql" => Err(Error::Config(
+                "PostgreSQL backend is not yet implemented. Use 'jsonl'.".to_string(),
+            )),
+            other => Err(Error::Config(format!(
+                "Unknown storage backend '{other}'. Supported backends: jsonl, postgresql"
+            ))),
+        }
+    }
 }
 
 impl RivetsConfig {
@@ -89,7 +115,7 @@ impl RivetsConfig {
         Self {
             issue_prefix: prefix.to_string(),
             storage: StorageConfig {
-                backend: "memory".to_string(),
+                backend: "jsonl".to_string(),
                 data_file: format!("{}/{}", RIVETS_DIR_NAME, ISSUES_FILE_NAME),
             },
         }
@@ -324,7 +350,7 @@ mod tests {
     fn test_config_new() {
         let config = RivetsConfig::new("myproj");
         assert_eq!(config.issue_prefix, "myproj");
-        assert_eq!(config.storage.backend, "memory");
+        assert_eq!(config.storage.backend, "jsonl");
         assert_eq!(config.storage.data_file, ".rivets/issues.jsonl");
     }
 
@@ -358,7 +384,7 @@ mod tests {
 
         // Verify YAML structure
         assert!(content.contains("issue-prefix: myproj"));
-        assert!(content.contains("backend: memory"));
+        assert!(content.contains("backend: jsonl"));
         assert!(content.contains("data_file: .rivets/issues.jsonl"));
     }
 

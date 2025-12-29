@@ -44,8 +44,8 @@
 //!
 //! #[tokio::main(flavor = "current_thread")]
 //! async fn main() -> anyhow::Result<()> {
-//!     // Create in-memory storage
-//!     let mut storage = create_storage(StorageBackend::InMemory).await?;
+//!     // Create in-memory storage with "proj" prefix for issue IDs
+//!     let mut storage = create_storage(StorageBackend::InMemory, "proj".to_string()).await?;
 //!
 //!     // Create an issue
 //!     let new_issue = NewIssue {
@@ -358,6 +358,7 @@ pub enum StorageBackend {
 struct JsonlBackedStorage {
     inner: Box<dyn IssueStorage>,
     path: PathBuf,
+    prefix: String,
 }
 
 impl JsonlBackedStorage {
@@ -462,7 +463,7 @@ impl IssueStorage for JsonlBackedStorage {
         // Reload from the JSONL file, replacing the inner storage
         if self.path.exists() {
             let (new_storage, warnings) =
-                in_memory::load_from_jsonl(&self.path, "rivets".to_string()).await?;
+                in_memory::load_from_jsonl(&self.path, self.prefix.clone()).await?;
             if !warnings.is_empty() {
                 for warning in &warnings {
                     tracing::warn!(warning = ?warning, "JSONL reload warning");
@@ -471,7 +472,7 @@ impl IssueStorage for JsonlBackedStorage {
             self.inner = new_storage;
         } else {
             // File doesn't exist - reset to empty storage
-            self.inner = in_memory::new_in_memory_storage("rivets".to_string());
+            self.inner = in_memory::new_in_memory_storage(self.prefix.clone());
         }
         Ok(())
     }
@@ -482,6 +483,11 @@ impl IssueStorage for JsonlBackedStorage {
 /// This factory function returns a trait object that can be used
 /// polymorphically regardless of the backend implementation.
 ///
+/// # Arguments
+///
+/// * `backend` - The storage backend to use
+/// * `prefix` - The prefix for generated issue IDs (e.g., "proj", "myapp")
+///
 /// # Example
 ///
 /// ```no_run
@@ -489,7 +495,7 @@ impl IssueStorage for JsonlBackedStorage {
 ///
 /// #[tokio::main(flavor = "current_thread")]
 /// async fn main() -> anyhow::Result<()> {
-///     let storage = create_storage(StorageBackend::InMemory).await?;
+///     let storage = create_storage(StorageBackend::InMemory, "proj".to_string()).await?;
 ///     // Use storage...
 ///     Ok(())
 /// }
@@ -499,14 +505,17 @@ impl IssueStorage for JsonlBackedStorage {
 ///
 /// - `Error::Io` if file operations fail (JSONL backend)
 /// - `Error::Storage` for backend-specific initialization errors
-pub async fn create_storage(backend: StorageBackend) -> Result<Box<dyn IssueStorage>> {
+pub async fn create_storage(
+    backend: StorageBackend,
+    prefix: String,
+) -> Result<Box<dyn IssueStorage>> {
     match backend {
-        StorageBackend::InMemory => Ok(in_memory::new_in_memory_storage("rivets".to_string())),
+        StorageBackend::InMemory => Ok(in_memory::new_in_memory_storage(prefix)),
         StorageBackend::Jsonl(path) => {
             // JSONL backend uses InMemoryStorage with file persistence
             let inner = if path.exists() {
                 let (storage, warnings) =
-                    in_memory::load_from_jsonl(&path, "rivets".to_string()).await?;
+                    in_memory::load_from_jsonl(&path, prefix.clone()).await?;
                 if !warnings.is_empty() {
                     // Log warnings but continue - storage is still usable
                     for warning in &warnings {
@@ -516,10 +525,14 @@ pub async fn create_storage(backend: StorageBackend) -> Result<Box<dyn IssueStor
                 storage
             } else {
                 // File doesn't exist yet (first run) - create empty storage
-                in_memory::new_in_memory_storage("rivets".to_string())
+                in_memory::new_in_memory_storage(prefix.clone())
             };
             // Wrap in JsonlBackedStorage so save() writes to file
-            Ok(Box::new(JsonlBackedStorage { inner, path }))
+            Ok(Box::new(JsonlBackedStorage {
+                inner,
+                path,
+                prefix,
+            }))
         }
         StorageBackend::PostgreSQL(_conn_str) => {
             // TODO: Implement PostgreSQL backend
@@ -850,7 +863,7 @@ mod tests {
         let jsonl_path = temp_dir.path().join("issues.jsonl");
 
         // Create storage and add an issue
-        let mut storage = create_storage(StorageBackend::Jsonl(jsonl_path.clone()))
+        let mut storage = create_storage(StorageBackend::Jsonl(jsonl_path.clone()), "test".into())
             .await
             .unwrap();
 
@@ -900,7 +913,7 @@ mod tests {
         let jsonl_path = temp_dir.path().join("issues.jsonl");
 
         // Create storage, add issue, save
-        let mut storage = create_storage(StorageBackend::Jsonl(jsonl_path.clone()))
+        let mut storage = create_storage(StorageBackend::Jsonl(jsonl_path.clone()), "test".into())
             .await
             .unwrap();
 
@@ -935,7 +948,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_in_memory_reload_is_noop() {
-        let mut storage = create_storage(StorageBackend::InMemory).await.unwrap();
+        let mut storage = create_storage(StorageBackend::InMemory, "test".into())
+            .await
+            .unwrap();
 
         let new_issue = NewIssue {
             title: "Test Issue".to_string(),
