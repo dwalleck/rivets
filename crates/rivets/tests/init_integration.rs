@@ -50,8 +50,8 @@ fn test_init_creates_config_file(temp_dir: TempDir) {
         "Config should contain issue-prefix"
     );
     assert!(
-        content.contains("backend: memory"),
-        "Config should specify memory backend"
+        content.contains("backend: jsonl"),
+        "Config should specify jsonl backend"
     );
     assert!(
         content.contains("data_file:"),

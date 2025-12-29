@@ -15,7 +15,8 @@
 //! This prevents potential deadlocks in concurrent scenarios.
 
 use crate::error::{Error, Result};
-use rivets::storage::{create_storage, IssueStorage, StorageBackend};
+use rivets::commands::init::RivetsConfig;
+use rivets::storage::{create_storage, IssueStorage};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -94,9 +95,23 @@ impl Context {
             return Err(Error::NoRivetsDirectory(canonical.display().to_string()));
         }
 
-        // Find the database file
-        let db_path = find_database(&rivets_dir)?;
-        debug!(db_path = %db_path.display(), "Found database");
+        // Load config to get storage settings
+        let config_path = rivets_dir.join("config.yaml");
+        let config = RivetsConfig::load(&config_path)
+            .await
+            .map_err(|e| Error::ConfigLoad {
+                path: config_path.display().to_string(),
+                reason: e.to_string(),
+            })?;
+        debug!(prefix = %config.issue_prefix, backend = %config.storage.backend, "Loaded config");
+
+        // Create backend configuration (this resolves the data path)
+        let backend = config.storage.to_backend(&canonical)?;
+        let db_path = backend.data_path().map_or_else(
+            || canonical.join(&config.storage.data_file),
+            Path::to_path_buf,
+        );
+        debug!(db_path = %db_path.display(), "Database path from backend");
 
         self.current_workspace = Some(canonical.clone());
 
@@ -114,7 +129,7 @@ impl Context {
                 self.evict_oldest();
             }
 
-            let storage = create_storage(StorageBackend::Jsonl(db_path.clone())).await?;
+            let storage = create_storage(backend.clone(), config.issue_prefix).await?;
             self.storage_cache
                 .insert(canonical.clone(), Arc::new(RwLock::new(storage)));
             self.cache_order.push_back(canonical.clone());
@@ -281,54 +296,6 @@ fn validate_path(path: &Path) -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Find the database file in a `.rivets/` directory.
-///
-/// Prefers the standard `issues.jsonl` location first, then falls back to
-/// searching for any `.jsonl` or `.db` file. Returns an error if multiple
-/// database files are found to avoid ambiguity.
-fn find_database(rivets_dir: &Path) -> Result<PathBuf> {
-    // Prefer the standard location first for deterministic behavior
-    let standard = rivets_dir.join("issues.jsonl");
-    if standard.exists() {
-        return Ok(standard);
-    }
-
-    // Fall back to searching for any .jsonl or .db file
-    let mut found = Vec::new();
-    for entry in std::fs::read_dir(rivets_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if let Some(ext) = path.extension() {
-            if ext == "jsonl" || ext == "db" {
-                found.push(path);
-            }
-        }
-    }
-
-    // Sort for deterministic behavior (read_dir order is undefined)
-    found.sort();
-
-    match found.len() {
-        0 => Ok(rivets_dir.join("issues.jsonl")), // Default for new workspaces
-        1 => Ok(found.into_iter().next().expect("checked len")),
-        _ => {
-            let files: Vec<_> = found
-                .iter()
-                .filter_map(|p| p.file_name())
-                .map(|n| n.to_string_lossy())
-                .collect();
-            Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "Multiple database files found in {}: {}. Remove duplicates or use issues.jsonl.",
-                    rivets_dir.display(),
-                    files.join(", ")
-                ),
-            )))
-        }
-    }
 }
 
 /// Discover a rivets workspace by walking up from the given directory.

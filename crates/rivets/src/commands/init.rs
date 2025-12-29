@@ -34,6 +34,7 @@
 //! ```
 
 use crate::error::{Error, Result};
+use crate::storage::StorageBackend;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::fs;
@@ -62,6 +63,9 @@ pub const MAX_PREFIX_LENGTH: usize = 20;
 /// Maximum directory depth to traverse when searching for rivets root
 pub const MAX_TRAVERSAL_DEPTH: usize = 256;
 
+/// Default storage backend type
+pub const DEFAULT_BACKEND: &str = "jsonl";
+
 /// Configuration file structure for rivets
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RivetsConfig {
@@ -76,11 +80,48 @@ pub struct RivetsConfig {
 /// Storage configuration section
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StorageConfig {
-    /// Storage backend type ("memory" for in-memory with JSONL persistence)
+    /// Storage backend type ("jsonl" or "postgresql")
     pub backend: String,
 
     /// Path to the data file
     pub data_file: String,
+}
+
+impl StorageConfig {
+    /// Convert the storage config to a [`StorageBackend`].
+    ///
+    /// # Arguments
+    ///
+    /// * `root_dir` - The workspace root directory to resolve relative paths
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend type is not recognized or not supported.
+    pub fn to_backend(&self, root_dir: impl AsRef<Path>) -> Result<StorageBackend> {
+        let root_dir = root_dir.as_ref();
+
+        // Validate that data_file is a relative path
+        let data_file_path = Path::new(&self.data_file);
+        if data_file_path.is_absolute() {
+            return Err(Error::Config(
+                "data_file must be a relative path".to_string(),
+            ));
+        }
+
+        let data_path = root_dir.join(&self.data_file);
+
+        match self.backend.as_str() {
+            "jsonl" => Ok(StorageBackend::Jsonl(data_path)),
+            "postgresql" => Err(Error::Config(
+                "PostgreSQL backend is not yet implemented. \
+                 See https://github.com/dwalleck/rivets/issues for tracking."
+                    .to_string(),
+            )),
+            other => Err(Error::Config(format!(
+                "Unknown storage backend '{other}'. Supported backends: jsonl, postgresql"
+            ))),
+        }
+    }
 }
 
 impl RivetsConfig {
@@ -89,22 +130,29 @@ impl RivetsConfig {
         Self {
             issue_prefix: prefix.to_string(),
             storage: StorageConfig {
-                backend: "memory".to_string(),
+                backend: DEFAULT_BACKEND.to_string(),
                 data_file: format!("{}/{}", RIVETS_DIR_NAME, ISSUES_FILE_NAME),
             },
         }
     }
 
     /// Load configuration from a file
+    ///
+    /// Validates the configuration after loading, including prefix validation.
     pub async fn load(path: &Path) -> Result<Self> {
         let content = fs::read_to_string(path).await?;
-        serde_yaml::from_str(&content).map_err(|e| {
+        let config: Self = serde_yaml::from_str(&content).map_err(|e| {
             Error::Config(format!(
                 "Failed to parse config file '{}': {}",
                 path.display(),
                 e
             ))
-        })
+        })?;
+
+        // Validate the prefix
+        validate_prefix(&config.issue_prefix)?;
+
+        Ok(config)
     }
 
     /// Save configuration to a file
@@ -324,7 +372,7 @@ mod tests {
     fn test_config_new() {
         let config = RivetsConfig::new("myproj");
         assert_eq!(config.issue_prefix, "myproj");
-        assert_eq!(config.storage.backend, "memory");
+        assert_eq!(config.storage.backend, "jsonl");
         assert_eq!(config.storage.data_file, ".rivets/issues.jsonl");
     }
 
@@ -358,8 +406,100 @@ mod tests {
 
         // Verify YAML structure
         assert!(content.contains("issue-prefix: myproj"));
-        assert!(content.contains("backend: memory"));
+        assert!(content.contains("backend: jsonl"));
         assert!(content.contains("data_file: .rivets/issues.jsonl"));
+    }
+
+    #[tokio::test]
+    async fn test_config_load_validates_prefix() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("config.yaml");
+
+        // Write a config with an invalid prefix (too short)
+        let invalid_config = r#"issue-prefix: x
+storage:
+  backend: jsonl
+  data_file: .rivets/issues.jsonl
+"#;
+        tokio::fs::write(&config_path, invalid_config)
+            .await
+            .unwrap();
+
+        let result = RivetsConfig::load(&config_path).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("at least"));
+    }
+
+    // ========== StorageConfig Tests ==========
+
+    #[test]
+    fn test_to_backend_jsonl_success() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = StorageConfig {
+            backend: "jsonl".to_string(),
+            data_file: "data/issues.jsonl".to_string(),
+        };
+
+        let result = config.to_backend(temp_dir.path());
+        assert!(result.is_ok());
+
+        let backend = result.unwrap();
+        assert!(matches!(backend, StorageBackend::Jsonl(_)));
+        assert_eq!(
+            backend.data_path().unwrap(),
+            temp_dir.path().join("data/issues.jsonl")
+        );
+    }
+
+    #[test]
+    fn test_to_backend_unknown_backend_error() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = StorageConfig {
+            backend: "unknown".to_string(),
+            data_file: "issues.jsonl".to_string(),
+        };
+
+        let result = config.to_backend(temp_dir.path());
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Unknown storage backend"));
+        assert!(err_msg.contains("unknown"));
+    }
+
+    #[test]
+    fn test_to_backend_postgresql_not_implemented() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = StorageConfig {
+            backend: "postgresql".to_string(),
+            data_file: "".to_string(),
+        };
+
+        let result = config.to_backend(temp_dir.path());
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("not yet implemented"));
+    }
+
+    #[test]
+    fn test_to_backend_absolute_path_rejected() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Use a platform-appropriate absolute path
+        #[cfg(windows)]
+        let absolute_path = "C:\\absolute\\path\\issues.jsonl";
+        #[cfg(not(windows))]
+        let absolute_path = "/absolute/path/issues.jsonl";
+
+        let config = StorageConfig {
+            backend: "jsonl".to_string(),
+            data_file: absolute_path.to_string(),
+        };
+
+        let result = config.to_backend(temp_dir.path());
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("relative path"));
     }
 
     // ========== Init Command Tests ==========

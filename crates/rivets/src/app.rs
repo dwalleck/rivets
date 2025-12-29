@@ -19,7 +19,7 @@
 
 use crate::commands::init::{find_rivets_root, RivetsConfig, CONFIG_FILE_NAME, RIVETS_DIR_NAME};
 use crate::error::{Error, Result};
-use crate::storage::{create_storage, IssueStorage, StorageBackend};
+use crate::storage::{create_storage, IssueStorage};
 use std::path::{Path, PathBuf};
 
 /// Application context for CLI operations.
@@ -81,8 +81,8 @@ impl App {
         let config = RivetsConfig::load(&config_path).await?;
 
         // Create storage based on configuration
-        let data_path = root_dir.join(&config.storage.data_file);
-        let storage = create_storage(StorageBackend::Jsonl(data_path)).await?;
+        let backend = config.storage.to_backend(&root_dir)?;
+        let storage = create_storage(backend, config.issue_prefix.clone()).await?;
 
         Ok(Self {
             storage,

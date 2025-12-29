@@ -42,6 +42,15 @@ pub enum Error {
     #[error("No .rivets directory found in {0} or parent directories")]
     NoRivetsDirectory(String),
 
+    /// Failed to load workspace configuration.
+    #[error("Failed to load config from '{path}': {reason}. Run 'rivets init' to create a valid configuration.")]
+    ConfigLoad {
+        /// The path to the config file.
+        path: String,
+        /// The reason for the failure.
+        reason: String,
+    },
+
     /// An error from the rivets storage layer.
     #[error("Storage error: {0}")]
     Storage(#[from] rivets::error::Error),

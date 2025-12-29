@@ -20,10 +20,21 @@ mod helpers {
     use super::*;
     use std::path::Path;
 
-    /// Create a temporary workspace with `.rivets/` directory.
+    /// Create a temporary workspace with `.rivets/` directory and config file.
     pub fn create_temp_workspace() -> TempDir {
         let temp = TempDir::new().expect("Failed to create temp dir");
-        std::fs::create_dir(temp.path().join(".rivets")).expect("Failed to create .rivets dir");
+        let rivets_dir = temp.path().join(".rivets");
+        std::fs::create_dir(&rivets_dir).expect("Failed to create .rivets dir");
+
+        // Create config.yaml with default prefix
+        let config_content = r"issue-prefix: test
+storage:
+  backend: jsonl
+  data_file: .rivets/issues.jsonl
+";
+        std::fs::write(rivets_dir.join("config.yaml"), config_content)
+            .expect("Failed to create config.yaml");
+
         temp
     }
 
