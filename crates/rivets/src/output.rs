@@ -6,6 +6,7 @@
 use crate::domain::{Dependency, Issue, IssueStatus, IssueType};
 use colored::Colorize;
 use serde::Serialize;
+use std::env;
 use std::io::{self, Write};
 
 // ============================================================================
@@ -13,12 +14,32 @@ use std::io::{self, Write};
 // ============================================================================
 
 const DEFAULT_TERMINAL_WIDTH: u16 = 80;
+const DEFAULT_MAX_CONTENT_WIDTH: usize = 80;
 
 /// Get the current terminal width, falling back to default if detection fails.
 fn get_terminal_width() -> usize {
     terminal_size::terminal_size()
         .map(|(w, _)| w.0 as usize)
         .unwrap_or(DEFAULT_TERMINAL_WIDTH as usize)
+}
+
+/// Get the maximum content width, respecting RIVETS_MAX_WIDTH environment variable.
+fn get_max_content_width() -> usize {
+    env::var("RIVETS_MAX_WIDTH")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_MAX_CONTENT_WIDTH)
+}
+
+// ============================================================================
+// ASCII Fallback Mode
+// ============================================================================
+
+/// Check if ASCII-only mode is enabled via RIVETS_ASCII=1 environment variable.
+fn use_ascii_icons() -> bool {
+    env::var("RIVETS_ASCII")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 // ============================================================================
@@ -60,24 +81,43 @@ fn colorize_labels(labels: &[String]) -> String {
     }
 }
 
-/// Get a colored status icon.
+/// Get a colored status icon, with ASCII fallback support.
 fn colored_status_icon(status: IssueStatus) -> String {
-    match status {
-        IssueStatus::Open => "○".white().to_string(),
-        IssueStatus::InProgress => "▶".yellow().to_string(),
-        IssueStatus::Blocked => "✗".red().to_string(),
-        IssueStatus::Closed => "✓".green().to_string(),
+    if use_ascii_icons() {
+        match status {
+            IssueStatus::Open => "o".white().to_string(),
+            IssueStatus::InProgress => ">".yellow().to_string(),
+            IssueStatus::Blocked => "x".red().to_string(),
+            IssueStatus::Closed => "+".green().to_string(),
+        }
+    } else {
+        match status {
+            IssueStatus::Open => "○".white().to_string(),
+            IssueStatus::InProgress => "▶".yellow().to_string(),
+            IssueStatus::Blocked => "✗".red().to_string(),
+            IssueStatus::Closed => "✓".green().to_string(),
+        }
     }
 }
 
-/// Get a type icon for issue types.
+/// Get a type icon for issue types, with ASCII fallback support.
 fn type_icon(issue_type: IssueType) -> &'static str {
-    match issue_type {
-        IssueType::Task => "◇",
-        IssueType::Bug => "●",
-        IssueType::Feature => "★",
-        IssueType::Epic => "◆",
-        IssueType::Chore => "○",
+    if use_ascii_icons() {
+        match issue_type {
+            IssueType::Task => "-",
+            IssueType::Bug => "*",
+            IssueType::Feature => "+",
+            IssueType::Epic => "#",
+            IssueType::Chore => ".",
+        }
+    } else {
+        match issue_type {
+            IssueType::Task => "◇",
+            IssueType::Bug => "●",
+            IssueType::Feature => "★",
+            IssueType::Epic => "◆",
+            IssueType::Chore => "○",
+        }
     }
 }
 
@@ -252,7 +292,8 @@ fn print_issue_details_text<W: Write>(
     dependents: &[Dependency],
 ) -> io::Result<()> {
     let terminal_width = get_terminal_width();
-    let content_width = terminal_width.min(80);
+    let max_width = get_max_content_width();
+    let content_width = terminal_width.min(max_width);
 
     // Header: status icon, ID, and title
     writeln!(
@@ -476,6 +517,12 @@ mod tests {
     use super::*;
     use crate::domain::{DependencyType, IssueId, IssueType};
     use chrono::Utc;
+    use colored::control::set_override;
+    use std::env;
+    use std::sync::Mutex;
+
+    // Mutex to prevent color tests from running in parallel (set_override is global state)
+    static COLOR_TEST_MUTEX: Mutex<()> = Mutex::new(());
 
     fn test_issue() -> Issue {
         Issue {
@@ -538,27 +585,124 @@ mod tests {
     }
 
     #[test]
-    fn test_colorize_status() {
-        // Just verify they produce non-empty output
-        assert!(!colorize_status(IssueStatus::Open).is_empty());
-        assert!(!colorize_status(IssueStatus::InProgress).is_empty());
-        assert!(!colorize_status(IssueStatus::Blocked).is_empty());
-        assert!(!colorize_status(IssueStatus::Closed).is_empty());
+    fn test_colorize_status_contains_ansi_codes() {
+        // Lock mutex to prevent race conditions with other color tests
+        let _guard = COLOR_TEST_MUTEX.lock().unwrap();
+        set_override(true);
+
+        let open = colorize_status(IssueStatus::Open);
+        let in_progress = colorize_status(IssueStatus::InProgress);
+        let blocked = colorize_status(IssueStatus::Blocked);
+        let closed = colorize_status(IssueStatus::Closed);
+
+        // All should contain the status text
+        assert!(open.contains("open"));
+        assert!(in_progress.contains("in_progress"));
+        assert!(blocked.contains("blocked"));
+        assert!(closed.contains("closed"));
+
+        // All should contain ANSI escape codes (\x1b[)
+        assert!(open.contains("\x1b["), "Open status should have ANSI codes");
+        assert!(
+            in_progress.contains("\x1b["),
+            "InProgress status should have ANSI codes"
+        );
+        assert!(
+            blocked.contains("\x1b["),
+            "Blocked status should have ANSI codes"
+        );
+        assert!(
+            closed.contains("\x1b["),
+            "Closed status should have ANSI codes"
+        );
+
+        set_override(false);
     }
 
     #[test]
-    fn test_colorize_priority() {
-        assert!(colorize_priority(0).contains("P0"));
-        assert!(colorize_priority(1).contains("P1"));
-        assert!(colorize_priority(2).contains("P2"));
+    fn test_colorize_priority_contains_ansi_codes() {
+        let _guard = COLOR_TEST_MUTEX.lock().unwrap();
+        set_override(true);
+
+        let p0 = colorize_priority(0);
+        let p1 = colorize_priority(1);
+        let p2 = colorize_priority(2);
+
+        // Verify priority text is present
+        assert!(p0.contains("P0"));
+        assert!(p1.contains("P1"));
+        assert!(p2.contains("P2"));
+
+        // P0 (bold+red) and P1 (yellow) should have ANSI codes
+        assert!(p0.contains("\x1b["), "P0 should have ANSI codes");
+        assert!(p1.contains("\x1b["), "P1 should have ANSI codes");
+        // P2 and higher have no color styling
+        assert!(!p2.contains("\x1b["), "P2 should not have ANSI codes");
+
+        set_override(false);
+    }
+
+    #[test]
+    fn test_colorize_id_contains_ansi_codes() {
+        let _guard = COLOR_TEST_MUTEX.lock().unwrap();
+        set_override(true);
+
+        let id = colorize_id("test-123");
+        assert!(id.contains("test-123"));
+        // Cyan color adds ANSI codes
+        assert!(id.contains("\x1b["), "ID should have ANSI codes");
+
+        set_override(false);
     }
 
     #[test]
     fn test_type_icon() {
+        // Test all issue types including Chore
         assert_eq!(type_icon(IssueType::Task), "◇");
         assert_eq!(type_icon(IssueType::Bug), "●");
         assert_eq!(type_icon(IssueType::Feature), "★");
         assert_eq!(type_icon(IssueType::Epic), "◆");
+        assert_eq!(type_icon(IssueType::Chore), "○");
+    }
+
+    #[test]
+    fn test_ascii_fallback_icons() {
+        // Lock mutex since we modify global env state
+        let _guard = COLOR_TEST_MUTEX.lock().unwrap();
+
+        // Test ASCII mode by temporarily setting env var
+        env::set_var("RIVETS_ASCII", "1");
+
+        assert_eq!(type_icon(IssueType::Task), "-");
+        assert_eq!(type_icon(IssueType::Bug), "*");
+        assert_eq!(type_icon(IssueType::Feature), "+");
+        assert_eq!(type_icon(IssueType::Epic), "#");
+        assert_eq!(type_icon(IssueType::Chore), ".");
+
+        // Status icons should also be ASCII
+        let open = colored_status_icon(IssueStatus::Open);
+        let closed = colored_status_icon(IssueStatus::Closed);
+        assert!(open.contains("o"));
+        assert!(closed.contains("+"));
+
+        // Clean up
+        env::remove_var("RIVETS_ASCII");
+    }
+
+    #[test]
+    fn test_max_width_env_var() {
+        // Lock mutex since we modify global env state
+        let _guard = COLOR_TEST_MUTEX.lock().unwrap();
+
+        // Test that get_max_content_width respects env var
+        env::set_var("RIVETS_MAX_WIDTH", "120");
+        assert_eq!(get_max_content_width(), 120);
+
+        env::set_var("RIVETS_MAX_WIDTH", "invalid");
+        assert_eq!(get_max_content_width(), DEFAULT_MAX_CONTENT_WIDTH);
+
+        env::remove_var("RIVETS_MAX_WIDTH");
+        assert_eq!(get_max_content_width(), DEFAULT_MAX_CONTENT_WIDTH);
     }
 
     #[test]
