@@ -81,6 +81,41 @@ fn type_icon(issue_type: IssueType) -> &'static str {
     }
 }
 
+// ============================================================================
+// Section Printing Helpers
+// ============================================================================
+
+/// Print a text section with a bold title and wrapped, indented content.
+fn print_text_section<W: Write>(
+    w: &mut W,
+    title: &str,
+    content: &str,
+    width: usize,
+) -> io::Result<()> {
+    if content.is_empty() {
+        return Ok(());
+    }
+    writeln!(w)?;
+    writeln!(w, "{}:", title.bold())?;
+    for line in wrap_text(content, width.saturating_sub(2)) {
+        writeln!(w, "  {line}")?;
+    }
+    Ok(())
+}
+
+/// Print an optional text section (only if Some and non-empty).
+fn print_optional_section<W: Write>(
+    w: &mut W,
+    title: &str,
+    content: &Option<String>,
+    width: usize,
+) -> io::Result<()> {
+    if let Some(text) = content {
+        print_text_section(w, title, text, width)?;
+    }
+    Ok(())
+}
+
 /// Output format mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputMode {
@@ -278,41 +313,16 @@ fn print_issue_details_text<W: Write>(
         )?;
     }
 
-    // Description section
-    if !issue.description.is_empty() {
-        writeln!(w)?;
-        writeln!(w, "{}:", "Description".bold())?;
-        for line in wrap_text(&issue.description, content_width.saturating_sub(2)) {
-            writeln!(w, "  {line}")?;
-        }
-    }
-
-    // Design Notes section
-    if let Some(ref design) = issue.design {
-        writeln!(w)?;
-        writeln!(w, "{}:", "Design Notes".bold())?;
-        for line in wrap_text(design, content_width.saturating_sub(2)) {
-            writeln!(w, "  {line}")?;
-        }
-    }
-
-    // Acceptance Criteria section
-    if let Some(ref acceptance) = issue.acceptance_criteria {
-        writeln!(w)?;
-        writeln!(w, "{}:", "Acceptance Criteria".bold())?;
-        for line in wrap_text(acceptance, content_width.saturating_sub(2)) {
-            writeln!(w, "  {line}")?;
-        }
-    }
-
-    // Notes section
-    if let Some(ref notes) = issue.notes {
-        writeln!(w)?;
-        writeln!(w, "{}:", "Notes".bold())?;
-        for line in wrap_text(notes, content_width.saturating_sub(2)) {
-            writeln!(w, "  {line}")?;
-        }
-    }
+    // Long-form content sections
+    print_text_section(w, "Description", &issue.description, content_width)?;
+    print_optional_section(w, "Design Notes", &issue.design, content_width)?;
+    print_optional_section(
+        w,
+        "Acceptance Criteria",
+        &issue.acceptance_criteria,
+        content_width,
+    )?;
+    print_optional_section(w, "Notes", &issue.notes, content_width)?;
 
     // Dependencies section
     if !deps.is_empty() {
@@ -598,7 +608,7 @@ mod tests {
     }
 
     #[test]
-    fn test_print_issues_table() {
+    fn test_print_issues_list_format() {
         let issues = vec![test_issue()];
         let mut buffer = Vec::new();
 
