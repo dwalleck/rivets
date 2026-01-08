@@ -348,34 +348,20 @@ fn print_issue_details_text<W: Write>(
 }
 
 /// Wrap text to fit within a given width, preserving existing line breaks.
+/// Uses textwrap to handle edge cases like long words (URLs, file paths).
 fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    for line in text.lines() {
-        if line.len() <= max_width {
-            lines.push(line.to_string());
-        } else {
-            // Simple word-based wrapping
-            let mut current_line = String::new();
-            for word in line.split_whitespace() {
-                if current_line.is_empty() {
-                    current_line = word.to_string();
-                } else if current_line.len() + 1 + word.len() <= max_width {
-                    current_line.push(' ');
-                    current_line.push_str(word);
-                } else {
-                    lines.push(current_line);
-                    current_line = word.to_string();
-                }
+    text.lines()
+        .flat_map(|line| {
+            if line.trim().is_empty() {
+                vec![String::new()]
+            } else {
+                textwrap::wrap(line, max_width)
+                    .into_iter()
+                    .map(|s| s.into_owned())
+                    .collect()
             }
-            if !current_line.is_empty() {
-                lines.push(current_line);
-            }
-        }
-    }
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    lines
+        })
+        .collect()
 }
 
 fn print_blocked_text<W: Write>(w: &mut W, blocked: &[(Issue, Vec<Issue>)]) -> io::Result<()> {
@@ -508,7 +494,12 @@ mod tests {
         let wrapped = wrap_text(text, 20);
         assert!(!wrapped.is_empty());
         for line in &wrapped {
-            assert!(line.len() <= 20 || !line.contains(' '));
+            assert!(
+                line.len() <= 20,
+                "Line too long: '{}' ({} chars)",
+                line,
+                line.len()
+            );
         }
     }
 
@@ -517,6 +508,23 @@ mod tests {
         let text = "Line one\nLine two\nLine three";
         let wrapped = wrap_text(text, 50);
         assert_eq!(wrapped.len(), 3);
+    }
+
+    #[test]
+    fn test_wrap_text_handles_long_words() {
+        // Long URL that exceeds max_width
+        let text = "Check out https://example.com/very/long/path/to/resource for details";
+        let wrapped = wrap_text(text, 30);
+        assert!(!wrapped.is_empty());
+        // textwrap will break long words to fit
+        for line in &wrapped {
+            assert!(
+                line.len() <= 30,
+                "Line too long: '{}' ({} chars)",
+                line,
+                line.len()
+            );
+        }
     }
 
     #[test]
