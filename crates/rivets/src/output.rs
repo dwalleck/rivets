@@ -762,4 +762,83 @@ mod tests {
         assert!(output.contains("Found 1 issue"));
         assert!(output.contains("test-abc"));
     }
+
+    #[test]
+    fn test_print_text_section_skips_empty_content() {
+        let mut buffer = Vec::new();
+
+        // Empty content should produce no output
+        print_text_section(&mut buffer, "Description", "", 80).unwrap();
+        assert!(buffer.is_empty(), "Empty content should produce no output");
+
+        // Non-empty content should produce output
+        print_text_section(&mut buffer, "Description", "Some text", 80).unwrap();
+        let output = String::from_utf8(buffer).unwrap();
+        assert!(output.contains("Description:"));
+        assert!(output.contains("Some text"));
+    }
+
+    #[test]
+    fn test_print_optional_section_handles_none() {
+        let mut buffer = Vec::new();
+
+        // None should produce no output
+        print_optional_section(&mut buffer, "Notes", &None, 80).unwrap();
+        assert!(buffer.is_empty(), "None should produce no output");
+
+        // Some with empty string should also produce no output
+        let empty: Option<String> = Some(String::new());
+        print_optional_section(&mut buffer, "Notes", &empty, 80).unwrap();
+        assert!(buffer.is_empty(), "Empty Some should produce no output");
+
+        // Some with content should produce output
+        let content: Option<String> = Some("Important note".to_string());
+        print_optional_section(&mut buffer, "Notes", &content, 80).unwrap();
+        let output = String::from_utf8(buffer).unwrap();
+        assert!(output.contains("Notes:"));
+        assert!(output.contains("Important note"));
+    }
+
+    #[test]
+    fn test_issue_with_empty_description() {
+        let mut issue = test_issue();
+        issue.description = String::new();
+
+        let mut buffer = Vec::new();
+        print_issue_details_text(&mut buffer, &issue, &[], &[]).unwrap();
+
+        let output = String::from_utf8(buffer).unwrap();
+        // Should not contain "Description:" section when empty
+        assert!(
+            !output.contains("Description:"),
+            "Empty description should not show Description section"
+        );
+    }
+
+    #[test]
+    fn test_wrap_text_with_narrow_width() {
+        // Edge case: very narrow width
+        let text = "Hello world";
+        let wrapped = wrap_text(text, 5);
+        assert!(!wrapped.is_empty());
+        for line in &wrapped {
+            assert!(line.len() <= 5, "Line '{}' exceeds width 5", line);
+        }
+    }
+
+    #[test]
+    fn test_wrap_text_with_wide_width() {
+        // Edge case: width wider than content
+        let text = "Short";
+        let wrapped = wrap_text(text, 100);
+        assert_eq!(wrapped.len(), 1);
+        assert_eq!(wrapped[0], "Short");
+    }
+
+    #[test]
+    fn test_wrap_text_empty_input() {
+        let wrapped = wrap_text("", 80);
+        // Empty string has no lines, so result is empty
+        assert!(wrapped.is_empty() || (wrapped.len() == 1 && wrapped[0].is_empty()));
+    }
 }
