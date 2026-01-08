@@ -184,6 +184,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run cargo-deny
+        # v2 includes cargo-deny 0.19.0 with CVSS 4.0 support
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           log-level: warn
