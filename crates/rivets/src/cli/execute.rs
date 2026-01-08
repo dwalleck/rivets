@@ -3,6 +3,7 @@
 //! This module contains the implementation of all CLI commands.
 
 use anyhow::Result;
+use colored::Colorize;
 
 use super::args::{
     BlockedArgs, CloseArgs, CreateArgs, DeleteArgs, DepAction, DepArgs, InfoArgs, InitArgs,
@@ -1215,10 +1216,8 @@ pub async fn execute_stale(
                 println!();
                 for issue in &stale_issues {
                     let days_stale = (Utc::now() - issue.updated_at).num_days();
-                    println!(
-                        "  {} [P{}] {} ({} days stale)",
-                        issue.id, issue.priority, issue.title, days_stale
-                    );
+                    output::print_issue(issue, output_mode)?;
+                    println!("  {} {} days", "Stale:".dimmed(), days_stale);
                 }
             }
         }
