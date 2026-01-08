@@ -658,6 +658,7 @@ fn test_cli_blocked_with_dependencies(initialized_dir: TempDir) {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Blocked issue"));
+    // Simple text format shows blockers on indented line
     assert!(stdout.contains("Blocked by:"));
 }
 

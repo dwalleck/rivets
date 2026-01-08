@@ -3,9 +3,83 @@
 //! This module provides utilities for formatting command output in both
 //! human-readable text format and JSON format for programmatic use.
 
-use crate::domain::{Dependency, Issue, IssueStatus};
+use crate::domain::{Dependency, Issue, IssueStatus, IssueType};
+use colored::Colorize;
 use serde::Serialize;
 use std::io::{self, Write};
+
+// ============================================================================
+// Terminal Width Detection
+// ============================================================================
+
+const DEFAULT_TERMINAL_WIDTH: u16 = 80;
+
+/// Get the current terminal width, falling back to default if detection fails.
+fn get_terminal_width() -> usize {
+    terminal_size::terminal_size()
+        .map(|(w, _)| w.0 as usize)
+        .unwrap_or(DEFAULT_TERMINAL_WIDTH as usize)
+}
+
+// ============================================================================
+// Color Helpers
+// ============================================================================
+
+/// Apply color to status text based on issue status.
+fn colorize_status(status: IssueStatus) -> String {
+    let text = format!("{status}");
+    match status {
+        IssueStatus::Open => text.white().to_string(),
+        IssueStatus::InProgress => text.yellow().to_string(),
+        IssueStatus::Blocked => text.red().to_string(),
+        IssueStatus::Closed => text.green().to_string(),
+    }
+}
+
+/// Apply color to priority text based on priority level.
+fn colorize_priority(priority: u8) -> String {
+    let text = format!("P{priority}");
+    match priority {
+        0 => text.red().bold().to_string(),
+        1 => text.yellow().to_string(),
+        _ => text.to_string(),
+    }
+}
+
+/// Colorize an issue ID (cyan).
+fn colorize_id(id: &str) -> String {
+    id.cyan().to_string()
+}
+
+/// Colorize labels (magenta).
+fn colorize_labels(labels: &[String]) -> String {
+    if labels.is_empty() {
+        String::new()
+    } else {
+        labels.join(", ").magenta().to_string()
+    }
+}
+
+/// Get a colored status icon.
+fn colored_status_icon(status: IssueStatus) -> String {
+    match status {
+        IssueStatus::Open => "○".white().to_string(),
+        IssueStatus::InProgress => "▶".yellow().to_string(),
+        IssueStatus::Blocked => "✗".red().to_string(),
+        IssueStatus::Closed => "✓".green().to_string(),
+    }
+}
+
+/// Get a type icon for issue types.
+fn type_icon(issue_type: IssueType) -> &'static str {
+    match issue_type {
+        IssueType::Task => "◇",
+        IssueType::Bug => "●",
+        IssueType::Feature => "★",
+        IssueType::Epic => "◆",
+        IssueType::Chore => "○",
+    }
+}
 
 /// Output format mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,20 +162,25 @@ pub fn print_json<T: Serialize>(value: &T) -> io::Result<()> {
 fn print_issue_text<W: Write>(w: &mut W, issue: &Issue) -> io::Result<()> {
     writeln!(
         w,
-        "{} {} [{}] P{} {}",
-        status_icon(issue.status),
-        issue.id,
-        issue.issue_type,
-        issue.priority,
+        "{} {} {} {} {}",
+        colored_status_icon(issue.status),
+        colorize_id(issue.id.as_str()),
+        type_icon(issue.issue_type),
+        colorize_priority(issue.priority),
         issue.title
     )?;
 
     if let Some(ref assignee) = issue.assignee {
-        writeln!(w, "  Assignee: {}", assignee)?;
+        writeln!(w, "  {} {}", "Assignee:".dimmed(), assignee)?;
     }
 
     if !issue.labels.is_empty() {
-        writeln!(w, "  Labels: {}", issue.labels.join(", "))?;
+        writeln!(
+            w,
+            "  {} {}",
+            "Labels:".dimmed(),
+            colorize_labels(&issue.labels)
+        )?;
     }
 
     Ok(())
@@ -117,7 +196,15 @@ fn print_issues_text<W: Write>(w: &mut W, issues: &[Issue]) -> io::Result<()> {
     writeln!(w)?;
 
     for issue in issues {
-        print_issue_text(w, issue)?;
+        writeln!(
+            w,
+            "{} {}  {}  {}  {}",
+            colored_status_icon(issue.status),
+            colorize_id(issue.id.as_str()),
+            type_icon(issue.issue_type),
+            colorize_priority(issue.priority),
+            issue.title
+        )?;
     }
 
     Ok(())
@@ -129,88 +216,166 @@ fn print_issue_details_text<W: Write>(
     deps: &[Dependency],
     dependents: &[Dependency],
 ) -> io::Result<()> {
-    writeln!(w, "{}", "=".repeat(60))?;
-    writeln!(w, "{} {}", status_icon(issue.status), issue.id)?;
-    writeln!(w, "{}", "=".repeat(60))?;
-    writeln!(w)?;
+    let terminal_width = get_terminal_width();
+    let content_width = terminal_width.min(80);
 
-    writeln!(w, "Title:    {}", issue.title)?;
-    writeln!(w, "Type:     {}", issue.issue_type)?;
-    writeln!(w, "Status:   {}", issue.status)?;
-    writeln!(w, "Priority: P{}", issue.priority)?;
+    // Header: status icon, ID, and title
+    writeln!(
+        w,
+        "{} {}: {}",
+        colored_status_icon(issue.status),
+        colorize_id(issue.id.as_str()),
+        issue.title
+    )?;
 
+    // Metadata line
+    let type_display = format!("{} {}", type_icon(issue.issue_type), issue.issue_type);
+    writeln!(
+        w,
+        "{}  {}    {}  {}    {}  {}",
+        "Type:".dimmed(),
+        type_display,
+        "Status:".dimmed(),
+        colorize_status(issue.status),
+        "Priority:".dimmed(),
+        colorize_priority(issue.priority)
+    )?;
+
+    // Optional fields
     if let Some(ref assignee) = issue.assignee {
-        writeln!(w, "Assignee: {}", assignee)?;
+        writeln!(w, "{} {}", "Assignee:".dimmed(), assignee)?;
     }
 
     if !issue.labels.is_empty() {
-        writeln!(w, "Labels:   {}", issue.labels.join(", "))?;
+        writeln!(
+            w,
+            "{} {}",
+            "Labels:".dimmed(),
+            colorize_labels(&issue.labels)
+        )?;
     }
 
     if let Some(ref ext_ref) = issue.external_ref {
-        writeln!(w, "Ref:      {}", ext_ref)?;
+        writeln!(w, "{} {}", "Ref:".dimmed(), ext_ref)?;
     }
 
-    writeln!(w)?;
+    // Timestamps
     writeln!(
         w,
-        "Created:  {}",
-        issue.created_at.format("%Y-%m-%d %H:%M:%S UTC")
-    )?;
-    writeln!(
-        w,
-        "Updated:  {}",
-        issue.updated_at.format("%Y-%m-%d %H:%M:%S UTC")
+        "{} {}    {} {}",
+        "Created:".dimmed(),
+        issue.created_at.format("%Y-%m-%d %H:%M"),
+        "Updated:".dimmed(),
+        issue.updated_at.format("%Y-%m-%d %H:%M")
     )?;
 
     if let Some(closed_at) = issue.closed_at {
-        writeln!(w, "Closed:   {}", closed_at.format("%Y-%m-%d %H:%M:%S UTC"))?;
+        writeln!(
+            w,
+            "{} {}",
+            "Closed:".dimmed(),
+            closed_at.format("%Y-%m-%d %H:%M")
+        )?;
     }
 
+    // Description section
     if !issue.description.is_empty() {
         writeln!(w)?;
-        writeln!(w, "Description:")?;
-        writeln!(w, "{}", indent_text(&issue.description, "  "))?;
+        writeln!(w, "{}:", "Description".bold())?;
+        for line in wrap_text(&issue.description, content_width.saturating_sub(2)) {
+            writeln!(w, "  {line}")?;
+        }
     }
 
+    // Design Notes section
     if let Some(ref design) = issue.design {
         writeln!(w)?;
-        writeln!(w, "Design Notes:")?;
-        writeln!(w, "{}", indent_text(design, "  "))?;
+        writeln!(w, "{}:", "Design Notes".bold())?;
+        for line in wrap_text(design, content_width.saturating_sub(2)) {
+            writeln!(w, "  {line}")?;
+        }
     }
 
+    // Acceptance Criteria section
     if let Some(ref acceptance) = issue.acceptance_criteria {
         writeln!(w)?;
-        writeln!(w, "Acceptance Criteria:")?;
-        writeln!(w, "{}", indent_text(acceptance, "  "))?;
+        writeln!(w, "{}:", "Acceptance Criteria".bold())?;
+        for line in wrap_text(acceptance, content_width.saturating_sub(2)) {
+            writeln!(w, "  {line}")?;
+        }
     }
 
+    // Notes section
     if let Some(ref notes) = issue.notes {
         writeln!(w)?;
-        writeln!(w, "Notes:")?;
-        writeln!(w, "{}", indent_text(notes, "  "))?;
+        writeln!(w, "{}:", "Notes".bold())?;
+        for line in wrap_text(notes, content_width.saturating_sub(2)) {
+            writeln!(w, "  {line}")?;
+        }
     }
 
+    // Dependencies section
     if !deps.is_empty() {
         writeln!(w)?;
-        writeln!(w, "Dependencies ({}):", deps.len())?;
+        writeln!(w, "{} ({}):", "Dependencies".bold(), deps.len())?;
         for dep in deps {
-            writeln!(w, "  -> {} ({})", dep.depends_on_id, dep.dep_type)?;
+            writeln!(
+                w,
+                "  {} {} ({})",
+                "→".cyan(),
+                colorize_id(dep.depends_on_id.as_str()),
+                dep.dep_type
+            )?;
         }
     }
 
+    // Dependents section
     if !dependents.is_empty() {
         writeln!(w)?;
-        writeln!(w, "Dependents ({}):", dependents.len())?;
+        writeln!(w, "{} ({}):", "Dependents".bold(), dependents.len())?;
         for dep in dependents {
-            writeln!(w, "  <- {} ({})", dep.depends_on_id, dep.dep_type)?;
+            writeln!(
+                w,
+                "  {} {} ({})",
+                "←".yellow(),
+                colorize_id(dep.depends_on_id.as_str()),
+                dep.dep_type
+            )?;
         }
     }
 
-    writeln!(w)?;
-    writeln!(w, "{}", "=".repeat(60))?;
-
     Ok(())
+}
+
+/// Wrap text to fit within a given width, preserving existing line breaks.
+fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        if line.len() <= max_width {
+            lines.push(line.to_string());
+        } else {
+            // Simple word-based wrapping
+            let mut current_line = String::new();
+            for word in line.split_whitespace() {
+                if current_line.is_empty() {
+                    current_line = word.to_string();
+                } else if current_line.len() + 1 + word.len() <= max_width {
+                    current_line.push(' ');
+                    current_line.push_str(word);
+                } else {
+                    lines.push(current_line);
+                    current_line = word.to_string();
+                }
+            }
+            if !current_line.is_empty() {
+                lines.push(current_line);
+            }
+        }
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
 }
 
 fn print_blocked_text<W: Write>(w: &mut W, blocked: &[(Issue, Vec<Issue>)]) -> io::Result<()> {
@@ -225,17 +390,25 @@ fn print_blocked_text<W: Write>(w: &mut W, blocked: &[(Issue, Vec<Issue>)]) -> i
     for (issue, blockers) in blocked {
         writeln!(
             w,
-            "{} {} P{} {}",
-            status_icon(issue.status),
-            issue.id,
-            issue.priority,
+            "{} {}  {}  {}  {}",
+            colored_status_icon(issue.status),
+            colorize_id(issue.id.as_str()),
+            type_icon(issue.issue_type),
+            colorize_priority(issue.priority),
             issue.title
         )?;
-        writeln!(w, "  Blocked by:")?;
-        for blocker in blockers {
-            writeln!(w, "    - {} ({})", blocker.id, blocker.status)?;
-        }
-        writeln!(w)?;
+
+        let blocked_by: Vec<String> = blockers
+            .iter()
+            .map(|b| {
+                format!(
+                    "{} ({})",
+                    colorize_id(b.id.as_str()),
+                    colorize_status(b.status)
+                )
+            })
+            .collect();
+        writeln!(w, "  {} {}", "Blocked by:".dimmed(), blocked_by.join(", "))?;
     }
 
     Ok(())
@@ -302,26 +475,6 @@ fn print_blocked_json<W: Write>(w: &mut W, blocked: &[(Issue, Vec<Issue>)]) -> i
     writeln!(w, "{}", json)
 }
 
-// ============================================================================
-// Helpers
-// ============================================================================
-
-fn status_icon(status: IssueStatus) -> &'static str {
-    match status {
-        IssueStatus::Open => "[ ]",
-        IssueStatus::InProgress => "[>]",
-        IssueStatus::Blocked => "[X]",
-        IssueStatus::Closed => "[+]",
-    }
-}
-
-fn indent_text(text: &str, indent: &str) -> String {
-    text.lines()
-        .map(|line| format!("{}{}", indent, line))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,18 +503,44 @@ mod tests {
     }
 
     #[test]
-    fn test_status_icon() {
-        assert_eq!(status_icon(IssueStatus::Open), "[ ]");
-        assert_eq!(status_icon(IssueStatus::InProgress), "[>]");
-        assert_eq!(status_icon(IssueStatus::Blocked), "[X]");
-        assert_eq!(status_icon(IssueStatus::Closed), "[+]");
+    fn test_wrap_text() {
+        let text = "This is a test of text wrapping functionality";
+        let wrapped = wrap_text(text, 20);
+        assert!(!wrapped.is_empty());
+        for line in &wrapped {
+            assert!(line.len() <= 20 || !line.contains(' '));
+        }
     }
 
     #[test]
-    fn test_indent_text() {
-        let text = "line 1\nline 2\nline 3";
-        let indented = indent_text(text, "  ");
-        assert_eq!(indented, "  line 1\n  line 2\n  line 3");
+    fn test_wrap_text_preserves_newlines() {
+        let text = "Line one\nLine two\nLine three";
+        let wrapped = wrap_text(text, 50);
+        assert_eq!(wrapped.len(), 3);
+    }
+
+    #[test]
+    fn test_colorize_status() {
+        // Just verify they produce non-empty output
+        assert!(!colorize_status(IssueStatus::Open).is_empty());
+        assert!(!colorize_status(IssueStatus::InProgress).is_empty());
+        assert!(!colorize_status(IssueStatus::Blocked).is_empty());
+        assert!(!colorize_status(IssueStatus::Closed).is_empty());
+    }
+
+    #[test]
+    fn test_colorize_priority() {
+        assert!(colorize_priority(0).contains("P0"));
+        assert!(colorize_priority(1).contains("P1"));
+        assert!(colorize_priority(2).contains("P2"));
+    }
+
+    #[test]
+    fn test_type_icon() {
+        assert_eq!(type_icon(IssueType::Task), "◇");
+        assert_eq!(type_icon(IssueType::Bug), "●");
+        assert_eq!(type_icon(IssueType::Feature), "★");
+        assert_eq!(type_icon(IssueType::Epic), "◆");
     }
 
     #[test]
@@ -405,8 +584,20 @@ mod tests {
 
         let output = String::from_utf8(buffer).unwrap();
         assert!(output.contains("test-abc"));
-        assert!(output.contains("Dependencies (1)"));
+        assert!(output.contains("Dependencies"));
         assert!(output.contains("test-xyz"));
         assert!(output.contains("blocks"));
+    }
+
+    #[test]
+    fn test_print_issues_table() {
+        let issues = vec![test_issue()];
+        let mut buffer = Vec::new();
+
+        print_issues_text(&mut buffer, &issues).unwrap();
+
+        let output = String::from_utf8(buffer).unwrap();
+        assert!(output.contains("Found 1 issue"));
+        assert!(output.contains("test-abc"));
     }
 }

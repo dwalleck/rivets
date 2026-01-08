@@ -35,6 +35,8 @@ async-trait = { workspace = true }
 petgraph = { workspace = true }
 sha2 = { workspace = true }
 serde_yaml = { workspace = true }
+colored = { workspace = true }
+terminal_size = { workspace = true }
 
 [features]
 # Enable test utilities like MockStorage for downstream crates to use in their tests.

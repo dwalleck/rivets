@@ -45,6 +45,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "ansi"]
 # CLI
 clap = { version = "4.5", features = ["derive", "cargo"] }
 
+# CLI output formatting
+tabled = "0.17"
+colored = "3"
+terminal_size = "0.4"
+
 # Internal workspace crates
 rivets-jsonl = { version = "0.1.0", path = "crates/rivets-jsonl" }
 rivets = { version = "0.1.0", path = "crates/rivets" }
