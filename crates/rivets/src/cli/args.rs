@@ -176,6 +176,7 @@ pub struct UpdateArgs {
 
 impl UpdateArgs {
     /// Returns true if any update field is specified.
+    #[must_use]
     pub fn has_updates(&self) -> bool {
         self.title.is_some()
             || self.description.is_some()

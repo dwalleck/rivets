@@ -168,12 +168,17 @@ fn print_text_section<W: Write>(
     title: &str,
     content: &str,
     width: usize,
+    config: &OutputConfig,
 ) -> io::Result<()> {
     if content.is_empty() {
         return Ok(());
     }
     writeln!(w)?;
-    writeln!(w, "{}:", title.bold())?;
+    if config.use_ascii {
+        writeln!(w, "{}:", title)?;
+    } else {
+        writeln!(w, "{}:", title.bold())?;
+    }
     for line in wrap_text(content, width.saturating_sub(2)) {
         writeln!(w, "  {line}")?;
     }
@@ -186,9 +191,10 @@ fn print_optional_section<W: Write>(
     title: &str,
     content: &Option<String>,
     width: usize,
+    config: &OutputConfig,
 ) -> io::Result<()> {
     if let Some(text) = content {
-        print_text_section(w, title, text, width)?;
+        print_text_section(w, title, text, width, config)?;
     }
     Ok(())
 }
@@ -404,15 +410,16 @@ fn print_issue_details_text<W: Write>(
     }
 
     // Long-form content sections
-    print_text_section(w, "Description", &issue.description, content_width)?;
-    print_optional_section(w, "Design Notes", &issue.design, content_width)?;
+    print_text_section(w, "Description", &issue.description, content_width, config)?;
+    print_optional_section(w, "Design Notes", &issue.design, content_width, config)?;
     print_optional_section(
         w,
         "Acceptance Criteria",
         &issue.acceptance_criteria,
         content_width,
+        config,
     )?;
-    print_optional_section(w, "Notes", &issue.notes, content_width)?;
+    print_optional_section(w, "Notes", &issue.notes, content_width, config)?;
 
     // Dependencies section
     if !deps.is_empty() {
@@ -825,14 +832,15 @@ mod tests {
 
     #[test]
     fn test_print_text_section_skips_empty_content() {
+        let config = OutputConfig::default();
         let mut buffer = Vec::new();
 
         // Empty content should produce no output
-        print_text_section(&mut buffer, "Description", "", 80).unwrap();
+        print_text_section(&mut buffer, "Description", "", 80, &config).unwrap();
         assert!(buffer.is_empty(), "Empty content should produce no output");
 
         // Non-empty content should produce output
-        print_text_section(&mut buffer, "Description", "Some text", 80).unwrap();
+        print_text_section(&mut buffer, "Description", "Some text", 80, &config).unwrap();
         let output = String::from_utf8(buffer).unwrap();
         assert!(output.contains("Description:"));
         assert!(output.contains("Some text"));
@@ -840,20 +848,21 @@ mod tests {
 
     #[test]
     fn test_print_optional_section_handles_none() {
+        let config = OutputConfig::default();
         let mut buffer = Vec::new();
 
         // None should produce no output
-        print_optional_section(&mut buffer, "Notes", &None, 80).unwrap();
+        print_optional_section(&mut buffer, "Notes", &None, 80, &config).unwrap();
         assert!(buffer.is_empty(), "None should produce no output");
 
         // Some with empty string should also produce no output
         let empty: Option<String> = Some(String::new());
-        print_optional_section(&mut buffer, "Notes", &empty, 80).unwrap();
+        print_optional_section(&mut buffer, "Notes", &empty, 80, &config).unwrap();
         assert!(buffer.is_empty(), "Empty Some should produce no output");
 
         // Some with content should produce output
         let content: Option<String> = Some("Important note".to_string());
-        print_optional_section(&mut buffer, "Notes", &content, 80).unwrap();
+        print_optional_section(&mut buffer, "Notes", &content, 80, &config).unwrap();
         let output = String::from_utf8(buffer).unwrap();
         assert!(output.contains("Notes:"));
         assert!(output.contains("Important note"));

@@ -2,6 +2,8 @@
 //!
 //! This module contains the implementation of all CLI commands.
 
+use std::io::Write;
+
 use anyhow::Result;
 use colored::Colorize;
 
@@ -25,6 +27,7 @@ pub async fn execute_init(args: &InitArgs) -> Result<()> {
         None if !args.quiet => {
             // Interactive mode: prompt for prefix
             eprint!("Issue ID prefix (e.g., 'myproj' for 'myproj-abc'): ");
+            std::io::stderr().flush()?;
             let mut input = String::new();
             std::io::stdin().read_line(&mut input)?;
             let trimmed = input.trim();
@@ -478,6 +481,37 @@ fn append_note(existing: Option<&str>, new_note: &str) -> String {
     }
 }
 
+/// Fetch an issue for a batch operation, recording failures if not found.
+///
+/// Returns `Some(issue)` if found, `None` if not found or error (failure recorded in result).
+async fn get_issue_for_batch_op(
+    app: &crate::app::App,
+    result: &mut super::types::BatchResult,
+    id_str: &str,
+) -> Option<crate::domain::Issue> {
+    use super::types::BatchError;
+    use crate::domain::IssueId;
+
+    let issue_id = IssueId::new(id_str);
+    match app.storage().get(&issue_id).await {
+        Ok(Some(issue)) => Some(issue),
+        Ok(None) => {
+            result.failed.push(BatchError {
+                issue_id: id_str.to_string(),
+                error: format!("Issue not found: {}", id_str),
+            });
+            None
+        }
+        Err(e) => {
+            result.failed.push(BatchError {
+                issue_id: id_str.to_string(),
+                error: e.to_string(),
+            });
+            None
+        }
+    }
+}
+
 /// Execute the close command
 ///
 /// # Batch Processing
@@ -498,32 +532,15 @@ pub async fn execute_close(
     let mut result = BatchResult::new();
 
     for id_str in &args.issue_ids {
-        let issue_id = IssueId::new(id_str);
-
-        // Always fetch the issue first to check status and get existing notes
-        let existing = match app.storage().get(&issue_id).await {
-            Ok(Some(issue)) => issue,
-            Ok(None) => {
-                result.failed.push(BatchError {
-                    issue_id: id_str.clone(),
-                    error: format!("Issue not found: {}", id_str),
-                });
-                continue;
-            }
-            Err(e) => {
-                result.failed.push(BatchError {
-                    issue_id: id_str.clone(),
-                    error: e.to_string(),
-                });
-                continue;
-            }
+        let Some(existing) = get_issue_for_batch_op(app, &mut result, id_str).await else {
+            continue;
         };
 
         // Check if already closed
         if existing.status == IssueStatus::Closed {
             result.failed.push(BatchError {
                 issue_id: id_str.clone(),
-                error: "Issue is already closed".to_string(),
+                error: format!("Issue is already closed (status: {})", existing.status),
             });
             continue;
         }
@@ -536,6 +553,7 @@ pub async fn execute_close(
             None
         };
 
+        let issue_id = IssueId::new(id_str);
         let update = IssueUpdate {
             status: Some(IssueStatus::Closed),
             notes: new_notes,
@@ -581,25 +599,8 @@ pub async fn execute_reopen(
     let mut result = BatchResult::new();
 
     for id_str in &args.issue_ids {
-        let issue_id = IssueId::new(id_str);
-
-        // Always fetch the issue first to check status and get existing notes
-        let existing = match app.storage().get(&issue_id).await {
-            Ok(Some(issue)) => issue,
-            Ok(None) => {
-                result.failed.push(BatchError {
-                    issue_id: id_str.clone(),
-                    error: format!("Issue not found: {}", id_str),
-                });
-                continue;
-            }
-            Err(e) => {
-                result.failed.push(BatchError {
-                    issue_id: id_str.clone(),
-                    error: e.to_string(),
-                });
-                continue;
-            }
+        let Some(existing) = get_issue_for_batch_op(app, &mut result, id_str).await else {
+            continue;
         };
 
         // Check if already open (not closed)
@@ -619,6 +620,7 @@ pub async fn execute_reopen(
             None
         };
 
+        let issue_id = IssueId::new(id_str);
         let update = IssueUpdate {
             status: Some(IssueStatus::Open),
             notes: new_notes,
