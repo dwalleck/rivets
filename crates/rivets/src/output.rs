@@ -10,36 +10,73 @@ use std::env;
 use std::io::{self, Write};
 
 // ============================================================================
-// Terminal Width Detection
+// Output Configuration
 // ============================================================================
 
 const DEFAULT_TERMINAL_WIDTH: u16 = 80;
 const DEFAULT_MAX_CONTENT_WIDTH: usize = 80;
+
+/// Configuration for output formatting.
+///
+/// This struct holds settings that control how output is formatted,
+/// including terminal width limits and ASCII fallback mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputConfig {
+    /// Maximum content width for text wrapping.
+    pub max_width: usize,
+    /// Whether to use ASCII-only icons instead of Unicode.
+    pub use_ascii: bool,
+}
+
+impl OutputConfig {
+    /// Create a new OutputConfig with explicit values.
+    pub fn new(max_width: usize, use_ascii: bool) -> Self {
+        Self {
+            max_width,
+            use_ascii,
+        }
+    }
+
+    /// Create an OutputConfig by reading from environment variables.
+    ///
+    /// Reads:
+    /// - `RIVETS_MAX_WIDTH`: Maximum content width (default: 80)
+    /// - `RIVETS_ASCII`: Set to "1" or "true" for ASCII-only icons (default: false)
+    pub fn from_env() -> Self {
+        let max_width = env::var("RIVETS_MAX_WIDTH")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_MAX_CONTENT_WIDTH);
+
+        let use_ascii = env::var("RIVETS_ASCII")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        Self {
+            max_width,
+            use_ascii,
+        }
+    }
+}
+
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            max_width: DEFAULT_MAX_CONTENT_WIDTH,
+            use_ascii: false,
+        }
+    }
+}
+
+// ============================================================================
+// Terminal Width Detection
+// ============================================================================
 
 /// Get the current terminal width, falling back to default if detection fails.
 fn get_terminal_width() -> usize {
     terminal_size::terminal_size()
         .map(|(w, _)| w.0 as usize)
         .unwrap_or(DEFAULT_TERMINAL_WIDTH as usize)
-}
-
-/// Get the maximum content width, respecting RIVETS_MAX_WIDTH environment variable.
-fn get_max_content_width() -> usize {
-    env::var("RIVETS_MAX_WIDTH")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_MAX_CONTENT_WIDTH)
-}
-
-// ============================================================================
-// ASCII Fallback Mode
-// ============================================================================
-
-/// Check if ASCII-only mode is enabled via RIVETS_ASCII=1 environment variable.
-fn use_ascii_icons() -> bool {
-    env::var("RIVETS_ASCII")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
 }
 
 // ============================================================================
@@ -82,8 +119,8 @@ fn colorize_labels(labels: &[String]) -> String {
 }
 
 /// Get a colored status icon, with ASCII fallback support.
-fn colored_status_icon(status: IssueStatus) -> String {
-    if use_ascii_icons() {
+fn colored_status_icon(status: IssueStatus, config: &OutputConfig) -> String {
+    if config.use_ascii {
         match status {
             IssueStatus::Open => "o".white().to_string(),
             IssueStatus::InProgress => ">".yellow().to_string(),
@@ -101,8 +138,8 @@ fn colored_status_icon(status: IssueStatus) -> String {
 }
 
 /// Get a type icon for issue types, with ASCII fallback support.
-fn type_icon(issue_type: IssueType) -> &'static str {
-    if use_ascii_icons() {
+fn type_icon(issue_type: IssueType, config: &OutputConfig) -> &'static str {
+    if config.use_ascii {
         match issue_type {
             IssueType::Task => "-",
             IssueType::Bug => "*",
@@ -169,9 +206,10 @@ pub enum OutputMode {
 pub fn print_issue(issue: &Issue, mode: OutputMode) -> io::Result<()> {
     let stdout = io::stdout();
     let mut handle = stdout.lock();
+    let config = OutputConfig::from_env();
 
     match mode {
-        OutputMode::Text => print_issue_text(&mut handle, issue),
+        OutputMode::Text => print_issue_text(&mut handle, issue, &config),
         OutputMode::Json => print_issue_json(&mut handle, issue),
     }
 }
@@ -180,9 +218,10 @@ pub fn print_issue(issue: &Issue, mode: OutputMode) -> io::Result<()> {
 pub fn print_issues(issues: &[Issue], mode: OutputMode) -> io::Result<()> {
     let stdout = io::stdout();
     let mut handle = stdout.lock();
+    let config = OutputConfig::from_env();
 
     match mode {
-        OutputMode::Text => print_issues_text(&mut handle, issues),
+        OutputMode::Text => print_issues_text(&mut handle, issues, &config),
         OutputMode::Json => print_issues_json(&mut handle, issues),
     }
 }
@@ -196,9 +235,10 @@ pub fn print_issue_details(
 ) -> io::Result<()> {
     let stdout = io::stdout();
     let mut handle = stdout.lock();
+    let config = OutputConfig::from_env();
 
     match mode {
-        OutputMode::Text => print_issue_details_text(&mut handle, issue, deps, dependents),
+        OutputMode::Text => print_issue_details_text(&mut handle, issue, deps, dependents, &config),
         OutputMode::Json => print_issue_details_json(&mut handle, issue, deps, dependents),
     }
 }
@@ -207,9 +247,10 @@ pub fn print_issue_details(
 pub fn print_blocked_issues(blocked: &[(Issue, Vec<Issue>)], mode: OutputMode) -> io::Result<()> {
     let stdout = io::stdout();
     let mut handle = stdout.lock();
+    let config = OutputConfig::from_env();
 
     match mode {
-        OutputMode::Text => print_blocked_text(&mut handle, blocked),
+        OutputMode::Text => print_blocked_text(&mut handle, blocked, &config),
         OutputMode::Json => print_blocked_json(&mut handle, blocked),
     }
 }
@@ -234,13 +275,13 @@ pub fn print_json<T: Serialize>(value: &T) -> io::Result<()> {
 // Text Formatting
 // ============================================================================
 
-fn print_issue_text<W: Write>(w: &mut W, issue: &Issue) -> io::Result<()> {
+fn print_issue_text<W: Write>(w: &mut W, issue: &Issue, config: &OutputConfig) -> io::Result<()> {
     writeln!(
         w,
         "{} {} {} {} {}",
-        colored_status_icon(issue.status),
+        colored_status_icon(issue.status, config),
         colorize_id(issue.id.as_str()),
-        type_icon(issue.issue_type),
+        type_icon(issue.issue_type, config),
         colorize_priority(issue.priority),
         issue.title
     )?;
@@ -261,7 +302,11 @@ fn print_issue_text<W: Write>(w: &mut W, issue: &Issue) -> io::Result<()> {
     Ok(())
 }
 
-fn print_issues_text<W: Write>(w: &mut W, issues: &[Issue]) -> io::Result<()> {
+fn print_issues_text<W: Write>(
+    w: &mut W,
+    issues: &[Issue],
+    config: &OutputConfig,
+) -> io::Result<()> {
     if issues.is_empty() {
         writeln!(w, "No issues found.")?;
         return Ok(());
@@ -274,9 +319,9 @@ fn print_issues_text<W: Write>(w: &mut W, issues: &[Issue]) -> io::Result<()> {
         writeln!(
             w,
             "{} {}  {}  {}  {}",
-            colored_status_icon(issue.status),
+            colored_status_icon(issue.status, config),
             colorize_id(issue.id.as_str()),
-            type_icon(issue.issue_type),
+            type_icon(issue.issue_type, config),
             colorize_priority(issue.priority),
             issue.title
         )?;
@@ -290,22 +335,26 @@ fn print_issue_details_text<W: Write>(
     issue: &Issue,
     deps: &[Dependency],
     dependents: &[Dependency],
+    config: &OutputConfig,
 ) -> io::Result<()> {
     let terminal_width = get_terminal_width();
-    let max_width = get_max_content_width();
-    let content_width = terminal_width.min(max_width);
+    let content_width = terminal_width.min(config.max_width);
 
     // Header: status icon, ID, and title
     writeln!(
         w,
         "{} {}: {}",
-        colored_status_icon(issue.status),
+        colored_status_icon(issue.status, config),
         colorize_id(issue.id.as_str()),
         issue.title
     )?;
 
     // Metadata line
-    let type_display = format!("{} {}", type_icon(issue.issue_type), issue.issue_type);
+    let type_display = format!(
+        "{} {}",
+        type_icon(issue.issue_type, config),
+        issue.issue_type
+    );
     writeln!(
         w,
         "{}  {}    {}  {}    {}  {}",
@@ -415,7 +464,11 @@ fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
         .collect()
 }
 
-fn print_blocked_text<W: Write>(w: &mut W, blocked: &[(Issue, Vec<Issue>)]) -> io::Result<()> {
+fn print_blocked_text<W: Write>(
+    w: &mut W,
+    blocked: &[(Issue, Vec<Issue>)],
+    config: &OutputConfig,
+) -> io::Result<()> {
     if blocked.is_empty() {
         writeln!(w, "No blocked issues found.")?;
         return Ok(());
@@ -428,9 +481,9 @@ fn print_blocked_text<W: Write>(w: &mut W, blocked: &[(Issue, Vec<Issue>)]) -> i
         writeln!(
             w,
             "{} {}  {}  {}  {}",
-            colored_status_icon(issue.status),
+            colored_status_icon(issue.status, config),
             colorize_id(issue.id.as_str()),
-            type_icon(issue.issue_type),
+            type_icon(issue.issue_type, config),
             colorize_priority(issue.priority),
             issue.title
         )?;
@@ -657,60 +710,65 @@ mod tests {
 
     #[test]
     fn test_type_icon() {
-        // Test all issue types including Chore
-        assert_eq!(type_icon(IssueType::Task), "◇");
-        assert_eq!(type_icon(IssueType::Bug), "●");
-        assert_eq!(type_icon(IssueType::Feature), "★");
-        assert_eq!(type_icon(IssueType::Epic), "◆");
-        assert_eq!(type_icon(IssueType::Chore), "○");
+        let config = OutputConfig::default();
+        // Test all issue types including Chore (Unicode mode)
+        assert_eq!(type_icon(IssueType::Task, &config), "◇");
+        assert_eq!(type_icon(IssueType::Bug, &config), "●");
+        assert_eq!(type_icon(IssueType::Feature, &config), "★");
+        assert_eq!(type_icon(IssueType::Epic, &config), "◆");
+        assert_eq!(type_icon(IssueType::Chore, &config), "○");
     }
 
     #[test]
     fn test_ascii_fallback_icons() {
-        // Lock mutex since we modify global env state
-        let _guard = COLOR_TEST_MUTEX.lock().unwrap();
+        // Test ASCII mode using explicit config (no env var needed)
+        let config = OutputConfig::new(80, true);
 
-        // Test ASCII mode by temporarily setting env var
-        env::set_var("RIVETS_ASCII", "1");
-
-        assert_eq!(type_icon(IssueType::Task), "-");
-        assert_eq!(type_icon(IssueType::Bug), "*");
-        assert_eq!(type_icon(IssueType::Feature), "+");
-        assert_eq!(type_icon(IssueType::Epic), "#");
-        assert_eq!(type_icon(IssueType::Chore), ".");
+        assert_eq!(type_icon(IssueType::Task, &config), "-");
+        assert_eq!(type_icon(IssueType::Bug, &config), "*");
+        assert_eq!(type_icon(IssueType::Feature, &config), "+");
+        assert_eq!(type_icon(IssueType::Epic, &config), "#");
+        assert_eq!(type_icon(IssueType::Chore, &config), ".");
 
         // Status icons should also be ASCII
-        let open = colored_status_icon(IssueStatus::Open);
-        let closed = colored_status_icon(IssueStatus::Closed);
+        let open = colored_status_icon(IssueStatus::Open, &config);
+        let closed = colored_status_icon(IssueStatus::Closed, &config);
         assert!(open.contains("o"));
         assert!(closed.contains("+"));
-
-        // Clean up
-        env::remove_var("RIVETS_ASCII");
     }
 
     #[test]
-    fn test_max_width_env_var() {
-        // Lock mutex since we modify global env state
+    fn test_output_config_from_env() {
+        // Lock mutex since we read global env state
         let _guard = COLOR_TEST_MUTEX.lock().unwrap();
 
-        // Test that get_max_content_width respects env var
+        // Test that OutputConfig::from_env respects env vars
         env::set_var("RIVETS_MAX_WIDTH", "120");
-        assert_eq!(get_max_content_width(), 120);
+        env::set_var("RIVETS_ASCII", "1");
+        let config = OutputConfig::from_env();
+        assert_eq!(config.max_width, 120);
+        assert!(config.use_ascii);
 
         env::set_var("RIVETS_MAX_WIDTH", "invalid");
-        assert_eq!(get_max_content_width(), DEFAULT_MAX_CONTENT_WIDTH);
+        env::set_var("RIVETS_ASCII", "false");
+        let config = OutputConfig::from_env();
+        assert_eq!(config.max_width, DEFAULT_MAX_CONTENT_WIDTH);
+        assert!(!config.use_ascii);
 
         env::remove_var("RIVETS_MAX_WIDTH");
-        assert_eq!(get_max_content_width(), DEFAULT_MAX_CONTENT_WIDTH);
+        env::remove_var("RIVETS_ASCII");
+        let config = OutputConfig::from_env();
+        assert_eq!(config.max_width, DEFAULT_MAX_CONTENT_WIDTH);
+        assert!(!config.use_ascii);
     }
 
     #[test]
     fn test_print_issue_text() {
         let issue = test_issue();
+        let config = OutputConfig::default();
         let mut buffer = Vec::new();
 
-        print_issue_text(&mut buffer, &issue).unwrap();
+        print_issue_text(&mut buffer, &issue, &config).unwrap();
 
         let output = String::from_utf8(buffer).unwrap();
         assert!(output.contains("test-abc"));
@@ -735,6 +793,7 @@ mod tests {
     #[test]
     fn test_print_issue_details_text() {
         let issue = test_issue();
+        let config = OutputConfig::default();
         let deps = vec![Dependency {
             depends_on_id: IssueId::new("test-xyz"),
             dep_type: DependencyType::Blocks,
@@ -742,7 +801,7 @@ mod tests {
         let dependents = vec![];
 
         let mut buffer = Vec::new();
-        print_issue_details_text(&mut buffer, &issue, &deps, &dependents).unwrap();
+        print_issue_details_text(&mut buffer, &issue, &deps, &dependents, &config).unwrap();
 
         let output = String::from_utf8(buffer).unwrap();
         assert!(output.contains("test-abc"));
@@ -754,9 +813,10 @@ mod tests {
     #[test]
     fn test_print_issues_list_format() {
         let issues = vec![test_issue()];
+        let config = OutputConfig::default();
         let mut buffer = Vec::new();
 
-        print_issues_text(&mut buffer, &issues).unwrap();
+        print_issues_text(&mut buffer, &issues, &config).unwrap();
 
         let output = String::from_utf8(buffer).unwrap();
         assert!(output.contains("Found 1 issue"));
@@ -803,9 +863,10 @@ mod tests {
     fn test_issue_with_empty_description() {
         let mut issue = test_issue();
         issue.description = String::new();
+        let config = OutputConfig::default();
 
         let mut buffer = Vec::new();
-        print_issue_details_text(&mut buffer, &issue, &[], &[]).unwrap();
+        print_issue_details_text(&mut buffer, &issue, &[], &[], &config).unwrap();
 
         let output = String::from_utf8(buffer).unwrap();
         // Should not contain "Description:" section when empty

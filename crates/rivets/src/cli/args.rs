@@ -174,6 +174,22 @@ pub struct UpdateArgs {
     pub external_ref: Option<String>,
 }
 
+impl UpdateArgs {
+    /// Returns true if any update field is specified.
+    pub fn has_updates(&self) -> bool {
+        self.title.is_some()
+            || self.description.is_some()
+            || self.status.is_some()
+            || self.priority.is_some()
+            || self.assignee.is_some()
+            || self.no_assignee
+            || self.design.is_some()
+            || self.acceptance.is_some()
+            || self.notes.is_some()
+            || self.external_ref.is_some()
+    }
+}
+
 /// Arguments for the `close` command
 #[derive(Parser, Debug, Clone)]
 pub struct CloseArgs {

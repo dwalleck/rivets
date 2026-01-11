@@ -806,13 +806,17 @@ fn test_cli_reopen_multiple_issues(initialized_dir: TempDir) {
 fn test_cli_reopen_already_open_issue(initialized_dir: TempDir) {
     let issue_id = create_issue(initialized_dir.path(), "Open issue", &[]);
 
-    // Try to reopen an already open issue
+    // Try to reopen an already open issue - should fail since it's not closed
     let output = run_rivets_in_dir(initialized_dir.path(), &["reopen", &issue_id]);
 
     assert!(
-        output.status.success(),
-        "Reopen should succeed even for open issues: {:?}",
-        String::from_utf8_lossy(&output.stderr)
+        !output.status.success(),
+        "Reopen should fail for non-closed issues"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not closed"),
+        "Error should mention issue is not closed: {stderr}"
     );
 }
 

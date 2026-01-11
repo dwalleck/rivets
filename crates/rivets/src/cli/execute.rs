@@ -19,17 +19,39 @@ pub async fn execute_init(args: &InitArgs) -> Result<()> {
 
     let current_dir = std::env::current_dir()?;
 
+    // Get prefix (interactive prompt if not provided and not in quiet mode)
+    let prefix = match &args.prefix {
+        Some(p) => Some(p.clone()),
+        None if !args.quiet => {
+            // Interactive mode: prompt for prefix
+            eprint!("Issue ID prefix (e.g., 'myproj' for 'myproj-abc'): ");
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            let trimmed = input.trim();
+            if trimmed.is_empty() {
+                None // Use default prefix
+            } else {
+                // Validate the input
+                Some(
+                    super::validators::validate_prefix(trimmed)
+                        .map_err(|e| anyhow::anyhow!("{}", e))?,
+                )
+            }
+        }
+        None => None, // Quiet mode: use default prefix
+    };
+
     if !args.quiet {
         println!(
             "Initializing rivets repository{}...",
-            args.prefix
+            prefix
                 .as_ref()
                 .map(|p| format!(" with prefix '{}'", p))
                 .unwrap_or_default()
         );
     }
 
-    let result = init::init(&current_dir, args.prefix.as_deref()).await?;
+    let result = init::init(&current_dir, prefix.as_deref()).await?;
 
     if !args.quiet {
         println!("Initialized rivets in {}", result.rivets_dir.display());
@@ -311,6 +333,15 @@ pub async fn execute_update(
     use super::types::BatchResult;
     use crate::domain::{IssueId, IssueUpdate};
 
+    if !args.has_updates() {
+        anyhow::bail!(
+            "No fields specified to update. Use one or more of:\n  \
+             --title, --description (-D), --status (-s), --priority (-p),\n  \
+             --assignee (-a), --no-assignee, --design, --acceptance,\n  \
+             --notes, --external-ref"
+        );
+    }
+
     let mut result = BatchResult::new();
 
     for id_str in &args.issue_ids {
@@ -469,28 +500,38 @@ pub async fn execute_close(
     for id_str in &args.issue_ids {
         let issue_id = IssueId::new(id_str);
 
-        // Build updated notes: append close reason to existing notes if present
-        let new_notes = if args.reason != "Completed" {
-            match app.storage().get(&issue_id).await {
-                Ok(Some(existing)) => {
-                    let close_note = format!("Closed: {}", args.reason);
-                    Some(append_note(existing.notes.as_deref(), &close_note))
-                }
-                Ok(None) => {
-                    result.failed.push(BatchError {
-                        issue_id: id_str.clone(),
-                        error: format!("Issue not found: {}", id_str),
-                    });
-                    continue;
-                }
-                Err(e) => {
-                    result.failed.push(BatchError {
-                        issue_id: id_str.clone(),
-                        error: e.to_string(),
-                    });
-                    continue;
-                }
+        // Always fetch the issue first to check status and get existing notes
+        let existing = match app.storage().get(&issue_id).await {
+            Ok(Some(issue)) => issue,
+            Ok(None) => {
+                result.failed.push(BatchError {
+                    issue_id: id_str.clone(),
+                    error: format!("Issue not found: {}", id_str),
+                });
+                continue;
             }
+            Err(e) => {
+                result.failed.push(BatchError {
+                    issue_id: id_str.clone(),
+                    error: e.to_string(),
+                });
+                continue;
+            }
+        };
+
+        // Check if already closed
+        if existing.status == IssueStatus::Closed {
+            result.failed.push(BatchError {
+                issue_id: id_str.clone(),
+                error: "Issue is already closed".to_string(),
+            });
+            continue;
+        }
+
+        // Build updated notes: append close reason if not default
+        let new_notes = if args.reason != "Completed" {
+            let close_note = format!("Closed: {}", args.reason);
+            Some(append_note(existing.notes.as_deref(), &close_note))
         } else {
             None
         };
@@ -542,28 +583,38 @@ pub async fn execute_reopen(
     for id_str in &args.issue_ids {
         let issue_id = IssueId::new(id_str);
 
-        // Build updated notes: append reopen reason to existing notes if provided
-        let new_notes = if let Some(reason) = &args.reason {
-            match app.storage().get(&issue_id).await {
-                Ok(Some(existing)) => {
-                    let reopen_note = format!("Reopened: {}", reason);
-                    Some(append_note(existing.notes.as_deref(), &reopen_note))
-                }
-                Ok(None) => {
-                    result.failed.push(BatchError {
-                        issue_id: id_str.clone(),
-                        error: format!("Issue not found: {}", id_str),
-                    });
-                    continue;
-                }
-                Err(e) => {
-                    result.failed.push(BatchError {
-                        issue_id: id_str.clone(),
-                        error: e.to_string(),
-                    });
-                    continue;
-                }
+        // Always fetch the issue first to check status and get existing notes
+        let existing = match app.storage().get(&issue_id).await {
+            Ok(Some(issue)) => issue,
+            Ok(None) => {
+                result.failed.push(BatchError {
+                    issue_id: id_str.clone(),
+                    error: format!("Issue not found: {}", id_str),
+                });
+                continue;
             }
+            Err(e) => {
+                result.failed.push(BatchError {
+                    issue_id: id_str.clone(),
+                    error: e.to_string(),
+                });
+                continue;
+            }
+        };
+
+        // Check if already open (not closed)
+        if existing.status != IssueStatus::Closed {
+            result.failed.push(BatchError {
+                issue_id: id_str.clone(),
+                error: format!("Issue is not closed (status: {})", existing.status),
+            });
+            continue;
+        }
+
+        // Build updated notes: append reopen reason if provided
+        let new_notes = if let Some(reason) = &args.reason {
+            let reopen_note = format!("Reopened: {}", reason);
+            Some(append_note(existing.notes.as_deref(), &reopen_note))
         } else {
             None
         };
@@ -1587,6 +1638,191 @@ mod tests {
             assert_eq!(
                 result,
                 "Closed: Fixed the bug\n\nReopened: Bug still present"
+            );
+        }
+    }
+
+    mod execute_update_tests {
+        use super::super::{execute_update, UpdateArgs};
+        use crate::output::OutputMode;
+        use tempfile::TempDir;
+
+        #[tokio::test]
+        async fn test_update_with_no_fields_returns_error() {
+            let temp_dir = TempDir::new().unwrap();
+            crate::commands::init::init(temp_dir.path(), Some("test"))
+                .await
+                .unwrap();
+
+            let mut app = crate::app::App::from_directory(temp_dir.path())
+                .await
+                .unwrap();
+
+            let args = UpdateArgs {
+                issue_ids: vec!["test-abc".to_string()],
+                title: None,
+                description: None,
+                status: None,
+                priority: None,
+                assignee: None,
+                no_assignee: false,
+                design: None,
+                acceptance: None,
+                notes: None,
+                external_ref: None,
+            };
+
+            let result = execute_update(&mut app, &args, OutputMode::Text).await;
+
+            assert!(result.is_err());
+            let error_msg = result.unwrap_err().to_string();
+            assert!(
+                error_msg.contains("No fields specified"),
+                "Error should mention no fields specified, got: {}",
+                error_msg
+            );
+            assert!(
+                error_msg.contains("--title"),
+                "Error should list available options, got: {}",
+                error_msg
+            );
+        }
+    }
+
+    mod execute_close_tests {
+        use super::super::{execute_close, CloseArgs};
+        use crate::domain::{IssueStatus, IssueUpdate, NewIssue};
+        use crate::output::OutputMode;
+        use tempfile::TempDir;
+
+        #[tokio::test]
+        async fn test_close_already_closed_issue_returns_error() {
+            let temp_dir = TempDir::new().unwrap();
+            crate::commands::init::init(temp_dir.path(), Some("test"))
+                .await
+                .unwrap();
+
+            let mut app = crate::app::App::from_directory(temp_dir.path())
+                .await
+                .unwrap();
+
+            // Create an issue
+            let new_issue = NewIssue {
+                title: "Test issue".to_string(),
+                ..Default::default()
+            };
+            let issue = app.storage_mut().create(new_issue).await.unwrap();
+            app.save().await.unwrap();
+
+            // Close it first
+            let update = IssueUpdate {
+                status: Some(IssueStatus::Closed),
+                ..Default::default()
+            };
+            app.storage_mut().update(&issue.id, update).await.unwrap();
+            app.save().await.unwrap();
+
+            // Try to close it again
+            let args = CloseArgs {
+                issue_ids: vec![issue.id.to_string()],
+                reason: "Completed".to_string(),
+            };
+
+            let result = execute_close(&mut app, &args, OutputMode::Text).await;
+
+            assert!(result.is_err());
+            let error_msg = result.unwrap_err().to_string();
+            assert!(
+                error_msg.contains("failed"),
+                "Error should indicate failure, got: {}",
+                error_msg
+            );
+        }
+    }
+
+    mod execute_reopen_tests {
+        use super::super::{execute_reopen, ReopenArgs};
+        use crate::domain::NewIssue;
+        use crate::output::OutputMode;
+        use tempfile::TempDir;
+
+        #[tokio::test]
+        async fn test_reopen_already_open_issue_returns_error() {
+            let temp_dir = TempDir::new().unwrap();
+            crate::commands::init::init(temp_dir.path(), Some("test"))
+                .await
+                .unwrap();
+
+            let mut app = crate::app::App::from_directory(temp_dir.path())
+                .await
+                .unwrap();
+
+            // Create an issue (starts as Open)
+            let new_issue = NewIssue {
+                title: "Test issue".to_string(),
+                ..Default::default()
+            };
+            let issue = app.storage_mut().create(new_issue).await.unwrap();
+            app.save().await.unwrap();
+
+            // Try to reopen an already open issue
+            let args = ReopenArgs {
+                issue_ids: vec![issue.id.to_string()],
+                reason: None,
+            };
+
+            let result = execute_reopen(&mut app, &args, OutputMode::Text).await;
+
+            assert!(result.is_err());
+            let error_msg = result.unwrap_err().to_string();
+            assert!(
+                error_msg.contains("failed"),
+                "Error should indicate failure, got: {}",
+                error_msg
+            );
+        }
+
+        #[tokio::test]
+        async fn test_reopen_in_progress_issue_returns_error() {
+            use crate::domain::{IssueStatus, IssueUpdate};
+
+            let temp_dir = TempDir::new().unwrap();
+            crate::commands::init::init(temp_dir.path(), Some("test"))
+                .await
+                .unwrap();
+
+            let mut app = crate::app::App::from_directory(temp_dir.path())
+                .await
+                .unwrap();
+
+            // Create an issue and set it to in_progress
+            let new_issue = NewIssue {
+                title: "Test issue".to_string(),
+                ..Default::default()
+            };
+            let issue = app.storage_mut().create(new_issue).await.unwrap();
+
+            let update = IssueUpdate {
+                status: Some(IssueStatus::InProgress),
+                ..Default::default()
+            };
+            app.storage_mut().update(&issue.id, update).await.unwrap();
+            app.save().await.unwrap();
+
+            // Try to reopen an in_progress issue
+            let args = ReopenArgs {
+                issue_ids: vec![issue.id.to_string()],
+                reason: None,
+            };
+
+            let result = execute_reopen(&mut app, &args, OutputMode::Text).await;
+
+            assert!(result.is_err());
+            let error_msg = result.unwrap_err().to_string();
+            assert!(
+                error_msg.contains("failed"),
+                "Error should indicate failure, got: {}",
+                error_msg
             );
         }
     }
