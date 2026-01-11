@@ -525,7 +525,7 @@ mod tests {
         match cli.command {
             Some(Commands::Close(args)) => {
                 assert_eq!(args.issue_ids, vec!["proj-abc"]);
-                assert_eq!(args.reason, "Completed"); // default
+                assert!(args.reason.is_none()); // no default
             }
             _ => panic!("Expected Close command"),
         }
@@ -545,7 +545,7 @@ mod tests {
         match cli.command {
             Some(Commands::Close(args)) => {
                 assert_eq!(args.issue_ids, vec!["proj-abc", "proj-def"]);
-                assert_eq!(args.reason, "Batch done");
+                assert_eq!(args.reason, Some("Batch done".to_string()));
             }
             _ => panic!("Expected Close command"),
         }
@@ -558,7 +558,7 @@ mod tests {
                 .unwrap();
         match cli.command {
             Some(Commands::Close(args)) => {
-                assert_eq!(args.reason, "Fixed in PR #42");
+                assert_eq!(args.reason, Some("Fixed in PR #42".to_string()));
             }
             _ => panic!("Expected Close command"),
         }

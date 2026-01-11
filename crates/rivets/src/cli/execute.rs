@@ -528,9 +528,9 @@ pub async fn execute_close(
             continue;
         }
 
-        // Build updated notes: append close reason if not default
-        let new_notes = if args.reason != "Completed" {
-            let close_note = format!("Closed: {}", args.reason);
+        // Build updated notes: append close reason if provided
+        let new_notes = if let Some(reason) = &args.reason {
+            let close_note = format!("Closed: {}", reason);
             Some(append_note(existing.notes.as_deref(), &close_note))
         } else {
             None
@@ -1725,7 +1725,7 @@ mod tests {
             // Try to close it again
             let args = CloseArgs {
                 issue_ids: vec![issue.id.to_string()],
-                reason: "Completed".to_string(),
+                reason: None,
             };
 
             let result = execute_close(&mut app, &args, OutputMode::Text).await;

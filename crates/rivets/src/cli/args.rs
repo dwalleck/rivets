@@ -197,9 +197,9 @@ pub struct CloseArgs {
     #[arg(required = true, value_parser = validate_issue_id)]
     pub issue_ids: Vec<String>,
 
-    /// Reason for closing
-    #[arg(short, long, default_value = "Completed")]
-    pub reason: String,
+    /// Reason for closing (only added to notes if provided)
+    #[arg(short, long)]
+    pub reason: Option<String>,
 }
 
 /// Arguments for the `reopen` command
