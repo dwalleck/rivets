@@ -175,6 +175,32 @@ pub struct UpdateArgs {
 }
 
 impl UpdateArgs {
+    /// Returns a formatted string of available flags for error messages.
+    ///
+    /// This dynamically generates the list from clap's argument definitions,
+    /// ensuring it stays in sync with the actual struct fields.
+    #[must_use]
+    pub fn available_flags_help() -> String {
+        use clap::CommandFactory;
+
+        let cmd = Self::command();
+        cmd.get_arguments()
+            .filter(|arg| {
+                // Filter out positional arguments (issue_ids) and help/version
+                let id = arg.get_id().as_str();
+                arg.get_long().is_some() && id != "help" && id != "version"
+            })
+            .map(|arg| {
+                let long = format!("--{}", arg.get_long().unwrap());
+                match arg.get_short() {
+                    Some(short) => format!("{} (-{})", long, short),
+                    None => long,
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     /// Returns true if any update field is specified.
     #[must_use]
     pub fn has_updates(&self) -> bool {

@@ -338,10 +338,8 @@ pub async fn execute_update(
 
     if !args.has_updates() {
         anyhow::bail!(
-            "No fields specified to update. Use one or more of:\n  \
-             --title, --description (-D), --status (-s), --priority (-p),\n  \
-             --assignee (-a), --no-assignee, --design, --acceptance,\n  \
-             --notes, --external-ref"
+            "No fields specified to update. Use one or more of:\n  {}",
+            UpdateArgs::available_flags_help()
         );
     }
 
@@ -474,10 +472,11 @@ fn output_batch_result(
 /// Append a new note to existing notes, separated by blank line.
 ///
 /// Used by close/reopen commands to append reason notes to existing issue notes.
+/// Treats empty existing notes the same as None (returns just the new note).
 fn append_note(existing: Option<&str>, new_note: &str) -> String {
     match existing {
-        Some(notes) => format!("{}\n\n{}", notes, new_note),
-        None => new_note.to_string(),
+        Some(notes) if !notes.is_empty() => format!("{}\n\n{}", notes, new_note),
+        _ => new_note.to_string(),
     }
 }
 
@@ -1611,7 +1610,7 @@ mod tests {
             "New note",
             "Existing notes\n\nNew note"
         )]
-        #[case::empty_existing_notes(Some(""), "New note", "\n\nNew note")]
+        #[case::empty_existing_notes(Some(""), "New note", "New note")]
         #[case::multiline_existing(
             Some("Line 1\nLine 2"),
             "New note",
