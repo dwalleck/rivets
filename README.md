@@ -2,22 +2,21 @@
 
 [![CI](https://github.com/dwalleck/rivets/actions/workflows/ci.yml/badge.svg)](https://github.com/dwalleck/rivets/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/dwalleck/rivets/branch/main/graph/badge.svg)](https://codecov.io/gh/dwalleck/rivets)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Crates.io](https://img.shields.io/crates/v/rivets.svg)](https://crates.io/crates/rivets)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 
-A high-performance, Rust-based issue tracking system using JSONL storage.
+A fast, Git-friendly issue tracker that lives in your repository.
 
-## Overview
+Rivets stores issues as JSONL files alongside your code—no external services, no context switching, no sync problems. Track bugs, features, and tasks with the same workflow you use for code.
 
-Rivets is a modern issue tracking system written in Rust that provides fast, efficient project management capabilities. It uses JSONL (JSON Lines) format for data storage, making it human-readable, version-control friendly, and easily scriptable.
+## Features
 
-## Project Structure
-
-This workspace contains three crates:
-
-- **rivets-jsonl**: A general-purpose JSONL library for efficient reading, writing, streaming, and querying of JSON Lines data
-- **rivets**: The CLI application and library for issue tracking built on top of rivets-jsonl
-- **rivets-mcp**: An MCP (Model Context Protocol) server for AI assistant integration
+- **Git-native** — Issues live in your repo, branch with your code, merge with your PRs
+- **Fast** — Built in Rust for instant responses, even with thousands of issues
+- **Dependency tracking** — Model blockers and relationships between issues
+- **AI-ready** — MCP server for seamless integration with AI coding assistants
+- **Scriptable** — JSON output mode for automation and custom tooling
+- **Human-readable** — JSONL storage you can grep, diff, and edit directly
 
 ## Installation
 
@@ -25,109 +24,135 @@ This workspace contains three crates:
 cargo install rivets
 ```
 
-## Development
-
-### Building
+## Quick Start
 
 ```bash
-cargo build
+# Initialize in your project
+rivets init
+
+# Create an issue
+rivets create --title "Add user authentication" --type feature
+
+# See what's ready to work on
+rivets ready
+
+# Start working on an issue
+rivets update RIVETS-1 --status in_progress
+
+# Mark it done
+rivets close RIVETS-1
 ```
 
-### Testing
+## Usage
+
+### Managing Issues
 
 ```bash
+rivets create --title "Fix login bug" --type bug --priority 1
+rivets list                          # List all open issues
+rivets list --status in_progress     # Filter by status
+rivets show RIVETS-1                 # View issue details
+rivets update RIVETS-1 --priority 2  # Update fields
+rivets close RIVETS-1 --reason "Fixed in commit abc123"
+```
+
+### Dependencies
+
+```bash
+rivets dep RIVETS-2 --blocks RIVETS-1    # RIVETS-2 blocks RIVETS-1
+rivets blocked                            # Show all blocked issues
+rivets ready                              # Show issues with no blockers
+```
+
+### Labels
+
+```bash
+rivets label add RIVETS-1 urgent backend
+rivets label remove RIVETS-1 urgent
+rivets list --label backend
+```
+
+### JSON Output
+
+All commands support `--json` for scripting:
+
+```bash
+rivets list --json | jq '.[] | select(.priority == 1)'
+```
+
+## Project Structure
+
+This workspace contains three crates:
+
+| Crate | Description |
+|-------|-------------|
+| `rivets` | CLI and core library |
+| `rivets-jsonl` | General-purpose JSONL library |
+| `rivets-mcp` | MCP server for AI assistant integration |
+
+## Development
+
+### Prerequisites
+
+- Rust 1.70+
+
+### Building and Testing
+
+```bash
+cargo build              # Build all crates
+cargo test               # Run tests
+cargo run -p rivets -- --help
+```
+
+### Code Quality
+
+Pre-commit hooks enforce formatting, linting, and tests. Run manually with:
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 ```
 
-### Running
+### Commit Convention
 
-```bash
-cargo run --package rivets -- --help
+This project uses [Conventional Commits](https://www.conventionalcommits.org/):
+
 ```
-
-### Quality Gates
-
-This project uses pre-commit hooks to maintain code quality. The following checks run automatically before each commit:
-
-1. **Code Formatting** (`cargo fmt -- --check`): Ensures all code follows Rust formatting standards
-2. **Linting** (`cargo clippy`): Catches common mistakes and enforces best practices
-3. **Tests** (`cargo test`): Ensures all tests pass
-
-To manually run all quality checks:
-
-```bash
-cargo fmt -- --check  # Check formatting
-cargo clippy --all-targets --all-features -- -D warnings  # Run linter
-cargo test  # Run tests
+feat(cli): add export command
+fix(storage): handle empty files gracefully
+docs: update installation instructions
 ```
-
-To fix formatting issues:
-
-```bash
-cargo fmt
-```
-
-**Note**: The pre-commit hook is automatically installed in `.git/hooks/pre-commit`. If you need to bypass it (not recommended), use `git commit --no-verify`.
-
-### Commit Messages
-
-This project follows [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/).
-
-To set up the commit-msg hook:
-
-```bash
-./scripts/setup-hooks.sh
-```
-
-Example commits:
-- `feat(cli): add new export command`
-- `fix(storage): handle empty files gracefully`
-- `docs: update installation instructions`
-
-### Generating Changelogs
-
-Changelogs are generated automatically using [git-cliff](https://git-cliff.org/):
-
-```bash
-# Install git-cliff
-cargo install git-cliff
-
-# Generate changelog for next release
-git cliff --unreleased --bump --prepend CHANGELOG.md
-```
-
-## Publishing to crates.io
-
-The crates must be published in dependency order since they depend on each other:
-
-```bash
-# 1. Publish the JSONL library first (no internal dependencies)
-cargo publish -p rivets-jsonl
-
-# 2. Publish the core rivets crate (depends on rivets-jsonl)
-cargo publish -p rivets
-
-# 3. Publish the MCP server (depends on rivets)
-cargo publish -p rivets-mcp
-```
-
-Wait for each crate to be indexed on crates.io before publishing the next one (usually takes a few minutes).
-
-To verify packaging before publishing:
-
-```bash
-cargo publish --dry-run -p rivets-jsonl
-```
-
-## License
-
-Licensed under either of:
-
-- MIT license
-- Apache License, Version 2.0
-
-at your option.
 
 ## Contributing
 
-Contributions are welcome! Please see our contribution guidelines for more information.
+Contributions are welcome! Please:
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feat/amazing-feature`)
+3. Make your changes with tests
+4. Ensure all quality checks pass
+5. Submit a pull request
+
+For maintainers, see [Publishing](#publishing) for release procedures.
+
+<details>
+<summary><h3>Publishing</h3></summary>
+
+Publish crates in dependency order:
+
+```bash
+cargo publish -p rivets-jsonl
+# Wait for indexing...
+cargo publish -p rivets
+# Wait for indexing...
+cargo publish -p rivets-mcp
+```
+
+Generate changelog: `git cliff --unreleased --bump --prepend CHANGELOG.md`
+
+</details>
+
+## License
+
+Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at your option.

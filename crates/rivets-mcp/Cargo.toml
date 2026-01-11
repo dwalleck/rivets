@@ -9,7 +9,7 @@ repository = "https://github.com/dwalleck/rivets"
 homepage = "https://github.com/dwalleck/rivets"
 documentation = "https://docs.rs/rivets-mcp"
 readme = "README.md"
-keywords = ["mcp", "model-context-protocol", "ai", "issue-tracking"]
+keywords = ["mcp", "mcp-server", "ai", "issue-tracking"]
 categories = ["development-tools", "command-line-utilities"]
 
 [[bin]]
