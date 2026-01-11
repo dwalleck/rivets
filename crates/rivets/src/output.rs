@@ -19,21 +19,24 @@ const DEFAULT_MAX_CONTENT_WIDTH: usize = 80;
 /// Configuration for output formatting.
 ///
 /// This struct holds settings that control how output is formatted,
-/// including terminal width limits and ASCII fallback mode.
+/// including terminal width limits, ASCII fallback mode, and color output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputConfig {
     /// Maximum content width for text wrapping.
     pub max_width: usize,
     /// Whether to use ASCII-only icons instead of Unicode.
     pub use_ascii: bool,
+    /// Whether to use colors in output.
+    pub use_colors: bool,
 }
 
 impl OutputConfig {
     /// Create a new OutputConfig with explicit values.
-    pub fn new(max_width: usize, use_ascii: bool) -> Self {
+    pub fn new(max_width: usize, use_ascii: bool, use_colors: bool) -> Self {
         Self {
             max_width,
             use_ascii,
+            use_colors,
         }
     }
 
@@ -42,6 +45,8 @@ impl OutputConfig {
     /// Reads:
     /// - `RIVETS_MAX_WIDTH`: Maximum content width (default: 80)
     /// - `RIVETS_ASCII`: Set to "1" or "true" for ASCII-only icons (default: false)
+    /// - `NO_COLOR`: Standard env var to disable colors (any value disables colors)
+    /// - `RIVETS_COLOR`: Set to "0" or "false" to disable colors (default: true)
     pub fn from_env() -> Self {
         let max_width = env::var("RIVETS_MAX_WIDTH")
             .ok()
@@ -52,9 +57,17 @@ impl OutputConfig {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
+        // Respect NO_COLOR standard (https://no-color.org/)
+        // Also support RIVETS_COLOR for explicit control
+        let use_colors = env::var("NO_COLOR").is_err()
+            && env::var("RIVETS_COLOR")
+                .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+                .unwrap_or(true);
+
         Self {
             max_width,
             use_ascii,
+            use_colors,
         }
     }
 }
@@ -64,6 +77,7 @@ impl Default for OutputConfig {
         Self {
             max_width: DEFAULT_MAX_CONTENT_WIDTH,
             use_ascii: false,
+            use_colors: true,
         }
     }
 }
@@ -84,8 +98,11 @@ fn get_terminal_width() -> usize {
 // ============================================================================
 
 /// Apply color to status text based on issue status.
-fn colorize_status(status: IssueStatus) -> String {
+fn colorize_status(status: IssueStatus, config: &OutputConfig) -> String {
     let text = format!("{status}");
+    if !config.use_colors {
+        return text;
+    }
     match status {
         IssueStatus::Open => text.white().to_string(),
         IssueStatus::InProgress => text.yellow().to_string(),
@@ -95,8 +112,11 @@ fn colorize_status(status: IssueStatus) -> String {
 }
 
 /// Apply color to priority text based on priority level.
-fn colorize_priority(priority: u8) -> String {
+fn colorize_priority(priority: u8, config: &OutputConfig) -> String {
     let text = format!("P{priority}");
+    if !config.use_colors {
+        return text;
+    }
     match priority {
         0 => text.red().bold().to_string(),
         1 => text.yellow().to_string(),
@@ -105,36 +125,85 @@ fn colorize_priority(priority: u8) -> String {
 }
 
 /// Colorize an issue ID (cyan).
-fn colorize_id(id: &str) -> String {
+fn colorize_id(id: &str, config: &OutputConfig) -> String {
+    if !config.use_colors {
+        return id.to_string();
+    }
     id.cyan().to_string()
 }
 
 /// Colorize labels (magenta).
-fn colorize_labels(labels: &[String]) -> String {
+fn colorize_labels(labels: &[String], config: &OutputConfig) -> String {
     if labels.is_empty() {
-        String::new()
-    } else {
-        labels.join(", ").magenta().to_string()
+        return String::new();
     }
+    let text = labels.join(", ");
+    if !config.use_colors {
+        return text;
+    }
+    text.magenta().to_string()
 }
 
 /// Get a colored status icon, with ASCII fallback support.
 fn colored_status_icon(status: IssueStatus, config: &OutputConfig) -> String {
-    if config.use_ascii {
+    let icon = if config.use_ascii {
         match status {
-            IssueStatus::Open => "o".white().to_string(),
-            IssueStatus::InProgress => ">".yellow().to_string(),
-            IssueStatus::Blocked => "x".red().to_string(),
-            IssueStatus::Closed => "+".green().to_string(),
+            IssueStatus::Open => "o",
+            IssueStatus::InProgress => ">",
+            IssueStatus::Blocked => "x",
+            IssueStatus::Closed => "+",
         }
     } else {
         match status {
-            IssueStatus::Open => "○".white().to_string(),
-            IssueStatus::InProgress => "▶".yellow().to_string(),
-            IssueStatus::Blocked => "✗".red().to_string(),
-            IssueStatus::Closed => "✓".green().to_string(),
+            IssueStatus::Open => "○",
+            IssueStatus::InProgress => "▶",
+            IssueStatus::Blocked => "✗",
+            IssueStatus::Closed => "✓",
         }
+    };
+
+    if !config.use_colors {
+        return icon.to_string();
     }
+
+    match status {
+        IssueStatus::Open => icon.white().to_string(),
+        IssueStatus::InProgress => icon.yellow().to_string(),
+        IssueStatus::Blocked => icon.red().to_string(),
+        IssueStatus::Closed => icon.green().to_string(),
+    }
+}
+
+/// Apply dimmed style to text (for labels/field names).
+fn dimmed(text: &str, config: &OutputConfig) -> String {
+    if !config.use_colors {
+        return text.to_string();
+    }
+    text.dimmed().to_string()
+}
+
+/// Apply bold style to text (for section headers).
+fn bold(text: &str, config: &OutputConfig) -> String {
+    if !config.use_colors {
+        return text.to_string();
+    }
+    text.bold().to_string()
+}
+
+/// Apply cyan color to text (for arrows/connectors).
+fn cyan(text: &str, config: &OutputConfig) -> String {
+    if !config.use_colors {
+        return text.to_string();
+    }
+    text.cyan().to_string()
+}
+
+/// Apply yellow color to text (for arrows/connectors).
+fn yellow(text: &str, config: &OutputConfig) -> String {
+    if !config.use_colors {
+        return text.to_string();
+    }
+    text.yellow().to_string()
 }
 
 /// Get a type icon for issue types, with ASCII fallback support.
@@ -286,22 +355,22 @@ fn print_issue_text<W: Write>(w: &mut W, issue: &Issue, config: &OutputConfig) -
         w,
         "{} {} {} {} {}",
         colored_status_icon(issue.status, config),
-        colorize_id(issue.id.as_str()),
+        colorize_id(issue.id.as_str(), config),
         type_icon(issue.issue_type, config),
-        colorize_priority(issue.priority),
+        colorize_priority(issue.priority, config),
         issue.title
     )?;
 
     if let Some(ref assignee) = issue.assignee {
-        writeln!(w, "  {} {}", "Assignee:".dimmed(), assignee)?;
+        writeln!(w, "  {} {}", dimmed("Assignee:", config), assignee)?;
     }
 
     if !issue.labels.is_empty() {
         writeln!(
             w,
             "  {} {}",
-            "Labels:".dimmed(),
-            colorize_labels(&issue.labels)
+            dimmed("Labels:", config),
+            colorize_labels(&issue.labels, config)
         )?;
     }
 
@@ -326,9 +395,9 @@ fn print_issues_text<W: Write>(
             w,
             "{} {}  {}  {}  {}",
             colored_status_icon(issue.status, config),
-            colorize_id(issue.id.as_str()),
+            colorize_id(issue.id.as_str(), config),
             type_icon(issue.issue_type, config),
-            colorize_priority(issue.priority),
+            colorize_priority(issue.priority, config),
             issue.title
         )?;
     }
@@ -351,7 +420,7 @@ fn print_issue_details_text<W: Write>(
         w,
         "{} {}: {}",
         colored_status_icon(issue.status, config),
-        colorize_id(issue.id.as_str()),
+        colorize_id(issue.id.as_str(), config),
         issue.title
     )?;
 
@@ -364,39 +433,39 @@ fn print_issue_details_text<W: Write>(
     writeln!(
         w,
         "{}  {}    {}  {}    {}  {}",
-        "Type:".dimmed(),
+        dimmed("Type:", config),
         type_display,
-        "Status:".dimmed(),
-        colorize_status(issue.status),
-        "Priority:".dimmed(),
-        colorize_priority(issue.priority)
+        dimmed("Status:", config),
+        colorize_status(issue.status, config),
+        dimmed("Priority:", config),
+        colorize_priority(issue.priority, config)
     )?;
 
     // Optional fields
     if let Some(ref assignee) = issue.assignee {
-        writeln!(w, "{} {}", "Assignee:".dimmed(), assignee)?;
+        writeln!(w, "{} {}", dimmed("Assignee:", config), assignee)?;
     }
 
     if !issue.labels.is_empty() {
         writeln!(
             w,
             "{} {}",
-            "Labels:".dimmed(),
-            colorize_labels(&issue.labels)
+            dimmed("Labels:", config),
+            colorize_labels(&issue.labels, config)
         )?;
     }
 
     if let Some(ref ext_ref) = issue.external_ref {
-        writeln!(w, "{} {}", "Ref:".dimmed(), ext_ref)?;
+        writeln!(w, "{} {}", dimmed("Ref:", config), ext_ref)?;
     }
 
     // Timestamps
     writeln!(
         w,
         "{} {}    {} {}",
-        "Created:".dimmed(),
+        dimmed("Created:", config),
         issue.created_at.format("%Y-%m-%d %H:%M"),
-        "Updated:".dimmed(),
+        dimmed("Updated:", config),
         issue.updated_at.format("%Y-%m-%d %H:%M")
     )?;
 
@@ -404,7 +473,7 @@ fn print_issue_details_text<W: Write>(
         writeln!(
             w,
             "{} {}",
-            "Closed:".dimmed(),
+            dimmed("Closed:", config),
             closed_at.format("%Y-%m-%d %H:%M")
         )?;
     }
@@ -424,13 +493,13 @@ fn print_issue_details_text<W: Write>(
     // Dependencies section
     if !deps.is_empty() {
         writeln!(w)?;
-        writeln!(w, "{} ({}):", "Dependencies".bold(), deps.len())?;
+        writeln!(w, "{} ({}):", bold("Dependencies", config), deps.len())?;
         for dep in deps {
             writeln!(
                 w,
                 "  {} {} ({})",
-                "→".cyan(),
-                colorize_id(dep.depends_on_id.as_str()),
+                cyan("→", config),
+                colorize_id(dep.depends_on_id.as_str(), config),
                 dep.dep_type
             )?;
         }
@@ -439,13 +508,13 @@ fn print_issue_details_text<W: Write>(
     // Dependents section
     if !dependents.is_empty() {
         writeln!(w)?;
-        writeln!(w, "{} ({}):", "Dependents".bold(), dependents.len())?;
+        writeln!(w, "{} ({}):", bold("Dependents", config), dependents.len())?;
         for dep in dependents {
             writeln!(
                 w,
                 "  {} {} ({})",
-                "←".yellow(),
-                colorize_id(dep.depends_on_id.as_str()),
+                yellow("←", config),
+                colorize_id(dep.depends_on_id.as_str(), config),
                 dep.dep_type
             )?;
         }
@@ -489,9 +558,9 @@ fn print_blocked_text<W: Write>(
             w,
             "{} {}  {}  {}  {}",
             colored_status_icon(issue.status, config),
-            colorize_id(issue.id.as_str()),
+            colorize_id(issue.id.as_str(), config),
             type_icon(issue.issue_type, config),
-            colorize_priority(issue.priority),
+            colorize_priority(issue.priority, config),
             issue.title
         )?;
 
@@ -500,12 +569,17 @@ fn print_blocked_text<W: Write>(
             .map(|b| {
                 format!(
                     "{} ({})",
-                    colorize_id(b.id.as_str()),
-                    colorize_status(b.status)
+                    colorize_id(b.id.as_str(), config),
+                    colorize_status(b.status, config)
                 )
             })
             .collect();
-        writeln!(w, "  {} {}", "Blocked by:".dimmed(), blocked_by.join(", "))?;
+        writeln!(
+            w,
+            "  {} {}",
+            dimmed("Blocked by:", config),
+            blocked_by.join(", ")
+        )?;
     }
 
     Ok(())
@@ -646,14 +720,15 @@ mod tests {
 
     #[test]
     fn test_colorize_status_contains_ansi_codes() {
-        // Lock mutex to prevent race conditions with other color tests
+        // Use config with colors enabled - no mutex needed
         let _guard = COLOR_TEST_MUTEX.lock().unwrap();
         set_override(true);
 
-        let open = colorize_status(IssueStatus::Open);
-        let in_progress = colorize_status(IssueStatus::InProgress);
-        let blocked = colorize_status(IssueStatus::Blocked);
-        let closed = colorize_status(IssueStatus::Closed);
+        let config = OutputConfig::new(80, false, true);
+        let open = colorize_status(IssueStatus::Open, &config);
+        let in_progress = colorize_status(IssueStatus::InProgress, &config);
+        let blocked = colorize_status(IssueStatus::Blocked, &config);
+        let closed = colorize_status(IssueStatus::Closed, &config);
 
         // All should contain the status text
         assert!(open.contains("open"));
@@ -680,13 +755,31 @@ mod tests {
     }
 
     #[test]
+    fn test_colorize_status_without_colors() {
+        // Test that colors are disabled when use_colors is false
+        let config = OutputConfig::new(80, false, false);
+        let open = colorize_status(IssueStatus::Open, &config);
+        let in_progress = colorize_status(IssueStatus::InProgress, &config);
+
+        // Should contain status text but NO ANSI codes
+        assert!(open.contains("open"));
+        assert!(!open.contains("\x1b["), "Open should NOT have ANSI codes");
+        assert!(in_progress.contains("in_progress"));
+        assert!(
+            !in_progress.contains("\x1b["),
+            "InProgress should NOT have ANSI codes"
+        );
+    }
+
+    #[test]
     fn test_colorize_priority_contains_ansi_codes() {
         let _guard = COLOR_TEST_MUTEX.lock().unwrap();
         set_override(true);
 
-        let p0 = colorize_priority(0);
-        let p1 = colorize_priority(1);
-        let p2 = colorize_priority(2);
+        let config = OutputConfig::new(80, false, true);
+        let p0 = colorize_priority(0, &config);
+        let p1 = colorize_priority(1, &config);
+        let p2 = colorize_priority(2, &config);
 
         // Verify priority text is present
         assert!(p0.contains("P0"));
@@ -703,16 +796,38 @@ mod tests {
     }
 
     #[test]
+    fn test_colorize_priority_without_colors() {
+        let config = OutputConfig::new(80, false, false);
+        let p0 = colorize_priority(0, &config);
+        let p1 = colorize_priority(1, &config);
+
+        // Should contain priority text but NO ANSI codes
+        assert!(p0.contains("P0"));
+        assert!(!p0.contains("\x1b["), "P0 should NOT have ANSI codes");
+        assert!(p1.contains("P1"));
+        assert!(!p1.contains("\x1b["), "P1 should NOT have ANSI codes");
+    }
+
+    #[test]
     fn test_colorize_id_contains_ansi_codes() {
         let _guard = COLOR_TEST_MUTEX.lock().unwrap();
         set_override(true);
 
-        let id = colorize_id("test-123");
+        let config = OutputConfig::new(80, false, true);
+        let id = colorize_id("test-123", &config);
         assert!(id.contains("test-123"));
         // Cyan color adds ANSI codes
         assert!(id.contains("\x1b["), "ID should have ANSI codes");
 
         set_override(false);
+    }
+
+    #[test]
+    fn test_colorize_id_without_colors() {
+        let config = OutputConfig::new(80, false, false);
+        let id = colorize_id("test-123", &config);
+        assert_eq!(id, "test-123");
+        assert!(!id.contains("\x1b["), "ID should NOT have ANSI codes");
     }
 
     #[test]
@@ -729,7 +844,7 @@ mod tests {
     #[test]
     fn test_ascii_fallback_icons() {
         // Test ASCII mode using explicit config (no env var needed)
-        let config = OutputConfig::new(80, true);
+        let config = OutputConfig::new(80, true, true);
 
         assert_eq!(type_icon(IssueType::Task, &config), "-");
         assert_eq!(type_icon(IssueType::Bug, &config), "*");
@@ -738,10 +853,20 @@ mod tests {
         assert_eq!(type_icon(IssueType::Chore, &config), ".");
 
         // Status icons should also be ASCII
-        let open = colored_status_icon(IssueStatus::Open, &config);
-        let closed = colored_status_icon(IssueStatus::Closed, &config);
+        let config_no_color = OutputConfig::new(80, true, false);
+        let open = colored_status_icon(IssueStatus::Open, &config_no_color);
+        let closed = colored_status_icon(IssueStatus::Closed, &config_no_color);
         assert!(open.contains("o"));
         assert!(closed.contains("+"));
+        // With colors disabled, no ANSI codes
+        assert!(
+            !open.contains("\x1b["),
+            "ASCII open should NOT have ANSI codes"
+        );
+        assert!(
+            !closed.contains("\x1b["),
+            "ASCII closed should NOT have ANSI codes"
+        );
     }
 
     #[test]
@@ -749,12 +874,19 @@ mod tests {
         // Lock mutex since we read global env state
         let _guard = COLOR_TEST_MUTEX.lock().unwrap();
 
+        // Clean up any existing env vars
+        env::remove_var("RIVETS_MAX_WIDTH");
+        env::remove_var("RIVETS_ASCII");
+        env::remove_var("NO_COLOR");
+        env::remove_var("RIVETS_COLOR");
+
         // Test that OutputConfig::from_env respects env vars
         env::set_var("RIVETS_MAX_WIDTH", "120");
         env::set_var("RIVETS_ASCII", "1");
         let config = OutputConfig::from_env();
         assert_eq!(config.max_width, 120);
         assert!(config.use_ascii);
+        assert!(config.use_colors); // Colors default to true
 
         env::set_var("RIVETS_MAX_WIDTH", "invalid");
         env::set_var("RIVETS_ASCII", "false");
@@ -762,11 +894,33 @@ mod tests {
         assert_eq!(config.max_width, DEFAULT_MAX_CONTENT_WIDTH);
         assert!(!config.use_ascii);
 
+        // Test NO_COLOR standard
+        env::set_var("NO_COLOR", "1");
+        let config = OutputConfig::from_env();
+        assert!(!config.use_colors, "NO_COLOR should disable colors");
+
+        env::remove_var("NO_COLOR");
+
+        // Test RIVETS_COLOR=0 disables colors
+        env::set_var("RIVETS_COLOR", "0");
+        let config = OutputConfig::from_env();
+        assert!(!config.use_colors, "RIVETS_COLOR=0 should disable colors");
+
+        env::set_var("RIVETS_COLOR", "false");
+        let config = OutputConfig::from_env();
+        assert!(
+            !config.use_colors,
+            "RIVETS_COLOR=false should disable colors"
+        );
+
+        // Clean up
         env::remove_var("RIVETS_MAX_WIDTH");
         env::remove_var("RIVETS_ASCII");
+        env::remove_var("RIVETS_COLOR");
         let config = OutputConfig::from_env();
         assert_eq!(config.max_width, DEFAULT_MAX_CONTENT_WIDTH);
         assert!(!config.use_ascii);
+        assert!(config.use_colors); // Colors default to true
     }
 
     #[test]
