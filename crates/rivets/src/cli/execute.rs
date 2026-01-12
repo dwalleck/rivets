@@ -139,6 +139,9 @@ pub async fn execute_create(
         None => {
             // Interactive mode: prompt for title
             eprint!("Title: ");
+            std::io::stderr()
+                .flush()
+                .context("Failed to flush prompt to stderr")?;
             let mut input = String::new();
             std::io::stdin().read_line(&mut input)?;
             // Apply same validation as CLI argument parsing
@@ -340,7 +343,8 @@ pub async fn execute_update(
 
     if !args.has_updates() {
         anyhow::bail!(
-            "No fields specified to update. Use one or more of:\n  {}",
+            "No fields specified to update. Use one or more of:\n  {}\n\n\
+             Example: rivets update ISSUE-ID --title 'New title' --priority 1",
             UpdateArgs::available_flags_help()
         );
     }
@@ -420,7 +424,8 @@ async fn save_or_record_failure(
                         "Failed to reload after save error - state may be inconsistent"
                     );
                     format!(
-                        "Save failed: {} (reload also failed: {} - state may be inconsistent)",
+                        "Save failed: {} (reload also failed: {} - state may be inconsistent. \
+                         Run 'rivets list' to verify current state)",
                         save_err, reload_err
                     )
                 } else {
@@ -523,6 +528,17 @@ async fn get_issue_for_batch_op(
 }
 
 /// Validate that an issue can transition to a target status.
+///
+/// # Valid Transitions
+///
+/// - Any non-closed status → Closed (close operation)
+/// - Closed → Open (reopen operation)
+/// - Any other transition is allowed by default
+///
+/// # Invalid Transitions
+///
+/// - Closed → Closed: Cannot close an already closed issue
+/// - Open/InProgress/Blocked → Open: Cannot reopen a non-closed issue
 ///
 /// Returns `Ok(())` if the transition is valid, or an error message describing why not.
 fn validate_status_transition(
@@ -700,6 +716,9 @@ pub async fn execute_delete(
     // Confirm deletion unless --force is used
     if !args.force {
         eprint!("Delete issue '{}' ({})? [y/N]: ", issue.id, issue.title);
+        std::io::stderr()
+            .flush()
+            .context("Failed to flush prompt to stderr")?;
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
         let response = input.trim().to_lowercase();
