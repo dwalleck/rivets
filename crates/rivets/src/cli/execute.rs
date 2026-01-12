@@ -4,7 +4,7 @@
 
 use std::io::Write;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use colored::Colorize;
 
 use super::args::{
@@ -27,7 +27,9 @@ pub async fn execute_init(args: &InitArgs) -> Result<()> {
         None if !args.quiet => {
             // Interactive mode: prompt for prefix
             eprint!("Issue ID prefix (e.g., 'myproj' for 'myproj-abc'): ");
-            std::io::stderr().flush()?;
+            std::io::stderr()
+                .flush()
+                .context("Failed to flush prompt to stderr")?;
             let mut input = String::new();
             std::io::stdin().read_line(&mut input)?;
             let trimmed = input.trim();
@@ -409,15 +411,24 @@ async fn save_or_record_failure(
     match storage_result {
         Ok(issue) => {
             if let Err(save_err) = app.save().await {
-                if let Err(reload_err) = app.storage_mut().reload().await {
+                // Try to reload to restore consistent state
+                let error_msg = if let Err(reload_err) = app.storage_mut().reload().await {
                     tracing::warn!(
-                        error = %reload_err,
-                        "Failed to reload after save error"
+                        save_error = %save_err,
+                        reload_error = %reload_err,
+                        issue_id = %issue_id,
+                        "Failed to reload after save error - state may be inconsistent"
                     );
-                }
+                    format!(
+                        "Save failed: {} (reload also failed: {} - state may be inconsistent)",
+                        save_err, reload_err
+                    )
+                } else {
+                    format!("Save failed: {}", save_err)
+                };
                 result.failed.push(BatchError {
                     issue_id: issue_id.to_string(),
-                    error: format!("Save failed: {}", save_err),
+                    error: error_msg,
                 });
             } else {
                 result.succeeded.push(issue);
@@ -511,6 +522,29 @@ async fn get_issue_for_batch_op(
     }
 }
 
+/// Validate that an issue can transition to a target status.
+///
+/// Returns `Ok(())` if the transition is valid, or an error message describing why not.
+fn validate_status_transition(
+    current: crate::domain::IssueStatus,
+    target: crate::domain::IssueStatus,
+) -> Result<(), String> {
+    use crate::domain::IssueStatus;
+
+    match (current, target) {
+        // Close: must not already be closed
+        (IssueStatus::Closed, IssueStatus::Closed) => {
+            Err(format!("Issue is already closed (status: {})", current))
+        }
+        // Reopen: must be closed
+        (status, IssueStatus::Open) if status != IssueStatus::Closed => {
+            Err(format!("Issue is not closed (status: {})", current))
+        }
+        // Valid transitions
+        _ => Ok(()),
+    }
+}
+
 /// Execute the close command
 ///
 /// # Batch Processing
@@ -535,11 +569,11 @@ pub async fn execute_close(
             continue;
         };
 
-        // Check if already closed
-        if existing.status == IssueStatus::Closed {
+        // Validate status transition
+        if let Err(err) = validate_status_transition(existing.status, IssueStatus::Closed) {
             result.failed.push(BatchError {
                 issue_id: id_str.clone(),
-                error: format!("Issue is already closed (status: {})", existing.status),
+                error: err,
             });
             continue;
         }
@@ -602,11 +636,11 @@ pub async fn execute_reopen(
             continue;
         };
 
-        // Check if already open (not closed)
-        if existing.status != IssueStatus::Closed {
+        // Validate status transition
+        if let Err(err) = validate_status_transition(existing.status, IssueStatus::Open) {
             result.failed.push(BatchError {
                 issue_id: id_str.clone(),
-                error: format!("Issue is not closed (status: {})", existing.status),
+                error: err,
             });
             continue;
         }
