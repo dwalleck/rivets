@@ -32,7 +32,7 @@ pub struct CreateArgs {
     /// Issue title (required, or prompted interactively)
     ///
     /// Short description of the issue. Will be prompted if not provided.
-    /// Maximum 200 characters.
+    /// Maximum length defined by `MAX_TITLE_LENGTH` (currently 200 characters).
     #[arg(long, value_parser = validate_title)]
     pub title: Option<String>,
 
@@ -130,7 +130,7 @@ pub struct UpdateArgs {
     #[arg(required = true, value_parser = validate_issue_id)]
     pub issue_ids: Vec<String>,
 
-    /// New title (maximum 200 characters)
+    /// New title (maximum length: `MAX_TITLE_LENGTH`)
     #[arg(long, value_parser = validate_title)]
     pub title: Option<String>,
 
@@ -421,4 +421,217 @@ pub enum LabelAction {
 
     /// List all labels used across all issues
     ListAll,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod update_args_has_updates_tests {
+        use super::*;
+
+        fn create_empty_update_args() -> UpdateArgs {
+            UpdateArgs {
+                issue_ids: vec!["test-abc".to_string()],
+                title: None,
+                description: None,
+                status: None,
+                priority: None,
+                assignee: None,
+                no_assignee: false,
+                design: None,
+                acceptance: None,
+                notes: None,
+                external_ref: None,
+            }
+        }
+
+        #[test]
+        fn test_has_updates_returns_false_when_all_fields_none() {
+            let args = create_empty_update_args();
+            assert!(!args.has_updates());
+        }
+
+        #[test]
+        fn test_has_updates_title() {
+            let mut args = create_empty_update_args();
+            args.title = Some("New title".to_string());
+            assert!(args.has_updates());
+        }
+
+        #[test]
+        fn test_has_updates_description() {
+            let mut args = create_empty_update_args();
+            args.description = Some("New description".to_string());
+            assert!(args.has_updates());
+        }
+
+        #[test]
+        fn test_has_updates_status() {
+            let mut args = create_empty_update_args();
+            args.status = Some(IssueStatusArg::InProgress);
+            assert!(args.has_updates());
+        }
+
+        #[test]
+        fn test_has_updates_priority() {
+            let mut args = create_empty_update_args();
+            args.priority = Some(1);
+            assert!(args.has_updates());
+        }
+
+        #[test]
+        fn test_has_updates_assignee() {
+            let mut args = create_empty_update_args();
+            args.assignee = Some("user@example.com".to_string());
+            assert!(args.has_updates());
+        }
+
+        #[test]
+        fn test_has_updates_no_assignee_flag() {
+            let mut args = create_empty_update_args();
+            args.no_assignee = true;
+            assert!(args.has_updates());
+        }
+
+        #[test]
+        fn test_has_updates_design() {
+            let mut args = create_empty_update_args();
+            args.design = Some("Design notes".to_string());
+            assert!(args.has_updates());
+        }
+
+        #[test]
+        fn test_has_updates_acceptance() {
+            let mut args = create_empty_update_args();
+            args.acceptance = Some("Acceptance criteria".to_string());
+            assert!(args.has_updates());
+        }
+
+        #[test]
+        fn test_has_updates_notes() {
+            let mut args = create_empty_update_args();
+            args.notes = Some("Notes".to_string());
+            assert!(args.has_updates());
+        }
+
+        #[test]
+        fn test_has_updates_external_ref() {
+            let mut args = create_empty_update_args();
+            args.external_ref = Some("https://example.com/issue".to_string());
+            assert!(args.has_updates());
+        }
+
+        #[test]
+        fn test_has_updates_multiple_fields() {
+            let mut args = create_empty_update_args();
+            args.title = Some("New title".to_string());
+            args.priority = Some(1);
+            args.notes = Some("Notes".to_string());
+            assert!(args.has_updates());
+        }
+    }
+
+    mod available_flags_help_tests {
+        use super::*;
+
+        #[test]
+        fn test_contains_expected_flags() {
+            let help = UpdateArgs::available_flags_help();
+
+            // Verify all expected flags are present
+            let expected_flags = [
+                "--title",
+                "--description",
+                "--status",
+                "--priority",
+                "--assignee",
+                "--no-assignee",
+                "--design",
+                "--acceptance",
+                "--notes",
+                "--external-ref",
+            ];
+
+            for flag in expected_flags {
+                assert!(
+                    help.contains(flag),
+                    "Expected flag '{}' not found in help: {}",
+                    flag,
+                    help
+                );
+            }
+        }
+
+        #[test]
+        fn test_contains_short_flags_where_defined() {
+            let help = UpdateArgs::available_flags_help();
+
+            // These flags have short versions defined in the struct
+            assert!(
+                help.contains("(-D)"),
+                "Expected short flag -D for description, got: {}",
+                help
+            );
+            assert!(
+                help.contains("(-s)"),
+                "Expected short flag -s for status, got: {}",
+                help
+            );
+            assert!(
+                help.contains("(-p)"),
+                "Expected short flag -p for priority, got: {}",
+                help
+            );
+            assert!(
+                help.contains("(-a)"),
+                "Expected short flag -a for assignee, got: {}",
+                help
+            );
+        }
+
+        #[test]
+        fn test_excludes_positional_and_meta_args() {
+            let help = UpdateArgs::available_flags_help();
+
+            // Should not contain help/version or positional args
+            assert!(
+                !help.contains("--help"),
+                "Should not contain --help: {}",
+                help
+            );
+            assert!(
+                !help.contains("--version"),
+                "Should not contain --version: {}",
+                help
+            );
+            // issue_ids is positional, should not appear
+            assert!(
+                !help.contains("issue_ids"),
+                "Should not contain positional arg: {}",
+                help
+            );
+        }
+
+        #[test]
+        fn test_format_is_comma_separated() {
+            let help = UpdateArgs::available_flags_help();
+
+            // Should be comma-separated
+            assert!(
+                help.contains(", "),
+                "Expected comma-separated format: {}",
+                help
+            );
+
+            // Count commas to verify multiple flags
+            let comma_count = help.matches(", ").count();
+            assert!(
+                comma_count >= 5,
+                "Expected at least 5 commas (6+ flags), got {}: {}",
+                comma_count,
+                help
+            );
+        }
+    }
 }

@@ -48,14 +48,35 @@ impl OutputConfig {
     /// - `NO_COLOR`: Standard env var to disable colors (any value disables colors)
     /// - `RIVETS_COLOR`: Set to "0" or "false" to disable colors (default: true)
     pub fn from_env() -> Self {
-        let max_width = env::var("RIVETS_MAX_WIDTH")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_MAX_CONTENT_WIDTH);
+        let max_width = match env::var("RIVETS_MAX_WIDTH") {
+            Ok(s) if !s.is_empty() => match s.parse() {
+                Ok(width) => width,
+                Err(_) => {
+                    tracing::warn!(
+                        env_var = "RIVETS_MAX_WIDTH",
+                        value = %s,
+                        default = DEFAULT_MAX_CONTENT_WIDTH,
+                        "Invalid value, using default"
+                    );
+                    DEFAULT_MAX_CONTENT_WIDTH
+                }
+            },
+            _ => DEFAULT_MAX_CONTENT_WIDTH,
+        };
 
-        let use_ascii = env::var("RIVETS_ASCII")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+        let use_ascii = match env::var("RIVETS_ASCII") {
+            Ok(v) if v == "1" || v.eq_ignore_ascii_case("true") => true,
+            Ok(v) if v == "0" || v.eq_ignore_ascii_case("false") || v.is_empty() => false,
+            Ok(v) => {
+                tracing::warn!(
+                    env_var = "RIVETS_ASCII",
+                    value = %v,
+                    "Invalid value (expected '1', 'true', '0', or 'false'), using default"
+                );
+                false
+            }
+            Err(_) => false,
+        };
 
         // Respect NO_COLOR standard (https://no-color.org/)
         // Also support RIVETS_COLOR for explicit control
@@ -243,10 +264,10 @@ fn print_text_section<W: Write>(
         return Ok(());
     }
     writeln!(w)?;
-    if config.use_ascii {
-        writeln!(w, "{}:", title)?;
-    } else {
+    if config.use_colors {
         writeln!(w, "{}:", title.bold())?;
+    } else {
+        writeln!(w, "{}:", title)?;
     }
     for line in wrap_text(content, width.saturating_sub(2)) {
         writeln!(w, "  {line}")?;
@@ -653,10 +674,53 @@ mod tests {
     use chrono::Utc;
     use colored::control::set_override;
     use std::env;
-    use std::sync::Mutex;
+    use std::sync::{Mutex, MutexGuard};
 
-    // Mutex to prevent color tests from running in parallel (set_override is global state)
-    static COLOR_TEST_MUTEX: Mutex<()> = Mutex::new(());
+    // Mutex to protect global state in tests:
+    // - colored crate's set_override() is process-global
+    // - Environment variables are process-global
+    // Tests modifying either must hold this mutex.
+    static GLOBAL_STATE_MUTEX: Mutex<()> = Mutex::new(());
+
+    /// RAII guard that enables colors via set_override and resets on drop.
+    /// Holds the mutex guard to prevent parallel color tests.
+    struct ColorGuard<'a> {
+        _guard: MutexGuard<'a, ()>,
+    }
+
+    impl<'a> ColorGuard<'a> {
+        fn new() -> Self {
+            let guard = GLOBAL_STATE_MUTEX.lock().unwrap();
+            set_override(true);
+            Self { _guard: guard }
+        }
+    }
+
+    impl Drop for ColorGuard<'_> {
+        fn drop(&mut self) {
+            set_override(false);
+        }
+    }
+
+    /// Helper for tests that need colors enabled.
+    /// Acquires mutex, enables colors, runs closure, then disables colors.
+    fn with_colors_enabled<F, R>(f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        let _guard = ColorGuard::new();
+        f()
+    }
+
+    /// Helper for tests that modify environment variables.
+    /// Acquires mutex to prevent parallel env var modifications.
+    fn with_env_lock<F, R>(f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        let _guard = GLOBAL_STATE_MUTEX.lock().unwrap();
+        f()
+    }
 
     fn test_issue() -> Issue {
         Issue {
@@ -720,38 +784,34 @@ mod tests {
 
     #[test]
     fn test_colorize_status_contains_ansi_codes() {
-        // Use config with colors enabled - no mutex needed
-        let _guard = COLOR_TEST_MUTEX.lock().unwrap();
-        set_override(true);
+        with_colors_enabled(|| {
+            let config = OutputConfig::new(80, false, true);
+            let open = colorize_status(IssueStatus::Open, &config);
+            let in_progress = colorize_status(IssueStatus::InProgress, &config);
+            let blocked = colorize_status(IssueStatus::Blocked, &config);
+            let closed = colorize_status(IssueStatus::Closed, &config);
 
-        let config = OutputConfig::new(80, false, true);
-        let open = colorize_status(IssueStatus::Open, &config);
-        let in_progress = colorize_status(IssueStatus::InProgress, &config);
-        let blocked = colorize_status(IssueStatus::Blocked, &config);
-        let closed = colorize_status(IssueStatus::Closed, &config);
+            // All should contain the status text
+            assert!(open.contains("open"));
+            assert!(in_progress.contains("in_progress"));
+            assert!(blocked.contains("blocked"));
+            assert!(closed.contains("closed"));
 
-        // All should contain the status text
-        assert!(open.contains("open"));
-        assert!(in_progress.contains("in_progress"));
-        assert!(blocked.contains("blocked"));
-        assert!(closed.contains("closed"));
-
-        // All should contain ANSI escape codes (\x1b[)
-        assert!(open.contains("\x1b["), "Open status should have ANSI codes");
-        assert!(
-            in_progress.contains("\x1b["),
-            "InProgress status should have ANSI codes"
-        );
-        assert!(
-            blocked.contains("\x1b["),
-            "Blocked status should have ANSI codes"
-        );
-        assert!(
-            closed.contains("\x1b["),
-            "Closed status should have ANSI codes"
-        );
-
-        set_override(false);
+            // All should contain ANSI escape codes (\x1b[)
+            assert!(open.contains("\x1b["), "Open status should have ANSI codes");
+            assert!(
+                in_progress.contains("\x1b["),
+                "InProgress status should have ANSI codes"
+            );
+            assert!(
+                blocked.contains("\x1b["),
+                "Blocked status should have ANSI codes"
+            );
+            assert!(
+                closed.contains("\x1b["),
+                "Closed status should have ANSI codes"
+            );
+        });
     }
 
     #[test]
@@ -773,26 +833,23 @@ mod tests {
 
     #[test]
     fn test_colorize_priority_contains_ansi_codes() {
-        let _guard = COLOR_TEST_MUTEX.lock().unwrap();
-        set_override(true);
+        with_colors_enabled(|| {
+            let config = OutputConfig::new(80, false, true);
+            let p0 = colorize_priority(0, &config);
+            let p1 = colorize_priority(1, &config);
+            let p2 = colorize_priority(2, &config);
 
-        let config = OutputConfig::new(80, false, true);
-        let p0 = colorize_priority(0, &config);
-        let p1 = colorize_priority(1, &config);
-        let p2 = colorize_priority(2, &config);
+            // Verify priority text is present
+            assert!(p0.contains("P0"));
+            assert!(p1.contains("P1"));
+            assert!(p2.contains("P2"));
 
-        // Verify priority text is present
-        assert!(p0.contains("P0"));
-        assert!(p1.contains("P1"));
-        assert!(p2.contains("P2"));
-
-        // P0 (bold+red) and P1 (yellow) should have ANSI codes
-        assert!(p0.contains("\x1b["), "P0 should have ANSI codes");
-        assert!(p1.contains("\x1b["), "P1 should have ANSI codes");
-        // P2 and higher have no color styling
-        assert!(!p2.contains("\x1b["), "P2 should not have ANSI codes");
-
-        set_override(false);
+            // P0 (bold+red) and P1 (yellow) should have ANSI codes
+            assert!(p0.contains("\x1b["), "P0 should have ANSI codes");
+            assert!(p1.contains("\x1b["), "P1 should have ANSI codes");
+            // P2 and higher have no color styling
+            assert!(!p2.contains("\x1b["), "P2 should not have ANSI codes");
+        });
     }
 
     #[test]
@@ -810,16 +867,13 @@ mod tests {
 
     #[test]
     fn test_colorize_id_contains_ansi_codes() {
-        let _guard = COLOR_TEST_MUTEX.lock().unwrap();
-        set_override(true);
-
-        let config = OutputConfig::new(80, false, true);
-        let id = colorize_id("test-123", &config);
-        assert!(id.contains("test-123"));
-        // Cyan color adds ANSI codes
-        assert!(id.contains("\x1b["), "ID should have ANSI codes");
-
-        set_override(false);
+        with_colors_enabled(|| {
+            let config = OutputConfig::new(80, false, true);
+            let id = colorize_id("test-123", &config);
+            assert!(id.contains("test-123"));
+            // Cyan color adds ANSI codes
+            assert!(id.contains("\x1b["), "ID should have ANSI codes");
+        });
     }
 
     #[test]
@@ -871,56 +925,55 @@ mod tests {
 
     #[test]
     fn test_output_config_from_env() {
-        // Lock mutex since we read global env state
-        let _guard = COLOR_TEST_MUTEX.lock().unwrap();
+        with_env_lock(|| {
+            // Clean up any existing env vars
+            env::remove_var("RIVETS_MAX_WIDTH");
+            env::remove_var("RIVETS_ASCII");
+            env::remove_var("NO_COLOR");
+            env::remove_var("RIVETS_COLOR");
 
-        // Clean up any existing env vars
-        env::remove_var("RIVETS_MAX_WIDTH");
-        env::remove_var("RIVETS_ASCII");
-        env::remove_var("NO_COLOR");
-        env::remove_var("RIVETS_COLOR");
+            // Test that OutputConfig::from_env respects env vars
+            env::set_var("RIVETS_MAX_WIDTH", "120");
+            env::set_var("RIVETS_ASCII", "1");
+            let config = OutputConfig::from_env();
+            assert_eq!(config.max_width, 120);
+            assert!(config.use_ascii);
+            assert!(config.use_colors); // Colors default to true
 
-        // Test that OutputConfig::from_env respects env vars
-        env::set_var("RIVETS_MAX_WIDTH", "120");
-        env::set_var("RIVETS_ASCII", "1");
-        let config = OutputConfig::from_env();
-        assert_eq!(config.max_width, 120);
-        assert!(config.use_ascii);
-        assert!(config.use_colors); // Colors default to true
+            env::set_var("RIVETS_MAX_WIDTH", "invalid");
+            env::set_var("RIVETS_ASCII", "false");
+            let config = OutputConfig::from_env();
+            assert_eq!(config.max_width, DEFAULT_MAX_CONTENT_WIDTH);
+            assert!(!config.use_ascii);
 
-        env::set_var("RIVETS_MAX_WIDTH", "invalid");
-        env::set_var("RIVETS_ASCII", "false");
-        let config = OutputConfig::from_env();
-        assert_eq!(config.max_width, DEFAULT_MAX_CONTENT_WIDTH);
-        assert!(!config.use_ascii);
+            // Test NO_COLOR standard
+            env::set_var("NO_COLOR", "1");
+            let config = OutputConfig::from_env();
+            assert!(!config.use_colors, "NO_COLOR should disable colors");
 
-        // Test NO_COLOR standard
-        env::set_var("NO_COLOR", "1");
-        let config = OutputConfig::from_env();
-        assert!(!config.use_colors, "NO_COLOR should disable colors");
+            env::remove_var("NO_COLOR");
 
-        env::remove_var("NO_COLOR");
+            // Test RIVETS_COLOR=0 disables colors
+            env::set_var("RIVETS_COLOR", "0");
+            let config = OutputConfig::from_env();
+            assert!(!config.use_colors, "RIVETS_COLOR=0 should disable colors");
 
-        // Test RIVETS_COLOR=0 disables colors
-        env::set_var("RIVETS_COLOR", "0");
-        let config = OutputConfig::from_env();
-        assert!(!config.use_colors, "RIVETS_COLOR=0 should disable colors");
+            env::set_var("RIVETS_COLOR", "false");
+            let config = OutputConfig::from_env();
+            assert!(
+                !config.use_colors,
+                "RIVETS_COLOR=false should disable colors"
+            );
 
-        env::set_var("RIVETS_COLOR", "false");
-        let config = OutputConfig::from_env();
-        assert!(
-            !config.use_colors,
-            "RIVETS_COLOR=false should disable colors"
-        );
-
-        // Clean up
-        env::remove_var("RIVETS_MAX_WIDTH");
-        env::remove_var("RIVETS_ASCII");
-        env::remove_var("RIVETS_COLOR");
-        let config = OutputConfig::from_env();
-        assert_eq!(config.max_width, DEFAULT_MAX_CONTENT_WIDTH);
-        assert!(!config.use_ascii);
-        assert!(config.use_colors); // Colors default to true
+            // Clean up
+            env::remove_var("RIVETS_MAX_WIDTH");
+            env::remove_var("RIVETS_ASCII");
+            env::remove_var("RIVETS_COLOR");
+            let config = OutputConfig::from_env();
+            assert_eq!(config.max_width, DEFAULT_MAX_CONTENT_WIDTH);
+            assert!(!config.use_ascii);
+            assert!(config.use_colors); // Colors default to true
+        });
     }
 
     #[test]
@@ -986,7 +1039,9 @@ mod tests {
 
     #[test]
     fn test_print_text_section_skips_empty_content() {
-        let config = OutputConfig::default();
+        // Use explicit config with colors disabled to avoid race conditions
+        // with colored crate's global state in parallel tests
+        let config = OutputConfig::new(80, false, false);
         let mut buffer = Vec::new();
 
         // Empty content should produce no output
@@ -1002,7 +1057,9 @@ mod tests {
 
     #[test]
     fn test_print_optional_section_handles_none() {
-        let config = OutputConfig::default();
+        // Use explicit config with colors disabled to avoid race conditions
+        // with colored crate's global state in parallel tests
+        let config = OutputConfig::new(80, false, false);
         let mut buffer = Vec::new();
 
         // None should produce no output

@@ -31,7 +31,9 @@ pub async fn execute_init(args: &InitArgs) -> Result<()> {
                 .flush()
                 .context("Failed to flush prompt to stderr")?;
             let mut input = String::new();
-            std::io::stdin().read_line(&mut input)?;
+            std::io::stdin()
+                .read_line(&mut input)
+                .context("Failed to read prefix from stdin")?;
             let trimmed = input.trim();
             if trimmed.is_empty() {
                 None // Use default prefix
@@ -74,7 +76,7 @@ pub async fn execute_info(
     _args: &InfoArgs,
     output_mode: OutputMode,
 ) -> Result<()> {
-    use crate::domain::{IssueFilter, IssueStatus};
+    use crate::domain::IssueFilter;
     use crate::output;
 
     let rivets_dir = app.rivets_dir();
@@ -83,15 +85,7 @@ pub async fn execute_info(
 
     // Get issue counts in a single pass
     let all_issues = app.storage().list(&IssueFilter::default()).await?;
-    let (total, open, in_progress, blocked, closed) = all_issues.iter().fold(
-        (0, 0, 0, 0, 0),
-        |(total, open, in_progress, blocked, closed), issue| match issue.status {
-            IssueStatus::Open => (total + 1, open + 1, in_progress, blocked, closed),
-            IssueStatus::InProgress => (total + 1, open, in_progress + 1, blocked, closed),
-            IssueStatus::Blocked => (total + 1, open, in_progress, blocked + 1, closed),
-            IssueStatus::Closed => (total + 1, open, in_progress, blocked, closed + 1),
-        },
-    );
+    let counts = count_by_status(&all_issues);
 
     match output_mode {
         output::OutputMode::Json => {
@@ -99,11 +93,11 @@ pub async fn execute_info(
                 "database_path": database_path.display().to_string(),
                 "issue_prefix": issue_prefix,
                 "issues": {
-                    "total": total,
-                    "open": open,
-                    "in_progress": in_progress,
-                    "blocked": blocked,
-                    "closed": closed
+                    "total": counts.total,
+                    "open": counts.open,
+                    "in_progress": counts.in_progress,
+                    "blocked": counts.blocked,
+                    "closed": counts.closed
                 }
             }))?;
         }
@@ -116,7 +110,7 @@ pub async fn execute_info(
             println!();
             println!(
                 "Issues: {} total ({} open, {} in progress, {} blocked, {} closed)",
-                total, open, in_progress, blocked, closed
+                counts.total, counts.open, counts.in_progress, counts.blocked, counts.closed
             );
         }
     }
@@ -143,7 +137,9 @@ pub async fn execute_create(
                 .flush()
                 .context("Failed to flush prompt to stderr")?;
             let mut input = String::new();
-            std::io::stdin().read_line(&mut input)?;
+            std::io::stdin()
+                .read_line(&mut input)
+                .context("Failed to read title from stdin")?;
             // Apply same validation as CLI argument parsing
             super::validators::validate_title(input.trim()).map_err(|e| anyhow::anyhow!("{}", e))?
         }
@@ -376,19 +372,8 @@ pub async fn execute_update(
         save_or_record_failure(app, &mut result, id_str, storage_result).await;
     }
 
-    // Output results
     output_batch_result(&result, "Updated", output_mode)?;
-
-    // Return error if any failures occurred
-    if result.has_failures() {
-        anyhow::bail!(
-            "{} of {} update(s) failed",
-            result.failed.len(),
-            result.total()
-        );
-    }
-
-    Ok(())
+    bail_on_batch_failures(&result, "update")
 }
 
 /// Handle save-or-record-failure for batch operations.
@@ -417,7 +402,7 @@ async fn save_or_record_failure(
             if let Err(save_err) = app.save().await {
                 // Try to reload to restore consistent state
                 let error_msg = if let Err(reload_err) = app.storage_mut().reload().await {
-                    tracing::warn!(
+                    tracing::error!(
                         save_error = %save_err,
                         reload_error = %reload_err,
                         issue_id = %issue_id,
@@ -494,6 +479,59 @@ fn append_note(existing: Option<&str>, new_note: &str) -> String {
         Some(notes) if !notes.is_empty() => format!("{}\n\n{}", notes, new_note),
         _ => new_note.to_string(),
     }
+}
+
+/// Build a reason note for close/reopen operations.
+///
+/// If a reason is provided, formats it with the given prefix (e.g., "Closed" or "Reopened")
+/// and appends it to existing notes. Returns None if no reason provided.
+fn build_reason_note(
+    existing_notes: Option<&str>,
+    reason: Option<&str>,
+    prefix: &str,
+) -> Option<String> {
+    reason.map(|r| append_note(existing_notes, &format!("{}: {}", prefix, r)))
+}
+
+/// Return an error if a batch operation had any failures.
+fn bail_on_batch_failures(result: &super::types::BatchResult, action: &str) -> Result<()> {
+    if result.has_failures() {
+        anyhow::bail!(
+            "{} of {} {}(s) failed",
+            result.failed.len(),
+            result.total(),
+            action
+        );
+    }
+    Ok(())
+}
+
+/// Issue counts grouped by status.
+#[derive(Default)]
+struct StatusCounts {
+    total: usize,
+    open: usize,
+    in_progress: usize,
+    blocked: usize,
+    closed: usize,
+}
+
+/// Count issues by status in a single pass.
+fn count_by_status(issues: &[crate::domain::Issue]) -> StatusCounts {
+    use crate::domain::IssueStatus;
+
+    issues
+        .iter()
+        .fold(StatusCounts::default(), |mut counts, issue| {
+            counts.total += 1;
+            match issue.status {
+                IssueStatus::Open => counts.open += 1,
+                IssueStatus::InProgress => counts.in_progress += 1,
+                IssueStatus::Blocked => counts.blocked += 1,
+                IssueStatus::Closed => counts.closed += 1,
+            }
+            counts
+        })
 }
 
 /// Fetch an issue for a batch operation, recording failures if not found.
@@ -594,18 +632,10 @@ pub async fn execute_close(
             continue;
         }
 
-        // Build updated notes: append close reason if provided
-        let new_notes = if let Some(reason) = &args.reason {
-            let close_note = format!("Closed: {}", reason);
-            Some(append_note(existing.notes.as_deref(), &close_note))
-        } else {
-            None
-        };
-
         let issue_id = IssueId::new(id_str);
         let update = IssueUpdate {
             status: Some(IssueStatus::Closed),
-            notes: new_notes,
+            notes: build_reason_note(existing.notes.as_deref(), args.reason.as_deref(), "Closed"),
             ..Default::default()
         };
 
@@ -613,19 +643,8 @@ pub async fn execute_close(
         save_or_record_failure(app, &mut result, id_str, storage_result).await;
     }
 
-    // Output results
     output_batch_result(&result, "Closed", output_mode)?;
-
-    // Return error if any failures occurred
-    if result.has_failures() {
-        anyhow::bail!(
-            "{} of {} close(s) failed",
-            result.failed.len(),
-            result.total()
-        );
-    }
-
-    Ok(())
+    bail_on_batch_failures(&result, "close")
 }
 
 /// Execute the reopen command
@@ -661,18 +680,14 @@ pub async fn execute_reopen(
             continue;
         }
 
-        // Build updated notes: append reopen reason if provided
-        let new_notes = if let Some(reason) = &args.reason {
-            let reopen_note = format!("Reopened: {}", reason);
-            Some(append_note(existing.notes.as_deref(), &reopen_note))
-        } else {
-            None
-        };
-
         let issue_id = IssueId::new(id_str);
         let update = IssueUpdate {
             status: Some(IssueStatus::Open),
-            notes: new_notes,
+            notes: build_reason_note(
+                existing.notes.as_deref(),
+                args.reason.as_deref(),
+                "Reopened",
+            ),
             ..Default::default()
         };
 
@@ -680,19 +695,8 @@ pub async fn execute_reopen(
         save_or_record_failure(app, &mut result, id_str, storage_result).await;
     }
 
-    // Output results
     output_batch_result(&result, "Reopened", output_mode)?;
-
-    // Return error if any failures occurred
-    if result.has_failures() {
-        anyhow::bail!(
-            "{} of {} reopen(s) failed",
-            result.failed.len(),
-            result.total()
-        );
-    }
-
-    Ok(())
+    bail_on_batch_failures(&result, "reopen")
 }
 
 /// Execute the delete command
@@ -720,7 +724,9 @@ pub async fn execute_delete(
             .flush()
             .context("Failed to flush prompt to stderr")?;
         let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
+        std::io::stdin()
+            .read_line(&mut input)
+            .context("Failed to read confirmation from stdin")?;
         let response = input.trim().to_lowercase();
         if response != "y" && response != "yes" {
             println!("Deletion cancelled.");
@@ -1096,15 +1102,7 @@ async fn execute_label_add(
         }
     }
 
-    if result.has_failures() {
-        anyhow::bail!(
-            "{} of {} label add(s) failed",
-            result.failed.len(),
-            result.total()
-        );
-    }
-
-    Ok(())
+    bail_on_batch_failures(&result, "label add")
 }
 
 /// Remove a label from one or more issues.
@@ -1155,15 +1153,7 @@ async fn execute_label_remove(
         }
     }
 
-    if result.has_failures() {
-        anyhow::bail!(
-            "{} of {} label remove(s) failed",
-            result.failed.len(),
-            result.total()
-        );
-    }
-
-    Ok(())
+    bail_on_batch_failures(&result, "label remove")
 }
 
 /// List labels for a specific issue.
@@ -1352,30 +1342,12 @@ pub async fn execute_stats(
     args: &StatsArgs,
     output_mode: OutputMode,
 ) -> Result<()> {
-    use crate::domain::{IssueFilter, IssueStatus};
+    use crate::domain::IssueFilter;
     use crate::output;
 
-    // Get all issues
+    // Get all issues and count by status
     let all_issues = app.storage().list(&IssueFilter::default()).await?;
-
-    // Calculate statistics
-    let total = all_issues.len();
-    let open = all_issues
-        .iter()
-        .filter(|i| i.status == IssueStatus::Open)
-        .count();
-    let in_progress = all_issues
-        .iter()
-        .filter(|i| i.status == IssueStatus::InProgress)
-        .count();
-    let blocked = all_issues
-        .iter()
-        .filter(|i| i.status == IssueStatus::Blocked)
-        .count();
-    let closed = all_issues
-        .iter()
-        .filter(|i| i.status == IssueStatus::Closed)
-        .count();
+    let counts = count_by_status(&all_issues);
 
     // Ready issues (not blocked by dependencies)
     let ready = app.storage().ready_to_work(None, None).await?.len();
@@ -1386,12 +1358,12 @@ pub async fn execute_stats(
     match output_mode {
         output::OutputMode::Json => {
             let mut stats = serde_json::json!({
-                "total": total,
+                "total": counts.total,
                 "by_status": {
-                    "open": open,
-                    "in_progress": in_progress,
-                    "blocked": blocked,
-                    "closed": closed
+                    "open": counts.open,
+                    "in_progress": counts.in_progress,
+                    "blocked": counts.blocked,
+                    "closed": counts.closed
                 },
                 "ready": ready,
                 "blocked_by_dependencies": blocked_by_deps
@@ -1418,13 +1390,13 @@ pub async fn execute_stats(
             println!("Project Statistics");
             println!("==================");
             println!();
-            println!("Total Issues:  {}", total);
+            println!("Total Issues:  {}", counts.total);
             println!();
             println!("By Status:");
-            println!("  Open:        {}", open);
-            println!("  In Progress: {}", in_progress);
-            println!("  Blocked:     {}", blocked);
-            println!("  Closed:      {}", closed);
+            println!("  Open:        {}", counts.open);
+            println!("  In Progress: {}", counts.in_progress);
+            println!("  Blocked:     {}", counts.blocked);
+            println!("  Closed:      {}", counts.closed);
             println!();
             println!("Ready to Work: {}", ready);
             println!("Blocked by Dependencies: {}", blocked_by_deps);
@@ -1692,6 +1664,274 @@ mod tests {
             assert_eq!(
                 result,
                 "Closed: Fixed the bug\n\nReopened: Bug still present"
+            );
+        }
+    }
+
+    mod validate_status_transition_tests {
+        use super::super::validate_status_transition;
+        use crate::domain::IssueStatus;
+        use rstest::rstest;
+
+        #[rstest]
+        #[case::open_to_closed(IssueStatus::Open, IssueStatus::Closed, true)]
+        #[case::in_progress_to_closed(IssueStatus::InProgress, IssueStatus::Closed, true)]
+        #[case::blocked_to_closed(IssueStatus::Blocked, IssueStatus::Closed, true)]
+        #[case::closed_to_closed(IssueStatus::Closed, IssueStatus::Closed, false)]
+        #[case::closed_to_open(IssueStatus::Closed, IssueStatus::Open, true)]
+        #[case::open_to_open(IssueStatus::Open, IssueStatus::Open, false)]
+        #[case::in_progress_to_open(IssueStatus::InProgress, IssueStatus::Open, false)]
+        #[case::blocked_to_open(IssueStatus::Blocked, IssueStatus::Open, false)]
+        fn test_status_transitions(
+            #[case] current: IssueStatus,
+            #[case] target: IssueStatus,
+            #[case] should_succeed: bool,
+        ) {
+            let result = validate_status_transition(current, target);
+            assert_eq!(
+                result.is_ok(),
+                should_succeed,
+                "Transition {:?} -> {:?} expected success={}, got {:?}",
+                current,
+                target,
+                should_succeed,
+                result
+            );
+        }
+
+        #[test]
+        fn test_closed_to_closed_error_message() {
+            let result = validate_status_transition(IssueStatus::Closed, IssueStatus::Closed);
+            assert!(result.is_err());
+            let error = result.unwrap_err();
+            assert!(
+                error.contains("already closed"),
+                "Error should mention 'already closed', got: {}",
+                error
+            );
+        }
+
+        #[test]
+        fn test_open_to_open_error_message() {
+            let result = validate_status_transition(IssueStatus::Open, IssueStatus::Open);
+            assert!(result.is_err());
+            let error = result.unwrap_err();
+            assert!(
+                error.contains("not closed"),
+                "Error should mention 'not closed', got: {}",
+                error
+            );
+        }
+
+        #[rstest]
+        #[case::open_to_in_progress(IssueStatus::Open, IssueStatus::InProgress, true)]
+        #[case::open_to_blocked(IssueStatus::Open, IssueStatus::Blocked, true)]
+        #[case::in_progress_to_blocked(IssueStatus::InProgress, IssueStatus::Blocked, true)]
+        #[case::blocked_to_in_progress(IssueStatus::Blocked, IssueStatus::InProgress, true)]
+        fn test_general_status_transitions_allowed(
+            #[case] current: IssueStatus,
+            #[case] target: IssueStatus,
+            #[case] should_succeed: bool,
+        ) {
+            let result = validate_status_transition(current, target);
+            assert_eq!(
+                result.is_ok(),
+                should_succeed,
+                "Transition {:?} -> {:?} expected success={}, got {:?}",
+                current,
+                target,
+                should_succeed,
+                result
+            );
+        }
+    }
+
+    mod build_reason_note_tests {
+        use super::super::build_reason_note;
+        use rstest::rstest;
+
+        #[rstest]
+        #[case::no_reason(None, None, "Closed", None)]
+        #[case::with_reason_no_existing(
+            None,
+            Some("Fixed the bug"),
+            "Closed",
+            Some("Closed: Fixed the bug")
+        )]
+        #[case::with_reason_and_existing(
+            Some("Initial notes"),
+            Some("Fixed"),
+            "Closed",
+            Some("Initial notes\n\nClosed: Fixed")
+        )]
+        #[case::empty_existing_treated_as_none(
+            Some(""),
+            Some("Needs work"),
+            "Reopened",
+            Some("Reopened: Needs work")
+        )]
+        #[case::reopen_prefix(
+            None,
+            Some("Not actually fixed"),
+            "Reopened",
+            Some("Reopened: Not actually fixed")
+        )]
+        fn test_build_reason_note(
+            #[case] existing: Option<&str>,
+            #[case] reason: Option<&str>,
+            #[case] prefix: &str,
+            #[case] expected: Option<&str>,
+        ) {
+            let result = build_reason_note(existing, reason, prefix);
+            assert_eq!(result.as_deref(), expected);
+        }
+    }
+
+    mod count_by_status_tests {
+        use super::super::count_by_status;
+        use super::create_test_issue;
+        use crate::domain::IssueStatus;
+
+        #[test]
+        fn test_empty_list() {
+            let counts = count_by_status(&[]);
+            assert_eq!(counts.total, 0);
+            assert_eq!(counts.open, 0);
+            assert_eq!(counts.in_progress, 0);
+            assert_eq!(counts.blocked, 0);
+            assert_eq!(counts.closed, 0);
+        }
+
+        #[test]
+        fn test_single_status() {
+            let mut issue = create_test_issue("test-1");
+            issue.status = IssueStatus::InProgress;
+            let counts = count_by_status(&[issue]);
+            assert_eq!(counts.total, 1);
+            assert_eq!(counts.open, 0);
+            assert_eq!(counts.in_progress, 1);
+            assert_eq!(counts.blocked, 0);
+            assert_eq!(counts.closed, 0);
+        }
+
+        #[test]
+        fn test_mixed_statuses() {
+            let mut issues = vec![
+                create_test_issue("test-1"),
+                create_test_issue("test-2"),
+                create_test_issue("test-3"),
+                create_test_issue("test-4"),
+                create_test_issue("test-5"),
+                create_test_issue("test-6"),
+            ];
+            issues[0].status = IssueStatus::Open;
+            issues[1].status = IssueStatus::Open;
+            issues[2].status = IssueStatus::InProgress;
+            issues[3].status = IssueStatus::Blocked;
+            issues[4].status = IssueStatus::Closed;
+            issues[5].status = IssueStatus::Closed;
+
+            let counts = count_by_status(&issues);
+            assert_eq!(counts.total, 6);
+            assert_eq!(counts.open, 2);
+            assert_eq!(counts.in_progress, 1);
+            assert_eq!(counts.blocked, 1);
+            assert_eq!(counts.closed, 2);
+        }
+
+        #[test]
+        fn test_all_same_status() {
+            let issues: Vec<_> = (1..=5)
+                .map(|i| {
+                    let mut issue = create_test_issue(&format!("test-{}", i));
+                    issue.status = IssueStatus::Blocked;
+                    issue
+                })
+                .collect();
+
+            let counts = count_by_status(&issues);
+            assert_eq!(counts.total, 5);
+            assert_eq!(counts.open, 0);
+            assert_eq!(counts.in_progress, 0);
+            assert_eq!(counts.blocked, 5);
+            assert_eq!(counts.closed, 0);
+        }
+    }
+
+    mod bail_on_batch_failures_tests {
+        use super::super::bail_on_batch_failures;
+        use super::create_test_issue;
+        use crate::cli::types::{BatchError, BatchResult};
+
+        #[test]
+        fn test_no_failures_returns_ok() {
+            let result = BatchResult::new();
+            assert!(bail_on_batch_failures(&result, "update").is_ok());
+        }
+
+        #[test]
+        fn test_with_successes_only_returns_ok() {
+            let mut result = BatchResult::new();
+            result.succeeded.push(create_test_issue("test-1"));
+            result.succeeded.push(create_test_issue("test-2"));
+            assert!(bail_on_batch_failures(&result, "close").is_ok());
+        }
+
+        #[test]
+        fn test_all_failures_returns_error() {
+            let mut result = BatchResult::new();
+            result.failed.push(BatchError {
+                issue_id: "test-1".to_string(),
+                error: "Not found".to_string(),
+            });
+            result.failed.push(BatchError {
+                issue_id: "test-2".to_string(),
+                error: "Invalid".to_string(),
+            });
+
+            let err = bail_on_batch_failures(&result, "update").unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("2 of 2"), "Should show '2 of 2', got: {}", msg);
+            assert!(
+                msg.contains("update"),
+                "Should contain 'update', got: {}",
+                msg
+            );
+        }
+
+        #[test]
+        fn test_partial_failures_returns_error() {
+            let mut result = BatchResult::new();
+            result.succeeded.push(create_test_issue("test-ok"));
+            result.failed.push(BatchError {
+                issue_id: "test-fail".to_string(),
+                error: "Error".to_string(),
+            });
+
+            let err = bail_on_batch_failures(&result, "close").unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("1 of 2"), "Should show '1 of 2', got: {}", msg);
+            assert!(
+                msg.contains("close"),
+                "Should contain 'close', got: {}",
+                msg
+            );
+        }
+
+        #[test]
+        fn test_error_message_format() {
+            let mut result = BatchResult::new();
+            result.failed.push(BatchError {
+                issue_id: "test-1".to_string(),
+                error: "Error".to_string(),
+            });
+
+            let err = bail_on_batch_failures(&result, "label add").unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("label add(s) failed"),
+                "Should format action correctly, got: {}",
+                msg
             );
         }
     }
