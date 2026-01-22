@@ -5,7 +5,21 @@
 
 ## Overview
 
-Tethys is a Rust library for code intelligence - extracting symbols, building dependency graphs, and answering questions like "what calls this function?" and "what's the blast radius of changing this file?"
+**Tethys is a code intelligence cache and query interface, not a semantic analyzer.**
+
+It uses tree-sitter for fast approximate indexing, delegates to LSPs for precision when needed, and provides a unified API for consumers who don't want to deal with LSP protocol details.
+
+LSPs (rust-analyzer, OmniSharp, etc.) already solve the hard problem of semantic analysis - type inference, name resolution, trait/interface dispatch. There's no point replicating that work. Tethys' value is in what LSPs *don't* provide:
+
+| What Tethys Provides | Why LSPs Don't Cover It |
+|---------------------|------------------------|
+| **Fast approximate mode** | LSPs require startup time and memory. Tree-sitter is instant. |
+| **Persistence** | LSPs are ephemeral. Tethys caches to JSONL. |
+| **Unified API across languages** | Each LSP has quirks. Tethys normalizes. |
+| **Designed for programmatic use** | LSPs are designed for editors, not CLI/MCP/agents. |
+| **Works without LSP running** | Tree-sitter layer works offline, no daemon needed. |
+
+### Consumers
 
 Tethys provides the *data*. What consumers do with it is up to them:
 
@@ -16,14 +30,74 @@ Tethys provides the *data*. What consumers do with it is up to them:
 | **MCP Server** | Let AI agents query symbol references |
 | **Catalyst Agents** | Help `code-refactor-master` track dependencies |
 
+## Why Tethys?
+
+### The Gap in the Landscape
+
+| Tool | Status | Why It Doesn't Fill the Gap |
+|------|--------|----------------------------|
+| **[Stack Graphs](https://github.com/github/stack-graphs)** | Archived Sept 2025 | GitHub stopped maintaining the open source version |
+| **[Kythe](https://kythe.io/)** | Active | Complex, not incremental, Google-scale infrastructure |
+| **[OpenGrok](https://oracle.github.io/opengrok/)** | Active | Search/browse only, no programmatic API for callers |
+| **rust-analyzer / OmniSharp** | Active | LSP servers, not embeddable libraries |
+| **tree-sitter** | Active | Parsing only, no semantic analysis |
+
+AI agent tooling (aider, OpenHands) evaluated stack-graphs and rejected it due to limited language support and maintenance concerns. Now it's archived entirely.
+
+**The need is real, but nothing fills it.** Tethys aims to be the lightweight, embeddable answer to "who calls this function?" that works across languages.
+
 ## Design Principles
 
-1. **Intelligence, not policy** - Tethys reports facts ("12 callers"), not judgments ("too risky")
-2. **Layered accuracy** - Fast approximate results (tree-sitter), optional precision (LSP)
-3. **Language extensible** - Start with Rust, design for adding C#, TypeScript, etc.
+1. **Cache, not analyzer** - Tethys indexes and caches; LSPs do the hard semantic work
+2. **Layered accuracy** - Fast approximate results (tree-sitter), optional precision (LSP delegation)
+3. **Language extensible** - Start with Rust + C#, design for adding more
 4. **Embeddable** - Library first, CLI second, MCP optional
+5. **Intelligence, not policy** - Tethys reports facts ("12 callers"), not judgments ("too risky")
 
 ## Architecture
+
+### Conceptual Model
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                          Consumers                              │
+│   (Rivets, Claude Code Hooks, MCP Server, Catalyst Agents)      │
+└─────────────────────────────┬───────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                           Tethys                                │
+│                   (Cache + Query Interface)                     │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │  L1+L2: Tree-sitter Layer                               │   │
+│  │  • Fast (~30 sec for 10K files)                         │   │
+│  │  • No daemon required                                   │   │
+│  │  • ~85% accuracy                                        │   │
+│  │  • Persists to JSONL                                    │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                              │                                  │
+│                              │ ambiguous cases only             │
+│                              ▼                                  │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │  L3: LSP Delegation (Optional)                          │   │
+│  │  • Delegates to rust-analyzer, OmniSharp, etc.          │   │
+│  │  • ~98% accuracy                                        │   │
+│  │  • Tethys asks, LSP answers                             │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              │ L3 only
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    External LSP Servers                         │
+│            (rust-analyzer, OmniSharp, csharp-ls)                │
+│                                                                 │
+│   These do the actual semantic analysis. Tethys just asks.     │
+└─────────────────────────────────────────────────────────────────┘
+```
 
 ### Workspace Structure
 
@@ -346,9 +420,11 @@ fn build_dependencies_l2(
 - Trait methods from imported traits
 - Macro expansions
 
-### Level 3: LSP Refinement (~98% accuracy)
+### Level 3: LSP Delegation (~98% accuracy)
 
-For ambiguous cases that tree-sitter can't resolve, optionally query an LSP server.
+**Tethys doesn't do semantic analysis - it delegates to LSPs.**
+
+For ambiguous cases that tree-sitter can't resolve, Tethys queries the LSP server (rust-analyzer, OmniSharp, etc.) that already has a complete semantic model. This is delegation, not reimplementation.
 
 ```rust
 /// Cases where tree-sitter can't determine the dependency
