@@ -75,7 +75,7 @@ AI agent tooling (aider, OpenHands) evaluated stack-graphs and rejected it due t
 │  │  • Fast (~30 sec for 10K files)                         │   │
 │  │  • No daemon required                                   │   │
 │  │  • ~85% accuracy                                        │   │
-│  │  • Persists to JSONL                                    │   │
+│  │  • Persists to SQLite (.rivets/index/tethys.db)         │   │
 │  └─────────────────────────────────────────────────────────┘   │
 │                              │                                  │
 │                              │ ambiguous cases only             │
@@ -108,10 +108,11 @@ rivets/
 │   ├── tethys/           # Code intelligence (standalone)
 │   │   ├── src/
 │   │   │   ├── lib.rs
+│   │   │   ├── db.rs           # SQLite storage layer
 │   │   │   ├── parser.rs       # tree-sitter parsing
 │   │   │   ├── symbols.rs      # Symbol extraction per language
 │   │   │   ├── resolver.rs     # Module/import resolution
-│   │   │   ├── graph.rs        # Dependency graph (petgraph)
+│   │   │   ├── graph.rs        # petgraph operations (blast radius, cycles)
 │   │   │   ├── lsp.rs          # Optional LSP refinement
 │   │   │   └── languages/
 │   │   │       ├── mod.rs
@@ -119,6 +120,9 @@ rivets/
 │   │   │       └── csharp.rs
 │   │   └── Cargo.toml
 │   └── rivets-mcp/       # MCP server (uses both)
+├── .rivets/
+│   └── index/
+│       └── tethys.db     # SQLite database (git-ignored)
 ```
 
 ### Core Types
@@ -129,12 +133,16 @@ rivets/
 /// A code symbol (function, struct, trait, class, etc.)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Symbol {
+    pub id: i64,
     pub name: String,
+    pub qualified_name: String,  // e.g., "IssueStorage::save"
     pub kind: SymbolKind,
     pub file: PathBuf,
     pub line: u32,
-    pub signature: String,
+    pub column: u32,
+    pub signature: Option<String>,
     pub visibility: Visibility,
+    pub parent_symbol_id: Option<i64>,  // For nested symbols (methods in impl)
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -161,23 +169,26 @@ pub enum Visibility {
     Private,
 }
 
-/// A dependency from one file to another
+/// A reference to a symbol (usage, not definition)
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Dependency {
-    pub from_file: PathBuf,
-    pub to_file: PathBuf,
-    pub symbol: String,
-    pub kind: DependencyKind,
-    pub line: u32,  // Line in from_file where dependency occurs
+pub struct Reference {
+    pub id: i64,
+    pub symbol_id: i64,         // Which symbol is being referenced
+    pub file: PathBuf,          // File containing the reference
+    pub kind: ReferenceKind,
+    pub line: u32,
+    pub column: u32,
+    pub in_symbol_id: Option<i64>,  // Which symbol contains this reference
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub enum DependencyKind {
+pub enum ReferenceKind {
     Import,     // use statement, using directive
     Call,       // Function/method call
     Type,       // Type reference in signature or variable
     Inherit,    // Trait impl, class inheritance
     Construct,  // Struct literal, new ClassName()
+    FieldAccess, // Struct field access
 }
 
 /// Analysis results for a single file
@@ -185,10 +196,11 @@ pub enum DependencyKind {
 pub struct FileAnalysis {
     pub path: PathBuf,
     pub language: String,
-    pub mtime: f64,
-    pub size: u64,
+    pub mtime_ns: i64,
+    pub size_bytes: u64,
+    pub content_hash: Option<u64>,
     pub symbols: Vec<Symbol>,
-    pub dependencies: Vec<Dependency>,
+    pub references: Vec<Reference>,
 }
 
 /// Query results for blast radius
@@ -204,6 +216,12 @@ pub struct Dependent {
     pub file: PathBuf,
     pub symbols_used: Vec<String>,
     pub line_count: usize,  // How many lines reference the target
+}
+
+/// A circular dependency detected in the codebase
+#[derive(Debug, Clone)]
+pub struct Cycle {
+    pub files: Vec<PathBuf>,  // Files involved in the cycle
 }
 ```
 
@@ -264,13 +282,19 @@ impl Tethys {
     /// Get blast radius for a specific symbol
     pub fn get_symbol_blast_radius(&self, symbol: &str) -> BlastRadius;
 
-    // === Export ===
+    /// Detect circular dependencies in the codebase
+    pub fn detect_cycles(&self) -> Vec<Cycle>;
 
-    /// Export index to JSONL format
-    pub fn export_jsonl(&self, writer: impl Write) -> Result<()>;
+    // === Database ===
 
-    /// Import index from JSONL format
-    pub fn import_jsonl(&mut self, reader: impl Read) -> Result<()>;
+    /// Get path to the SQLite database
+    pub fn db_path(&self) -> &Path;
+
+    /// Rebuild the entire index from scratch
+    pub fn rebuild(&mut self) -> Result<IndexStats>;
+
+    /// Vacuum the database to reclaim space
+    pub fn vacuum(&self) -> Result<()>;
 }
 ```
 
@@ -650,21 +674,92 @@ impl LanguageSupport for CSharpLanguage {
 
 ## Storage
 
-Tethys can export/import its index as JSONL for persistence:
+Tethys uses a **SQLite + petgraph hybrid** approach:
 
-```jsonl
-{"entity":"file","path":"src/auth.rs","language":"rust","mtime":1735123456.78,"size":2048}
-{"entity":"symbol","file":"src/auth.rs","name":"authenticate","kind":"Function","line":42,"signature":"fn authenticate(token: &str) -> Result<User>","visibility":"Public"}
-{"entity":"symbol","file":"src/auth.rs","name":"AuthMiddleware","kind":"Struct","line":15,"signature":"struct AuthMiddleware","visibility":"Public"}
-{"entity":"dep","from":"src/routes/api.rs","to":"src/auth.rs","symbol":"AuthMiddleware","kind":"Import","line":3}
-{"entity":"dep","from":"src/handlers/login.rs","to":"src/auth.rs","symbol":"authenticate","kind":"Call","line":27}
+- **SQLite** is the source of truth for all indexed data
+- **petgraph** is used for graph algorithms (blast radius, cycle detection)
+- Data is loaded from SQLite into petgraph on-demand for graph operations
+
+### Why Not JSONL?
+
+Unlike rivets issues (which are shared, versioned, and synced), Tethys indexes are:
+- **Local** - derived from source code, not shared between machines
+- **Regenerable** - can be rebuilt from source at any time
+- **Query-heavy** - need efficient lookups by symbol name, file, etc.
+
+SQLite provides indexed queries that JSONL can't match, while petgraph provides graph algorithms that SQL can't express efficiently.
+
+### Database Location
+
+```
+.rivets/
+├── index/
+│   └── tethys.db          # SQLite database (git-ignored)
 ```
 
-This format is:
-- Human readable
-- Git-friendly (line-based diffs)
-- Compatible with rivets' existing JSONL approach
-- Streamable (can process large indexes without loading entirely into memory)
+### Schema
+
+```sql
+-- Indexed source files
+CREATE TABLE files (
+    id INTEGER PRIMARY KEY,
+    path TEXT NOT NULL UNIQUE,
+    language TEXT NOT NULL,
+    mtime_ns INTEGER NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    content_hash INTEGER,
+    indexed_at INTEGER NOT NULL
+);
+
+-- Symbol definitions
+CREATE TABLE symbols (
+    id INTEGER PRIMARY KEY,
+    file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    qualified_name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    line INTEGER NOT NULL,
+    column INTEGER NOT NULL,
+    signature TEXT,
+    visibility TEXT NOT NULL,
+    parent_symbol_id INTEGER REFERENCES symbols(id) ON DELETE CASCADE
+);
+
+-- References (usages of symbols)
+CREATE TABLE refs (
+    id INTEGER PRIMARY KEY,
+    symbol_id INTEGER NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
+    file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    line INTEGER NOT NULL,
+    column INTEGER NOT NULL,
+    in_symbol_id INTEGER REFERENCES symbols(id) ON DELETE CASCADE
+);
+
+-- File-level dependencies (denormalized for fast queries)
+CREATE TABLE file_deps (
+    from_file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    to_file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    ref_count INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (from_file_id, to_file_id)
+);
+```
+
+### Query Strategy
+
+| Operation | Approach | Reason |
+|-----------|----------|--------|
+| Symbol search | SQL | Simple filtering, indices |
+| List references | SQL | Direct foreign key lookup |
+| Direct callers | SQL | Single JOIN |
+| File dependencies | SQL | Denormalized table |
+| **Blast radius** | petgraph | Transitive closure |
+| **Cycle detection** | petgraph | Graph algorithm |
+| **Shortest path** | petgraph | Graph algorithm |
+
+For graph operations, Tethys loads the relevant subgraph from SQLite into petgraph, computes the result, and returns it. This avoids loading the entire codebase graph for a single query.
+
+See [SQLite + petgraph spike](../spikes/2026-01-22-tethys-sqlite-petgraph.md) for detailed implementation examples
 
 ## CLI (Optional)
 
@@ -673,6 +768,9 @@ Tethys can include a CLI for standalone use:
 ```bash
 # Index a workspace
 tethys index
+
+# Rebuild index from scratch
+tethys index --rebuild
 
 # Search for symbols
 tethys search "authenticate"
@@ -686,8 +784,11 @@ tethys blast-radius src/auth.rs
 # Get blast radius for a symbol
 tethys blast-radius --symbol "authenticate"
 
-# Export index
-tethys export > index.jsonl
+# Detect circular dependencies
+tethys cycles
+
+# Show index stats
+tethys stats
 
 # Use LSP for precision
 tethys index --lsp
@@ -764,7 +865,8 @@ async fn handle_get_callers(params: GetCallersParams, tethys: &Tethys) -> McpRes
 
 ### Phase 1: Core Infrastructure
 - [ ] Workspace crate structure
-- [ ] `Symbol`, `Dependency`, `FileAnalysis` types
+- [ ] SQLite database setup with schema
+- [ ] `Symbol`, `Reference`, `FileAnalysis` types
 - [ ] tree-sitter integration
 - [ ] Rust symbol extraction
 - [ ] Basic `Tethys` struct with `index()` and `symbols_in_file()`
@@ -772,21 +874,24 @@ async fn handle_get_callers(params: GetCallersParams, tethys: &Tethys) -> McpRes
 ### Phase 2: Dependency Detection (L1 + L2)
 - [ ] Use statement parsing for Rust
 - [ ] Module path resolution
-- [ ] Symbol reference extraction
+- [ ] Symbol reference extraction (with `in_symbol_id` tracking)
 - [ ] Cross-reference to build dependencies
 - [ ] `get_dependents()`, `get_dependencies()`
 
-### Phase 3: Dependency Graph
-- [ ] petgraph integration
+### Phase 3: Graph Operations
+- [ ] petgraph integration for graph algorithms
+- [ ] SQLite → petgraph loading for subgraphs
 - [ ] `get_blast_radius()` with BFS
 - [ ] `get_callers()` for symbol-level queries
-- [ ] JSONL export/import
+- [ ] `detect_cycles()` with Tarjan's SCC
 
 ### Phase 4: CLI
-- [ ] `tethys index`
+- [ ] `tethys index` / `tethys index --rebuild`
 - [ ] `tethys search`
 - [ ] `tethys callers`
 - [ ] `tethys blast-radius`
+- [ ] `tethys cycles`
+- [ ] `tethys stats`
 
 ### Phase 5: C# Support
 - [ ] tree-sitter-c-sharp integration
@@ -813,7 +918,8 @@ async fn handle_get_callers(params: GetCallersParams, tethys: &Tethys) -> McpRes
 tree-sitter = "0.24"
 tree-sitter-rust = "0.23"
 tree-sitter-c-sharp = "0.23"
-petgraph = "0.6"
+rusqlite = { version = "0.32", features = ["bundled"] }
+petgraph = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
@@ -823,6 +929,8 @@ tracing = "0.1"
 tempfile = "3"
 rstest = "0.23"
 ```
+
+**Note:** `rusqlite` with `bundled` feature compiles SQLite from source, ensuring consistent behavior across platforms. `petgraph` 0.8 is actively maintained (releases in 2025).
 
 ## References
 
