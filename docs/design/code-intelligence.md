@@ -1,5 +1,13 @@
 # Code Intelligence for Rivets
 
+> **⚠️ Superseded:** This document has been consolidated into [tethys-code-intelligence.md](./tethys-code-intelligence.md), which describes Tethys as a standalone code intelligence library that Rivets (and other consumers) can use.
+
+---
+
+*Original document preserved below for reference.*
+
+---
+
 This document describes how rivets could implement tree-sitter based structural indexing and semantic search to give agents better context when working on issues.
 
 ## Motivation
