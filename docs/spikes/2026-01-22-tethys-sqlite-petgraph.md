@@ -13,7 +13,7 @@
 │  Simple Queries          │  Graph Operations            │
 │  (SQL)                   │  (petgraph)                  │
 │                          │                              │
-│  - Find symbol by name   │  - Blast radius (transitive) │
+│  - Find symbol by name   │  - Impact analysis (transitive) │
 │  - List references       │  - Cycle detection           │
 │  - File dependencies     │  - Shortest path             │
 │  - Symbol lookup         │  - Connected components      │
@@ -47,7 +47,8 @@ CREATE TABLE symbols (
     id INTEGER PRIMARY KEY,
     file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
     name TEXT NOT NULL,              -- simple name: "save"
-    qualified_name TEXT NOT NULL,    -- full path: "IssueStorage::save"
+    module_path TEXT NOT NULL,       -- module location: "crate::storage::issue"
+    qualified_name TEXT NOT NULL,    -- symbol hierarchy: "IssueStorage::save"
     kind TEXT NOT NULL,              -- 'function', 'struct', 'trait', 'method', etc.
     line INTEGER NOT NULL,
     column INTEGER NOT NULL,
@@ -59,6 +60,7 @@ CREATE TABLE symbols (
 );
 
 CREATE INDEX idx_symbols_name ON symbols(name);
+CREATE INDEX idx_symbols_module_path ON symbols(module_path);
 CREATE INDEX idx_symbols_qualified ON symbols(qualified_name);
 CREATE INDEX idx_symbols_file ON symbols(file_id);
 CREATE INDEX idx_symbols_kind ON symbols(kind);
@@ -249,8 +251,8 @@ impl TethysDb {
         Ok(SymbolGraph { graph, node_map })
     }
 
-    /// Get blast radius: all symbols transitively affected by changing target
-    pub fn get_blast_radius(&self, symbol_id: i64) -> Result<BlastRadius> {
+    /// Get impact: all symbols transitively affected by changing target
+    pub fn get_impact(&self, symbol_id: i64) -> Result<Impact> {
         let symbol_graph = self.build_symbol_graph(symbol_id)?;
 
         let root_idx = symbol_graph.node_map.get(&symbol_id)
@@ -277,7 +279,7 @@ impl TethysDb {
 
         let max_depth = depths.values().max().copied().unwrap_or(0);
 
-        Ok(BlastRadius {
+        Ok(Impact {
             root_symbol_id: symbol_id,
             direct_dependents: self.find_direct_callers(symbol_id)?,
             transitive_count: dependents.len(),
@@ -321,12 +323,12 @@ impl TethysDb {
 }
 ```
 
-## Blast Radius Result Type
+## Impact Result Type
 
 ```rust
-/// Result of blast radius analysis
+/// Result of impact analysis
 #[derive(Debug)]
-pub struct BlastRadius {
+pub struct Impact {
     pub root_symbol_id: i64,
     pub root_symbol: Symbol,
 
@@ -361,7 +363,7 @@ pub struct AffectedFile {
 | List references | SQL | Direct lookup by foreign key |
 | Direct callers | SQL | Single JOIN operation |
 | File dependencies | SQL | Denormalized table, fast |
-| Blast radius | petgraph | Requires transitive closure |
+| Impact analysis | petgraph | Requires transitive closure |
 | Cycle detection | petgraph | Requires graph algorithms |
 | Shortest path | petgraph | Graph algorithm |
 

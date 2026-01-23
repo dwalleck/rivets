@@ -14,7 +14,7 @@ LSPs (rust-analyzer, OmniSharp, etc.) already solve the hard problem of semantic
 | What Tethys Provides | Why LSPs Don't Cover It |
 |---------------------|------------------------|
 | **Fast approximate mode** | LSPs require startup time and memory. Tree-sitter is instant. |
-| **Persistence** | LSPs are ephemeral. Tethys caches to JSONL. |
+| **Persistence** | LSPs are ephemeral. Tethys caches to SQLite. |
 | **Unified API across languages** | Each LSP has quirks. Tethys normalizes. |
 | **Designed for programmatic use** | LSPs are designed for editors, not CLI/MCP/agents. |
 | **Works without LSP running** | Tree-sitter layer works offline, no daemon needed. |
@@ -25,7 +25,7 @@ Tethys provides the *data*. What consumers do with it is up to them:
 
 | Consumer | Use Case |
 |----------|----------|
-| **Rivets** | Enrich issues with code context, show blast radius |
+| **Rivets** | Enrich issues with code context, show impact analysis |
 | **Claude Code Hook** | Warn about callers before modifying a function |
 | **MCP Server** | Let AI agents query symbol references |
 | **Catalyst Agents** | Help `code-refactor-master` track dependencies |
@@ -112,7 +112,7 @@ rivets/
 │   │   │   ├── parser.rs       # tree-sitter parsing
 │   │   │   ├── symbols.rs      # Symbol extraction per language
 │   │   │   ├── resolver.rs     # Module/import resolution
-│   │   │   ├── graph.rs        # petgraph operations (blast radius, cycles)
+│   │   │   ├── graph.rs        # petgraph operations (impact analysis, cycles)
 │   │   │   ├── lsp.rs          # Optional LSP refinement
 │   │   │   └── languages/
 │   │   │       ├── mod.rs
@@ -125,27 +125,82 @@ rivets/
 │       └── tethys.db     # SQLite database (git-ignored)
 ```
 
+### Domain Model
+
+```mermaid
+erDiagram
+    IndexedFile ||--o{ Symbol : contains
+    IndexedFile ||--o{ Reference : contains
+    Symbol ||--o{ Reference : "referenced by"
+    Symbol ||--o{ Symbol : "parent of"
+    Reference }o--|| Symbol : "occurs in"
+
+    IndexedFile {
+        i64 id PK
+        PathBuf path UK
+        Language language
+        i64 mtime_ns
+        u64 size_bytes
+        u64 content_hash
+        i64 indexed_at
+    }
+
+    Symbol {
+        i64 id PK
+        i64 file_id FK
+        String name
+        String module_path
+        String qualified_name
+        SymbolKind kind
+        u32 line
+        u32 column
+        Span span "optional"
+        String signature "optional"
+        Visibility visibility
+        i64 parent_symbol_id FK "optional"
+    }
+
+    Reference {
+        i64 id PK
+        i64 symbol_id FK
+        i64 file_id FK
+        ReferenceKind kind
+        u32 line
+        u32 column
+        Span span "optional"
+        i64 in_symbol_id FK "optional"
+    }
+```
+
+### Domain Model Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| **Language representation** | Enum (`Language::Rust`, `Language::CSharp`) | Type-safe; adding a language requires implementing `LanguageSupport` trait anyway |
+| **Module path** | Separate `module_path` field alongside `qualified_name` | Enables "what's exported from this module" queries without string parsing |
+| **Full path** | Computed on read from `module_path` + `qualified_name` | No redundancy; concatenation is cheap |
+| **File representation** | Separate `IndexedFile` (stored) vs `FileAnalysis` (transient) | Clear separation between database entity and parsing result |
+| **Symbol extent** | `Option<Span>` for start/end positions | Tree-sitter provides spans, but optional allows flexibility |
+| **Reference tracking** | `in_symbol_id` tracks containing symbol | Enables "who calls X?" at symbol granularity, not just file |
+| **Index/DependencyGraph** | Internal types, not public | Users interact through `Tethys` API; storage is implementation detail |
+| **LspRefinement** | Opaque placeholder for Phase 6 | Preserves design intent without premature implementation |
+| **Query options** | Simple parameters for MVP | Builder pattern preferred when options are added later |
+| **Error categorization** | `IndexErrorKind` distinguishes input vs internal errors | Similar to HTTP 4xx vs 5xx; helps with debugging and triage |
+
 ### Core Types
 
 ```rust
-// tethys/src/lib.rs
+// === Enums ===
 
-/// A code symbol (function, struct, trait, class, etc.)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Symbol {
-    pub id: i64,
-    pub name: String,
-    pub qualified_name: String,  // e.g., "IssueStorage::save"
-    pub kind: SymbolKind,
-    pub file: PathBuf,
-    pub line: u32,
-    pub column: u32,
-    pub signature: Option<String>,
-    pub visibility: Visibility,
-    pub parent_symbol_id: Option<i64>,  // For nested symbols (methods in impl)
+/// Supported programming languages
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Language {
+    Rust,
+    CSharp,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+/// Symbol kinds we track
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SymbolKind {
     Function,
     Method,
@@ -161,7 +216,8 @@ pub enum SymbolKind {
     Macro,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+/// Visibility levels (normalized across languages)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Visibility {
     Public,
     Crate,      // pub(crate) in Rust, internal in C#
@@ -169,33 +225,102 @@ pub enum Visibility {
     Private,
 }
 
+/// Reference kinds
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReferenceKind {
+    Import,      // use statement, using directive
+    Call,        // function/method invocation
+    Type,        // type annotation
+    Inherit,     // trait impl, class inheritance
+    Construct,   // struct literal, new ClassName()
+    FieldAccess, // struct field access
+}
+
+/// Indexing error categories
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexErrorKind {
+    // Input problems (analogous to HTTP 4xx)
+    ParseFailed,        // syntax error in source code
+    UnsupportedLanguage,// file type not supported
+    EncodingError,      // not valid UTF-8
+
+    // Internal problems (analogous to HTTP 5xx)
+    IoError,            // couldn't read file
+    DatabaseError,      // SQLite error
+}
+
+// === Core Entities ===
+
+/// A source/end position span in a file
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Span {
+    pub start_line: u32,
+    pub start_column: u32,
+    pub end_line: u32,
+    pub end_column: u32,
+}
+
+/// A source file in the index (stored in database)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexedFile {
+    pub id: i64,
+    pub path: PathBuf,
+    pub language: Language,
+    pub mtime_ns: i64,
+    pub size_bytes: u64,
+    pub content_hash: Option<u64>,
+    pub indexed_at: i64,
+}
+
+/// A code symbol definition (function, struct, trait, class, etc.)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Symbol {
+    pub id: i64,
+    pub file_id: i64,
+    pub name: String,              // simple name: "save"
+    pub module_path: String,       // module location: "crate::storage::issue"
+    pub qualified_name: String,    // symbol hierarchy: "IssueStorage::save"
+    pub kind: SymbolKind,
+    pub line: u32,
+    pub column: u32,
+    pub span: Option<Span>,
+    pub signature: Option<String>, // e.g., "fn save(&self, issue: &Issue) -> Result<()>"
+    pub visibility: Visibility,
+    pub parent_symbol_id: Option<i64>,
+}
+
+impl Symbol {
+    /// Compute the full path: module_path + qualified_name
+    /// e.g., "crate::storage::issue::IssueStorage::save"
+    pub fn full_path(&self) -> String {
+        if self.module_path.is_empty() {
+            self.qualified_name.clone()
+        } else {
+            format!("{}::{}", self.module_path, self.qualified_name)
+        }
+    }
+}
+
 /// A reference to a symbol (usage, not definition)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Reference {
     pub id: i64,
-    pub symbol_id: i64,         // Which symbol is being referenced
-    pub file: PathBuf,          // File containing the reference
+    pub symbol_id: i64,            // which symbol is being referenced
+    pub file_id: i64,              // file containing the reference
     pub kind: ReferenceKind,
     pub line: u32,
     pub column: u32,
-    pub in_symbol_id: Option<i64>,  // Which symbol contains this reference
+    pub span: Option<Span>,
+    pub in_symbol_id: Option<i64>, // which symbol contains this reference
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub enum ReferenceKind {
-    Import,     // use statement, using directive
-    Call,       // Function/method call
-    Type,       // Type reference in signature or variable
-    Inherit,    // Trait impl, class inheritance
-    Construct,  // Struct literal, new ClassName()
-    FieldAccess, // Struct field access
-}
+// === Transient Types (not stored) ===
 
-/// Analysis results for a single file
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Analysis results from parsing a single file
+#[derive(Debug, Clone)]
 pub struct FileAnalysis {
     pub path: PathBuf,
-    pub language: String,
+    pub language: Language,
     pub mtime_ns: i64,
     pub size_bytes: u64,
     pub content_hash: Option<u64>,
@@ -203,26 +328,65 @@ pub struct FileAnalysis {
     pub references: Vec<Reference>,
 }
 
-/// Query results for blast radius
+// === Operation Results ===
+
+/// Statistics from a full index operation
 #[derive(Debug, Clone)]
-pub struct BlastRadius {
+pub struct IndexStats {
+    pub files_indexed: usize,
+    pub symbols_found: usize,
+    pub references_found: usize,
+    pub duration: std::time::Duration,
+    pub files_skipped: usize,
+    pub errors: Vec<IndexError>,
+}
+
+/// Statistics from an incremental update
+#[derive(Debug, Clone)]
+pub struct IndexUpdate {
+    pub files_changed: usize,
+    pub files_unchanged: usize,
+    pub duration: std::time::Duration,
+    pub errors: Vec<IndexError>,
+}
+
+/// An error encountered during indexing
+#[derive(Debug, Clone)]
+pub struct IndexError {
+    pub path: PathBuf,
+    pub kind: IndexErrorKind,
+    pub message: String,
+}
+
+// === Query Results ===
+
+/// Result of impact analysis (transitive dependents)
+#[derive(Debug, Clone)]
+pub struct Impact {
     pub target: PathBuf,
     pub direct_dependents: Vec<Dependent>,
     pub transitive_dependents: Vec<Dependent>,
 }
 
+/// A file that depends on the target
 #[derive(Debug, Clone)]
 pub struct Dependent {
     pub file: PathBuf,
     pub symbols_used: Vec<String>,
-    pub line_count: usize,  // How many lines reference the target
+    pub line_count: usize,
 }
 
 /// A circular dependency detected in the codebase
 #[derive(Debug, Clone)]
 pub struct Cycle {
-    pub files: Vec<PathBuf>,  // Files involved in the cycle
+    pub files: Vec<PathBuf>,
 }
+
+// === Internal Types (not public, noted for design clarity) ===
+
+// Index: Wraps SQLite connection, manages schema and queries
+// DependencyGraph: Wraps petgraph, lazily loaded from SQLite for graph operations
+// LspRefinement: Placeholder for Phase 6 LSP delegation
 ```
 
 ### Public API
@@ -230,73 +394,115 @@ pub struct Cycle {
 ```rust
 // tethys/src/lib.rs
 
-pub struct Tethys {
-    index: Index,
-    graph: DependencyGraph,
-    lsp: Option<LspRefinement>,
-}
+/// Code intelligence cache and query interface.
+/// Internal fields are not exposed; interact through methods only.
+pub struct Tethys { /* opaque */ }
 
 impl Tethys {
-    /// Create a new Tethys instance for a workspace
+    // === Construction ===
+
+    /// Create a new Tethys instance for a workspace.
+    /// Uses convention-based defaults: respects .gitignore, excludes common build dirs.
     pub fn new(workspace_root: &Path) -> Result<Self>;
 
-    /// Create with LSP refinement enabled
+    /// Create with LSP refinement enabled (Phase 6).
     pub fn with_lsp(workspace_root: &Path, lsp_command: &str) -> Result<Self>;
 
     // === Indexing ===
 
-    /// Index all source files in the workspace
+    /// Index all source files in the workspace.
     pub fn index(&mut self) -> Result<IndexStats>;
 
-    /// Incrementally update index for changed files
+    /// Incrementally update index for changed files.
     pub fn update(&mut self) -> Result<IndexUpdate>;
 
-    /// Check if index is stale
-    pub fn is_stale(&self) -> bool;
+    /// Check if any indexed files have changed since last update.
+    pub fn needs_update(&self) -> Result<bool>;
+
+    /// Rebuild the entire index from scratch.
+    pub fn rebuild(&mut self) -> Result<IndexStats>;
+
+    // === File Queries ===
+
+    /// Get metadata for an indexed file.
+    pub fn get_file(&self, path: &Path) -> Result<Option<IndexedFile>>;
 
     // === Symbol Queries ===
 
-    /// Search for symbols by name (fuzzy matching)
-    pub fn search_symbols(&self, query: &str) -> Vec<Symbol>;
+    /// Search for symbols by name (fuzzy/partial matching).
+    pub fn search_symbols(&self, query: &str) -> Result<Vec<Symbol>>;
 
-    /// Get all symbols in a file
-    pub fn symbols_in_file(&self, path: &Path) -> Vec<Symbol>;
+    /// List all symbols defined in a file.
+    pub fn list_symbols(&self, path: &Path) -> Result<Vec<Symbol>>;
 
-    /// Find symbol definition by name
-    pub fn find_symbol(&self, name: &str) -> Option<Symbol>;
+    /// Get a symbol by its qualified name (exact match).
+    pub fn get_symbol(&self, qualified_name: &str) -> Result<Option<Symbol>>;
 
-    // === Dependency Queries ===
+    /// Get a symbol by its database ID.
+    pub fn get_symbol_by_id(&self, id: i64) -> Result<Option<Symbol>>;
 
-    /// Get all files that depend on the given file
-    pub fn get_dependents(&self, path: &Path) -> Vec<PathBuf>;
+    // === Reference Queries ===
 
-    /// Get all files that the given file depends on
-    pub fn get_dependencies(&self, path: &Path) -> Vec<PathBuf>;
+    /// Get all references to a symbol (exact locations).
+    pub fn get_references(&self, qualified_name: &str) -> Result<Vec<Reference>>;
 
-    /// Get callers of a specific symbol
-    pub fn get_callers(&self, symbol: &str) -> Vec<Dependent>;
+    /// List all outgoing references from a file.
+    pub fn list_references_in_file(&self, path: &Path) -> Result<Vec<Reference>>;
 
-    /// Get full blast radius (transitive dependents)
-    pub fn get_blast_radius(&self, path: &Path) -> BlastRadius;
+    // === Dependency Queries (file-level) ===
 
-    /// Get blast radius for a specific symbol
-    pub fn get_symbol_blast_radius(&self, symbol: &str) -> BlastRadius;
+    /// Get files that directly depend on the given file.
+    pub fn get_dependents(&self, path: &Path) -> Result<Vec<PathBuf>>;
 
-    /// Detect circular dependencies in the codebase
-    pub fn detect_cycles(&self) -> Vec<Cycle>;
+    /// Get files that the given file directly depends on.
+    pub fn get_dependencies(&self, path: &Path) -> Result<Vec<PathBuf>>;
+
+    /// Get impact analysis: direct and transitive dependents of a file.
+    pub fn get_impact(&self, path: &Path) -> Result<Impact>;
+
+    // === Dependency Queries (symbol-level) ===
+
+    /// Get symbols that call/use the given symbol (aggregated by file).
+    pub fn get_callers(&self, qualified_name: &str) -> Result<Vec<Dependent>>;
+
+    /// Get symbols that the given symbol calls/uses.
+    pub fn get_symbol_dependencies(&self, qualified_name: &str) -> Result<Vec<Symbol>>;
+
+    /// Get impact analysis: direct and transitive callers of a symbol.
+    pub fn get_symbol_impact(&self, qualified_name: &str) -> Result<Impact>;
+
+    // === Graph Analysis ===
+
+    /// Detect circular dependencies in the codebase.
+    pub fn detect_cycles(&self) -> Result<Vec<Cycle>>;
+
+    /// Get the shortest dependency path between two files, if one exists.
+    pub fn get_dependency_chain(&self, from: &Path, to: &Path) -> Result<Option<Vec<PathBuf>>>;
 
     // === Database ===
 
-    /// Get path to the SQLite database
+    /// Get path to the SQLite database file.
     pub fn db_path(&self) -> &Path;
 
-    /// Rebuild the entire index from scratch
-    pub fn rebuild(&mut self) -> Result<IndexStats>;
-
-    /// Vacuum the database to reclaim space
+    /// Vacuum the database to reclaim space.
     pub fn vacuum(&self) -> Result<()>;
 }
 ```
+
+### API Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Struct visibility | Opaque | Internal fields are implementation details |
+| Error handling | All DB methods return `Result<T>` | Database errors are rare but real; explicit handling |
+| Naming: `search_*` | Fuzzy/partial matching → `Vec<T>` | Implies exploration, multiple results |
+| Naming: `get_*` | Exact lookup by key → `Option<T>` or `Vec<T>` | Direct retrieval, known key |
+| Naming: `list_*` | Enumerate category → `Vec<T>` | All items matching criteria |
+| Symbol identification | `qualified_name` (e.g., `"IssueStorage::save"`) | Matches `Symbol::qualified_name` field |
+| Staleness check | `needs_update()` method | Explicit check without triggering work |
+| File configuration | Convention-based defaults | Respects `.gitignore`, excludes `target/`, etc. |
+| Impact terminology | `Impact` instead of `BlastRadius` | Standard term in change management |
+| Query options | Simple params for MVP | Builder pattern preferred when options needed later |
 
 ## Dependency Detection Strategy
 
@@ -602,8 +808,8 @@ impl DependencyGraph {
             .collect()
     }
 
-    /// Transitive dependents (full blast radius)
-    pub fn get_blast_radius(&self, path: &Path) -> Vec<PathBuf> {
+    /// Transitive dependents (impact analysis)
+    pub fn get_impact(&self, path: &Path) -> Vec<PathBuf> {
         let Some(&start) = self.node_map.get(path) else { return vec![] };
 
         let mut visited = HashSet::new();
@@ -677,7 +883,7 @@ impl LanguageSupport for CSharpLanguage {
 Tethys uses a **SQLite + petgraph hybrid** approach:
 
 - **SQLite** is the source of truth for all indexed data
-- **petgraph** is used for graph algorithms (blast radius, cycle detection)
+- **petgraph** is used for graph algorithms (impact analysis, cycle detection)
 - Data is loaded from SQLite into petgraph on-demand for graph operations
 
 ### Why Not JSONL?
@@ -704,26 +910,38 @@ SQLite provides indexed queries that JSONL can't match, while petgraph provides 
 CREATE TABLE files (
     id INTEGER PRIMARY KEY,
     path TEXT NOT NULL UNIQUE,
-    language TEXT NOT NULL,
+    language TEXT NOT NULL,          -- 'rust', 'csharp'
     mtime_ns INTEGER NOT NULL,
     size_bytes INTEGER NOT NULL,
     content_hash INTEGER,
     indexed_at INTEGER NOT NULL
 );
 
+CREATE INDEX idx_files_path ON files(path);
+CREATE INDEX idx_files_language ON files(language);
+
 -- Symbol definitions
 CREATE TABLE symbols (
     id INTEGER PRIMARY KEY,
     file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
-    name TEXT NOT NULL,
-    qualified_name TEXT NOT NULL,
+    name TEXT NOT NULL,              -- simple name: "save"
+    module_path TEXT NOT NULL,       -- module location: "crate::storage::issue"
+    qualified_name TEXT NOT NULL,    -- symbol hierarchy: "IssueStorage::save"
     kind TEXT NOT NULL,
     line INTEGER NOT NULL,
     column INTEGER NOT NULL,
+    end_line INTEGER,                -- optional span end
+    end_column INTEGER,
     signature TEXT,
     visibility TEXT NOT NULL,
     parent_symbol_id INTEGER REFERENCES symbols(id) ON DELETE CASCADE
 );
+
+CREATE INDEX idx_symbols_name ON symbols(name);
+CREATE INDEX idx_symbols_module_path ON symbols(module_path);
+CREATE INDEX idx_symbols_qualified ON symbols(qualified_name);
+CREATE INDEX idx_symbols_file ON symbols(file_id);
+CREATE INDEX idx_symbols_kind ON symbols(kind);
 
 -- References (usages of symbols)
 CREATE TABLE refs (
@@ -733,8 +951,14 @@ CREATE TABLE refs (
     kind TEXT NOT NULL,
     line INTEGER NOT NULL,
     column INTEGER NOT NULL,
+    end_line INTEGER,                -- optional span end
+    end_column INTEGER,
     in_symbol_id INTEGER REFERENCES symbols(id) ON DELETE CASCADE
 );
+
+CREATE INDEX idx_refs_symbol ON refs(symbol_id);
+CREATE INDEX idx_refs_file ON refs(file_id);
+CREATE INDEX idx_refs_in_symbol ON refs(in_symbol_id);
 
 -- File-level dependencies (denormalized for fast queries)
 CREATE TABLE file_deps (
@@ -743,6 +967,8 @@ CREATE TABLE file_deps (
     ref_count INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (from_file_id, to_file_id)
 );
+
+CREATE INDEX idx_file_deps_to ON file_deps(to_file_id);
 ```
 
 ### Query Strategy
@@ -753,7 +979,7 @@ CREATE TABLE file_deps (
 | List references | SQL | Direct foreign key lookup |
 | Direct callers | SQL | Single JOIN |
 | File dependencies | SQL | Denormalized table |
-| **Blast radius** | petgraph | Transitive closure |
+| **Impact analysis** | petgraph | Transitive closure |
 | **Cycle detection** | petgraph | Graph algorithm |
 | **Shortest path** | petgraph | Graph algorithm |
 
@@ -778,11 +1004,11 @@ tethys search "authenticate"
 # Get callers of a symbol
 tethys callers "AuthMiddleware::new"
 
-# Get blast radius for a file
-tethys blast-radius src/auth.rs
+# Get impact analysis for a file
+tethys impact src/auth.rs
 
-# Get blast radius for a symbol
-tethys blast-radius --symbol "authenticate"
+# Get impact analysis for a symbol
+tethys impact --symbol "authenticate"
 
 # Detect circular dependencies
 tethys cycles
@@ -806,8 +1032,8 @@ fn show_issue_with_context(issue: &Issue, tethys: &Tethys) {
 
     if let Some(files) = &issue.related_files {
         for file in files {
-            let blast = tethys.get_blast_radius(file);
-            println!("\nBlast radius for {}:", file.display());
+            let impact = tethys.get_impact(file);
+            println!("\nImpact analysis for {}:", file.display());
             println!("  Direct: {} files", blast.direct_dependents.len());
             println!("  Transitive: {} files", blast.transitive_dependents.len());
         }
@@ -881,7 +1107,7 @@ async fn handle_get_callers(params: GetCallersParams, tethys: &Tethys) -> McpRes
 ### Phase 3: Graph Operations
 - [ ] petgraph integration for graph algorithms
 - [ ] SQLite → petgraph loading for subgraphs
-- [ ] `get_blast_radius()` with BFS
+- [ ] `get_impact()` with BFS
 - [ ] `get_callers()` for symbol-level queries
 - [ ] `detect_cycles()` with Tarjan's SCC
 
@@ -889,7 +1115,7 @@ async fn handle_get_callers(params: GetCallersParams, tethys: &Tethys) -> McpRes
 - [ ] `tethys index` / `tethys index --rebuild`
 - [ ] `tethys search`
 - [ ] `tethys callers`
-- [ ] `tethys blast-radius`
+- [ ] `tethys impact`
 - [ ] `tethys cycles`
 - [ ] `tethys stats`
 
