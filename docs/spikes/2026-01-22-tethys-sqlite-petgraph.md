@@ -47,7 +47,8 @@ CREATE TABLE symbols (
     id INTEGER PRIMARY KEY,
     file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
     name TEXT NOT NULL,              -- simple name: "save"
-    qualified_name TEXT NOT NULL,    -- full path: "IssueStorage::save"
+    module_path TEXT NOT NULL,       -- module location: "crate::storage::issue"
+    qualified_name TEXT NOT NULL,    -- symbol hierarchy: "IssueStorage::save"
     kind TEXT NOT NULL,              -- 'function', 'struct', 'trait', 'method', etc.
     line INTEGER NOT NULL,
     column INTEGER NOT NULL,
@@ -59,6 +60,7 @@ CREATE TABLE symbols (
 );
 
 CREATE INDEX idx_symbols_name ON symbols(name);
+CREATE INDEX idx_symbols_module_path ON symbols(module_path);
 CREATE INDEX idx_symbols_qualified ON symbols(qualified_name);
 CREATE INDEX idx_symbols_file ON symbols(file_id);
 CREATE INDEX idx_symbols_kind ON symbols(kind);
