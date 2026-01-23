@@ -304,3 +304,275 @@ fn index_handles_empty_rust_file() {
     assert_eq!(stats.symbols_found, 0);
     assert!(stats.errors.is_empty());
 }
+
+// ============================================================================
+// Phase 2: Dependency Detection
+// ============================================================================
+
+#[test]
+fn get_dependencies_for_file_using_internal_module() {
+    let (_dir, mut tethys) = workspace_with_files(&[
+        (
+            "src/lib.rs",
+            r"
+mod auth;
+mod config;
+",
+        ),
+        (
+            "src/auth.rs",
+            r"
+use crate::config::Config;
+
+pub struct Authenticator {
+    config: Config,
+}
+
+impl Authenticator {
+    pub fn new(config: Config) -> Self {
+        Self { config }
+    }
+}
+",
+        ),
+        (
+            "src/config.rs",
+            r"
+pub struct Config {
+    pub secret: String,
+}
+",
+        ),
+    ]);
+
+    tethys.index().expect("index failed");
+
+    // auth.rs should depend on config.rs (uses Config type)
+    let deps = tethys
+        .get_dependencies(std::path::Path::new("src/auth.rs"))
+        .expect("get_dependencies failed");
+
+    assert!(
+        deps.iter().any(|p| p.to_string_lossy().contains("config")),
+        "auth.rs should depend on config.rs, got: {deps:?}"
+    );
+}
+
+#[test]
+fn get_dependents_for_file() {
+    let (_dir, mut tethys) = workspace_with_files(&[
+        (
+            "src/lib.rs",
+            r"
+mod auth;
+mod config;
+",
+        ),
+        (
+            "src/auth.rs",
+            r"
+use crate::config::Config;
+
+pub fn authenticate(config: Config) -> bool {
+    true
+}
+",
+        ),
+        (
+            "src/config.rs",
+            r"
+pub struct Config {
+    pub secret: String,
+}
+",
+        ),
+    ]);
+
+    tethys.index().expect("index failed");
+
+    // config.rs should have auth.rs as a dependent
+    let dependents = tethys
+        .get_dependents(std::path::Path::new("src/config.rs"))
+        .expect("get_dependents failed");
+
+    assert!(
+        dependents
+            .iter()
+            .any(|p| p.to_string_lossy().contains("auth")),
+        "config.rs should have auth.rs as dependent, got: {dependents:?}"
+    );
+}
+
+#[test]
+fn dependencies_ignores_unused_imports() {
+    // This tests L2 behavior: only count dependencies for symbols that are ACTUALLY USED
+    let (_dir, mut tethys) = workspace_with_files(&[
+        (
+            "src/lib.rs",
+            r"
+mod auth;
+mod config;
+mod utils;
+",
+        ),
+        (
+            "src/auth.rs",
+            r"
+// Import Config but never use it
+use crate::config::Config;
+// Import Helper and actually use it
+use crate::utils::Helper;
+
+pub fn authenticate() -> bool {
+    Helper::check()
+}
+",
+        ),
+        (
+            "src/config.rs",
+            r"
+pub struct Config {}
+",
+        ),
+        (
+            "src/utils.rs",
+            r"
+pub struct Helper;
+impl Helper {
+    pub fn check() -> bool { true }
+}
+",
+        ),
+    ]);
+
+    tethys.index().expect("index failed");
+
+    let deps = tethys
+        .get_dependencies(std::path::Path::new("src/auth.rs"))
+        .expect("get_dependencies failed");
+
+    // auth.rs should depend on utils.rs (Helper is used)
+    assert!(
+        deps.iter().any(|p| p.to_string_lossy().contains("utils")),
+        "auth.rs should depend on utils.rs (used), got: {deps:?}"
+    );
+
+    // auth.rs should NOT depend on config.rs (Config is imported but unused)
+    // This is the key L2 test!
+    assert!(
+        !deps.iter().any(|p| p.to_string_lossy().contains("config")),
+        "auth.rs should NOT depend on config.rs (unused import), got: {deps:?}"
+    );
+}
+
+#[test]
+fn dependencies_detects_aliased_imports() {
+    // Test that `use Foo as Bar` creates dependency when `Bar` is used
+    let (_dir, mut tethys) = workspace_with_files(&[
+        (
+            "src/lib.rs",
+            r"
+mod auth;
+mod config;
+",
+        ),
+        (
+            "src/auth.rs",
+            r"
+use crate::config::Config as Settings;
+
+pub fn get_settings() -> Settings {
+    Settings { secret: String::new() }
+}
+",
+        ),
+        (
+            "src/config.rs",
+            r"
+pub struct Config {
+    pub secret: String,
+}
+",
+        ),
+    ]);
+
+    tethys.index().expect("index failed");
+
+    let deps = tethys
+        .get_dependencies(std::path::Path::new("src/auth.rs"))
+        .expect("get_dependencies failed");
+
+    // auth.rs should depend on config.rs because Settings (alias for Config) is used
+    assert!(
+        deps.iter().any(|p| p.to_string_lossy().contains("config")),
+        "auth.rs should depend on config.rs (aliased import used), got: {deps:?}"
+    );
+}
+
+#[test]
+fn dependencies_handles_circular_references() {
+    // Test that A→B, B→A circular dependencies don't crash the indexer.
+    //
+    // KNOWN LIMITATION: Due to single-pass indexing, dependencies can only be
+    // recorded to files that are already in the database. Files indexed earlier
+    // may not have their dependencies to later-indexed files recorded.
+    // A proper fix would require two-pass indexing.
+    let (_dir, mut tethys) = workspace_with_files(&[
+        (
+            "src/lib.rs",
+            r"
+mod a;
+mod b;
+",
+        ),
+        (
+            "src/a.rs",
+            r"
+use crate::b::B;
+
+pub struct A;
+
+impl A {
+    pub fn get_b() -> B { B }
+}
+",
+        ),
+        (
+            "src/b.rs",
+            r"
+use crate::a::A;
+
+pub struct B;
+
+impl B {
+    pub fn get_a() -> A { A }
+}
+",
+        ),
+    ]);
+
+    // Indexing should complete without errors
+    let stats = tethys.index().expect("index failed");
+    assert!(stats.errors.is_empty(), "should have no indexing errors");
+
+    // At least one direction of the circular dependency should be detected
+    // (depends on file indexing order - the later-indexed file's dependencies
+    // to earlier files will be recorded)
+    let deps_a = tethys
+        .get_dependencies(std::path::Path::new("src/a.rs"))
+        .expect("get_dependencies failed");
+    let deps_b = tethys
+        .get_dependencies(std::path::Path::new("src/b.rs"))
+        .expect("get_dependencies failed");
+
+    let a_depends_on_b = deps_a.iter().any(|p| p.to_string_lossy().contains("b.rs"));
+    let b_depends_on_a = deps_b.iter().any(|p| p.to_string_lossy().contains("a.rs"));
+
+    // At least one direction should be detected (the second file indexed
+    // will successfully record its dependency on the first)
+    assert!(
+        a_depends_on_b || b_depends_on_a,
+        "At least one direction of circular dependency should be detected. \
+         a→b: {a_depends_on_b}, b→a: {b_depends_on_a}"
+    );
+}

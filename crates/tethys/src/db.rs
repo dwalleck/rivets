@@ -13,10 +13,11 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::warn;
 
-use crate::error::Result;
-use crate::types::{IndexedFile, Language, Span, Symbol, SymbolKind, Visibility};
+use crate::error::{Error, Result};
+use crate::types::{
+    IndexedFile, Language, Reference, ReferenceKind, Span, Symbol, SymbolKind, Visibility,
+};
 
 /// Data required to insert a symbol into the database.
 ///
@@ -62,15 +63,17 @@ impl Index {
 
     /// Get the current unix timestamp in nanoseconds.
     ///
-    /// Falls back to 0 (Unix epoch) if system time is unavailable, with a warning logged.
-    fn now_ns() -> i64 {
-        SystemTime::now().duration_since(UNIX_EPOCH).map_or_else(
-            |e| {
-                warn!(error = %e, "System time before Unix epoch, using 0");
-                0
-            },
-            |d| d.as_nanos() as i64,
-        )
+    /// Returns an error if the system time is before the Unix epoch, which would
+    /// break timestamp comparison logic for incremental indexing.
+    fn now_ns() -> Result<i64> {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
+            .map_err(|e| {
+                Error::Config(format!(
+                    "System clock is before Unix epoch: {e}. Fix system time before indexing."
+                ))
+            })
     }
 
     // === File Operations ===
@@ -86,11 +89,8 @@ impl Index {
         content_hash: Option<u64>,
     ) -> Result<i64> {
         let path_str = path.to_string_lossy();
-        let lang_str = match language {
-            Language::Rust => "rust",
-            Language::CSharp => "csharp",
-        };
-        let indexed_at = Self::now_ns();
+        let lang_str = language.as_str();
+        let indexed_at = Self::now_ns()?;
 
         // Try to update first
         let updated = self.conn.execute(
@@ -146,17 +146,7 @@ impl Index {
                 "SELECT id, path, language, mtime_ns, size_bytes, content_hash, indexed_at
                  FROM files WHERE path = ?1",
                 [&path_str],
-                |row| {
-                    Ok(IndexedFile {
-                        id: row.get(0)?,
-                        path: PathBuf::from(row.get::<_, String>(1)?),
-                        language: parse_language(row.get::<_, String>(2)?.as_str()),
-                        mtime_ns: row.get(3)?,
-                        size_bytes: row.get::<_, i64>(4)? as u64,
-                        content_hash: row.get::<_, Option<i64>>(5)?.map(|h| h as u64),
-                        indexed_at: row.get(6)?,
-                    })
-                },
+                row_to_indexed_file,
             )
             .optional()
             .map_err(Into::into)
@@ -170,6 +160,19 @@ impl Index {
             .query_row("SELECT id FROM files WHERE path = ?1", [&path_str], |row| {
                 row.get(0)
             })
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Get a file by its database ID.
+    pub fn get_file_by_id(&self, id: i64) -> Result<Option<IndexedFile>> {
+        self.conn
+            .query_row(
+                "SELECT id, path, language, mtime_ns, size_bytes, content_hash, indexed_at
+                 FROM files WHERE id = ?1",
+                [id],
+                row_to_indexed_file,
+            )
             .optional()
             .map_err(Into::into)
     }
@@ -190,11 +193,8 @@ impl Index {
         let tx = self.conn.transaction()?;
 
         let path_str = path.to_string_lossy();
-        let lang_str = match language {
-            Language::Rust => "rust",
-            Language::CSharp => "csharp",
-        };
-        let indexed_at = Self::now_ns();
+        let lang_str = language.as_str();
+        let indexed_at = Self::now_ns()?;
 
         // Try to update first
         let updated = tx.execute(
@@ -362,6 +362,88 @@ impl Index {
         Ok((files as usize, symbols as usize, refs as usize))
     }
 
+    // === Reference Operations ===
+    // Note: Reference operations are infrastructure for Phase 3+ features
+    // (symbol-level "who calls X?" queries). Currently only file-level
+    // dependency tracking is used via file_deps table.
+
+    /// Insert a reference to a symbol.
+    #[allow(dead_code)] // Phase 3+: symbol-level reference tracking
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_reference(
+        &self,
+        symbol_id: i64,
+        file_id: i64,
+        kind: &str,
+        line: u32,
+        column: u32,
+        in_symbol_id: Option<i64>,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO refs (symbol_id, file_id, kind, line, column, in_symbol_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![symbol_id, file_id, kind, line, column, in_symbol_id],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Get all references to a symbol.
+    #[allow(dead_code)] // Phase 3+: symbol-level reference tracking
+    pub fn get_references_to_symbol(&self, symbol_id: i64) -> Result<Vec<Reference>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, symbol_id, file_id, kind, line, column, end_line, end_column, in_symbol_id
+             FROM refs WHERE symbol_id = ?1 ORDER BY file_id, line",
+        )?;
+
+        let refs = stmt
+            .query_map([symbol_id], row_to_reference)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(refs)
+    }
+
+    // === File Dependency Operations ===
+
+    /// Insert or update a file-level dependency.
+    ///
+    /// Records that `from_file_id` depends on `to_file_id`.
+    pub fn insert_file_dependency(&self, from_file_id: i64, to_file_id: i64) -> Result<()> {
+        // Use upsert (ON CONFLICT) to handle duplicates (increments ref_count)
+        self.conn.execute(
+            "INSERT INTO file_deps (from_file_id, to_file_id, ref_count)
+             VALUES (?1, ?2, 1)
+             ON CONFLICT(from_file_id, to_file_id) DO UPDATE SET ref_count = ref_count + 1",
+            params![from_file_id, to_file_id],
+        )?;
+        Ok(())
+    }
+
+    /// Get files that the given file depends on.
+    pub fn get_file_dependencies(&self, file_id: i64) -> Result<Vec<i64>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT to_file_id FROM file_deps WHERE from_file_id = ?1")?;
+
+        let deps = stmt
+            .query_map([file_id], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(deps)
+    }
+
+    /// Get files that depend on the given file.
+    pub fn get_file_dependents(&self, file_id: i64) -> Result<Vec<i64>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT from_file_id FROM file_deps WHERE to_file_id = ?1")?;
+
+        let deps = stmt
+            .query_map([file_id], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(deps)
+    }
+
     /// Clear all data from the database.
     pub fn clear(&self) -> Result<()> {
         self.conn.execute_batch(
@@ -379,83 +461,139 @@ impl Index {
 
 /// Parse a language string from the database.
 ///
-/// Falls back to `Language::Rust` for unrecognized values, with a warning logged.
-fn parse_language(s: &str) -> Language {
+/// Returns an error for unrecognized values, indicating possible database corruption.
+fn parse_language(s: &str) -> rusqlite::Result<Language> {
     match s {
-        "rust" => Language::Rust,
-        "csharp" => Language::CSharp,
-        unknown => {
-            warn!(
-                language = unknown,
-                "Unknown language in database, defaulting to Rust"
-            );
-            Language::Rust
-        }
+        "rust" => Ok(Language::Rust),
+        "csharp" => Ok(Language::CSharp),
+        unknown => Err(rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            format!("Unknown language '{unknown}' in database. Database may be corrupted or from a newer version.").into(),
+        )),
     }
 }
 
 /// Parse a symbol kind string from the database.
 ///
-/// Falls back to `SymbolKind::Function` for unrecognized values, with a warning logged.
-fn parse_symbol_kind(s: &str) -> SymbolKind {
+/// Returns an error for unrecognized values, indicating possible database corruption.
+fn parse_symbol_kind(s: &str) -> rusqlite::Result<SymbolKind> {
     match s {
-        "function" => SymbolKind::Function,
-        "method" => SymbolKind::Method,
-        "struct" => SymbolKind::Struct,
-        "class" => SymbolKind::Class,
-        "enum" => SymbolKind::Enum,
-        "trait" => SymbolKind::Trait,
-        "interface" => SymbolKind::Interface,
-        "const" => SymbolKind::Const,
-        "static" => SymbolKind::Static,
-        "module" => SymbolKind::Module,
-        "type_alias" => SymbolKind::TypeAlias,
-        "macro" => SymbolKind::Macro,
-        unknown => {
-            warn!(
-                kind = unknown,
-                "Unknown symbol kind in database, defaulting to Function"
-            );
-            SymbolKind::Function
-        }
+        "function" => Ok(SymbolKind::Function),
+        "method" => Ok(SymbolKind::Method),
+        "struct" => Ok(SymbolKind::Struct),
+        "class" => Ok(SymbolKind::Class),
+        "enum" => Ok(SymbolKind::Enum),
+        "trait" => Ok(SymbolKind::Trait),
+        "interface" => Ok(SymbolKind::Interface),
+        "const" => Ok(SymbolKind::Const),
+        "static" => Ok(SymbolKind::Static),
+        "module" => Ok(SymbolKind::Module),
+        "type_alias" => Ok(SymbolKind::TypeAlias),
+        "macro" => Ok(SymbolKind::Macro),
+        unknown => Err(rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            format!("Unknown symbol kind '{unknown}' in database. Database may be corrupted or from a newer version.").into(),
+        )),
     }
 }
 
 /// Parse a visibility string from the database.
 ///
-/// Falls back to `Visibility::Private` for unrecognized values, with a warning logged.
-fn parse_visibility(s: &str) -> Visibility {
+/// Returns an error for unrecognized values, indicating possible database corruption.
+fn parse_visibility(s: &str) -> rusqlite::Result<Visibility> {
     match s {
-        "public" => Visibility::Public,
-        "crate" => Visibility::Crate,
-        "module" => Visibility::Module,
-        "private" => Visibility::Private,
-        unknown => {
-            warn!(
-                visibility = unknown,
-                "Unknown visibility in database, defaulting to Private"
-            );
-            Visibility::Private
-        }
+        "public" => Ok(Visibility::Public),
+        "crate" => Ok(Visibility::Crate),
+        "module" => Ok(Visibility::Module),
+        "private" => Ok(Visibility::Private),
+        unknown => Err(rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            format!("Unknown visibility '{unknown}' in database. Database may be corrupted or from a newer version.").into(),
+        )),
+    }
+}
+
+/// Convert a database row to an [`IndexedFile`].
+///
+/// Expected columns: id, path, language, `mtime_ns`, `size_bytes`, `content_hash`, `indexed_at`
+fn row_to_indexed_file(row: &rusqlite::Row) -> rusqlite::Result<IndexedFile> {
+    Ok(IndexedFile {
+        id: row.get(0)?,
+        path: PathBuf::from(row.get::<_, String>(1)?),
+        language: parse_language(row.get::<_, String>(2)?.as_str())?,
+        mtime_ns: row.get(3)?,
+        size_bytes: row.get::<_, i64>(4)? as u64,
+        content_hash: row.get::<_, Option<i64>>(5)?.map(|h| h as u64),
+        indexed_at: row.get(6)?,
+    })
+}
+
+/// Build a span from start and optional end positions.
+///
+/// Returns `None` if either `end_line` or `end_column` is missing.
+fn build_span(
+    start_line: u32,
+    start_column: u32,
+    end_line: Option<u32>,
+    end_column: Option<u32>,
+) -> Option<Span> {
+    end_line.zip(end_column).map(|(el, ec)| Span {
+        start_line,
+        start_column,
+        end_line: el,
+        end_column: ec,
+    })
+}
+
+/// Convert a database row to a Reference.
+#[allow(dead_code)] // Phase 3+: symbol-level reference tracking
+fn row_to_reference(row: &rusqlite::Row) -> rusqlite::Result<Reference> {
+    let line: u32 = row.get(4)?;
+    let column: u32 = row.get(5)?;
+    let end_line: Option<u32> = row.get(6)?;
+    let end_column: Option<u32> = row.get(7)?;
+
+    Ok(Reference {
+        id: row.get(0)?,
+        symbol_id: row.get(1)?,
+        file_id: row.get(2)?,
+        kind: parse_reference_kind(&row.get::<_, String>(3)?)?,
+        line,
+        column,
+        span: build_span(line, column, end_line, end_column),
+        in_symbol_id: row.get(8)?,
+    })
+}
+
+/// Parse a reference kind string from the database.
+///
+/// Returns an error for unrecognized values, indicating possible database corruption.
+#[allow(dead_code)] // Phase 3+: symbol-level reference tracking
+fn parse_reference_kind(s: &str) -> rusqlite::Result<ReferenceKind> {
+    match s {
+        "import" => Ok(ReferenceKind::Import),
+        "call" => Ok(ReferenceKind::Call),
+        "type" => Ok(ReferenceKind::Type),
+        "inherit" => Ok(ReferenceKind::Inherit),
+        "construct" => Ok(ReferenceKind::Construct),
+        "field_access" => Ok(ReferenceKind::FieldAccess),
+        unknown => Err(rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            format!("Unknown reference kind '{unknown}' in database. Database may be corrupted or from a newer version.").into(),
+        )),
     }
 }
 
 /// Convert a database row to a Symbol.
 fn row_to_symbol(row: &rusqlite::Row) -> rusqlite::Result<Symbol> {
-    let end_line: Option<u32> = row.get(8)?;
-    let end_column: Option<u32> = row.get(9)?;
     let line: u32 = row.get(6)?;
     let column: u32 = row.get(7)?;
-
-    let span = match (end_line, end_column) {
-        (Some(el), Some(ec)) => Some(Span {
-            start_line: line,
-            start_column: column,
-            end_line: el,
-            end_column: ec,
-        }),
-        _ => None,
-    };
+    let end_line: Option<u32> = row.get(8)?;
+    let end_column: Option<u32> = row.get(9)?;
 
     Ok(Symbol {
         id: row.get(0)?,
@@ -463,13 +601,13 @@ fn row_to_symbol(row: &rusqlite::Row) -> rusqlite::Result<Symbol> {
         name: row.get(2)?,
         module_path: row.get(3)?,
         qualified_name: row.get(4)?,
-        kind: parse_symbol_kind(&row.get::<_, String>(5)?),
+        kind: parse_symbol_kind(&row.get::<_, String>(5)?)?,
         line,
         column,
-        span,
+        span: build_span(line, column, end_line, end_column),
         signature: row.get(10)?,
-        signature_details: None, // TODO: Parse from JSON column when stored
-        visibility: parse_visibility(&row.get::<_, String>(11)?),
+        signature_details: None, // TODO(Phase 3+): Parse from JSON column when stored
+        visibility: parse_visibility(&row.get::<_, String>(11)?)?,
         parent_symbol_id: row.get(12)?,
     })
 }
@@ -717,58 +855,182 @@ mod tests {
         assert!(results.is_empty());
     }
 
-    // === Parsing fallback tests ===
+    // === Parsing tests ===
 
     #[test]
     fn parse_language_known_values() {
-        assert_eq!(parse_language("rust"), Language::Rust);
-        assert_eq!(parse_language("csharp"), Language::CSharp);
+        assert_eq!(parse_language("rust").unwrap(), Language::Rust);
+        assert_eq!(parse_language("csharp").unwrap(), Language::CSharp);
     }
 
     #[test]
-    fn parse_language_unknown_defaults_to_rust() {
-        // Unknown values should default to Rust (with a warning logged)
-        assert_eq!(parse_language("python"), Language::Rust);
-        assert_eq!(parse_language(""), Language::Rust);
-        assert_eq!(parse_language("unknown"), Language::Rust);
+    fn parse_language_unknown_returns_error() {
+        // Unknown values should return an error (database corruption)
+        assert!(parse_language("python").is_err());
+        assert!(parse_language("").is_err());
+        assert!(parse_language("unknown").is_err());
+
+        // Verify error message contains the unknown value
+        let err = parse_language("python").unwrap_err();
+        assert!(err.to_string().contains("python"));
     }
 
     #[test]
     fn parse_symbol_kind_known_values() {
-        assert_eq!(parse_symbol_kind("function"), SymbolKind::Function);
-        assert_eq!(parse_symbol_kind("method"), SymbolKind::Method);
-        assert_eq!(parse_symbol_kind("struct"), SymbolKind::Struct);
-        assert_eq!(parse_symbol_kind("class"), SymbolKind::Class);
-        assert_eq!(parse_symbol_kind("enum"), SymbolKind::Enum);
-        assert_eq!(parse_symbol_kind("trait"), SymbolKind::Trait);
-        assert_eq!(parse_symbol_kind("interface"), SymbolKind::Interface);
-        assert_eq!(parse_symbol_kind("const"), SymbolKind::Const);
-        assert_eq!(parse_symbol_kind("static"), SymbolKind::Static);
-        assert_eq!(parse_symbol_kind("module"), SymbolKind::Module);
-        assert_eq!(parse_symbol_kind("type_alias"), SymbolKind::TypeAlias);
-        assert_eq!(parse_symbol_kind("macro"), SymbolKind::Macro);
+        assert_eq!(parse_symbol_kind("function").unwrap(), SymbolKind::Function);
+        assert_eq!(parse_symbol_kind("method").unwrap(), SymbolKind::Method);
+        assert_eq!(parse_symbol_kind("struct").unwrap(), SymbolKind::Struct);
+        assert_eq!(parse_symbol_kind("class").unwrap(), SymbolKind::Class);
+        assert_eq!(parse_symbol_kind("enum").unwrap(), SymbolKind::Enum);
+        assert_eq!(parse_symbol_kind("trait").unwrap(), SymbolKind::Trait);
+        assert_eq!(
+            parse_symbol_kind("interface").unwrap(),
+            SymbolKind::Interface
+        );
+        assert_eq!(parse_symbol_kind("const").unwrap(), SymbolKind::Const);
+        assert_eq!(parse_symbol_kind("static").unwrap(), SymbolKind::Static);
+        assert_eq!(parse_symbol_kind("module").unwrap(), SymbolKind::Module);
+        assert_eq!(
+            parse_symbol_kind("type_alias").unwrap(),
+            SymbolKind::TypeAlias
+        );
+        assert_eq!(parse_symbol_kind("macro").unwrap(), SymbolKind::Macro);
     }
 
     #[test]
-    fn parse_symbol_kind_unknown_defaults_to_function() {
-        // Unknown values should default to Function (with a warning logged)
-        assert_eq!(parse_symbol_kind("unknown"), SymbolKind::Function);
-        assert_eq!(parse_symbol_kind(""), SymbolKind::Function);
+    fn parse_symbol_kind_unknown_returns_error() {
+        // Unknown values should return an error (database corruption)
+        assert!(parse_symbol_kind("unknown").is_err());
+        assert!(parse_symbol_kind("").is_err());
+
+        // Verify error message contains the unknown value
+        let err = parse_symbol_kind("bogus").unwrap_err();
+        assert!(err.to_string().contains("bogus"));
     }
 
     #[test]
     fn parse_visibility_known_values() {
-        assert_eq!(parse_visibility("public"), Visibility::Public);
-        assert_eq!(parse_visibility("crate"), Visibility::Crate);
-        assert_eq!(parse_visibility("module"), Visibility::Module);
-        assert_eq!(parse_visibility("private"), Visibility::Private);
+        assert_eq!(parse_visibility("public").unwrap(), Visibility::Public);
+        assert_eq!(parse_visibility("crate").unwrap(), Visibility::Crate);
+        assert_eq!(parse_visibility("module").unwrap(), Visibility::Module);
+        assert_eq!(parse_visibility("private").unwrap(), Visibility::Private);
     }
 
     #[test]
-    fn parse_visibility_unknown_defaults_to_private() {
-        // Unknown values should default to Private (with a warning logged)
-        assert_eq!(parse_visibility("protected"), Visibility::Private);
-        assert_eq!(parse_visibility(""), Visibility::Private);
-        assert_eq!(parse_visibility("internal"), Visibility::Private);
+    fn parse_visibility_unknown_returns_error() {
+        // Unknown values should return an error (database corruption)
+        assert!(parse_visibility("protected").is_err());
+        assert!(parse_visibility("").is_err());
+        assert!(parse_visibility("internal").is_err());
+
+        // Verify error message contains the unknown value
+        let err = parse_visibility("protected").unwrap_err();
+        assert!(err.to_string().contains("protected"));
+    }
+
+    // ========================================================================
+    // Reference and Dependency Tests (Phase 2: Step 4)
+    // ========================================================================
+
+    #[test]
+    fn insert_and_query_references() {
+        let (_dir, path) = temp_db();
+        let index = Index::open(&path).unwrap();
+
+        // Create a file and symbol
+        let file_id = index
+            .upsert_file(Path::new("src/lib.rs"), Language::Rust, 1000, 100, None)
+            .unwrap();
+
+        let symbol_id = index
+            .insert_symbol(
+                file_id,
+                "authenticate",
+                "crate::auth",
+                "authenticate",
+                SymbolKind::Function,
+                10,
+                1,
+                None,
+                None,
+                Visibility::Public,
+                None,
+            )
+            .unwrap();
+
+        // Create another file that references the symbol
+        let ref_file_id = index
+            .upsert_file(Path::new("src/main.rs"), Language::Rust, 1000, 50, None)
+            .unwrap();
+
+        // Insert a reference
+        index
+            .insert_reference(symbol_id, ref_file_id, "call", 5, 10, None)
+            .unwrap();
+
+        // Query references
+        let refs = index.get_references_to_symbol(symbol_id).unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].symbol_id, symbol_id);
+        assert_eq!(refs[0].file_id, ref_file_id);
+        assert_eq!(refs[0].line, 5);
+    }
+
+    #[test]
+    fn insert_file_dependency() {
+        let (_dir, path) = temp_db();
+        let index = Index::open(&path).unwrap();
+
+        // Create two files
+        let file1_id = index
+            .upsert_file(Path::new("src/main.rs"), Language::Rust, 1000, 100, None)
+            .unwrap();
+        let file2_id = index
+            .upsert_file(Path::new("src/auth.rs"), Language::Rust, 1000, 50, None)
+            .unwrap();
+
+        // main.rs depends on auth.rs
+        index.insert_file_dependency(file1_id, file2_id).unwrap();
+
+        // Verify the dependency
+        let deps = index.get_file_dependencies(file1_id).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0], file2_id);
+    }
+
+    #[test]
+    fn get_file_dependencies_and_dependents() {
+        let (_dir, path) = temp_db();
+        let index = Index::open(&path).unwrap();
+
+        // Create three files: main.rs -> auth.rs -> db.rs
+        let main_id = index
+            .upsert_file(Path::new("src/main.rs"), Language::Rust, 1000, 100, None)
+            .unwrap();
+        let auth_id = index
+            .upsert_file(Path::new("src/auth.rs"), Language::Rust, 1000, 50, None)
+            .unwrap();
+        let db_id = index
+            .upsert_file(Path::new("src/db.rs"), Language::Rust, 1000, 75, None)
+            .unwrap();
+
+        // Set up dependencies
+        index.insert_file_dependency(main_id, auth_id).unwrap();
+        index.insert_file_dependency(auth_id, db_id).unwrap();
+
+        // main.rs depends on auth.rs
+        let main_deps = index.get_file_dependencies(main_id).unwrap();
+        assert_eq!(main_deps.len(), 1);
+        assert_eq!(main_deps[0], auth_id);
+
+        // auth.rs is depended on by main.rs
+        let auth_dependents = index.get_file_dependents(auth_id).unwrap();
+        assert_eq!(auth_dependents.len(), 1);
+        assert_eq!(auth_dependents[0], main_id);
+
+        // db.rs is depended on by auth.rs
+        let db_dependents = index.get_file_dependents(db_id).unwrap();
+        assert_eq!(db_dependents.len(), 1);
+        assert_eq!(db_dependents[0], auth_id);
     }
 }

@@ -38,6 +38,7 @@ mod error;
 mod graph;
 mod languages;
 mod parser;
+mod resolver;
 mod types;
 
 pub use error::{Error, IndexError, IndexErrorKind, Result};
@@ -52,7 +53,8 @@ use std::time::{Instant, UNIX_EPOCH};
 
 use db::{Index, SymbolData};
 use languages::rust;
-use tracing::warn;
+use resolver::resolve_module_path;
+use tracing::{debug, warn};
 
 /// Code intelligence cache and query interface.
 ///
@@ -118,10 +120,11 @@ impl Tethys {
         let mut symbols_found = 0;
         let references_found = 0;
         let mut files_skipped = 0;
+        let mut directories_skipped = Vec::new();
         let mut errors = Vec::new();
 
         // Walk the workspace and find source files
-        let files = self.discover_files()?;
+        let files = self.discover_files(&mut directories_skipped)?;
 
         for file_path in files {
             // Check if it's a supported language
@@ -160,6 +163,7 @@ impl Tethys {
             references_found,
             duration: start.elapsed(),
             files_skipped,
+            directories_skipped,
             errors,
         })
     }
@@ -192,6 +196,10 @@ impl Tethys {
         // Extract symbols
         let extracted = rust::extract_symbols(&tree, content_str.as_bytes());
 
+        // Extract use statements and references for dependency detection
+        let uses = rust::extract_use_statements(&tree, content_str.as_bytes());
+        let refs = rust::extract_references(&tree, content_str.as_bytes());
+
         // Convert to SymbolData for atomic insertion
         let qualified_names: Vec<String> = extracted
             .iter()
@@ -222,10 +230,8 @@ impl Tethys {
             .collect();
 
         // Store in database atomically
-        let relative_path = path.strip_prefix(&self.workspace_root).unwrap_or(path);
-
-        self.db.index_file_atomic(
-            relative_path,
+        let file_id = self.db.index_file_atomic(
+            self.relative_path(path),
             language,
             mtime_ns,
             size_bytes,
@@ -233,21 +239,116 @@ impl Tethys {
             &symbol_data,
         )?;
 
+        // Compute and store file dependencies (L2: only for actually used symbols)
+        self.compute_dependencies(path, file_id, &uses, &refs)?;
+
         Ok(extracted.len())
     }
 
+    /// Compute and store file-level dependencies based on use statements and actual references.
+    ///
+    /// This is L2 dependency detection: we only count a dependency if the imported symbol
+    /// is actually used in the code, not just imported.
+    fn compute_dependencies(
+        &self,
+        current_file: &Path,
+        file_id: i64,
+        uses: &[rust::UseStatement],
+        refs: &[rust::ExtractedReference],
+    ) -> Result<()> {
+        use std::collections::HashSet;
+
+        // Build a set of actually referenced names (both direct names and path prefixes)
+        let mut referenced_names: HashSet<&str> = HashSet::new();
+        for r in refs {
+            referenced_names.insert(&r.name);
+            // Also add the first path component if present (for `Foo::bar()` style calls)
+            if let Some(path) = &r.path {
+                if let Some(first) = path.first() {
+                    referenced_names.insert(first);
+                }
+            }
+        }
+
+        // Crate root is the src/ directory (or where the main/lib file lives)
+        let crate_root = self.workspace_root.join("src");
+
+        // Track which files we depend on (dedupe)
+        let mut depended_files: HashSet<PathBuf> = HashSet::new();
+
+        for use_stmt in uses {
+            // Skip glob imports - can't determine what's used
+            if use_stmt.is_glob {
+                continue;
+            }
+
+            // Check if any imported name from this use statement is actually referenced
+            let mut is_used = false;
+            for name in &use_stmt.imported_names {
+                // Check both the original name and alias
+                let lookup_name = use_stmt.alias.as_ref().unwrap_or(name);
+                if referenced_names.contains(lookup_name.as_str()) {
+                    is_used = true;
+                    break;
+                }
+            }
+
+            // Only record dependency if the import is actually used (L2 behavior)
+            if !is_used {
+                continue;
+            }
+
+            // Resolve the module path to a file
+            if let Some(resolved) = resolve_module_path(&use_stmt.path, current_file, &crate_root) {
+                // Make the path relative to workspace root
+                let dep_path = self.relative_path(&resolved).to_path_buf();
+                depended_files.insert(dep_path);
+            }
+        }
+
+        // Store dependencies in the database
+        for dep_path in depended_files {
+            match self.db.get_file_id(&dep_path)? {
+                Some(dep_file_id) => {
+                    self.db.insert_file_dependency(file_id, dep_file_id)?;
+                }
+                None => {
+                    // This can happen when dependencies form cycles and files are
+                    // indexed in an order where the dependency target hasn't been
+                    // indexed yet. A two-pass indexing approach would fix this.
+                    debug!(
+                        from_file = %current_file.display(),
+                        dep_path = %dep_path.display(),
+                        "Dependency target not yet indexed, skipping"
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Discover source files in the workspace.
-    fn discover_files(&self) -> Result<Vec<PathBuf>> {
+    fn discover_files(
+        &self,
+        directories_skipped: &mut Vec<(PathBuf, String)>,
+    ) -> Result<Vec<PathBuf>> {
         let mut files = Vec::new();
-        self.walk_dir(&self.workspace_root, &mut files)?;
+        self.walk_dir(&self.workspace_root, &mut files, directories_skipped)?;
         Ok(files)
     }
 
     /// Recursively walk a directory, collecting source files.
     ///
-    /// Directories that cannot be read (e.g., due to permissions) are skipped with a warning.
+    /// Directories that cannot be read (e.g., due to permissions) are tracked
+    /// in `directories_skipped` for reporting.
     #[allow(clippy::only_used_in_recursion)] // Method design, may use self in future
-    fn walk_dir(&self, dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    fn walk_dir(
+        &self,
+        dir: &Path,
+        files: &mut Vec<PathBuf>,
+        directories_skipped: &mut Vec<(PathBuf, String)>,
+    ) -> Result<()> {
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
             Err(e) => {
@@ -256,11 +357,25 @@ impl Tethys {
                     error = %e,
                     "Cannot read directory, skipping"
                 );
+                directories_skipped.push((dir.to_path_buf(), e.to_string()));
                 return Ok(());
             }
         };
 
-        for entry in entries.flatten() {
+        for entry in entries {
+            // Explicitly handle entry errors instead of silently skipping with flatten()
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!(
+                        directory = %dir.display(),
+                        error = %e,
+                        "Failed to read directory entry, skipping"
+                    );
+                    continue;
+                }
+            };
+
             let path = entry.path();
 
             // Skip hidden directories and common build directories
@@ -271,7 +386,7 @@ impl Tethys {
             }
 
             if path.is_dir() {
-                self.walk_dir(&path, files)?;
+                self.walk_dir(&path, files, directories_skipped)?;
             } else if path.is_file() {
                 // Check if it's a supported file type
                 if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
@@ -291,6 +406,31 @@ impl Tethys {
             name,
             "target" | "node_modules" | "vendor" | "bin" | "obj" | "build" | "dist" | "__pycache__"
         )
+    }
+
+    /// Get the path relative to the workspace root.
+    ///
+    /// Returns the original path if it's not under the workspace root.
+    fn relative_path<'a>(&self, path: &'a Path) -> &'a Path {
+        path.strip_prefix(&self.workspace_root).unwrap_or(path)
+    }
+
+    /// Convert a list of file IDs to their paths, logging warnings for missing files.
+    fn file_ids_to_paths(&self, file_ids: Vec<i64>, source_file_id: i64) -> Result<Vec<PathBuf>> {
+        let mut paths = Vec::new();
+        for dep_id in file_ids {
+            match self.db.get_file_by_id(dep_id)? {
+                Some(file) => paths.push(file.path),
+                None => {
+                    warn!(
+                        source_file_id,
+                        missing_file_id = dep_id,
+                        "file_deps references non-existent file, possible database corruption"
+                    );
+                }
+            }
+        }
+        Ok(paths)
     }
 
     /// Incrementally update index for changed files.
@@ -322,8 +462,7 @@ impl Tethys {
 
     /// Get metadata for an indexed file.
     pub fn get_file(&self, path: &Path) -> Result<Option<IndexedFile>> {
-        let relative_path = path.strip_prefix(&self.workspace_root).unwrap_or(path);
-        self.db.get_file(relative_path)
+        self.db.get_file(self.relative_path(path))
     }
 
     // === Symbol Queries ===
@@ -335,9 +474,7 @@ impl Tethys {
 
     /// List all symbols defined in a file.
     pub fn list_symbols(&self, path: &Path) -> Result<Vec<Symbol>> {
-        let relative_path = path.strip_prefix(&self.workspace_root).unwrap_or(path);
-
-        match self.db.get_file_id(relative_path)? {
+        match self.db.get_file_id(self.relative_path(path))? {
             Some(file_id) => self.db.list_symbols_in_file(file_id),
             None => Ok(vec![]),
         }
@@ -372,15 +509,23 @@ impl Tethys {
     // === Dependency Queries ===
 
     /// Get files that directly depend on the given file.
-    #[allow(unused_variables)]
     pub fn get_dependents(&self, path: &Path) -> Result<Vec<PathBuf>> {
-        todo!("Phase 2: Implement get_dependents")
+        let Some(file_id) = self.db.get_file_id(self.relative_path(path))? else {
+            return Ok(vec![]);
+        };
+
+        let dependent_ids = self.db.get_file_dependents(file_id)?;
+        self.file_ids_to_paths(dependent_ids, file_id)
     }
 
     /// Get files that the given file directly depends on.
-    #[allow(unused_variables)]
     pub fn get_dependencies(&self, path: &Path) -> Result<Vec<PathBuf>> {
-        todo!("Phase 2: Implement get_dependencies")
+        let Some(file_id) = self.db.get_file_id(self.relative_path(path))? else {
+            return Ok(vec![]);
+        };
+
+        let dep_ids = self.db.get_file_dependencies(file_id)?;
+        self.file_ids_to_paths(dep_ids, file_id)
     }
 
     /// Get impact analysis: direct and transitive dependents of a file.

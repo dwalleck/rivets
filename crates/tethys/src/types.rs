@@ -60,6 +60,15 @@ impl Language {
             _ => None,
         }
     }
+
+    /// Convert to database string representation.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Rust => "rust",
+            Self::CSharp => "csharp",
+        }
+    }
 }
 
 /// Symbol kinds tracked by Tethys.
@@ -197,6 +206,25 @@ pub struct Span {
     pub end_line: u32,
     /// Ending column (1-indexed, exclusive)
     pub end_column: u32,
+}
+
+impl Span {
+    /// Create a new span with validation.
+    ///
+    /// Returns `None` if the end position is before the start position.
+    #[must_use]
+    pub fn new(start_line: u32, start_column: u32, end_line: u32, end_column: u32) -> Option<Self> {
+        // End must be >= start (either on a later line, or same line with >= column)
+        if end_line < start_line || (end_line == start_line && end_column < start_column) {
+            return None;
+        }
+        Some(Self {
+            start_line,
+            start_column,
+            end_line,
+            end_column,
+        })
+    }
 }
 
 // ============================================================================
@@ -430,6 +458,8 @@ pub struct IndexStats {
     pub duration: Duration,
     /// Files skipped (unsupported language, binary, etc.)
     pub files_skipped: usize,
+    /// Directories that could not be read (path, error reason)
+    pub directories_skipped: Vec<(PathBuf, String)>,
     /// Errors encountered (file-level, non-fatal)
     pub errors: Vec<IndexError>,
 }
@@ -771,5 +801,46 @@ mod tests {
             type_annotation: None
         }
         .is_reference());
+    }
+
+    // === Span validation tests ===
+
+    #[test]
+    fn span_new_valid_same_line() {
+        let span = Span::new(10, 5, 10, 20);
+        assert!(span.is_some());
+        let span = span.unwrap();
+        assert_eq!(span.start_line, 10);
+        assert_eq!(span.start_column, 5);
+        assert_eq!(span.end_line, 10);
+        assert_eq!(span.end_column, 20);
+    }
+
+    #[test]
+    fn span_new_valid_different_lines() {
+        let span = Span::new(5, 10, 15, 3);
+        assert!(span.is_some());
+        let span = span.unwrap();
+        assert_eq!(span.start_line, 5);
+        assert_eq!(span.end_line, 15);
+    }
+
+    #[test]
+    fn span_new_valid_single_character() {
+        // Same position is valid (represents a single character or cursor position)
+        let span = Span::new(1, 1, 1, 1);
+        assert!(span.is_some());
+    }
+
+    #[test]
+    fn span_new_invalid_end_line_before_start() {
+        let span = Span::new(10, 5, 8, 5);
+        assert!(span.is_none());
+    }
+
+    #[test]
+    fn span_new_invalid_end_column_before_start_same_line() {
+        let span = Span::new(10, 20, 10, 5);
+        assert!(span.is_none());
     }
 }
