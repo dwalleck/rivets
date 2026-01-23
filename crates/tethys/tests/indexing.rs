@@ -511,12 +511,10 @@ pub struct Config {
 
 #[test]
 fn dependencies_handles_circular_references() {
-    // Test that A→B, B→A circular dependencies don't crash the indexer.
+    // Test that A→B, B→A circular dependencies are both detected.
     //
-    // KNOWN LIMITATION: Due to single-pass indexing, dependencies can only be
-    // recorded to files that are already in the database. Files indexed earlier
-    // may not have their dependencies to later-indexed files recorded.
-    // A proper fix would require two-pass indexing.
+    // The deferred dependency resolution ensures that dependencies from
+    // earlier-indexed files to later-indexed files are properly recorded.
     let (_dir, mut tethys) = workspace_with_files(&[
         (
             "src/lib.rs",
@@ -568,11 +566,85 @@ impl B {
     let a_depends_on_b = deps_a.iter().any(|p| p.to_string_lossy().contains("b.rs"));
     let b_depends_on_a = deps_b.iter().any(|p| p.to_string_lossy().contains("a.rs"));
 
-    // At least one direction should be detected (the second file indexed
-    // will successfully record its dependency on the first)
+    // Both directions should be detected thanks to deferred dependency resolution
     assert!(
-        a_depends_on_b || b_depends_on_a,
-        "At least one direction of circular dependency should be detected. \
-         a→b: {a_depends_on_b}, b→a: {b_depends_on_a}"
+        a_depends_on_b,
+        "a.rs should depend on b.rs, got deps: {deps_a:?}"
+    );
+    assert!(
+        b_depends_on_a,
+        "b.rs should depend on a.rs, got deps: {deps_b:?}"
+    );
+}
+
+#[test]
+fn deferred_resolution_handles_three_file_cycle() {
+    // A→B→C→A cycle requires multiple resolution passes.
+    // This verifies the convergence loop works correctly.
+    let (_dir, mut tethys) = workspace_with_files(&[
+        ("src/lib.rs", "mod a;\nmod b;\nmod c;"),
+        (
+            "src/a.rs",
+            r"
+use crate::b::B;
+
+pub struct A;
+
+impl A {
+    pub fn get() -> B { B }
+}
+",
+        ),
+        (
+            "src/b.rs",
+            r"
+use crate::c::C;
+
+pub struct B;
+
+impl B {
+    pub fn get() -> C { C }
+}
+",
+        ),
+        (
+            "src/c.rs",
+            r"
+use crate::a::A;
+
+pub struct C;
+
+impl C {
+    pub fn get() -> A { A }
+}
+",
+        ),
+    ]);
+
+    let stats = tethys.index().expect("index failed");
+    assert!(stats.errors.is_empty(), "should have no indexing errors");
+
+    // All three cycle edges should be detected
+    let deps_a = tethys
+        .get_dependencies(std::path::Path::new("src/a.rs"))
+        .expect("get_dependencies failed");
+    let deps_b = tethys
+        .get_dependencies(std::path::Path::new("src/b.rs"))
+        .expect("get_dependencies failed");
+    let deps_c = tethys
+        .get_dependencies(std::path::Path::new("src/c.rs"))
+        .expect("get_dependencies failed");
+
+    assert!(
+        deps_a.iter().any(|p| p.to_string_lossy().contains("b.rs")),
+        "a.rs should depend on b.rs, got: {deps_a:?}"
+    );
+    assert!(
+        deps_b.iter().any(|p| p.to_string_lossy().contains("c.rs")),
+        "b.rs should depend on c.rs, got: {deps_b:?}"
+    );
+    assert!(
+        deps_c.iter().any(|p| p.to_string_lossy().contains("a.rs")),
+        "c.rs should depend on a.rs, got: {deps_c:?}"
     );
 }

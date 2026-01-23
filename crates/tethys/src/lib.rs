@@ -56,6 +56,17 @@ use languages::rust;
 use resolver::resolve_module_path;
 use tracing::{debug, warn};
 
+/// A dependency that couldn't be resolved because the target file wasn't indexed yet.
+///
+/// These are collected during the first indexing pass and resolved in subsequent passes.
+#[derive(Debug)]
+struct PendingDependency {
+    /// The file ID that has the dependency.
+    from_file_id: i64,
+    /// The path to the file being depended on (relative to workspace root).
+    dep_path: PathBuf,
+}
+
 /// Code intelligence cache and query interface.
 ///
 /// `Tethys` is the main entry point for code intelligence operations. It manages
@@ -114,6 +125,10 @@ impl Tethys {
     // === Indexing ===
 
     /// Index all source files in the workspace.
+    ///
+    /// Uses deferred dependency resolution to handle circular dependencies:
+    /// 1. First pass: Index all files, queue dependencies that can't resolve
+    /// 2. Resolution passes: Retry pending dependencies until no progress
     pub fn index(&mut self) -> Result<IndexStats> {
         let start = Instant::now();
         let mut files_indexed = 0;
@@ -122,10 +137,12 @@ impl Tethys {
         let mut files_skipped = 0;
         let mut directories_skipped = Vec::new();
         let mut errors = Vec::new();
+        let mut pending: Vec<PendingDependency> = Vec::new();
 
         // Walk the workspace and find source files
         let files = self.discover_files(&mut directories_skipped)?;
 
+        // First pass: index all files, collecting unresolved dependencies
         for file_path in files {
             // Check if it's a supported language
             let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -142,7 +159,7 @@ impl Tethys {
             }
 
             // Read and parse the file
-            match self.index_file(&file_path, language) {
+            match self.index_file(&file_path, language, &mut pending) {
                 Ok(count) => {
                     files_indexed += 1;
                     symbols_found += count;
@@ -157,6 +174,45 @@ impl Tethys {
             }
         }
 
+        // Resolution passes: retry pending dependencies until stable
+        let mut prev_count = pending.len() + 1;
+        let mut pass = 0;
+        while !pending.is_empty() && pending.len() < prev_count {
+            pass += 1;
+            let before = pending.len();
+            prev_count = before;
+            pending = self.resolve_pending(pending)?;
+            debug!(
+                pass,
+                resolved = before - pending.len(),
+                remaining = pending.len(),
+                "Dependency resolution pass completed"
+            );
+        }
+
+        // Convert remaining pending to (from_path, dep_path) for reporting
+        let unresolved_dependencies: Vec<(PathBuf, PathBuf)> = pending
+            .into_iter()
+            .filter_map(|p| {
+                let from_path = self
+                    .db
+                    .get_file_by_id(p.from_file_id)
+                    .ok()
+                    .flatten()
+                    .map(|f| f.path)?;
+                Some((from_path, p.dep_path))
+            })
+            .collect();
+
+        // Log unresolved dependencies with actual file paths
+        for (from_path, dep_path) in &unresolved_dependencies {
+            debug!(
+                from_file = %from_path.display(),
+                dep_path = %dep_path.display(),
+                "Dependency unresolved after all passes (likely external crate)"
+            );
+        }
+
         Ok(IndexStats {
             files_indexed,
             symbols_found,
@@ -165,6 +221,7 @@ impl Tethys {
             files_skipped,
             directories_skipped,
             errors,
+            unresolved_dependencies,
         })
     }
 
@@ -172,7 +229,14 @@ impl Tethys {
     ///
     /// Uses a database transaction to ensure atomicity - either the file and all
     /// its symbols are stored, or nothing is changed on failure.
-    fn index_file(&mut self, path: &Path, language: Language) -> Result<usize> {
+    ///
+    /// Unresolved dependencies (target file not yet indexed) are added to `pending`.
+    fn index_file(
+        &mut self,
+        path: &Path,
+        language: Language,
+        pending: &mut Vec<PendingDependency>,
+    ) -> Result<usize> {
         let content = std::fs::read(path)?;
         let content_str = std::str::from_utf8(&content)
             .map_err(|_| Error::Parser("file is not valid UTF-8".to_string()))?;
@@ -240,7 +304,7 @@ impl Tethys {
         )?;
 
         // Compute and store file dependencies (L2: only for actually used symbols)
-        self.compute_dependencies(path, file_id, &uses, &refs)?;
+        self.compute_dependencies(path, file_id, &uses, &refs, pending)?;
 
         Ok(extracted.len())
     }
@@ -249,12 +313,16 @@ impl Tethys {
     ///
     /// This is L2 dependency detection: we only count a dependency if the imported symbol
     /// is actually used in the code, not just imported.
+    ///
+    /// Dependencies that can't be resolved (target file not yet indexed) are added to
+    /// `pending` for retry in subsequent passes.
     fn compute_dependencies(
         &self,
         current_file: &Path,
         file_id: i64,
         uses: &[rust::UseStatement],
         refs: &[rust::ExtractedReference],
+        pending: &mut Vec<PendingDependency>,
     ) -> Result<()> {
         use std::collections::HashSet;
 
@@ -306,26 +374,45 @@ impl Tethys {
             }
         }
 
-        // Store dependencies in the database
+        // Store dependencies in the database, queueing unresolved ones for later
         for dep_path in depended_files {
             match self.db.get_file_id(&dep_path)? {
                 Some(dep_file_id) => {
                     self.db.insert_file_dependency(file_id, dep_file_id)?;
                 }
                 None => {
-                    // This can happen when dependencies form cycles and files are
-                    // indexed in an order where the dependency target hasn't been
-                    // indexed yet. A two-pass indexing approach would fix this.
-                    debug!(
-                        from_file = %current_file.display(),
-                        dep_path = %dep_path.display(),
-                        "Dependency target not yet indexed, skipping"
-                    );
+                    // Target file not indexed yet - queue for resolution pass
+                    pending.push(PendingDependency {
+                        from_file_id: file_id,
+                        dep_path,
+                    });
                 }
             }
         }
 
         Ok(())
+    }
+
+    /// Retry resolving pending dependencies.
+    ///
+    /// Returns dependencies that still couldn't be resolved.
+    fn resolve_pending(&self, pending: Vec<PendingDependency>) -> Result<Vec<PendingDependency>> {
+        let mut still_pending = Vec::new();
+
+        for p in pending {
+            match self.db.get_file_id(&p.dep_path)? {
+                Some(dep_file_id) => {
+                    self.db
+                        .insert_file_dependency(p.from_file_id, dep_file_id)?;
+                }
+                None => {
+                    // Still not found - keep for next pass or final logging
+                    still_pending.push(p);
+                }
+            }
+        }
+
+        Ok(still_pending)
     }
 
     /// Discover source files in the workspace.

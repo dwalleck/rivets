@@ -462,6 +462,9 @@ pub struct IndexStats {
     pub directories_skipped: Vec<(PathBuf, String)>,
     /// Errors encountered (file-level, non-fatal)
     pub errors: Vec<IndexError>,
+    /// Dependencies that couldn't be resolved (`from_file`, `dep_path`).
+    /// These are typically external crate dependencies or missing files.
+    pub unresolved_dependencies: Vec<(PathBuf, PathBuf)>,
 }
 
 /// Statistics from an incremental update.
