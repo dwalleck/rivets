@@ -15,10 +15,8 @@
 //! The trait-based design allows language-specific logic while maintaining
 //! a uniform interface for the indexer.
 
+pub mod csharp;
 pub mod rust;
-
-// TODO: Phase 5
-// pub mod csharp;
 
 use crate::types::Language;
 
@@ -27,11 +25,11 @@ use crate::types::Language;
 /// Returns `None` for languages that are declared but not yet implemented.
 #[must_use]
 #[allow(dead_code)] // Public API, will be used when language-agnostic indexing is implemented
+#[allow(clippy::unnecessary_wraps)] // Option return is intentional for future language stubs
 pub fn get_language_support(lang: Language) -> Option<&'static dyn LanguageSupport> {
     match lang {
         Language::Rust => Some(&rust::RustLanguage),
-        // TODO: Phase 5 - implement C# support
-        Language::CSharp => None,
+        Language::CSharp => Some(&csharp::CSharpLanguage),
     }
 }
 

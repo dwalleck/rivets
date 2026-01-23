@@ -196,7 +196,7 @@ impl ReferenceKind {
 ///
 /// Positions are 1-indexed (first line is 1, first column is 1) to match
 /// editor conventions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Span {
     /// Starting line (1-indexed)
     pub start_line: u32,
