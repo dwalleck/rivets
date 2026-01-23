@@ -1,0 +1,36 @@
+[package]
+name = "tethys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Code intelligence cache and query interface"
+
+[dependencies]
+# Parsing
+tree-sitter = "0.24"
+tree-sitter-rust = "0.23"
+# tree-sitter-c-sharp = "0.23"  # Phase 5
+
+# Storage
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Graph algorithms
+petgraph.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+rstest.workspace = true
+
+[lints]
+workspace = true
