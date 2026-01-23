@@ -1,7 +1,9 @@
 # Blast Radius Analysis Design
 
+> **Note**: This early design document has been superseded by the [Tethys Code Intelligence Library](../design/tethys-code-intelligence.md). The term "blast radius" has been replaced with "impact analysis" in the final design.
+
 **Date**: 2026-01-22
-**Status**: Draft
+**Status**: Superseded
 **Author**: Collaborative design session
 
 ## Overview

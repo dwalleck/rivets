@@ -25,7 +25,7 @@ Tethys provides the *data*. What consumers do with it is up to them:
 
 | Consumer | Use Case |
 |----------|----------|
-| **Rivets** | Enrich issues with code context, show blast radius |
+| **Rivets** | Enrich issues with code context, show impact analysis |
 | **Claude Code Hook** | Warn about callers before modifying a function |
 | **MCP Server** | Let AI agents query symbol references |
 | **Catalyst Agents** | Help `code-refactor-master` track dependencies |
@@ -112,7 +112,7 @@ rivets/
 │   │   │   ├── parser.rs       # tree-sitter parsing
 │   │   │   ├── symbols.rs      # Symbol extraction per language
 │   │   │   ├── resolver.rs     # Module/import resolution
-│   │   │   ├── graph.rs        # petgraph operations (blast radius, cycles)
+│   │   │   ├── graph.rs        # petgraph operations (impact analysis, cycles)
 │   │   │   ├── lsp.rs          # Optional LSP refinement
 │   │   │   └── languages/
 │   │   │       ├── mod.rs
@@ -360,9 +360,9 @@ pub struct IndexError {
 
 // === Query Results ===
 
-/// Result of blast radius analysis
+/// Result of impact analysis (transitive dependents)
 #[derive(Debug, Clone)]
-pub struct BlastRadius {
+pub struct Impact {
     pub target: PathBuf,
     pub direct_dependents: Vec<Dependent>,
     pub transitive_dependents: Vec<Dependent>,
@@ -394,73 +394,115 @@ pub struct Cycle {
 ```rust
 // tethys/src/lib.rs
 
-pub struct Tethys {
-    index: Index,
-    graph: DependencyGraph,
-    lsp: Option<LspRefinement>,
-}
+/// Code intelligence cache and query interface.
+/// Internal fields are not exposed; interact through methods only.
+pub struct Tethys { /* opaque */ }
 
 impl Tethys {
-    /// Create a new Tethys instance for a workspace
+    // === Construction ===
+
+    /// Create a new Tethys instance for a workspace.
+    /// Uses convention-based defaults: respects .gitignore, excludes common build dirs.
     pub fn new(workspace_root: &Path) -> Result<Self>;
 
-    /// Create with LSP refinement enabled
+    /// Create with LSP refinement enabled (Phase 6).
     pub fn with_lsp(workspace_root: &Path, lsp_command: &str) -> Result<Self>;
 
     // === Indexing ===
 
-    /// Index all source files in the workspace
+    /// Index all source files in the workspace.
     pub fn index(&mut self) -> Result<IndexStats>;
 
-    /// Incrementally update index for changed files
+    /// Incrementally update index for changed files.
     pub fn update(&mut self) -> Result<IndexUpdate>;
 
-    /// Check if index is stale
-    pub fn is_stale(&self) -> bool;
+    /// Check if any indexed files have changed since last update.
+    pub fn needs_update(&self) -> Result<bool>;
+
+    /// Rebuild the entire index from scratch.
+    pub fn rebuild(&mut self) -> Result<IndexStats>;
+
+    // === File Queries ===
+
+    /// Get metadata for an indexed file.
+    pub fn get_file(&self, path: &Path) -> Result<Option<IndexedFile>>;
 
     // === Symbol Queries ===
 
-    /// Search for symbols by name (fuzzy matching)
-    pub fn search_symbols(&self, query: &str) -> Vec<Symbol>;
+    /// Search for symbols by name (fuzzy/partial matching).
+    pub fn search_symbols(&self, query: &str) -> Result<Vec<Symbol>>;
 
-    /// Get all symbols in a file
-    pub fn symbols_in_file(&self, path: &Path) -> Vec<Symbol>;
+    /// List all symbols defined in a file.
+    pub fn list_symbols(&self, path: &Path) -> Result<Vec<Symbol>>;
 
-    /// Find symbol definition by name
-    pub fn find_symbol(&self, name: &str) -> Option<Symbol>;
+    /// Get a symbol by its qualified name (exact match).
+    pub fn get_symbol(&self, qualified_name: &str) -> Result<Option<Symbol>>;
 
-    // === Dependency Queries ===
+    /// Get a symbol by its database ID.
+    pub fn get_symbol_by_id(&self, id: i64) -> Result<Option<Symbol>>;
 
-    /// Get all files that depend on the given file
-    pub fn get_dependents(&self, path: &Path) -> Vec<PathBuf>;
+    // === Reference Queries ===
 
-    /// Get all files that the given file depends on
-    pub fn get_dependencies(&self, path: &Path) -> Vec<PathBuf>;
+    /// Get all references to a symbol (exact locations).
+    pub fn get_references(&self, qualified_name: &str) -> Result<Vec<Reference>>;
 
-    /// Get callers of a specific symbol
-    pub fn get_callers(&self, symbol: &str) -> Vec<Dependent>;
+    /// List all outgoing references from a file.
+    pub fn list_references_in_file(&self, path: &Path) -> Result<Vec<Reference>>;
 
-    /// Get full blast radius (transitive dependents)
-    pub fn get_blast_radius(&self, path: &Path) -> BlastRadius;
+    // === Dependency Queries (file-level) ===
 
-    /// Get blast radius for a specific symbol
-    pub fn get_symbol_blast_radius(&self, symbol: &str) -> BlastRadius;
+    /// Get files that directly depend on the given file.
+    pub fn get_dependents(&self, path: &Path) -> Result<Vec<PathBuf>>;
 
-    /// Detect circular dependencies in the codebase
-    pub fn detect_cycles(&self) -> Vec<Cycle>;
+    /// Get files that the given file directly depends on.
+    pub fn get_dependencies(&self, path: &Path) -> Result<Vec<PathBuf>>;
+
+    /// Get impact analysis: direct and transitive dependents of a file.
+    pub fn get_impact(&self, path: &Path) -> Result<Impact>;
+
+    // === Dependency Queries (symbol-level) ===
+
+    /// Get symbols that call/use the given symbol (aggregated by file).
+    pub fn get_callers(&self, qualified_name: &str) -> Result<Vec<Dependent>>;
+
+    /// Get symbols that the given symbol calls/uses.
+    pub fn get_symbol_dependencies(&self, qualified_name: &str) -> Result<Vec<Symbol>>;
+
+    /// Get impact analysis: direct and transitive callers of a symbol.
+    pub fn get_symbol_impact(&self, qualified_name: &str) -> Result<Impact>;
+
+    // === Graph Analysis ===
+
+    /// Detect circular dependencies in the codebase.
+    pub fn detect_cycles(&self) -> Result<Vec<Cycle>>;
+
+    /// Get the shortest dependency path between two files, if one exists.
+    pub fn get_dependency_chain(&self, from: &Path, to: &Path) -> Result<Option<Vec<PathBuf>>>;
 
     // === Database ===
 
-    /// Get path to the SQLite database
+    /// Get path to the SQLite database file.
     pub fn db_path(&self) -> &Path;
 
-    /// Rebuild the entire index from scratch
-    pub fn rebuild(&mut self) -> Result<IndexStats>;
-
-    /// Vacuum the database to reclaim space
+    /// Vacuum the database to reclaim space.
     pub fn vacuum(&self) -> Result<()>;
 }
 ```
+
+### API Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Struct visibility | Opaque | Internal fields are implementation details |
+| Error handling | All DB methods return `Result<T>` | Database errors are rare but real; explicit handling |
+| Naming: `search_*` | Fuzzy/partial matching → `Vec<T>` | Implies exploration, multiple results |
+| Naming: `get_*` | Exact lookup by key → `Option<T>` or `Vec<T>` | Direct retrieval, known key |
+| Naming: `list_*` | Enumerate category → `Vec<T>` | All items matching criteria |
+| Symbol identification | `qualified_name` (e.g., `"IssueStorage::save"`) | Matches `Symbol::qualified_name` field |
+| Staleness check | `needs_update()` method | Explicit check without triggering work |
+| File configuration | Convention-based defaults | Respects `.gitignore`, excludes `target/`, etc. |
+| Impact terminology | `Impact` instead of `BlastRadius` | Standard term in change management |
+| Query options | Simple params for MVP | Builder pattern preferred when options needed later |
 
 ## Dependency Detection Strategy
 
@@ -766,8 +808,8 @@ impl DependencyGraph {
             .collect()
     }
 
-    /// Transitive dependents (full blast radius)
-    pub fn get_blast_radius(&self, path: &Path) -> Vec<PathBuf> {
+    /// Transitive dependents (impact analysis)
+    pub fn get_impact(&self, path: &Path) -> Vec<PathBuf> {
         let Some(&start) = self.node_map.get(path) else { return vec![] };
 
         let mut visited = HashSet::new();
@@ -841,7 +883,7 @@ impl LanguageSupport for CSharpLanguage {
 Tethys uses a **SQLite + petgraph hybrid** approach:
 
 - **SQLite** is the source of truth for all indexed data
-- **petgraph** is used for graph algorithms (blast radius, cycle detection)
+- **petgraph** is used for graph algorithms (impact analysis, cycle detection)
 - Data is loaded from SQLite into petgraph on-demand for graph operations
 
 ### Why Not JSONL?
@@ -937,7 +979,7 @@ CREATE INDEX idx_file_deps_to ON file_deps(to_file_id);
 | List references | SQL | Direct foreign key lookup |
 | Direct callers | SQL | Single JOIN |
 | File dependencies | SQL | Denormalized table |
-| **Blast radius** | petgraph | Transitive closure |
+| **Impact analysis** | petgraph | Transitive closure |
 | **Cycle detection** | petgraph | Graph algorithm |
 | **Shortest path** | petgraph | Graph algorithm |
 
@@ -962,11 +1004,11 @@ tethys search "authenticate"
 # Get callers of a symbol
 tethys callers "AuthMiddleware::new"
 
-# Get blast radius for a file
-tethys blast-radius src/auth.rs
+# Get impact analysis for a file
+tethys impact src/auth.rs
 
-# Get blast radius for a symbol
-tethys blast-radius --symbol "authenticate"
+# Get impact analysis for a symbol
+tethys impact --symbol "authenticate"
 
 # Detect circular dependencies
 tethys cycles
@@ -990,8 +1032,8 @@ fn show_issue_with_context(issue: &Issue, tethys: &Tethys) {
 
     if let Some(files) = &issue.related_files {
         for file in files {
-            let blast = tethys.get_blast_radius(file);
-            println!("\nBlast radius for {}:", file.display());
+            let impact = tethys.get_impact(file);
+            println!("\nImpact analysis for {}:", file.display());
             println!("  Direct: {} files", blast.direct_dependents.len());
             println!("  Transitive: {} files", blast.transitive_dependents.len());
         }
@@ -1065,7 +1107,7 @@ async fn handle_get_callers(params: GetCallersParams, tethys: &Tethys) -> McpRes
 ### Phase 3: Graph Operations
 - [ ] petgraph integration for graph algorithms
 - [ ] SQLite → petgraph loading for subgraphs
-- [ ] `get_blast_radius()` with BFS
+- [ ] `get_impact()` with BFS
 - [ ] `get_callers()` for symbol-level queries
 - [ ] `detect_cycles()` with Tarjan's SCC
 
@@ -1073,7 +1115,7 @@ async fn handle_get_callers(params: GetCallersParams, tethys: &Tethys) -> McpRes
 - [ ] `tethys index` / `tethys index --rebuild`
 - [ ] `tethys search`
 - [ ] `tethys callers`
-- [ ] `tethys blast-radius`
+- [ ] `tethys impact`
 - [ ] `tethys cycles`
 - [ ] `tethys stats`
 
