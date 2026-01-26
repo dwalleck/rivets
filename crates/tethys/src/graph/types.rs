@@ -38,10 +38,15 @@ pub struct SymbolImpact {
     pub direct_callers: Vec<CallerInfo>,
     /// Symbols that transitively call the target (excludes direct).
     pub transitive_callers: Vec<CallerInfo>,
-    /// Total number of unique callers.
-    pub total_caller_count: usize,
     /// Maximum depth reached during traversal.
     pub max_depth_reached: u32,
+}
+
+impl SymbolImpact {
+    /// Total number of unique callers (direct + transitive).
+    pub fn total_caller_count(&self) -> usize {
+        self.direct_callers.len() + self.transitive_callers.len()
+    }
 }
 
 /// A path through the call graph.
@@ -51,6 +56,31 @@ pub struct CallPath {
     pub symbols: Vec<Symbol>,
     /// The relationship at each step.
     pub edges: Vec<ReferenceKind>,
+}
+
+impl CallPath {
+    /// Create a new call path, validating invariants.
+    ///
+    /// Returns `None` if:
+    /// - `symbols` is empty
+    /// - `edges.len()` does not equal `symbols.len() - 1`
+    pub fn new(symbols: Vec<Symbol>, edges: Vec<ReferenceKind>) -> Option<Self> {
+        if symbols.is_empty() {
+            return None;
+        }
+        if edges.len() != symbols.len().saturating_sub(1) {
+            return None;
+        }
+        Some(Self { symbols, edges })
+    }
+
+    /// Create a trivial path with a single symbol.
+    pub fn single(symbol: Symbol) -> Self {
+        Self {
+            symbols: vec![symbol],
+            edges: vec![],
+        }
+    }
 }
 
 /// Information about a file dependency.
@@ -71,8 +101,13 @@ pub struct FileImpact {
     pub direct_dependents: Vec<FileDepInfo>,
     /// Files that transitively depend on the target.
     pub transitive_dependents: Vec<FileDepInfo>,
-    /// Total number of dependent files.
-    pub total_dependent_count: usize,
+}
+
+impl FileImpact {
+    /// Total number of dependent files (direct + transitive).
+    pub fn total_dependent_count(&self) -> usize {
+        self.direct_dependents.len() + self.transitive_dependents.len()
+    }
 }
 
 /// A path through the file dependency graph.
@@ -80,4 +115,21 @@ pub struct FileImpact {
 pub struct FilePath {
     /// Files from source to target.
     pub files: Vec<IndexedFile>,
+}
+
+impl FilePath {
+    /// Create a new file path, validating invariants.
+    ///
+    /// Returns `None` if `files` is empty.
+    pub fn new(files: Vec<IndexedFile>) -> Option<Self> {
+        if files.is_empty() {
+            return None;
+        }
+        Some(Self { files })
+    }
+
+    /// Create a trivial path with a single file.
+    pub fn single(file: IndexedFile) -> Self {
+        Self { files: vec![file] }
+    }
 }

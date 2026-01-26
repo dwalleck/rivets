@@ -28,7 +28,7 @@ mod sql;
 pub use sql::{SqlFileGraph, SqlSymbolGraph};
 
 use crate::error::Result;
-use crate::types::Cycle;
+use crate::types::{Cycle, FileId, SymbolId};
 
 /// Operations on the symbol-level dependency graph.
 ///
@@ -36,24 +36,28 @@ use crate::types::Cycle;
 /// This enables precise impact analysis and execution flow understanding.
 pub trait SymbolGraphOps: Send + Sync {
     /// Get symbols that directly call/reference the given symbol.
-    fn get_callers(&self, symbol_id: i64) -> Result<Vec<CallerInfo>>;
+    fn get_callers(&self, symbol_id: SymbolId) -> Result<Vec<CallerInfo>>;
 
     /// Get symbols that the given symbol directly calls/references.
-    fn get_callees(&self, symbol_id: i64) -> Result<Vec<CalleeInfo>>;
+    fn get_callees(&self, symbol_id: SymbolId) -> Result<Vec<CalleeInfo>>;
 
     /// Get transitive callers (impact analysis).
     ///
     /// Returns all symbols that directly or indirectly call the target.
     fn get_transitive_callers(
         &self,
-        symbol_id: i64,
+        symbol_id: SymbolId,
         max_depth: Option<u32>,
     ) -> Result<SymbolImpact>;
 
     /// Find the shortest call path between two symbols.
     ///
     /// Returns `None` if no path exists.
-    fn find_call_path(&self, from_symbol_id: i64, to_symbol_id: i64) -> Result<Option<CallPath>>;
+    fn find_call_path(
+        &self,
+        from_symbol_id: SymbolId,
+        to_symbol_id: SymbolId,
+    ) -> Result<Option<CallPath>>;
 }
 
 /// Operations on the file-level dependency graph.
@@ -61,21 +65,28 @@ pub trait SymbolGraphOps: Send + Sync {
 /// File graphs are coarser than symbol graphs but faster to traverse.
 pub trait FileGraphOps: Send + Sync {
     /// Get files that directly depend on the given file.
-    fn get_dependents(&self, file_id: i64) -> Result<Vec<FileDepInfo>>;
+    fn get_dependents(&self, file_id: FileId) -> Result<Vec<FileDepInfo>>;
 
     /// Get files that the given file directly depends on.
-    fn get_dependencies(&self, file_id: i64) -> Result<Vec<FileDepInfo>>;
+    fn get_dependencies(&self, file_id: FileId) -> Result<Vec<FileDepInfo>>;
 
     /// Get transitive dependents (file-level impact analysis).
-    fn get_transitive_dependents(&self, file_id: i64, max_depth: Option<u32>)
-        -> Result<FileImpact>;
+    fn get_transitive_dependents(
+        &self,
+        file_id: FileId,
+        max_depth: Option<u32>,
+    ) -> Result<FileImpact>;
 
     /// Find the shortest dependency path between two files.
-    fn find_dependency_path(&self, from_file_id: i64, to_file_id: i64) -> Result<Option<FilePath>>;
+    fn find_dependency_path(
+        &self,
+        from_file_id: FileId,
+        to_file_id: FileId,
+    ) -> Result<Option<FilePath>>;
 
     /// Detect circular dependencies in the codebase.
     fn detect_cycles(&self) -> Result<Vec<Cycle>>;
 
     /// Detect cycles involving a specific file.
-    fn detect_cycles_involving(&self, file_id: i64) -> Result<Vec<Cycle>>;
+    fn detect_cycles_involving(&self, file_id: FileId) -> Result<Vec<Cycle>>;
 }

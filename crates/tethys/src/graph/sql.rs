@@ -17,7 +17,9 @@ use super::{
     SymbolGraphOps, SymbolImpact,
 };
 use crate::error::Result;
-use crate::types::{IndexedFile, Language, ReferenceKind, Span, Symbol, SymbolKind, Visibility};
+use crate::types::{
+    FileId, IndexedFile, Language, ReferenceKind, Span, Symbol, SymbolId, SymbolKind, Visibility,
+};
 
 /// SQL-based implementation of symbol graph operations.
 ///
@@ -36,12 +38,16 @@ impl SqlSymbolGraph {
         })
     }
 
+    /// Acquire the connection lock, converting poison errors to our error type.
+    fn lock_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+        self.conn
+            .lock()
+            .map_err(|e| crate::error::Error::Internal(format!("mutex poisoned: {e}")))
+    }
+
     /// Get a symbol by its database ID.
     fn get_symbol_by_id(&self, id: i64) -> Result<Option<Symbol>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| crate::error::Error::Internal(format!("mutex poisoned: {e}")))?;
+        let conn = self.lock_conn()?;
 
         let mut stmt = conn.prepare(
             "SELECT id, file_id, name, module_path, qualified_name, kind, line, column,
@@ -72,12 +78,16 @@ impl SqlFileGraph {
         })
     }
 
+    /// Acquire the connection lock, converting poison errors to our error type.
+    fn lock_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+        self.conn
+            .lock()
+            .map_err(|e| crate::error::Error::Internal(format!("mutex poisoned: {e}")))
+    }
+
     /// Get a file by its database ID.
     fn get_file_by_id(&self, id: i64) -> Result<Option<IndexedFile>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| crate::error::Error::Internal(format!("mutex poisoned: {e}")))?;
+        let conn = self.lock_conn()?;
 
         let mut stmt = conn.prepare(
             "SELECT id, path, language, mtime_ns, size_bytes, content_hash, indexed_at
@@ -91,11 +101,8 @@ impl SqlFileGraph {
 }
 
 impl FileGraphOps for SqlFileGraph {
-    fn get_dependents(&self, file_id: i64) -> Result<Vec<FileDepInfo>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| crate::error::Error::Internal(format!("mutex poisoned: {e}")))?;
+    fn get_dependents(&self, file_id: FileId) -> Result<Vec<FileDepInfo>> {
+        let conn = self.lock_conn()?;
 
         // Find all files that depend on the target file
         // file_deps has (from_file_id, to_file_id) where from depends on to
@@ -111,7 +118,7 @@ impl FileGraphOps for SqlFileGraph {
         )?;
 
         let dependents = stmt
-            .query_map([file_id], |row| {
+            .query_map([file_id.0], |row| {
                 let file = row_to_indexed_file(row)?;
                 let ref_count: usize = row.get::<_, i64>(7)? as usize;
 
@@ -122,11 +129,8 @@ impl FileGraphOps for SqlFileGraph {
         Ok(dependents)
     }
 
-    fn get_dependencies(&self, file_id: i64) -> Result<Vec<FileDepInfo>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| crate::error::Error::Internal(format!("mutex poisoned: {e}")))?;
+    fn get_dependencies(&self, file_id: FileId) -> Result<Vec<FileDepInfo>> {
+        let conn = self.lock_conn()?;
 
         // Find all files that the given file depends on
         // file_deps has (from_file_id, to_file_id) where from depends on to
@@ -142,7 +146,7 @@ impl FileGraphOps for SqlFileGraph {
         )?;
 
         let dependencies = stmt
-            .query_map([file_id], |row| {
+            .query_map([file_id.0], |row| {
                 let file = row_to_indexed_file(row)?;
                 let ref_count: usize = row.get::<_, i64>(7)? as usize;
 
@@ -155,20 +159,17 @@ impl FileGraphOps for SqlFileGraph {
 
     fn get_transitive_dependents(
         &self,
-        file_id: i64,
+        file_id: FileId,
         max_depth: Option<u32>,
     ) -> Result<FileImpact> {
         let max_depth = max_depth.unwrap_or(50);
 
         // First, get the target file
         let target = self
-            .get_file_by_id(file_id)?
-            .ok_or_else(|| crate::error::Error::NotFound(format!("file id: {file_id}")))?;
+            .get_file_by_id(file_id.0)?
+            .ok_or_else(|| crate::error::Error::NotFound(format!("file id: {}", file_id.0)))?;
 
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| crate::error::Error::Internal(format!("mutex poisoned: {e}")))?;
+        let conn = self.lock_conn()?;
 
         // Use recursive CTE to find all dependents with their depth
         let mut stmt = conn.prepare(
@@ -198,7 +199,7 @@ impl FileGraphOps for SqlFileGraph {
         let mut direct_dependents = Vec::new();
         let mut transitive_dependents = Vec::new();
 
-        let rows = stmt.query_map(rusqlite::params![file_id, max_depth], |row| {
+        let rows = stmt.query_map(rusqlite::params![file_id.0, max_depth], |row| {
             let file = row_to_indexed_file(row)?;
             let depth: u32 = row.get::<_, i64>(7)? as u32;
             Ok((file, depth))
@@ -216,23 +217,24 @@ impl FileGraphOps for SqlFileGraph {
             }
         }
 
-        let total_dependent_count = direct_dependents.len() + transitive_dependents.len();
-
         Ok(FileImpact {
             target,
             direct_dependents,
             transitive_dependents,
-            total_dependent_count,
         })
     }
 
-    fn find_dependency_path(&self, from_file_id: i64, to_file_id: i64) -> Result<Option<FilePath>> {
+    fn find_dependency_path(
+        &self,
+        from_file_id: FileId,
+        to_file_id: FileId,
+    ) -> Result<Option<FilePath>> {
         // Same file - trivial path
         if from_file_id == to_file_id {
-            let file = self
-                .get_file_by_id(from_file_id)?
-                .ok_or_else(|| crate::error::Error::NotFound(format!("file id: {from_file_id}")))?;
-            return Ok(Some(FilePath { files: vec![file] }));
+            let file = self.get_file_by_id(from_file_id.0)?.ok_or_else(|| {
+                crate::error::Error::NotFound(format!("file id: {}", from_file_id.0))
+            })?;
+            return Ok(Some(FilePath::single(file)));
         }
 
         // BFS to find shortest path using recursive CTE
@@ -241,10 +243,7 @@ impl FileGraphOps for SqlFileGraph {
 
         // Scope the connection lock to just the query execution
         let file_ids: Option<Vec<i64>> = {
-            let conn = self
-                .conn
-                .lock()
-                .map_err(|e| crate::error::Error::Internal(format!("mutex poisoned: {e}")))?;
+            let conn = self.lock_conn()?;
 
             let mut stmt = conn.prepare(
                 "WITH RECURSIVE path_search(file_id, path, depth) AS (
@@ -270,7 +269,7 @@ impl FileGraphOps for SqlFileGraph {
 
             let path_str: Option<String> = stmt
                 .query_row(
-                    rusqlite::params![from_file_id, to_file_id, max_depth],
+                    rusqlite::params![from_file_id.0, to_file_id.0, max_depth],
                     |row| row.get(0),
                 )
                 .optional()?;
@@ -296,7 +295,8 @@ impl FileGraphOps for SqlFileGraph {
             files.push(file);
         }
 
-        Ok(Some(FilePath { files }))
+        // Use validated constructor - invariants guaranteed by construction
+        Ok(FilePath::new(files))
     }
 
     fn detect_cycles(&self) -> Result<Vec<crate::types::Cycle>> {
@@ -304,18 +304,15 @@ impl FileGraphOps for SqlFileGraph {
         Ok(vec![])
     }
 
-    fn detect_cycles_involving(&self, _file_id: i64) -> Result<Vec<crate::types::Cycle>> {
+    fn detect_cycles_involving(&self, _file_id: FileId) -> Result<Vec<crate::types::Cycle>> {
         // Cycle detection stubbed for future implementation
         Ok(vec![])
     }
 }
 
 impl SymbolGraphOps for SqlSymbolGraph {
-    fn get_callers(&self, symbol_id: i64) -> Result<Vec<CallerInfo>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| crate::error::Error::Internal(format!("mutex poisoned: {e}")))?;
+    fn get_callers(&self, symbol_id: SymbolId) -> Result<Vec<CallerInfo>> {
+        let conn = self.lock_conn()?;
 
         // Find all symbols that contain references to the target symbol
         let mut stmt = conn.prepare(
@@ -333,7 +330,7 @@ impl SymbolGraphOps for SqlSymbolGraph {
         )?;
 
         let callers = stmt
-            .query_map([symbol_id], |row| {
+            .query_map([symbol_id.0], |row| {
                 let symbol = row_to_symbol(row)?;
                 let ref_count: usize = row.get::<_, i64>(13)? as usize;
                 let ref_kinds_str: String = row.get(14)?;
@@ -350,11 +347,8 @@ impl SymbolGraphOps for SqlSymbolGraph {
         Ok(callers)
     }
 
-    fn get_callees(&self, symbol_id: i64) -> Result<Vec<CalleeInfo>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| crate::error::Error::Internal(format!("mutex poisoned: {e}")))?;
+    fn get_callees(&self, symbol_id: SymbolId) -> Result<Vec<CalleeInfo>> {
+        let conn = self.lock_conn()?;
 
         // Find all symbols that the given symbol references
         let mut stmt = conn.prepare(
@@ -372,7 +366,7 @@ impl SymbolGraphOps for SqlSymbolGraph {
         )?;
 
         let callees = stmt
-            .query_map([symbol_id], |row| {
+            .query_map([symbol_id.0], |row| {
                 let symbol = row_to_symbol(row)?;
                 let ref_count: usize = row.get::<_, i64>(13)? as usize;
                 let ref_kinds_str: String = row.get(14)?;
@@ -391,20 +385,17 @@ impl SymbolGraphOps for SqlSymbolGraph {
 
     fn get_transitive_callers(
         &self,
-        symbol_id: i64,
+        symbol_id: SymbolId,
         max_depth: Option<u32>,
     ) -> Result<SymbolImpact> {
         let max_depth = max_depth.unwrap_or(50);
 
         // First, get the target symbol
         let target = self
-            .get_symbol_by_id(symbol_id)?
-            .ok_or_else(|| crate::error::Error::NotFound(format!("symbol id: {symbol_id}")))?;
+            .get_symbol_by_id(symbol_id.0)?
+            .ok_or_else(|| crate::error::Error::NotFound(format!("symbol id: {}", symbol_id.0)))?;
 
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| crate::error::Error::Internal(format!("mutex poisoned: {e}")))?;
+        let conn = self.lock_conn()?;
 
         // Use recursive CTE to find all callers with their depth
         let mut stmt = conn.prepare(
@@ -439,7 +430,7 @@ impl SymbolGraphOps for SqlSymbolGraph {
         let mut transitive_callers = Vec::new();
         let mut max_depth_reached: u32 = 0;
 
-        let rows = stmt.query_map(rusqlite::params![symbol_id, max_depth], |row| {
+        let rows = stmt.query_map(rusqlite::params![symbol_id.0, max_depth], |row| {
             let symbol = row_to_symbol(row)?;
             let depth: u32 = row.get::<_, i64>(13)? as u32;
             Ok((symbol, depth))
@@ -462,27 +453,25 @@ impl SymbolGraphOps for SqlSymbolGraph {
             }
         }
 
-        let total_caller_count = direct_callers.len() + transitive_callers.len();
-
         Ok(SymbolImpact {
             target,
             direct_callers,
             transitive_callers,
-            total_caller_count,
             max_depth_reached,
         })
     }
 
-    fn find_call_path(&self, from_symbol_id: i64, to_symbol_id: i64) -> Result<Option<CallPath>> {
+    fn find_call_path(
+        &self,
+        from_symbol_id: SymbolId,
+        to_symbol_id: SymbolId,
+    ) -> Result<Option<CallPath>> {
         // Same symbol - trivial path
         if from_symbol_id == to_symbol_id {
-            let symbol = self.get_symbol_by_id(from_symbol_id)?.ok_or_else(|| {
-                crate::error::Error::NotFound(format!("symbol id: {from_symbol_id}"))
+            let symbol = self.get_symbol_by_id(from_symbol_id.0)?.ok_or_else(|| {
+                crate::error::Error::NotFound(format!("symbol id: {}", from_symbol_id.0))
             })?;
-            return Ok(Some(CallPath {
-                symbols: vec![symbol],
-                edges: vec![],
-            }));
+            return Ok(Some(CallPath::single(symbol)));
         }
 
         // BFS to find shortest path using recursive CTE
@@ -491,10 +480,7 @@ impl SymbolGraphOps for SqlSymbolGraph {
 
         // Scope the connection lock to just the query execution
         let symbol_ids: Option<Vec<i64>> = {
-            let conn = self
-                .conn
-                .lock()
-                .map_err(|e| crate::error::Error::Internal(format!("mutex poisoned: {e}")))?;
+            let conn = self.lock_conn()?;
 
             let mut stmt = conn.prepare(
                 "WITH RECURSIVE path_search(symbol_id, path, depth) AS (
@@ -521,7 +507,7 @@ impl SymbolGraphOps for SqlSymbolGraph {
 
             let path_str: Option<String> = stmt
                 .query_row(
-                    rusqlite::params![from_symbol_id, to_symbol_id, max_depth],
+                    rusqlite::params![from_symbol_id.0, to_symbol_id.0, max_depth],
                     |row| row.get(0),
                 )
                 .optional()?;
@@ -550,7 +536,8 @@ impl SymbolGraphOps for SqlSymbolGraph {
         // Create edges (all Call for simplicity)
         let edges = vec![ReferenceKind::Call; symbols.len().saturating_sub(1)];
 
-        Ok(Some(CallPath { symbols, edges }))
+        // Use validated constructor - invariants guaranteed by construction
+        Ok(CallPath::new(symbols, edges))
     }
 }
 
@@ -669,7 +656,7 @@ fn parse_language(s: &str) -> rusqlite::Result<Language> {
 mod tests {
     use super::*;
     use crate::db::Index;
-    use crate::types::{Language, SymbolKind, Visibility};
+    use crate::types::{FileId, Language, SymbolId, SymbolKind, Visibility};
     use tempfile::TempDir;
 
     /// Create a test database with a known call graph:
@@ -821,7 +808,7 @@ mod tests {
             .get_symbol_by_qualified_name("db::query")
             .unwrap()
             .unwrap();
-        let callers = graph.get_callers(db_query.id).unwrap();
+        let callers = graph.get_callers(SymbolId(db_query.id)).unwrap();
 
         // db::query is called by auth::validate and cache::get
         assert_eq!(callers.len(), 2, "expected 2 callers, got: {callers:?}");
@@ -844,7 +831,7 @@ mod tests {
             .get_symbol_by_qualified_name("main::run")
             .unwrap()
             .unwrap();
-        let callers = graph.get_callers(main_run.id).unwrap();
+        let callers = graph.get_callers(SymbolId(main_run.id)).unwrap();
 
         // main::run is not called by anything
         assert!(callers.is_empty(), "main::run should have no callers");
@@ -860,7 +847,7 @@ mod tests {
             .get_symbol_by_qualified_name("main::run")
             .unwrap()
             .unwrap();
-        let callees = graph.get_callees(main_run.id).unwrap();
+        let callees = graph.get_callees(SymbolId(main_run.id)).unwrap();
 
         // main::run calls auth::validate and cache::get
         assert_eq!(callees.len(), 2, "expected 2 callees, got: {callees:?}");
@@ -883,7 +870,7 @@ mod tests {
             .get_symbol_by_qualified_name("db::query")
             .unwrap()
             .unwrap();
-        let callees = graph.get_callees(db_query.id).unwrap();
+        let callees = graph.get_callees(SymbolId(db_query.id)).unwrap();
 
         // db::query doesn't call anything
         assert!(callees.is_empty(), "db::query should have no callees");
@@ -899,7 +886,7 @@ mod tests {
             .get_symbol_by_qualified_name("db::query")
             .unwrap()
             .unwrap();
-        let callers = graph.get_callers(db_query.id).unwrap();
+        let callers = graph.get_callers(SymbolId(db_query.id)).unwrap();
 
         // All references should be "call" type
         for caller in &callers {
@@ -921,7 +908,7 @@ mod tests {
             .get_symbol_by_qualified_name("db::query")
             .unwrap()
             .unwrap();
-        let callers = graph.get_callers(db_query.id).unwrap();
+        let callers = graph.get_callers(SymbolId(db_query.id)).unwrap();
 
         // Each caller should have exactly 1 reference
         for caller in &callers {
@@ -943,10 +930,12 @@ mod tests {
             .get_symbol_by_qualified_name("db::query")
             .unwrap()
             .unwrap();
-        let impact = graph.get_transitive_callers(db_query.id, None).unwrap();
+        let impact = graph
+            .get_transitive_callers(SymbolId(db_query.id), None)
+            .unwrap();
 
         // db::query's transitive callers: auth::validate, cache::get (direct), main::run (transitive)
-        assert_eq!(impact.total_caller_count, 3, "expected 3 total callers");
+        assert_eq!(impact.total_caller_count(), 3, "expected 3 total callers");
         assert_eq!(impact.direct_callers.len(), 2, "expected 2 direct callers");
         assert_eq!(
             impact.transitive_callers.len(),
@@ -975,7 +964,9 @@ mod tests {
             .get_symbol_by_qualified_name("db::query")
             .unwrap()
             .unwrap();
-        let impact = graph.get_transitive_callers(db_query.id, Some(1)).unwrap();
+        let impact = graph
+            .get_transitive_callers(SymbolId(db_query.id), Some(1))
+            .unwrap();
 
         // With max_depth=1, should only get direct callers
         assert_eq!(impact.direct_callers.len(), 2);
@@ -996,9 +987,11 @@ mod tests {
             .get_symbol_by_qualified_name("main::run")
             .unwrap()
             .unwrap();
-        let impact = graph.get_transitive_callers(main_run.id, None).unwrap();
+        let impact = graph
+            .get_transitive_callers(SymbolId(main_run.id), None)
+            .unwrap();
 
-        assert_eq!(impact.total_caller_count, 0);
+        assert_eq!(impact.total_caller_count(), 0);
         assert!(impact.direct_callers.is_empty());
         assert!(impact.transitive_callers.is_empty());
     }
@@ -1018,7 +1011,9 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let path = graph.find_call_path(main_run.id, db_query.id).unwrap();
+        let path = graph
+            .find_call_path(SymbolId(main_run.id), SymbolId(db_query.id))
+            .unwrap();
 
         assert!(
             path.is_some(),
@@ -1048,7 +1043,9 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let path = graph.find_call_path(db_query.id, main_run.id).unwrap();
+        let path = graph
+            .find_call_path(SymbolId(db_query.id), SymbolId(main_run.id))
+            .unwrap();
 
         assert!(path.is_none(), "should not find path in reverse direction");
     }
@@ -1064,7 +1061,9 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let path = graph.find_call_path(main_run.id, main_run.id).unwrap();
+        let path = graph
+            .find_call_path(SymbolId(main_run.id), SymbolId(main_run.id))
+            .unwrap();
 
         assert!(path.is_some());
         let path = path.unwrap();
@@ -1147,7 +1146,7 @@ mod tests {
             .get_file_id(std::path::Path::new("src/db.rs"))
             .unwrap()
             .unwrap();
-        let dependents = graph.get_dependents(db_id).unwrap();
+        let dependents = graph.get_dependents(FileId(db_id)).unwrap();
 
         // db.rs is depended on by auth.rs and cache.rs
         assert_eq!(dependents.len(), 2);
@@ -1169,7 +1168,7 @@ mod tests {
             .get_file_id(std::path::Path::new("src/main.rs"))
             .unwrap()
             .unwrap();
-        let dependencies = graph.get_dependencies(main_id).unwrap();
+        let dependencies = graph.get_dependencies(FileId(main_id)).unwrap();
 
         // main.rs depends on auth.rs and cache.rs
         assert_eq!(dependencies.len(), 2);
@@ -1191,12 +1190,14 @@ mod tests {
             .get_file_id(std::path::Path::new("src/db.rs"))
             .unwrap()
             .unwrap();
-        let impact = graph.get_transitive_dependents(db_id, None).unwrap();
+        let impact = graph
+            .get_transitive_dependents(FileId(db_id), None)
+            .unwrap();
 
         // db.rs: direct deps = auth.rs, cache.rs; transitive = main.rs
         assert_eq!(impact.direct_dependents.len(), 2);
         assert_eq!(impact.transitive_dependents.len(), 1);
-        assert_eq!(impact.total_dependent_count, 3);
+        assert_eq!(impact.total_dependent_count(), 3);
     }
 
     #[test]
@@ -1209,7 +1210,9 @@ mod tests {
             .get_file_id(std::path::Path::new("src/db.rs"))
             .unwrap()
             .unwrap();
-        let impact = graph.get_transitive_dependents(db_id, Some(1)).unwrap();
+        let impact = graph
+            .get_transitive_dependents(FileId(db_id), Some(1))
+            .unwrap();
 
         // With max_depth=1, should only get direct dependents
         assert_eq!(impact.direct_dependents.len(), 2);
@@ -1234,7 +1237,9 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let path = graph.find_dependency_path(main_id, db_id).unwrap();
+        let path = graph
+            .find_dependency_path(FileId(main_id), FileId(db_id))
+            .unwrap();
 
         assert!(path.is_some(), "should find path from main.rs to db.rs");
         let path = path.unwrap();
@@ -1261,7 +1266,9 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let path = graph.find_dependency_path(db_id, main_id).unwrap();
+        let path = graph
+            .find_dependency_path(FileId(db_id), FileId(main_id))
+            .unwrap();
 
         assert!(path.is_none(), "should not find path in reverse direction");
     }
@@ -1277,7 +1284,9 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let path = graph.find_dependency_path(main_id, main_id).unwrap();
+        let path = graph
+            .find_dependency_path(FileId(main_id), FileId(main_id))
+            .unwrap();
 
         assert!(path.is_some());
         let path = path.unwrap();
@@ -1305,7 +1314,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let cycles = graph.detect_cycles_involving(main_id).unwrap();
+        let cycles = graph.detect_cycles_involving(FileId(main_id)).unwrap();
         assert!(
             cycles.is_empty(),
             "acyclic graph should have no cycles involving main.rs"

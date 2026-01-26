@@ -43,8 +43,8 @@ mod types;
 
 pub use error::{Error, IndexError, IndexErrorKind, Result};
 pub use types::{
-    Cycle, Dependent, FileAnalysis, FunctionSignature, Impact, IndexStats, IndexUpdate,
-    IndexedFile, Language, Parameter, Reference, ReferenceKind, Span, Symbol, SymbolKind,
+    Cycle, Dependent, FileAnalysis, FileId, FunctionSignature, Impact, IndexStats, IndexUpdate,
+    IndexedFile, Language, Parameter, Reference, ReferenceKind, Span, Symbol, SymbolId, SymbolKind,
     Visibility,
 };
 
@@ -733,7 +733,7 @@ impl Tethys {
 
         let file_impact = self
             .file_graph
-            .get_transitive_dependents(file_id, Some(50))?;
+            .get_transitive_dependents(FileId::from(file_id), Some(50))?;
 
         // Convert FileImpact to public Impact type
         Ok(Impact {
@@ -766,7 +766,7 @@ impl Tethys {
             .get_symbol_by_qualified_name(qualified_name)?
             .ok_or_else(|| Error::NotFound(format!("symbol: {qualified_name}")))?;
 
-        let callers = self.symbol_graph.get_callers(symbol.id)?;
+        let callers = self.symbol_graph.get_callers(SymbolId::from(symbol.id))?;
 
         // Convert CallerInfo to Dependent
         callers
@@ -792,7 +792,7 @@ impl Tethys {
             .get_symbol_by_qualified_name(qualified_name)?
             .ok_or_else(|| Error::NotFound(format!("symbol: {qualified_name}")))?;
 
-        let callees = self.symbol_graph.get_callees(symbol.id)?;
+        let callees = self.symbol_graph.get_callees(SymbolId::from(symbol.id))?;
 
         Ok(callees.into_iter().map(|c| c.symbol).collect())
     }
@@ -806,34 +806,32 @@ impl Tethys {
 
         let impact = self
             .symbol_graph
-            .get_transitive_callers(symbol.id, Some(50))?;
+            .get_transitive_callers(SymbolId::from(symbol.id), Some(50))?;
 
-        // Convert SymbolImpact to public Impact type
-        let mut direct_dependents = Vec::new();
-        for caller in impact.direct_callers {
+        // Convert CallerInfo to Dependent
+        let caller_to_dependent = |caller: graph::CallerInfo| -> Result<Dependent> {
             let file = self
                 .db
                 .get_file_by_id(caller.symbol.file_id)?
                 .ok_or_else(|| Error::NotFound(format!("file id: {}", caller.symbol.file_id)))?;
-            direct_dependents.push(Dependent {
+            Ok(Dependent {
                 file: file.path,
                 symbols_used: vec![caller.symbol.qualified_name],
                 line_count: caller.reference_count,
-            });
-        }
+            })
+        };
 
-        let mut transitive_dependents = Vec::new();
-        for caller in impact.transitive_callers {
-            let file = self
-                .db
-                .get_file_by_id(caller.symbol.file_id)?
-                .ok_or_else(|| Error::NotFound(format!("file id: {}", caller.symbol.file_id)))?;
-            transitive_dependents.push(Dependent {
-                file: file.path,
-                symbols_used: vec![caller.symbol.qualified_name],
-                line_count: caller.reference_count,
-            });
-        }
+        let direct_dependents = impact
+            .direct_callers
+            .into_iter()
+            .map(&caller_to_dependent)
+            .collect::<Result<Vec<_>>>()?;
+
+        let transitive_dependents = impact
+            .transitive_callers
+            .into_iter()
+            .map(caller_to_dependent)
+            .collect::<Result<Vec<_>>>()?;
 
         let target_file = self
             .db
@@ -865,7 +863,9 @@ impl Tethys {
             .get_file_id(self.relative_path(to))?
             .ok_or_else(|| Error::NotFound(format!("file: {}", to.display())))?;
 
-        let path = self.file_graph.find_dependency_path(from_id, to_id)?;
+        let path = self
+            .file_graph
+            .find_dependency_path(FileId::from(from_id), FileId::from(to_id))?;
 
         Ok(path.map(|p| p.files.into_iter().map(|f| f.path).collect()))
     }

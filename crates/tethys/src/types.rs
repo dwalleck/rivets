@@ -21,6 +21,52 @@ use std::time::Duration;
 use crate::error::IndexError;
 
 // ============================================================================
+// Strongly-typed ID wrappers
+// ============================================================================
+
+/// A strongly-typed symbol ID to prevent mixing with file IDs.
+///
+/// This newtype provides type safety for function signatures that accept
+/// both symbol and file IDs, preventing accidental parameter swaps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SymbolId(pub i64);
+
+impl SymbolId {
+    /// Extract the raw i64 value.
+    #[must_use]
+    pub fn as_i64(self) -> i64 {
+        self.0
+    }
+}
+
+impl From<i64> for SymbolId {
+    fn from(id: i64) -> Self {
+        Self(id)
+    }
+}
+
+/// A strongly-typed file ID to prevent mixing with symbol IDs.
+///
+/// This newtype provides type safety for function signatures that accept
+/// both symbol and file IDs, preventing accidental parameter swaps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FileId(pub i64);
+
+impl FileId {
+    /// Extract the raw i64 value.
+    #[must_use]
+    pub fn as_i64(self) -> i64 {
+        self.0
+    }
+}
+
+impl From<i64> for FileId {
+    fn from(id: i64) -> Self {
+        Self(id)
+    }
+}
+
+// ============================================================================
 // Enums
 // ============================================================================
 
