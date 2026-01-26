@@ -49,6 +49,10 @@ pub enum Error {
     /// Requested resource was not found
     #[error("not found: {0}")]
     NotFound(String),
+
+    /// Internal error (mutex poisoning, unexpected state, etc.)
+    #[error("internal error: {0}")]
+    Internal(String),
 }
 
 /// Error encountered while indexing a specific file.

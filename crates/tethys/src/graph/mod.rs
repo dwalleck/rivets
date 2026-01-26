@@ -12,14 +12,19 @@
 //! - SQL implementations use recursive CTEs for traversal
 //! - Petgraph can be swapped in later for specific algorithms
 
-// TODO: Remove when implementations are added in Phase 3 Tasks 3-6
+// TODO: Remove when implementations are integrated in Phase 3 Task 7
 #![allow(dead_code)]
+#![allow(unused_imports)]
 
 mod types;
 
 pub use types::{
     CallPath, CalleeInfo, CallerInfo, FileDepInfo, FileImpact, FilePath, SymbolImpact,
 };
+
+mod sql;
+
+pub use sql::SqlSymbolGraph;
 
 use crate::error::Result;
 use crate::types::Cycle;
