@@ -1,4 +1,9 @@
 //! Types for graph operations.
+//!
+//! Some fields are intentionally kept for API completeness and future use,
+//! even if not currently consumed by the public Tethys API.
+
+#![allow(dead_code)]
 
 use crate::types::{IndexedFile, ReferenceKind, Symbol};
 

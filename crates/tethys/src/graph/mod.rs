@@ -11,10 +11,11 @@
 //! - Traits define the operations (`SymbolGraphOps`, `FileGraphOps`)
 //! - SQL implementations use recursive CTEs for traversal
 //! - Petgraph can be swapped in later for specific algorithms
+//!
+//! Some trait methods are intentionally kept for API completeness and future use,
+//! even if not currently consumed by the public Tethys API.
 
-// TODO: Remove when implementations are integrated in Phase 3 Task 7
 #![allow(dead_code)]
-#![allow(unused_imports)]
 
 mod types;
 

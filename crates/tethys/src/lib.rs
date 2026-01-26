@@ -53,6 +53,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, UNIX_EPOCH};
 
 use db::{Index, SymbolData};
+use graph::{FileGraphOps, SqlFileGraph, SqlSymbolGraph, SymbolGraphOps};
 use languages::rust;
 use resolver::resolve_module_path;
 use tracing::{debug, trace, warn};
@@ -79,6 +80,8 @@ pub struct Tethys {
     db_path: PathBuf,
     db: Index,
     parser: tree_sitter::Parser,
+    symbol_graph: Box<dyn SymbolGraphOps>,
+    file_graph: Box<dyn FileGraphOps>,
 }
 
 // TODO: Add `# Errors` documentation to public methods when implementations are complete
@@ -109,11 +112,17 @@ impl Tethys {
             .set_language(&tree_sitter_rust::LANGUAGE.into())
             .map_err(|e| Error::Parser(e.to_string()))?;
 
+        // Initialize graph operations with their own DB connections
+        let symbol_graph: Box<dyn SymbolGraphOps> = Box::new(SqlSymbolGraph::new(&db_path)?);
+        let file_graph: Box<dyn FileGraphOps> = Box::new(SqlFileGraph::new(&db_path)?);
+
         Ok(Self {
             workspace_root,
             db_path,
             db,
             parser,
+            symbol_graph,
+            file_graph,
         })
     }
 
@@ -716,40 +725,149 @@ impl Tethys {
     }
 
     /// Get impact analysis: direct and transitive dependents of a file.
-    #[allow(unused_variables)]
     pub fn get_impact(&self, path: &Path) -> Result<Impact> {
-        todo!("Phase 3: Implement get_impact")
+        let file_id = self
+            .db
+            .get_file_id(self.relative_path(path))?
+            .ok_or_else(|| Error::NotFound(format!("file: {}", path.display())))?;
+
+        let file_impact = self
+            .file_graph
+            .get_transitive_dependents(file_id, Some(50))?;
+
+        // Convert FileImpact to public Impact type
+        Ok(Impact {
+            target: file_impact.target.path,
+            direct_dependents: file_impact
+                .direct_dependents
+                .into_iter()
+                .map(|d| Dependent {
+                    file: d.file.path,
+                    symbols_used: vec![],
+                    line_count: d.ref_count,
+                })
+                .collect(),
+            transitive_dependents: file_impact
+                .transitive_dependents
+                .into_iter()
+                .map(|d| Dependent {
+                    file: d.file.path,
+                    symbols_used: vec![],
+                    line_count: d.ref_count,
+                })
+                .collect(),
+        })
     }
 
     /// Get symbols that call/use the given symbol.
-    #[allow(unused_variables)]
     pub fn get_callers(&self, qualified_name: &str) -> Result<Vec<Dependent>> {
-        todo!("Phase 3: Implement get_callers")
+        let symbol = self
+            .db
+            .get_symbol_by_qualified_name(qualified_name)?
+            .ok_or_else(|| Error::NotFound(format!("symbol: {qualified_name}")))?;
+
+        let callers = self.symbol_graph.get_callers(symbol.id)?;
+
+        // Convert CallerInfo to Dependent
+        callers
+            .into_iter()
+            .map(|c| {
+                let file = self
+                    .db
+                    .get_file_by_id(c.symbol.file_id)?
+                    .ok_or_else(|| Error::NotFound(format!("file id: {}", c.symbol.file_id)))?;
+                Ok(Dependent {
+                    file: file.path,
+                    symbols_used: vec![c.symbol.qualified_name],
+                    line_count: c.reference_count,
+                })
+            })
+            .collect()
     }
 
     /// Get symbols that the given symbol calls/uses.
-    #[allow(unused_variables)]
     pub fn get_symbol_dependencies(&self, qualified_name: &str) -> Result<Vec<Symbol>> {
-        todo!("Phase 3: Implement get_symbol_dependencies")
+        let symbol = self
+            .db
+            .get_symbol_by_qualified_name(qualified_name)?
+            .ok_or_else(|| Error::NotFound(format!("symbol: {qualified_name}")))?;
+
+        let callees = self.symbol_graph.get_callees(symbol.id)?;
+
+        Ok(callees.into_iter().map(|c| c.symbol).collect())
     }
 
     /// Get impact analysis: direct and transitive callers of a symbol.
-    #[allow(unused_variables)]
     pub fn get_symbol_impact(&self, qualified_name: &str) -> Result<Impact> {
-        todo!("Phase 3: Implement get_symbol_impact")
+        let symbol = self
+            .db
+            .get_symbol_by_qualified_name(qualified_name)?
+            .ok_or_else(|| Error::NotFound(format!("symbol: {qualified_name}")))?;
+
+        let impact = self
+            .symbol_graph
+            .get_transitive_callers(symbol.id, Some(50))?;
+
+        // Convert SymbolImpact to public Impact type
+        let mut direct_dependents = Vec::new();
+        for caller in impact.direct_callers {
+            let file = self
+                .db
+                .get_file_by_id(caller.symbol.file_id)?
+                .ok_or_else(|| Error::NotFound(format!("file id: {}", caller.symbol.file_id)))?;
+            direct_dependents.push(Dependent {
+                file: file.path,
+                symbols_used: vec![caller.symbol.qualified_name],
+                line_count: caller.reference_count,
+            });
+        }
+
+        let mut transitive_dependents = Vec::new();
+        for caller in impact.transitive_callers {
+            let file = self
+                .db
+                .get_file_by_id(caller.symbol.file_id)?
+                .ok_or_else(|| Error::NotFound(format!("file id: {}", caller.symbol.file_id)))?;
+            transitive_dependents.push(Dependent {
+                file: file.path,
+                symbols_used: vec![caller.symbol.qualified_name],
+                line_count: caller.reference_count,
+            });
+        }
+
+        let target_file = self
+            .db
+            .get_file_by_id(symbol.file_id)?
+            .ok_or_else(|| Error::NotFound(format!("file id: {}", symbol.file_id)))?;
+
+        Ok(Impact {
+            target: target_file.path,
+            direct_dependents,
+            transitive_dependents,
+        })
     }
 
     // === Graph Analysis ===
 
     /// Detect circular dependencies in the codebase.
     pub fn detect_cycles(&self) -> Result<Vec<Cycle>> {
-        todo!("Phase 3: Implement detect_cycles")
+        self.file_graph.detect_cycles()
     }
 
     /// Get the shortest dependency path between two files.
-    #[allow(unused_variables)]
     pub fn get_dependency_chain(&self, from: &Path, to: &Path) -> Result<Option<Vec<PathBuf>>> {
-        todo!("Phase 3: Implement get_dependency_chain")
+        let from_id = self
+            .db
+            .get_file_id(self.relative_path(from))?
+            .ok_or_else(|| Error::NotFound(format!("file: {}", from.display())))?;
+        let to_id = self
+            .db
+            .get_file_id(self.relative_path(to))?
+            .ok_or_else(|| Error::NotFound(format!("file: {}", to.display())))?;
+
+        let path = self.file_graph.find_dependency_path(from_id, to_id)?;
+
+        Ok(path.map(|p| p.files.into_iter().map(|f| f.path).collect()))
     }
 
     // === Database ===
