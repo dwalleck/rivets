@@ -252,8 +252,8 @@ impl Index {
                     sym.kind.as_str(),
                     sym.line,
                     sym.column,
-                    sym.span.map(|s| s.end_line),
-                    sym.span.map(|s| s.end_column),
+                    sym.span.map(|s| s.end_line()),
+                    sym.span.map(|s| s.end_column()),
                     sym.signature,
                     sym.visibility.as_str(),
                     sym.parent_symbol_id
@@ -296,8 +296,8 @@ impl Index {
                 kind.as_str(),
                 line,
                 column,
-                span.map(|s| s.end_line),
-                span.map(|s| s.end_column),
+                span.map(|s| s.end_line()),
+                span.map(|s| s.end_column()),
                 signature,
                 visibility.as_str(),
                 parent_symbol_id
@@ -396,9 +396,8 @@ impl Index {
     }
 
     // === Reference Operations ===
-    // Note: Reference operations are infrastructure for Phase 3+ features
-    // (symbol-level "who calls X?" queries). Currently only file-level
-    // dependency tracking is used via file_deps table.
+    // These operations support symbol-level "who calls X?" queries.
+    // See graph/sql.rs for higher-level graph traversal using these primitives.
 
     /// Insert a reference to a symbol.
     #[allow(clippy::too_many_arguments)]
@@ -509,7 +508,7 @@ impl Index {
 /// Parse a language string from the database.
 ///
 /// Returns an error for unrecognized values, indicating possible database corruption.
-fn parse_language(s: &str) -> rusqlite::Result<Language> {
+pub(crate) fn parse_language(s: &str) -> rusqlite::Result<Language> {
     match s {
         "rust" => Ok(Language::Rust),
         "csharp" => Ok(Language::CSharp),
@@ -524,7 +523,7 @@ fn parse_language(s: &str) -> rusqlite::Result<Language> {
 /// Parse a symbol kind string from the database.
 ///
 /// Returns an error for unrecognized values, indicating possible database corruption.
-fn parse_symbol_kind(s: &str) -> rusqlite::Result<SymbolKind> {
+pub(crate) fn parse_symbol_kind(s: &str) -> rusqlite::Result<SymbolKind> {
     match s {
         "function" => Ok(SymbolKind::Function),
         "method" => Ok(SymbolKind::Method),
@@ -549,7 +548,7 @@ fn parse_symbol_kind(s: &str) -> rusqlite::Result<SymbolKind> {
 /// Parse a visibility string from the database.
 ///
 /// Returns an error for unrecognized values, indicating possible database corruption.
-fn parse_visibility(s: &str) -> rusqlite::Result<Visibility> {
+pub(crate) fn parse_visibility(s: &str) -> rusqlite::Result<Visibility> {
     match s {
         "public" => Ok(Visibility::Public),
         "crate" => Ok(Visibility::Crate),
@@ -566,7 +565,7 @@ fn parse_visibility(s: &str) -> rusqlite::Result<Visibility> {
 /// Convert a database row to an [`IndexedFile`].
 ///
 /// Expected columns: id, path, language, `mtime_ns`, `size_bytes`, `content_hash`, `indexed_at`
-fn row_to_indexed_file(row: &rusqlite::Row) -> rusqlite::Result<IndexedFile> {
+pub(crate) fn row_to_indexed_file(row: &rusqlite::Row) -> rusqlite::Result<IndexedFile> {
     Ok(IndexedFile {
         id: row.get(0)?,
         path: PathBuf::from(row.get::<_, String>(1)?),
@@ -580,23 +579,20 @@ fn row_to_indexed_file(row: &rusqlite::Row) -> rusqlite::Result<IndexedFile> {
 
 /// Build a span from start and optional end positions.
 ///
-/// Returns `None` if either `end_line` or `end_column` is missing.
-fn build_span(
+/// Returns `None` if either `end_line` or `end_column` is missing, or if the
+/// span would be invalid (end before start).
+pub(crate) fn build_span(
     start_line: u32,
     start_column: u32,
     end_line: Option<u32>,
     end_column: Option<u32>,
 ) -> Option<Span> {
-    end_line.zip(end_column).map(|(el, ec)| Span {
-        start_line,
-        start_column,
-        end_line: el,
-        end_column: ec,
-    })
+    end_line
+        .zip(end_column)
+        .and_then(|(el, ec)| Span::new(start_line, start_column, el, ec))
 }
 
 /// Convert a database row to a Reference.
-#[allow(dead_code)] // Phase 3+: symbol-level reference tracking
 fn row_to_reference(row: &rusqlite::Row) -> rusqlite::Result<Reference> {
     let line: u32 = row.get(4)?;
     let column: u32 = row.get(5)?;
@@ -618,7 +614,6 @@ fn row_to_reference(row: &rusqlite::Row) -> rusqlite::Result<Reference> {
 /// Parse a reference kind string from the database.
 ///
 /// Returns an error for unrecognized values, indicating possible database corruption.
-#[allow(dead_code)] // Phase 3+: symbol-level reference tracking
 fn parse_reference_kind(s: &str) -> rusqlite::Result<ReferenceKind> {
     match s {
         "import" => Ok(ReferenceKind::Import),
@@ -636,7 +631,7 @@ fn parse_reference_kind(s: &str) -> rusqlite::Result<ReferenceKind> {
 }
 
 /// Convert a database row to a Symbol.
-fn row_to_symbol(row: &rusqlite::Row) -> rusqlite::Result<Symbol> {
+pub(crate) fn row_to_symbol(row: &rusqlite::Row) -> rusqlite::Result<Symbol> {
     let line: u32 = row.get(6)?;
     let column: u32 = row.get(7)?;
     let end_line: Option<u32> = row.get(8)?;
@@ -653,7 +648,7 @@ fn row_to_symbol(row: &rusqlite::Row) -> rusqlite::Result<Symbol> {
         column,
         span: build_span(line, column, end_line, end_column),
         signature: row.get(10)?,
-        signature_details: None, // TODO(Phase 3+): Parse from JSON column when stored
+        signature_details: None, // TODO: Parse from JSON column when stored
         visibility: parse_visibility(&row.get::<_, String>(11)?)?,
         parent_symbol_id: row.get(12)?,
     })

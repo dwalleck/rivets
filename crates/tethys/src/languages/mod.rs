@@ -17,6 +17,7 @@
 
 pub mod csharp;
 pub mod rust;
+mod tree_sitter_utils;
 
 use crate::types::Language;
 

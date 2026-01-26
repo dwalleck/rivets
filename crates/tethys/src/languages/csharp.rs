@@ -6,6 +6,7 @@
 // This is safe for practical source files (no file has 4 billion lines).
 #![allow(clippy::cast_possible_truncation)]
 
+use super::tree_sitter_utils::{node_span, node_text};
 use super::LanguageSupport;
 use crate::types::{FunctionSignature, Parameter, Span, SymbolKind, Visibility};
 
@@ -930,23 +931,6 @@ fn extract_parameter(param_node: &tree_sitter::Node, content: &[u8]) -> Option<P
     })
 }
 
-/// Get text content of a node.
-fn node_text(node: &tree_sitter::Node, content: &[u8]) -> Option<String> {
-    std::str::from_utf8(&content[node.byte_range()])
-        .ok()
-        .map(String::from)
-}
-
-/// Convert tree-sitter positions to our Span type.
-fn node_span(node: &tree_sitter::Node) -> Span {
-    Span {
-        start_line: node.start_position().row as u32 + 1,
-        start_column: node.start_position().column as u32 + 1,
-        end_line: node.end_position().row as u32 + 1,
-        end_column: node.end_position().column as u32 + 1,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1380,8 +1364,8 @@ public class Test {
 
         // They should have different containing spans
         assert_ne!(
-            foo_ref.containing_symbol_span.unwrap().start_line,
-            bar_ref.containing_symbol_span.unwrap().start_line
+            foo_ref.containing_symbol_span.unwrap().start_line(),
+            bar_ref.containing_symbol_span.unwrap().start_line()
         );
     }
 }

@@ -44,6 +44,7 @@ pub struct SymbolImpact {
 
 impl SymbolImpact {
     /// Total number of unique callers (direct + transitive).
+    #[must_use]
     pub fn total_caller_count(&self) -> usize {
         self.direct_callers.len() + self.transitive_callers.len()
     }
@@ -53,9 +54,9 @@ impl SymbolImpact {
 #[derive(Debug, Clone)]
 pub struct CallPath {
     /// Symbols from source to target.
-    pub symbols: Vec<Symbol>,
+    symbols: Vec<Symbol>,
     /// The relationship at each step.
-    pub edges: Vec<ReferenceKind>,
+    edges: Vec<ReferenceKind>,
 }
 
 impl CallPath {
@@ -64,6 +65,7 @@ impl CallPath {
     /// Returns `None` if:
     /// - `symbols` is empty
     /// - `edges.len()` does not equal `symbols.len() - 1`
+    #[must_use]
     pub fn new(symbols: Vec<Symbol>, edges: Vec<ReferenceKind>) -> Option<Self> {
         if symbols.is_empty() {
             return None;
@@ -75,11 +77,24 @@ impl CallPath {
     }
 
     /// Create a trivial path with a single symbol.
+    #[must_use]
     pub fn single(symbol: Symbol) -> Self {
         Self {
             symbols: vec![symbol],
             edges: vec![],
         }
+    }
+
+    /// Get the symbols in this path.
+    #[must_use]
+    pub fn symbols(&self) -> &[Symbol] {
+        &self.symbols
+    }
+
+    /// Get the edges (reference kinds) between symbols.
+    #[must_use]
+    pub fn edges(&self) -> &[ReferenceKind] {
+        &self.edges
     }
 }
 
@@ -105,6 +120,7 @@ pub struct FileImpact {
 
 impl FileImpact {
     /// Total number of dependent files (direct + transitive).
+    #[must_use]
     pub fn total_dependent_count(&self) -> usize {
         self.direct_dependents.len() + self.transitive_dependents.len()
     }
@@ -114,13 +130,14 @@ impl FileImpact {
 #[derive(Debug, Clone)]
 pub struct FilePath {
     /// Files from source to target.
-    pub files: Vec<IndexedFile>,
+    files: Vec<IndexedFile>,
 }
 
 impl FilePath {
     /// Create a new file path, validating invariants.
     ///
     /// Returns `None` if `files` is empty.
+    #[must_use]
     pub fn new(files: Vec<IndexedFile>) -> Option<Self> {
         if files.is_empty() {
             return None;
@@ -129,7 +146,20 @@ impl FilePath {
     }
 
     /// Create a trivial path with a single file.
+    #[must_use]
     pub fn single(file: IndexedFile) -> Self {
         Self { files: vec![file] }
+    }
+
+    /// Get the files in this path.
+    #[must_use]
+    pub fn files(&self) -> &[IndexedFile] {
+        &self.files
+    }
+
+    /// Consume the path and return the files.
+    #[must_use]
+    pub fn into_files(self) -> Vec<IndexedFile> {
+        self.files
     }
 }

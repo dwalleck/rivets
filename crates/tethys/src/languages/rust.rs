@@ -6,6 +6,7 @@
 // This is safe for practical source files (no file has 4 billion lines).
 #![allow(clippy::cast_possible_truncation)]
 
+use super::tree_sitter_utils::{node_span, node_text};
 use super::LanguageSupport;
 use crate::types::{FunctionSignature, Parameter, Span, SymbolKind, Visibility};
 
@@ -971,23 +972,6 @@ fn extract_parameter(param_node: &tree_sitter::Node, content: &[u8]) -> Option<P
     })
 }
 
-/// Get text content of a node.
-fn node_text(node: &tree_sitter::Node, content: &[u8]) -> Option<String> {
-    std::str::from_utf8(&content[node.byte_range()])
-        .ok()
-        .map(String::from)
-}
-
-/// Convert tree-sitter positions to our Span type.
-fn node_span(node: &tree_sitter::Node) -> Span {
-    Span {
-        start_line: node.start_position().row as u32 + 1,
-        start_column: node.start_position().column as u32 + 1,
-        end_line: node.end_position().row as u32 + 1,
-        end_column: node.end_position().column as u32 + 1,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1368,12 +1352,12 @@ fn another() {
             "should track containing symbol"
         );
         let outer_span = foo_ref.containing_symbol_span.as_ref().unwrap();
-        assert_eq!(outer_span.start_line, 2, "outer() starts at line 2");
+        assert_eq!(outer_span.start_line(), 2, "outer() starts at line 2");
 
         // bar() is called from another(), which starts at line 6
         let bar_ref = refs.iter().find(|r| r.name == "bar").unwrap();
         let another_span = bar_ref.containing_symbol_span.as_ref().unwrap();
-        assert_eq!(another_span.start_line, 6, "another() starts at line 6");
+        assert_eq!(another_span.start_line(), 6, "another() starts at line 6");
     }
 
     #[test]
@@ -1423,7 +1407,8 @@ fn outer() {
         // The containing span should be the outer function (line 2)
         let span = containing.unwrap();
         assert_eq!(
-            span.start_line, 2,
+            span.start_line(),
+            2,
             "containing span should point to outer() function"
         );
     }
@@ -1456,7 +1441,8 @@ fn outer() {
         // The containing span should be the inner function (line 3)
         let span = containing.unwrap();
         assert_eq!(
-            span.start_line, 3,
+            span.start_line(),
+            3,
             "containing span should point to inner() function, not outer()"
         );
     }

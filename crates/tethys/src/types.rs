@@ -29,7 +29,7 @@ use crate::error::IndexError;
 /// This newtype provides type safety for function signatures that accept
 /// both symbol and file IDs, preventing accidental parameter swaps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SymbolId(pub i64);
+pub struct SymbolId(i64);
 
 impl SymbolId {
     /// Extract the raw i64 value.
@@ -50,7 +50,7 @@ impl From<i64> for SymbolId {
 /// This newtype provides type safety for function signatures that accept
 /// both symbol and file IDs, preventing accidental parameter swaps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FileId(pub i64);
+pub struct FileId(i64);
 
 impl FileId {
     /// Extract the raw i64 value.
@@ -242,16 +242,18 @@ impl ReferenceKind {
 ///
 /// Positions are 1-indexed (first line is 1, first column is 1) to match
 /// editor conventions.
+///
+/// Use [`Span::new`] to construct a span with validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Span {
     /// Starting line (1-indexed)
-    pub start_line: u32,
+    start_line: u32,
     /// Starting column (1-indexed)
-    pub start_column: u32,
+    start_column: u32,
     /// Ending line (1-indexed, inclusive)
-    pub end_line: u32,
+    end_line: u32,
     /// Ending column (1-indexed, exclusive)
-    pub end_column: u32,
+    end_column: u32,
 }
 
 impl Span {
@@ -270,6 +272,30 @@ impl Span {
             end_line,
             end_column,
         })
+    }
+
+    /// Returns the starting line (1-indexed).
+    #[must_use]
+    pub fn start_line(&self) -> u32 {
+        self.start_line
+    }
+
+    /// Returns the starting column (1-indexed).
+    #[must_use]
+    pub fn start_column(&self) -> u32 {
+        self.start_column
+    }
+
+    /// Returns the ending line (1-indexed, inclusive).
+    #[must_use]
+    pub fn end_line(&self) -> u32 {
+        self.end_line
+    }
+
+    /// Returns the ending column (1-indexed, exclusive).
+    #[must_use]
+    pub fn end_column(&self) -> u32 {
+        self.end_column
     }
 }
 
@@ -859,10 +885,10 @@ mod tests {
         let span = Span::new(10, 5, 10, 20);
         assert!(span.is_some());
         let span = span.unwrap();
-        assert_eq!(span.start_line, 10);
-        assert_eq!(span.start_column, 5);
-        assert_eq!(span.end_line, 10);
-        assert_eq!(span.end_column, 20);
+        assert_eq!(span.start_line(), 10);
+        assert_eq!(span.start_column(), 5);
+        assert_eq!(span.end_line(), 10);
+        assert_eq!(span.end_column(), 20);
     }
 
     #[test]
@@ -870,8 +896,8 @@ mod tests {
         let span = Span::new(5, 10, 15, 3);
         assert!(span.is_some());
         let span = span.unwrap();
-        assert_eq!(span.start_line, 5);
-        assert_eq!(span.end_line, 15);
+        assert_eq!(span.start_line(), 5);
+        assert_eq!(span.end_line(), 15);
     }
 
     #[test]

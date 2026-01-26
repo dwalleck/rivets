@@ -266,11 +266,27 @@ impl Tethys {
         // Get file metadata
         let metadata = std::fs::metadata(path)?;
         #[allow(clippy::cast_possible_truncation)] // Nanoseconds fit in i64 for centuries
-        let mtime_ns = metadata
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map_or(0, |d| d.as_nanos() as i64);
+        let mtime_ns = match metadata.modified() {
+            Ok(mtime) => match mtime.duration_since(UNIX_EPOCH) {
+                Ok(duration) => duration.as_nanos() as i64,
+                Err(e) => {
+                    warn!(
+                        file = %path.display(),
+                        error = %e,
+                        "File modification time is before Unix epoch, using 0"
+                    );
+                    0
+                }
+            },
+            Err(e) => {
+                warn!(
+                    file = %path.display(),
+                    error = %e,
+                    "Platform does not support file modification time, using 0"
+                );
+                0
+            }
+        };
         let size_bytes = metadata.len();
 
         // Parse with tree-sitter
@@ -381,12 +397,11 @@ impl Tethys {
         for r in refs {
             // Try to resolve the target symbol by name
             let Some(&symbol_id) = name_to_id.get(&r.name) else {
-                // Symbol not in this file - skip for now
-                // TODO: Phase 3+ can resolve cross-file references
+                // Cross-file symbol resolution not yet implemented
                 trace!(
                     reference_name = %r.name,
                     line = r.line,
-                    "Skipping cross-file reference"
+                    "Skipping cross-file reference (symbol not in this file)"
                 );
                 continue;
             };
@@ -867,7 +882,7 @@ impl Tethys {
             .file_graph
             .find_dependency_path(FileId::from(from_id), FileId::from(to_id))?;
 
-        Ok(path.map(|p| p.files.into_iter().map(|f| f.path).collect()))
+        Ok(path.map(|p| p.into_files().into_iter().map(|f| f.path).collect()))
     }
 
     // === Database ===
