@@ -10,7 +10,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use super::{CallPath, CalleeInfo, CallerInfo, SymbolGraphOps, SymbolImpact};
 use crate::error::Result;
@@ -31,6 +31,24 @@ impl SqlSymbolGraph {
         Ok(Self {
             conn: Mutex::new(conn),
         })
+    }
+
+    /// Get a symbol by its database ID.
+    fn get_symbol_by_id(&self, id: i64) -> Result<Option<Symbol>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| crate::error::Error::Internal(format!("mutex poisoned: {e}")))?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, file_id, name, module_path, qualified_name, kind, line, column,
+             end_line, end_column, signature, visibility, parent_symbol_id
+             FROM symbols WHERE id = ?1",
+        )?;
+
+        let symbol = stmt.query_row([id], row_to_symbol).optional()?;
+
+        Ok(symbol)
     }
 }
 
@@ -115,10 +133,86 @@ impl SymbolGraphOps for SqlSymbolGraph {
 
     fn get_transitive_callers(
         &self,
-        _symbol_id: i64,
-        _max_depth: Option<u32>,
+        symbol_id: i64,
+        max_depth: Option<u32>,
     ) -> Result<SymbolImpact> {
-        todo!("Task 4: Implement get_transitive_callers")
+        let max_depth = max_depth.unwrap_or(50);
+
+        // First, get the target symbol
+        let target = self
+            .get_symbol_by_id(symbol_id)?
+            .ok_or_else(|| crate::error::Error::NotFound(format!("symbol id: {symbol_id}")))?;
+
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| crate::error::Error::Internal(format!("mutex poisoned: {e}")))?;
+
+        // Use recursive CTE to find all callers with their depth
+        let mut stmt = conn.prepare(
+            "WITH RECURSIVE caller_tree(symbol_id, depth) AS (
+                -- Base case: direct callers
+                SELECT DISTINCT r.in_symbol_id, 1
+                FROM refs r
+                WHERE r.symbol_id = ?1
+                  AND r.in_symbol_id IS NOT NULL
+
+                UNION
+
+                -- Recursive case: callers of callers
+                SELECT DISTINCT r.in_symbol_id, ct.depth + 1
+                FROM refs r
+                JOIN caller_tree ct ON r.symbol_id = ct.symbol_id
+                WHERE r.in_symbol_id IS NOT NULL
+                  AND ct.depth < ?2
+            )
+            SELECT DISTINCT
+                s.id, s.file_id, s.name, s.module_path, s.qualified_name,
+                s.kind, s.line, s.column, s.end_line, s.end_column,
+                s.signature, s.visibility, s.parent_symbol_id,
+                MIN(ct.depth) as min_depth
+            FROM caller_tree ct
+            JOIN symbols s ON s.id = ct.symbol_id
+            GROUP BY s.id
+            ORDER BY min_depth, s.qualified_name",
+        )?;
+
+        let mut direct_callers = Vec::new();
+        let mut transitive_callers = Vec::new();
+        let mut max_depth_reached: u32 = 0;
+
+        let rows = stmt.query_map(rusqlite::params![symbol_id, max_depth], |row| {
+            let symbol = row_to_symbol(row)?;
+            let depth: u32 = row.get::<_, i64>(13)? as u32;
+            Ok((symbol, depth))
+        })?;
+
+        for row in rows {
+            let (symbol, depth) = row?;
+            max_depth_reached = max_depth_reached.max(depth);
+
+            let caller_info = CallerInfo {
+                symbol,
+                reference_count: 1,
+                reference_kinds: vec![ReferenceKind::Call],
+            };
+
+            if depth == 1 {
+                direct_callers.push(caller_info);
+            } else {
+                transitive_callers.push(caller_info);
+            }
+        }
+
+        let total_caller_count = direct_callers.len() + transitive_callers.len();
+
+        Ok(SymbolImpact {
+            target,
+            direct_callers,
+            transitive_callers,
+            total_caller_count,
+            max_depth_reached,
+        })
     }
 
     fn find_call_path(&self, _from_symbol_id: i64, _to_symbol_id: i64) -> Result<Option<CallPath>> {
@@ -475,5 +569,75 @@ mod tests {
                 caller.symbol.name
             );
         }
+    }
+
+    #[test]
+    fn get_transitive_callers_finds_all_ancestors() {
+        let (_dir, db_path) = setup_test_graph();
+        let graph = SqlSymbolGraph::new(&db_path).unwrap();
+        let index = Index::open(&db_path).unwrap();
+
+        let db_query = index
+            .get_symbol_by_qualified_name("db::query")
+            .unwrap()
+            .unwrap();
+        let impact = graph.get_transitive_callers(db_query.id, None).unwrap();
+
+        // db::query's transitive callers: auth::validate, cache::get (direct), main::run (transitive)
+        assert_eq!(impact.total_caller_count, 3, "expected 3 total callers");
+        assert_eq!(impact.direct_callers.len(), 2, "expected 2 direct callers");
+        assert_eq!(
+            impact.transitive_callers.len(),
+            1,
+            "expected 1 transitive caller"
+        );
+
+        let transitive_names: Vec<&str> = impact
+            .transitive_callers
+            .iter()
+            .map(|c| c.symbol.name.as_str())
+            .collect();
+        assert!(
+            transitive_names.contains(&"run"),
+            "main::run should be transitive caller"
+        );
+    }
+
+    #[test]
+    fn get_transitive_callers_respects_max_depth() {
+        let (_dir, db_path) = setup_test_graph();
+        let graph = SqlSymbolGraph::new(&db_path).unwrap();
+        let index = Index::open(&db_path).unwrap();
+
+        let db_query = index
+            .get_symbol_by_qualified_name("db::query")
+            .unwrap()
+            .unwrap();
+        let impact = graph.get_transitive_callers(db_query.id, Some(1)).unwrap();
+
+        // With max_depth=1, should only get direct callers
+        assert_eq!(impact.direct_callers.len(), 2);
+        assert!(
+            impact.transitive_callers.is_empty(),
+            "should have no transitive with depth=1"
+        );
+        assert_eq!(impact.max_depth_reached, 1);
+    }
+
+    #[test]
+    fn get_transitive_callers_handles_no_callers() {
+        let (_dir, db_path) = setup_test_graph();
+        let graph = SqlSymbolGraph::new(&db_path).unwrap();
+        let index = Index::open(&db_path).unwrap();
+
+        let main_run = index
+            .get_symbol_by_qualified_name("main::run")
+            .unwrap()
+            .unwrap();
+        let impact = graph.get_transitive_callers(main_run.id, None).unwrap();
+
+        assert_eq!(impact.total_caller_count, 0);
+        assert!(impact.direct_callers.is_empty());
+        assert!(impact.transitive_callers.is_empty());
     }
 }
