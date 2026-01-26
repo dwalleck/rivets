@@ -286,7 +286,7 @@ impl FunctionSignature {
 pub struct Parameter {
     /// Parameter name (e.g., "`user_id`")
     pub name: String,
-    /// Type annotation (e.g., "i64", "&str", "Option<User>")
+    /// Type annotation (e.g., "i64", "&str", "`Option<User>`")
     pub type_annotation: Option<String>,
 }
 
