@@ -45,6 +45,10 @@ pub enum Error {
     /// Invalid configuration or arguments
     #[error("configuration error: {0}")]
     Config(String),
+
+    /// Requested resource was not found
+    #[error("not found: {0}")]
+    NotFound(String),
 }
 
 /// Error encountered while indexing a specific file.
