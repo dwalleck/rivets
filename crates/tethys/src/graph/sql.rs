@@ -215,8 +215,84 @@ impl SymbolGraphOps for SqlSymbolGraph {
         })
     }
 
-    fn find_call_path(&self, _from_symbol_id: i64, _to_symbol_id: i64) -> Result<Option<CallPath>> {
-        todo!("Task 5: Implement find_call_path")
+    fn find_call_path(&self, from_symbol_id: i64, to_symbol_id: i64) -> Result<Option<CallPath>> {
+        // Same symbol - trivial path
+        if from_symbol_id == to_symbol_id {
+            let symbol = self.get_symbol_by_id(from_symbol_id)?.ok_or_else(|| {
+                crate::error::Error::NotFound(format!("symbol id: {from_symbol_id}"))
+            })?;
+            return Ok(Some(CallPath {
+                symbols: vec![symbol],
+                edges: vec![],
+            }));
+        }
+
+        // BFS to find shortest path using recursive CTE
+        // We search forward from `from` through callees (what does `from` call?)
+        let max_depth = 50;
+
+        // Scope the connection lock to just the query execution
+        let symbol_ids: Option<Vec<i64>> = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|e| crate::error::Error::Internal(format!("mutex poisoned: {e}")))?;
+
+            let mut stmt = conn.prepare(
+                "WITH RECURSIVE path_search(symbol_id, path, depth) AS (
+                    -- Start from the source symbol
+                    SELECT ?1, CAST(?1 AS TEXT), 0
+
+                    UNION
+
+                    -- Follow callees (symbols that the current symbol calls)
+                    SELECT r.symbol_id,
+                           ps.path || ',' || r.symbol_id,
+                           ps.depth + 1
+                    FROM refs r
+                    JOIN path_search ps ON r.in_symbol_id = ps.symbol_id
+                    WHERE ps.depth < ?3
+                      AND r.symbol_id IS NOT NULL
+                )
+                SELECT path
+                FROM path_search
+                WHERE symbol_id = ?2
+                ORDER BY depth
+                LIMIT 1",
+            )?;
+
+            let path_str: Option<String> = stmt
+                .query_row(
+                    rusqlite::params![from_symbol_id, to_symbol_id, max_depth],
+                    |row| row.get(0),
+                )
+                .optional()?;
+
+            // Parse path into symbol IDs if found
+            path_str.map(|s| {
+                s.split(',')
+                    .filter_map(|id| id.trim().parse().ok())
+                    .collect()
+            })
+        }; // conn lock released here
+
+        let Some(symbol_ids) = symbol_ids else {
+            return Ok(None);
+        };
+
+        // Fetch symbols for each ID in the path
+        let mut symbols = Vec::with_capacity(symbol_ids.len());
+        for id in symbol_ids {
+            let symbol = self
+                .get_symbol_by_id(id)?
+                .ok_or_else(|| crate::error::Error::NotFound(format!("symbol id: {id}")))?;
+            symbols.push(symbol);
+        }
+
+        // Create edges (all Call for simplicity)
+        let edges = vec![ReferenceKind::Call; symbols.len().saturating_sub(1)];
+
+        Ok(Some(CallPath { symbols, edges }))
     }
 }
 
@@ -639,5 +715,74 @@ mod tests {
         assert_eq!(impact.total_caller_count, 0);
         assert!(impact.direct_callers.is_empty());
         assert!(impact.transitive_callers.is_empty());
+    }
+
+    #[test]
+    fn find_call_path_returns_shortest_path() {
+        let (_dir, db_path) = setup_test_graph();
+        let graph = SqlSymbolGraph::new(&db_path).unwrap();
+        let index = Index::open(&db_path).unwrap();
+
+        let main_run = index
+            .get_symbol_by_qualified_name("main::run")
+            .unwrap()
+            .unwrap();
+        let db_query = index
+            .get_symbol_by_qualified_name("db::query")
+            .unwrap()
+            .unwrap();
+
+        let path = graph.find_call_path(main_run.id, db_query.id).unwrap();
+
+        assert!(
+            path.is_some(),
+            "should find path from main::run to db::query"
+        );
+        let path = path.unwrap();
+
+        // Path should be: main::run -> (auth::validate OR cache::get) -> db::query
+        assert_eq!(path.symbols.len(), 3, "path should have 3 symbols");
+        assert_eq!(path.symbols[0].qualified_name, "main::run");
+        assert_eq!(path.symbols[2].qualified_name, "db::query");
+    }
+
+    #[test]
+    fn find_call_path_returns_none_for_unconnected() {
+        let (_dir, db_path) = setup_test_graph();
+        let graph = SqlSymbolGraph::new(&db_path).unwrap();
+        let index = Index::open(&db_path).unwrap();
+
+        // db::query doesn't call main::run (reverse direction)
+        let db_query = index
+            .get_symbol_by_qualified_name("db::query")
+            .unwrap()
+            .unwrap();
+        let main_run = index
+            .get_symbol_by_qualified_name("main::run")
+            .unwrap()
+            .unwrap();
+
+        let path = graph.find_call_path(db_query.id, main_run.id).unwrap();
+
+        assert!(path.is_none(), "should not find path in reverse direction");
+    }
+
+    #[test]
+    fn find_call_path_same_symbol_returns_single_node() {
+        let (_dir, db_path) = setup_test_graph();
+        let graph = SqlSymbolGraph::new(&db_path).unwrap();
+        let index = Index::open(&db_path).unwrap();
+
+        let main_run = index
+            .get_symbol_by_qualified_name("main::run")
+            .unwrap()
+            .unwrap();
+
+        let path = graph.find_call_path(main_run.id, main_run.id).unwrap();
+
+        assert!(path.is_some());
+        let path = path.unwrap();
+        assert_eq!(path.symbols.len(), 1);
+        assert_eq!(path.symbols[0].qualified_name, "main::run");
     }
 }
