@@ -12,9 +12,12 @@ use std::sync::Mutex;
 
 use rusqlite::{Connection, OptionalExtension};
 
-use super::{CallPath, CalleeInfo, CallerInfo, SymbolGraphOps, SymbolImpact};
+use super::{
+    CallPath, CalleeInfo, CallerInfo, FileDepInfo, FileGraphOps, FileImpact, FilePath,
+    SymbolGraphOps, SymbolImpact,
+};
 use crate::error::Result;
-use crate::types::{ReferenceKind, Span, Symbol, SymbolKind, Visibility};
+use crate::types::{IndexedFile, Language, ReferenceKind, Span, Symbol, SymbolKind, Visibility};
 
 /// SQL-based implementation of symbol graph operations.
 ///
@@ -49,6 +52,261 @@ impl SqlSymbolGraph {
         let symbol = stmt.query_row([id], row_to_symbol).optional()?;
 
         Ok(symbol)
+    }
+}
+
+/// SQL-based implementation of file graph operations.
+///
+/// Wraps a `Connection` in a `Mutex` to satisfy the `Send + Sync` bounds
+/// required by the `FileGraphOps` trait.
+pub struct SqlFileGraph {
+    conn: Mutex<Connection>,
+}
+
+impl SqlFileGraph {
+    /// Create a new SQL file graph connected to the given database.
+    pub fn new(db_path: &Path) -> Result<Self> {
+        let conn = Connection::open(db_path)?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
+    }
+
+    /// Get a file by its database ID.
+    fn get_file_by_id(&self, id: i64) -> Result<Option<IndexedFile>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| crate::error::Error::Internal(format!("mutex poisoned: {e}")))?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, path, language, mtime_ns, size_bytes, content_hash, indexed_at
+             FROM files WHERE id = ?1",
+        )?;
+
+        let file = stmt.query_row([id], row_to_indexed_file).optional()?;
+
+        Ok(file)
+    }
+}
+
+impl FileGraphOps for SqlFileGraph {
+    fn get_dependents(&self, file_id: i64) -> Result<Vec<FileDepInfo>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| crate::error::Error::Internal(format!("mutex poisoned: {e}")))?;
+
+        // Find all files that depend on the target file
+        // file_deps has (from_file_id, to_file_id) where from depends on to
+        // So we need files where to_file_id = file_id (files that depend ON it)
+        let mut stmt = conn.prepare(
+            "SELECT
+                f.id, f.path, f.language, f.mtime_ns, f.size_bytes, f.content_hash, f.indexed_at,
+                fd.ref_count
+             FROM file_deps fd
+             JOIN files f ON f.id = fd.from_file_id
+             WHERE fd.to_file_id = ?1
+             ORDER BY f.path",
+        )?;
+
+        let dependents = stmt
+            .query_map([file_id], |row| {
+                let file = row_to_indexed_file(row)?;
+                let ref_count: usize = row.get::<_, i64>(7)? as usize;
+
+                Ok(FileDepInfo { file, ref_count })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(dependents)
+    }
+
+    fn get_dependencies(&self, file_id: i64) -> Result<Vec<FileDepInfo>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| crate::error::Error::Internal(format!("mutex poisoned: {e}")))?;
+
+        // Find all files that the given file depends on
+        // file_deps has (from_file_id, to_file_id) where from depends on to
+        // So we need files where from_file_id = file_id (files it depends ON)
+        let mut stmt = conn.prepare(
+            "SELECT
+                f.id, f.path, f.language, f.mtime_ns, f.size_bytes, f.content_hash, f.indexed_at,
+                fd.ref_count
+             FROM file_deps fd
+             JOIN files f ON f.id = fd.to_file_id
+             WHERE fd.from_file_id = ?1
+             ORDER BY f.path",
+        )?;
+
+        let dependencies = stmt
+            .query_map([file_id], |row| {
+                let file = row_to_indexed_file(row)?;
+                let ref_count: usize = row.get::<_, i64>(7)? as usize;
+
+                Ok(FileDepInfo { file, ref_count })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(dependencies)
+    }
+
+    fn get_transitive_dependents(
+        &self,
+        file_id: i64,
+        max_depth: Option<u32>,
+    ) -> Result<FileImpact> {
+        let max_depth = max_depth.unwrap_or(50);
+
+        // First, get the target file
+        let target = self
+            .get_file_by_id(file_id)?
+            .ok_or_else(|| crate::error::Error::NotFound(format!("file id: {file_id}")))?;
+
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| crate::error::Error::Internal(format!("mutex poisoned: {e}")))?;
+
+        // Use recursive CTE to find all dependents with their depth
+        let mut stmt = conn.prepare(
+            "WITH RECURSIVE dependent_tree(file_id, depth) AS (
+                -- Base case: direct dependents
+                SELECT DISTINCT fd.from_file_id, 1
+                FROM file_deps fd
+                WHERE fd.to_file_id = ?1
+
+                UNION
+
+                -- Recursive case: dependents of dependents
+                SELECT DISTINCT fd.from_file_id, dt.depth + 1
+                FROM file_deps fd
+                JOIN dependent_tree dt ON fd.to_file_id = dt.file_id
+                WHERE dt.depth < ?2
+            )
+            SELECT DISTINCT
+                f.id, f.path, f.language, f.mtime_ns, f.size_bytes, f.content_hash, f.indexed_at,
+                MIN(dt.depth) as min_depth
+            FROM dependent_tree dt
+            JOIN files f ON f.id = dt.file_id
+            GROUP BY f.id
+            ORDER BY min_depth, f.path",
+        )?;
+
+        let mut direct_dependents = Vec::new();
+        let mut transitive_dependents = Vec::new();
+
+        let rows = stmt.query_map(rusqlite::params![file_id, max_depth], |row| {
+            let file = row_to_indexed_file(row)?;
+            let depth: u32 = row.get::<_, i64>(7)? as u32;
+            Ok((file, depth))
+        })?;
+
+        for row in rows {
+            let (file, depth) = row?;
+
+            let dep_info = FileDepInfo { file, ref_count: 1 };
+
+            if depth == 1 {
+                direct_dependents.push(dep_info);
+            } else {
+                transitive_dependents.push(dep_info);
+            }
+        }
+
+        let total_dependent_count = direct_dependents.len() + transitive_dependents.len();
+
+        Ok(FileImpact {
+            target,
+            direct_dependents,
+            transitive_dependents,
+            total_dependent_count,
+        })
+    }
+
+    fn find_dependency_path(&self, from_file_id: i64, to_file_id: i64) -> Result<Option<FilePath>> {
+        // Same file - trivial path
+        if from_file_id == to_file_id {
+            let file = self
+                .get_file_by_id(from_file_id)?
+                .ok_or_else(|| crate::error::Error::NotFound(format!("file id: {from_file_id}")))?;
+            return Ok(Some(FilePath { files: vec![file] }));
+        }
+
+        // BFS to find shortest path using recursive CTE
+        // We search forward from `from` through dependencies (what does `from` depend on?)
+        let max_depth = 50;
+
+        // Scope the connection lock to just the query execution
+        let file_ids: Option<Vec<i64>> = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|e| crate::error::Error::Internal(format!("mutex poisoned: {e}")))?;
+
+            let mut stmt = conn.prepare(
+                "WITH RECURSIVE path_search(file_id, path, depth) AS (
+                    -- Start from the source file
+                    SELECT ?1, CAST(?1 AS TEXT), 0
+
+                    UNION
+
+                    -- Follow dependencies (files that the current file depends on)
+                    SELECT fd.to_file_id,
+                           ps.path || ',' || fd.to_file_id,
+                           ps.depth + 1
+                    FROM file_deps fd
+                    JOIN path_search ps ON fd.from_file_id = ps.file_id
+                    WHERE ps.depth < ?3
+                )
+                SELECT path
+                FROM path_search
+                WHERE file_id = ?2
+                ORDER BY depth
+                LIMIT 1",
+            )?;
+
+            let path_str: Option<String> = stmt
+                .query_row(
+                    rusqlite::params![from_file_id, to_file_id, max_depth],
+                    |row| row.get(0),
+                )
+                .optional()?;
+
+            // Parse path into file IDs if found
+            path_str.map(|s| {
+                s.split(',')
+                    .filter_map(|id| id.trim().parse().ok())
+                    .collect()
+            })
+        }; // conn lock released here
+
+        let Some(file_ids) = file_ids else {
+            return Ok(None);
+        };
+
+        // Fetch files for each ID in the path
+        let mut files = Vec::with_capacity(file_ids.len());
+        for id in file_ids {
+            let file = self
+                .get_file_by_id(id)?
+                .ok_or_else(|| crate::error::Error::NotFound(format!("file id: {id}")))?;
+            files.push(file);
+        }
+
+        Ok(Some(FilePath { files }))
+    }
+
+    fn detect_cycles(&self) -> Result<Vec<crate::types::Cycle>> {
+        // Cycle detection stubbed for future implementation
+        Ok(vec![])
+    }
+
+    fn detect_cycles_involving(&self, _file_id: i64) -> Result<Vec<crate::types::Cycle>> {
+        // Cycle detection stubbed for future implementation
+        Ok(vec![])
     }
 }
 
@@ -377,6 +635,34 @@ fn parse_reference_kinds(s: &str) -> Vec<ReferenceKind> {
             _ => None,
         })
         .collect()
+}
+
+/// Convert a database row to an `IndexedFile`.
+///
+/// Expects 7 columns: id, path, language, `mtime_ns`, `size_bytes`, `content_hash`, `indexed_at`
+fn row_to_indexed_file(row: &rusqlite::Row) -> rusqlite::Result<IndexedFile> {
+    Ok(IndexedFile {
+        id: row.get(0)?,
+        path: std::path::PathBuf::from(row.get::<_, String>(1)?),
+        language: parse_language(&row.get::<_, String>(2)?)?,
+        mtime_ns: row.get(3)?,
+        size_bytes: row.get::<_, i64>(4)? as u64,
+        content_hash: row.get::<_, Option<i64>>(5)?.map(|h| h as u64),
+        indexed_at: row.get(6)?,
+    })
+}
+
+/// Parse a language string from the database.
+fn parse_language(s: &str) -> rusqlite::Result<Language> {
+    match s {
+        "rust" => Ok(Language::Rust),
+        "csharp" => Ok(Language::CSharp),
+        unknown => Err(rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            format!("Unknown language: {unknown}").into(),
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -784,5 +1070,245 @@ mod tests {
         let path = path.unwrap();
         assert_eq!(path.symbols.len(), 1);
         assert_eq!(path.symbols[0].qualified_name, "main::run");
+    }
+
+    // === FileGraphOps Tests ===
+
+    /// Create a test database with a known file dependency graph:
+    ///
+    /// ```text
+    /// main.rs -> auth.rs -> db.rs
+    ///         -> cache.rs -> db.rs
+    /// ```
+    fn setup_file_deps_graph() -> (TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let mut index = Index::open(&db_path).unwrap();
+
+        // Create files: main.rs -> auth.rs -> db.rs
+        //                       -> cache.rs -> db.rs
+        let main_id = index
+            .index_file_atomic(
+                std::path::Path::new("src/main.rs"),
+                Language::Rust,
+                1000,
+                100,
+                None,
+                &[],
+            )
+            .unwrap();
+        let auth_id = index
+            .index_file_atomic(
+                std::path::Path::new("src/auth.rs"),
+                Language::Rust,
+                1000,
+                100,
+                None,
+                &[],
+            )
+            .unwrap();
+        let cache_id = index
+            .index_file_atomic(
+                std::path::Path::new("src/cache.rs"),
+                Language::Rust,
+                1000,
+                100,
+                None,
+                &[],
+            )
+            .unwrap();
+        let db_id = index
+            .index_file_atomic(
+                std::path::Path::new("src/db.rs"),
+                Language::Rust,
+                1000,
+                100,
+                None,
+                &[],
+            )
+            .unwrap();
+
+        // Set up dependencies (from_file depends on to_file)
+        index.insert_file_dependency(main_id, auth_id).unwrap();
+        index.insert_file_dependency(main_id, cache_id).unwrap();
+        index.insert_file_dependency(auth_id, db_id).unwrap();
+        index.insert_file_dependency(cache_id, db_id).unwrap();
+
+        (dir, db_path)
+    }
+
+    #[test]
+    fn file_graph_get_dependents_returns_direct() {
+        let (_dir, db_path) = setup_file_deps_graph();
+        let graph = SqlFileGraph::new(&db_path).unwrap();
+        let index = Index::open(&db_path).unwrap();
+
+        let db_id = index
+            .get_file_id(std::path::Path::new("src/db.rs"))
+            .unwrap()
+            .unwrap();
+        let dependents = graph.get_dependents(db_id).unwrap();
+
+        // db.rs is depended on by auth.rs and cache.rs
+        assert_eq!(dependents.len(), 2);
+        let paths: Vec<_> = dependents
+            .iter()
+            .map(|d| d.file.path.to_string_lossy().to_string())
+            .collect();
+        assert!(paths.iter().any(|p| p.contains("auth")));
+        assert!(paths.iter().any(|p| p.contains("cache")));
+    }
+
+    #[test]
+    fn file_graph_get_dependencies_returns_direct() {
+        let (_dir, db_path) = setup_file_deps_graph();
+        let graph = SqlFileGraph::new(&db_path).unwrap();
+        let index = Index::open(&db_path).unwrap();
+
+        let main_id = index
+            .get_file_id(std::path::Path::new("src/main.rs"))
+            .unwrap()
+            .unwrap();
+        let dependencies = graph.get_dependencies(main_id).unwrap();
+
+        // main.rs depends on auth.rs and cache.rs
+        assert_eq!(dependencies.len(), 2);
+        let paths: Vec<_> = dependencies
+            .iter()
+            .map(|d| d.file.path.to_string_lossy().to_string())
+            .collect();
+        assert!(paths.iter().any(|p| p.contains("auth")));
+        assert!(paths.iter().any(|p| p.contains("cache")));
+    }
+
+    #[test]
+    fn file_graph_get_transitive_dependents() {
+        let (_dir, db_path) = setup_file_deps_graph();
+        let graph = SqlFileGraph::new(&db_path).unwrap();
+        let index = Index::open(&db_path).unwrap();
+
+        let db_id = index
+            .get_file_id(std::path::Path::new("src/db.rs"))
+            .unwrap()
+            .unwrap();
+        let impact = graph.get_transitive_dependents(db_id, None).unwrap();
+
+        // db.rs: direct deps = auth.rs, cache.rs; transitive = main.rs
+        assert_eq!(impact.direct_dependents.len(), 2);
+        assert_eq!(impact.transitive_dependents.len(), 1);
+        assert_eq!(impact.total_dependent_count, 3);
+    }
+
+    #[test]
+    fn file_graph_get_transitive_dependents_respects_max_depth() {
+        let (_dir, db_path) = setup_file_deps_graph();
+        let graph = SqlFileGraph::new(&db_path).unwrap();
+        let index = Index::open(&db_path).unwrap();
+
+        let db_id = index
+            .get_file_id(std::path::Path::new("src/db.rs"))
+            .unwrap()
+            .unwrap();
+        let impact = graph.get_transitive_dependents(db_id, Some(1)).unwrap();
+
+        // With max_depth=1, should only get direct dependents
+        assert_eq!(impact.direct_dependents.len(), 2);
+        assert!(
+            impact.transitive_dependents.is_empty(),
+            "should have no transitive with depth=1"
+        );
+    }
+
+    #[test]
+    fn file_graph_find_dependency_path_returns_shortest() {
+        let (_dir, db_path) = setup_file_deps_graph();
+        let graph = SqlFileGraph::new(&db_path).unwrap();
+        let index = Index::open(&db_path).unwrap();
+
+        let main_id = index
+            .get_file_id(std::path::Path::new("src/main.rs"))
+            .unwrap()
+            .unwrap();
+        let db_id = index
+            .get_file_id(std::path::Path::new("src/db.rs"))
+            .unwrap()
+            .unwrap();
+
+        let path = graph.find_dependency_path(main_id, db_id).unwrap();
+
+        assert!(path.is_some(), "should find path from main.rs to db.rs");
+        let path = path.unwrap();
+
+        // Path should be: main.rs -> (auth.rs OR cache.rs) -> db.rs
+        assert_eq!(path.files.len(), 3, "path should have 3 files");
+        assert!(path.files[0].path.to_string_lossy().contains("main"));
+        assert!(path.files[2].path.to_string_lossy().contains("db"));
+    }
+
+    #[test]
+    fn file_graph_find_dependency_path_returns_none_for_unconnected() {
+        let (_dir, db_path) = setup_file_deps_graph();
+        let graph = SqlFileGraph::new(&db_path).unwrap();
+        let index = Index::open(&db_path).unwrap();
+
+        // db.rs doesn't depend on main.rs (reverse direction)
+        let db_id = index
+            .get_file_id(std::path::Path::new("src/db.rs"))
+            .unwrap()
+            .unwrap();
+        let main_id = index
+            .get_file_id(std::path::Path::new("src/main.rs"))
+            .unwrap()
+            .unwrap();
+
+        let path = graph.find_dependency_path(db_id, main_id).unwrap();
+
+        assert!(path.is_none(), "should not find path in reverse direction");
+    }
+
+    #[test]
+    fn file_graph_find_dependency_path_same_file_returns_single_node() {
+        let (_dir, db_path) = setup_file_deps_graph();
+        let graph = SqlFileGraph::new(&db_path).unwrap();
+        let index = Index::open(&db_path).unwrap();
+
+        let main_id = index
+            .get_file_id(std::path::Path::new("src/main.rs"))
+            .unwrap()
+            .unwrap();
+
+        let path = graph.find_dependency_path(main_id, main_id).unwrap();
+
+        assert!(path.is_some());
+        let path = path.unwrap();
+        assert_eq!(path.files.len(), 1);
+        assert!(path.files[0].path.to_string_lossy().contains("main"));
+    }
+
+    #[test]
+    fn file_graph_detect_cycles_returns_empty_for_acyclic() {
+        let (_dir, db_path) = setup_file_deps_graph();
+        let graph = SqlFileGraph::new(&db_path).unwrap();
+
+        let cycles = graph.detect_cycles().unwrap();
+        assert!(cycles.is_empty(), "acyclic graph should have no cycles");
+    }
+
+    #[test]
+    fn file_graph_detect_cycles_involving_returns_empty_for_acyclic() {
+        let (_dir, db_path) = setup_file_deps_graph();
+        let graph = SqlFileGraph::new(&db_path).unwrap();
+        let index = Index::open(&db_path).unwrap();
+
+        let main_id = index
+            .get_file_id(std::path::Path::new("src/main.rs"))
+            .unwrap()
+            .unwrap();
+
+        let cycles = graph.detect_cycles_involving(main_id).unwrap();
+        assert!(
+            cycles.is_empty(),
+            "acyclic graph should have no cycles involving main.rs"
+        );
     }
 }

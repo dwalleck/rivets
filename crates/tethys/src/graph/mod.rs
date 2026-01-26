@@ -24,7 +24,7 @@ pub use types::{
 
 mod sql;
 
-pub use sql::SqlSymbolGraph;
+pub use sql::{SqlFileGraph, SqlSymbolGraph};
 
 use crate::error::Result;
 use crate::types::Cycle;
