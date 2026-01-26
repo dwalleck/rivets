@@ -48,13 +48,14 @@ pub use types::{
     Visibility,
 };
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, UNIX_EPOCH};
 
 use db::{Index, SymbolData};
 use languages::rust;
 use resolver::resolve_module_path;
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 /// A dependency that couldn't be resolved because the target file wasn't indexed yet.
 ///
@@ -133,7 +134,7 @@ impl Tethys {
         let start = Instant::now();
         let mut files_indexed = 0;
         let mut symbols_found = 0;
-        let references_found = 0;
+        let mut references_found = 0;
         let mut files_skipped = 0;
         let mut directories_skipped = Vec::new();
         let mut errors = Vec::new();
@@ -160,9 +161,10 @@ impl Tethys {
 
             // Read and parse the file
             match self.index_file(&file_path, language, &mut pending) {
-                Ok(count) => {
+                Ok((sym_count, ref_count)) => {
                     files_indexed += 1;
-                    symbols_found += count;
+                    symbols_found += sym_count;
+                    references_found += ref_count;
                 }
                 Err(e) => {
                     errors.push(IndexError::new(
@@ -193,14 +195,23 @@ impl Tethys {
         // Convert remaining pending to (from_path, dep_path) for reporting
         let unresolved_dependencies: Vec<(PathBuf, PathBuf)> = pending
             .into_iter()
-            .filter_map(|p| {
-                let from_path = self
-                    .db
-                    .get_file_by_id(p.from_file_id)
-                    .ok()
-                    .flatten()
-                    .map(|f| f.path)?;
-                Some((from_path, p.dep_path))
+            .filter_map(|p| match self.db.get_file_by_id(p.from_file_id) {
+                Ok(Some(f)) => Some((f.path, p.dep_path)),
+                Ok(None) => {
+                    warn!(
+                        file_id = p.from_file_id,
+                        "File not found when building unresolved deps list"
+                    );
+                    None
+                }
+                Err(e) => {
+                    warn!(
+                        file_id = p.from_file_id,
+                        error = %e,
+                        "DB error when building unresolved deps list"
+                    );
+                    None
+                }
             })
             .collect();
 
@@ -231,12 +242,14 @@ impl Tethys {
     /// its symbols are stored, or nothing is changed on failure.
     ///
     /// Unresolved dependencies (target file not yet indexed) are added to `pending`.
+    ///
+    /// Returns (`symbol_count`, `reference_count`).
     fn index_file(
         &mut self,
         path: &Path,
         language: Language,
         pending: &mut Vec<PendingDependency>,
-    ) -> Result<usize> {
+    ) -> Result<(usize, usize)> {
         let content = std::fs::read(path)?;
         let content_str = std::str::from_utf8(&content)
             .map_err(|_| Error::Parser("file is not valid UTF-8".to_string()))?;
@@ -303,10 +316,91 @@ impl Tethys {
             &symbol_data,
         )?;
 
+        // Build lookup maps for reference insertion
+        let stored_symbols = self.db.list_symbols_in_file(file_id)?;
+        let (name_to_id, span_to_id) = Self::build_symbol_maps(&stored_symbols);
+
+        // Store references for resolvable symbols
+        let refs_stored = self.store_references(file_id, &refs, &name_to_id, &span_to_id)?;
+
         // Compute and store file dependencies (L2: only for actually used symbols)
         self.compute_dependencies(path, file_id, &uses, &refs, pending)?;
 
-        Ok(extracted.len())
+        Ok((extracted.len(), refs_stored))
+    }
+
+    /// Build lookup maps from symbols for reference resolution.
+    ///
+    /// Returns (`name -> id`, `span -> id`) maps.
+    fn build_symbol_maps(symbols: &[Symbol]) -> (HashMap<String, i64>, HashMap<Span, i64>) {
+        let mut name_to_id: HashMap<String, i64> = HashMap::new();
+        let mut span_to_id: HashMap<Span, i64> = HashMap::new();
+
+        for sym in symbols {
+            // Map name to ID (log if duplicate, last one wins)
+            if let Some(prev_id) = name_to_id.insert(sym.name.clone(), sym.id) {
+                trace!(
+                    name = %sym.name,
+                    new_id = sym.id,
+                    prev_id,
+                    "Duplicate symbol name in file, using newer"
+                );
+            }
+
+            // Map span to ID for containing symbol resolution
+            if let Some(span) = sym.span {
+                span_to_id.insert(span, sym.id);
+            }
+        }
+
+        (name_to_id, span_to_id)
+    }
+
+    /// Store extracted references in the database.
+    ///
+    /// Only stores references where the target symbol can be resolved.
+    /// Returns the count of references stored.
+    fn store_references(
+        &self,
+        file_id: i64,
+        refs: &[rust::ExtractedReference],
+        name_to_id: &HashMap<String, i64>,
+        span_to_id: &HashMap<Span, i64>,
+    ) -> Result<usize> {
+        let mut count = 0;
+
+        for r in refs {
+            // Try to resolve the target symbol by name
+            let Some(&symbol_id) = name_to_id.get(&r.name) else {
+                // Symbol not in this file - skip for now
+                // TODO: Phase 3+ can resolve cross-file references
+                trace!(
+                    reference_name = %r.name,
+                    line = r.line,
+                    "Skipping cross-file reference"
+                );
+                continue;
+            };
+
+            // Resolve containing symbol if present
+            let in_symbol_id = r
+                .containing_symbol_span
+                .and_then(|span| span_to_id.get(&span).copied());
+
+            // Insert the reference
+            let kind_str = r.kind.to_db_kind().as_str();
+            self.db.insert_reference(
+                symbol_id,
+                file_id,
+                kind_str,
+                r.line,
+                r.column,
+                in_symbol_id,
+            )?;
+            count += 1;
+        }
+
+        Ok(count)
     }
 
     /// Compute and store file-level dependencies based on use statements and actual references.
@@ -568,29 +662,35 @@ impl Tethys {
     }
 
     /// Get a symbol by its qualified name (exact match).
-    #[allow(unused_variables)]
     pub fn get_symbol(&self, qualified_name: &str) -> Result<Option<Symbol>> {
-        todo!("Phase 2: Implement get_symbol")
+        self.db.get_symbol_by_qualified_name(qualified_name)
     }
 
     /// Get a symbol by its database ID.
-    #[allow(unused_variables)]
     pub fn get_symbol_by_id(&self, id: i64) -> Result<Option<Symbol>> {
-        todo!("Phase 2: Implement get_symbol_by_id")
+        self.db.get_symbol_by_id(id)
     }
 
     // === Reference Queries ===
 
     /// Get all references to a symbol.
-    #[allow(unused_variables)]
     pub fn get_references(&self, qualified_name: &str) -> Result<Vec<Reference>> {
-        todo!("Phase 2: Implement get_references")
+        // First find the symbol by qualified name
+        let Some(symbol) = self.db.get_symbol_by_qualified_name(qualified_name)? else {
+            return Ok(vec![]);
+        };
+
+        // Then get all references to it
+        self.db.get_references_to_symbol(symbol.id)
     }
 
     /// List all outgoing references from a file.
-    #[allow(unused_variables)]
     pub fn list_references_in_file(&self, path: &Path) -> Result<Vec<Reference>> {
-        todo!("Phase 2: Implement list_references_in_file")
+        let Some(file_id) = self.db.get_file_id(self.relative_path(path))? else {
+            return Ok(vec![]);
+        };
+
+        self.db.list_references_in_file(file_id)
     }
 
     // === Dependency Queries ===

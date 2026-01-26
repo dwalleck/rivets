@@ -91,6 +91,10 @@ pub struct ExtractedReference {
     pub column: u32,
     /// The scoped path if this is a qualified reference (e.g., `crate::auth::authenticate`)
     pub path: Option<Vec<String>>,
+    /// Span of the containing symbol (function/method) for "who calls X?" queries.
+    /// `None` for top-level references (e.g., static initializers).
+    /// Resolved to `in_symbol_id` during indexing.
+    pub containing_symbol_span: Option<Span>,
 }
 
 /// Kind of reference extracted from Rust source code.
@@ -105,6 +109,18 @@ pub enum ExtractedReferenceKind {
     Type,
     /// Struct constructor (e.g., `User { name: ... }`)
     Constructor,
+}
+
+impl ExtractedReferenceKind {
+    /// Convert to database reference kind.
+    #[must_use]
+    pub fn to_db_kind(self) -> crate::types::ReferenceKind {
+        match self {
+            Self::Call => crate::types::ReferenceKind::Call,
+            Self::Type => crate::types::ReferenceKind::Type,
+            Self::Constructor => crate::types::ReferenceKind::Construct,
+        }
+    }
 }
 
 /// An extracted use statement from Rust source code.
@@ -145,7 +161,7 @@ pub fn extract_references(tree: &tree_sitter::Tree, content: &[u8]) -> Vec<Extra
     let mut refs = Vec::new();
     let root = tree.root_node();
 
-    extract_references_recursive(&root, content, &mut refs);
+    extract_references_recursive(&root, content, &mut refs, None);
 
     refs
 }
@@ -154,10 +170,11 @@ fn extract_references_recursive(
     node: &tree_sitter::Node,
     content: &[u8],
     refs: &mut Vec<ExtractedReference>,
+    containing_span: Option<Span>,
 ) {
     use node_kinds::{
-        CALL_EXPRESSION, FUNCTION_ITEM, IMPL_ITEM, STRUCT_EXPRESSION, STRUCT_ITEM, TRAIT_ITEM,
-        TYPE_IDENTIFIER, USE_DECLARATION,
+        CALL_EXPRESSION, DECLARATION_LIST, FUNCTION_ITEM, IMPL_ITEM, STRUCT_EXPRESSION,
+        STRUCT_ITEM, TRAIT_ITEM, TYPE_IDENTIFIER, USE_DECLARATION,
     };
 
     match node.kind() {
@@ -166,14 +183,14 @@ fn extract_references_recursive(
 
         CALL_EXPRESSION => {
             // Function/method call
-            if let Some(ref_data) = extract_call_reference(node, content) {
+            if let Some(ref_data) = extract_call_reference(node, content, containing_span) {
                 refs.push(ref_data);
             }
         }
 
         STRUCT_EXPRESSION => {
             // Struct constructor: `User { name: ... }`
-            if let Some(ref_data) = extract_struct_constructor(node, content) {
+            if let Some(ref_data) = extract_struct_constructor(node, content, containing_span) {
                 refs.push(ref_data);
             }
         }
@@ -188,17 +205,58 @@ fn extract_references_recursive(
                         line: node.start_position().row as u32 + 1,
                         column: node.start_position().column as u32 + 1,
                         path: None,
+                        containing_symbol_span: containing_span,
                     });
                 }
             }
         }
 
-        // Skip symbol definitions (they're not references)
-        FUNCTION_ITEM | STRUCT_ITEM | TRAIT_ITEM | IMPL_ITEM => {
-            // Still recurse into children for references within definitions
+        // Function definitions: capture span and recurse with it
+        FUNCTION_ITEM => {
+            let fn_span = node_span(node);
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                extract_references_recursive(&child, content, refs);
+                extract_references_recursive(&child, content, refs, Some(fn_span));
+            }
+            return;
+        }
+
+        // Impl blocks: recurse into methods with their own spans
+        IMPL_ITEM => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == DECLARATION_LIST {
+                    // Methods inside impl get their own containing spans
+                    let mut inner_cursor = child.walk();
+                    for item in child.children(&mut inner_cursor) {
+                        if item.kind() == FUNCTION_ITEM {
+                            let method_span = node_span(&item);
+                            let mut method_cursor = item.walk();
+                            for method_child in item.children(&mut method_cursor) {
+                                extract_references_recursive(
+                                    &method_child,
+                                    content,
+                                    refs,
+                                    Some(method_span),
+                                );
+                            }
+                        } else {
+                            extract_references_recursive(&item, content, refs, containing_span);
+                        }
+                    }
+                } else {
+                    // Type references in impl header (e.g., `impl Foo for Bar`)
+                    extract_references_recursive(&child, content, refs, containing_span);
+                }
+            }
+            return;
+        }
+
+        // Struct/trait definitions: recurse but don't set containing symbol
+        STRUCT_ITEM | TRAIT_ITEM => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                extract_references_recursive(&child, content, refs, containing_span);
             }
             return;
         }
@@ -209,12 +267,16 @@ fn extract_references_recursive(
     // Recurse into children
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        extract_references_recursive(&child, content, refs);
+        extract_references_recursive(&child, content, refs, containing_span);
     }
 }
 
 /// Extract a call reference from a `call_expression` node.
-fn extract_call_reference(node: &tree_sitter::Node, content: &[u8]) -> Option<ExtractedReference> {
+fn extract_call_reference(
+    node: &tree_sitter::Node,
+    content: &[u8],
+    containing_span: Option<Span>,
+) -> Option<ExtractedReference> {
     use node_kinds::{FIELD_EXPRESSION, IDENTIFIER, SCOPED_IDENTIFIER};
 
     // Get the function being called
@@ -230,6 +292,7 @@ fn extract_call_reference(node: &tree_sitter::Node, content: &[u8]) -> Option<Ex
                 line: function.start_position().row as u32 + 1,
                 column: function.start_position().column as u32 + 1,
                 path: None,
+                containing_symbol_span: containing_span,
             })
         }
         SCOPED_IDENTIFIER => {
@@ -241,6 +304,7 @@ fn extract_call_reference(node: &tree_sitter::Node, content: &[u8]) -> Option<Ex
                 line: function.start_position().row as u32 + 1,
                 column: function.start_position().column as u32 + 1,
                 path: if path.is_empty() { None } else { Some(path) },
+                containing_symbol_span: containing_span,
             })
         }
         FIELD_EXPRESSION => {
@@ -253,6 +317,7 @@ fn extract_call_reference(node: &tree_sitter::Node, content: &[u8]) -> Option<Ex
                 line: field.start_position().row as u32 + 1,
                 column: field.start_position().column as u32 + 1,
                 path: None,
+                containing_symbol_span: containing_span,
             })
         }
         _ => None,
@@ -263,6 +328,7 @@ fn extract_call_reference(node: &tree_sitter::Node, content: &[u8]) -> Option<Ex
 fn extract_struct_constructor(
     node: &tree_sitter::Node,
     content: &[u8],
+    containing_span: Option<Span>,
 ) -> Option<ExtractedReference> {
     use node_kinds::{SCOPED_IDENTIFIER, SCOPED_TYPE_IDENTIFIER, TYPE_IDENTIFIER};
 
@@ -278,6 +344,7 @@ fn extract_struct_constructor(
                 line: name_node.start_position().row as u32 + 1,
                 column: name_node.start_position().column as u32 + 1,
                 path: None,
+                containing_symbol_span: containing_span,
             })
         }
         SCOPED_IDENTIFIER | SCOPED_TYPE_IDENTIFIER => {
@@ -288,6 +355,7 @@ fn extract_struct_constructor(
                 line: name_node.start_position().row as u32 + 1,
                 column: name_node.start_position().column as u32 + 1,
                 path: if path.is_empty() { None } else { Some(path) },
+                containing_symbol_span: containing_span,
             })
         }
         _ => None,
@@ -1277,5 +1345,119 @@ impl User {
             .iter()
             .find(|r| r.name == "new" && r.kind == ExtractedReferenceKind::Call);
         assert!(new_ref.is_some(), "should find associated function call");
+    }
+
+    #[test]
+    fn tracks_containing_symbol_for_references() {
+        let code = r"
+fn outer() {
+    foo();
+}
+
+fn another() {
+    bar();
+}
+";
+        let tree = parse_rust(code);
+        let refs = extract_references(&tree, code.as_bytes());
+
+        // foo() is called from outer(), which spans lines 2-4
+        let foo_ref = refs.iter().find(|r| r.name == "foo").unwrap();
+        assert!(
+            foo_ref.containing_symbol_span.is_some(),
+            "should track containing symbol"
+        );
+        let outer_span = foo_ref.containing_symbol_span.as_ref().unwrap();
+        assert_eq!(outer_span.start_line, 2, "outer() starts at line 2");
+
+        // bar() is called from another(), which starts at line 6
+        let bar_ref = refs.iter().find(|r| r.name == "bar").unwrap();
+        let another_span = bar_ref.containing_symbol_span.as_ref().unwrap();
+        assert_eq!(another_span.start_line, 6, "another() starts at line 6");
+    }
+
+    #[test]
+    fn top_level_reference_has_no_containing_symbol() {
+        // Static/const initializers at module level have no containing function
+        let code = "static FOO: User = User { name: \"\" };";
+        let tree = parse_rust(code);
+        let refs = extract_references(&tree, code.as_bytes());
+
+        let user_ref = refs
+            .iter()
+            .find(|r| r.name == "User" && r.kind == ExtractedReferenceKind::Constructor);
+        assert!(user_ref.is_some(), "should find User constructor");
+        // Top-level references have no containing symbol
+        assert!(
+            user_ref.unwrap().containing_symbol_span.is_none(),
+            "top-level reference should not have containing symbol"
+        );
+    }
+
+    #[test]
+    fn references_in_closures_track_containing_function() {
+        // References inside closures should point to the enclosing function
+        let code = r"
+fn outer() {
+    let closure = || {
+        helper();
+    };
+}
+";
+        let tree = parse_rust(code);
+        let refs = extract_references(&tree, code.as_bytes());
+
+        let helper_ref = refs
+            .iter()
+            .find(|r| r.name == "helper" && r.kind == ExtractedReferenceKind::Call);
+        assert!(helper_ref.is_some(), "should find helper() call");
+
+        // The reference inside the closure should have containing_symbol_span
+        // pointing to the outer function
+        let containing = helper_ref.unwrap().containing_symbol_span;
+        assert!(
+            containing.is_some(),
+            "closure reference should have containing symbol span"
+        );
+
+        // The containing span should be the outer function (line 2)
+        let span = containing.unwrap();
+        assert_eq!(
+            span.start_line, 2,
+            "containing span should point to outer() function"
+        );
+    }
+
+    #[test]
+    fn references_in_nested_functions_track_inner_function() {
+        // Rust allows nested function definitions - references should track the innermost
+        let code = r"
+fn outer() {
+    fn inner() {
+        helper();
+    }
+}
+";
+        let tree = parse_rust(code);
+        let refs = extract_references(&tree, code.as_bytes());
+
+        let helper_ref = refs
+            .iter()
+            .find(|r| r.name == "helper" && r.kind == ExtractedReferenceKind::Call);
+        assert!(helper_ref.is_some(), "should find helper() call");
+
+        // The reference should point to inner(), not outer()
+        let containing = helper_ref.unwrap().containing_symbol_span;
+        assert!(
+            containing.is_some(),
+            "nested function reference should have containing symbol span"
+        );
+
+        // The containing span should be the inner function (line 3)
+        let span = containing.unwrap();
+        assert_eq!(
+            span.start_line, 3,
+            "containing span should point to inner() function, not outer()"
+        );
     }
 }

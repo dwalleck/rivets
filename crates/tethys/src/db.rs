@@ -13,6 +13,7 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::trace;
 
 use crate::error::{Error, Result};
 use crate::types::{
@@ -346,6 +347,38 @@ impl Index {
         Ok(symbols)
     }
 
+    /// Get a symbol by its database ID.
+    pub fn get_symbol_by_id(&self, id: i64) -> Result<Option<Symbol>> {
+        trace!(symbol_id = id, "Looking up symbol by ID");
+        let mut stmt = self.conn.prepare(
+            "SELECT id, file_id, name, module_path, qualified_name, kind, line, column,
+             end_line, end_column, signature, visibility, parent_symbol_id
+             FROM symbols WHERE id = ?1",
+        )?;
+
+        let mut rows = stmt.query([id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row_to_symbol(row)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Get a symbol by its qualified name (exact match).
+    pub fn get_symbol_by_qualified_name(&self, qualified_name: &str) -> Result<Option<Symbol>> {
+        trace!(qualified_name = %qualified_name, "Looking up symbol by qualified name");
+        let mut stmt = self.conn.prepare(
+            "SELECT id, file_id, name, module_path, qualified_name, kind, line, column,
+             end_line, end_column, signature, visibility, parent_symbol_id
+             FROM symbols WHERE qualified_name = ?1",
+        )?;
+
+        let mut rows = stmt.query([qualified_name])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row_to_symbol(row)?)),
+            None => Ok(None),
+        }
+    }
+
     /// Get total counts for stats.
     #[allow(dead_code)] // Public API, not yet used internally
     pub fn get_counts(&self) -> Result<(usize, usize, usize)> {
@@ -368,7 +401,6 @@ impl Index {
     // dependency tracking is used via file_deps table.
 
     /// Insert a reference to a symbol.
-    #[allow(dead_code)] // Phase 3+: symbol-level reference tracking
     #[allow(clippy::too_many_arguments)]
     pub fn insert_reference(
         &self,
@@ -388,8 +420,8 @@ impl Index {
     }
 
     /// Get all references to a symbol.
-    #[allow(dead_code)] // Phase 3+: symbol-level reference tracking
     pub fn get_references_to_symbol(&self, symbol_id: i64) -> Result<Vec<Reference>> {
+        trace!(symbol_id, "Getting references to symbol");
         let mut stmt = self.conn.prepare(
             "SELECT id, symbol_id, file_id, kind, line, column, end_line, end_column, in_symbol_id
              FROM refs WHERE symbol_id = ?1 ORDER BY file_id, line",
@@ -397,6 +429,21 @@ impl Index {
 
         let refs = stmt
             .query_map([symbol_id], row_to_reference)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(refs)
+    }
+
+    /// List all outgoing references from a file.
+    pub fn list_references_in_file(&self, file_id: i64) -> Result<Vec<Reference>> {
+        trace!(file_id, "Listing references in file");
+        let mut stmt = self.conn.prepare(
+            "SELECT id, symbol_id, file_id, kind, line, column, end_line, end_column, in_symbol_id
+             FROM refs WHERE file_id = ?1 ORDER BY line, column",
+        )?;
+
+        let refs = stmt
+            .query_map([file_id], row_to_reference)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(refs)

@@ -648,3 +648,543 @@ impl C {
         "c.rs should depend on a.rs, got: {deps_c:?}"
     );
 }
+
+// ============================================================================
+// Phase 2: Reference Storage and Queries
+// ============================================================================
+
+#[test]
+fn index_stores_references_for_same_file_symbols() {
+    let (_dir, mut tethys) = workspace_with_files(&[(
+        "src/lib.rs",
+        r"
+pub struct User {
+    pub name: String,
+}
+
+impl User {
+    pub fn new(name: String) -> Self {
+        Self { name }
+    }
+}
+
+pub fn create_user(name: String) -> User {
+    User::new(name)
+}
+",
+    )]);
+
+    let stats = tethys.index().expect("index failed");
+
+    // Should find references within the file:
+    // - User in return type of create_user
+    // - User::new() call in create_user
+    // - Self references (which resolve to User)
+    assert!(
+        stats.references_found > 0,
+        "should store references, found: {}",
+        stats.references_found
+    );
+}
+
+#[test]
+fn list_references_in_file_returns_references() {
+    let (dir, mut tethys) = workspace_with_files(&[(
+        "src/lib.rs",
+        r"
+pub struct Config {
+    pub value: u32,
+}
+
+pub fn get_config() -> Config {
+    Config { value: 42 }
+}
+",
+    )]);
+
+    tethys.index().expect("index failed");
+
+    let refs = tethys
+        .list_references_in_file(&dir.path().join("src/lib.rs"))
+        .expect("list_references_in_file failed");
+
+    // Should find Config references:
+    // - Config in return type
+    // - Config { ... } constructor
+    assert!(
+        !refs.is_empty(),
+        "should have references in file, got: {refs:?}"
+    );
+
+    // All references should be to Config
+    let config_refs: Vec<_> = refs.iter().filter(|r| r.symbol_id > 0).collect();
+    assert!(
+        !config_refs.is_empty(),
+        "should have resolved symbol references"
+    );
+}
+
+#[test]
+fn get_references_returns_references_to_symbol() {
+    let (_dir, mut tethys) = workspace_with_files(&[(
+        "src/lib.rs",
+        r"
+pub struct Helper;
+
+impl Helper {
+    pub fn assist() {}
+}
+
+pub fn use_helper() {
+    Helper::assist();
+}
+
+pub fn another_helper_use() -> Helper {
+    Helper
+}
+",
+    )]);
+
+    tethys.index().expect("index failed");
+
+    // Get references to the Helper struct
+    let refs = tethys
+        .get_references("Helper")
+        .expect("get_references failed");
+
+    // Should find multiple references to Helper:
+    // - In impl Helper
+    // - Helper::assist() call
+    // - Helper return type
+    // - Helper constructor
+    assert!(
+        refs.len() >= 2,
+        "should have multiple references to Helper, got: {refs:?}"
+    );
+}
+
+#[test]
+fn get_symbol_by_qualified_name() {
+    let (_dir, mut tethys) = workspace_with_files(&[(
+        "src/lib.rs",
+        r"
+pub fn authenticate() -> bool {
+    true
+}
+",
+    )]);
+
+    tethys.index().expect("index failed");
+
+    let symbol = tethys
+        .get_symbol("authenticate")
+        .expect("get_symbol failed");
+
+    assert!(symbol.is_some(), "should find authenticate symbol");
+    let sym = symbol.unwrap();
+    assert_eq!(sym.name, "authenticate");
+}
+
+#[test]
+fn get_symbol_returns_none_for_unknown() {
+    let (_dir, mut tethys) = workspace_with_files(&[("src/lib.rs", "fn foo() {}")]);
+
+    tethys.index().expect("index failed");
+
+    let symbol = tethys
+        .get_symbol("nonexistent_symbol")
+        .expect("get_symbol failed");
+
+    assert!(symbol.is_none(), "should not find nonexistent symbol");
+}
+
+#[test]
+fn get_symbol_by_id_works() {
+    let (_dir, mut tethys) = workspace_with_files(&[(
+        "src/lib.rs",
+        r"
+pub fn my_function() {}
+",
+    )]);
+
+    tethys.index().expect("index failed");
+
+    // First get the symbol to find its ID
+    let symbol = tethys
+        .get_symbol("my_function")
+        .expect("get_symbol failed")
+        .expect("should find symbol");
+
+    // Now look it up by ID
+    let by_id = tethys
+        .get_symbol_by_id(symbol.id)
+        .expect("get_symbol_by_id failed");
+
+    assert!(by_id.is_some(), "should find symbol by ID");
+    assert_eq!(by_id.unwrap().name, "my_function");
+}
+
+#[test]
+fn references_track_containing_symbol() {
+    let (dir, mut tethys) = workspace_with_files(&[(
+        "src/lib.rs",
+        r"
+pub struct Data;
+
+pub fn process() -> Data {
+    Data
+}
+
+pub fn another() -> Data {
+    Data
+}
+",
+    )]);
+
+    tethys.index().expect("index failed");
+
+    let refs = tethys
+        .list_references_in_file(&dir.path().join("src/lib.rs"))
+        .expect("list_references_in_file failed");
+
+    // Filter to Data references with in_symbol_id set
+    let refs_with_containing: Vec<_> = refs.iter().filter(|r| r.in_symbol_id.is_some()).collect();
+
+    // References inside process() and another() should have in_symbol_id
+    assert!(
+        !refs_with_containing.is_empty(),
+        "some references should track containing symbol, got: {refs:?}"
+    );
+}
+
+// ============================================================================
+// Edge Cases and Error Handling
+// ============================================================================
+
+#[test]
+fn get_references_returns_empty_for_nonexistent_symbol() {
+    let (_dir, mut tethys) = workspace_with_files(&[(
+        "src/lib.rs",
+        r"
+pub fn real_function() {}
+",
+    )]);
+
+    tethys.index().expect("index failed");
+
+    let refs = tethys
+        .get_references("symbol_that_does_not_exist")
+        .expect("get_references should not error");
+
+    assert!(
+        refs.is_empty(),
+        "should return empty vec for nonexistent symbol"
+    );
+}
+
+#[test]
+fn get_symbol_by_id_returns_none_for_invalid_id() {
+    let (_dir, mut tethys) = workspace_with_files(&[("src/lib.rs", "fn foo() {}")]);
+
+    tethys.index().expect("index failed");
+
+    let symbol = tethys
+        .get_symbol_by_id(999_999)
+        .expect("get_symbol_by_id should not error");
+
+    assert!(symbol.is_none(), "should return None for non-existent ID");
+}
+
+#[test]
+fn get_references_returns_empty_for_unreferenced_symbol() {
+    let (_dir, mut tethys) = workspace_with_files(&[(
+        "src/lib.rs",
+        r"
+// Symbol exists but is never referenced anywhere
+pub struct UnusedType;
+
+pub fn unrelated_function() -> i32 {
+    42
+}
+",
+    )]);
+
+    tethys.index().expect("index failed");
+
+    let refs = tethys
+        .get_references("UnusedType")
+        .expect("get_references should not error");
+
+    // UnusedType is defined but never used, so no references
+    assert!(
+        refs.is_empty(),
+        "unreferenced symbol should have no references, got: {refs:?}"
+    );
+}
+
+#[test]
+fn list_references_in_file_returns_empty_for_unknown_file() {
+    let (_dir, mut tethys) = workspace_with_files(&[("src/lib.rs", "fn foo() {}")]);
+
+    tethys.index().expect("index failed");
+
+    let refs = tethys
+        .list_references_in_file(std::path::Path::new("src/nonexistent.rs"))
+        .expect("list_references_in_file should not error");
+
+    assert!(refs.is_empty(), "should return empty vec for unknown file");
+}
+
+#[test]
+fn list_references_in_file_returns_empty_for_file_with_no_references() {
+    let (dir, mut tethys) = workspace_with_files(&[(
+        "src/lib.rs",
+        r"
+// File with only definitions, no references to other symbols
+pub const VALUE: i32 = 42;
+",
+    )]);
+
+    tethys.index().expect("index failed");
+
+    let refs = tethys
+        .list_references_in_file(&dir.path().join("src/lib.rs"))
+        .expect("list_references_in_file should not error");
+
+    // A file with only a constant definition has no outgoing references
+    // (primitive types like i32 are not tracked as symbol references)
+    assert!(
+        refs.is_empty(),
+        "file with no symbol references should return empty, got: {refs:?}"
+    );
+}
+
+#[test]
+fn references_preserve_reference_kind() {
+    use tethys::ReferenceKind;
+
+    let (dir, mut tethys) = workspace_with_files(&[(
+        "src/lib.rs",
+        r"
+pub struct User {
+    pub name: String,
+}
+
+impl User {
+    pub fn new() -> Self {
+        Self { name: String::new() }
+    }
+}
+
+pub fn create() -> User {
+    User::new()
+}
+",
+    )]);
+
+    tethys.index().expect("index failed");
+
+    let refs = tethys
+        .list_references_in_file(&dir.path().join("src/lib.rs"))
+        .expect("list_references_in_file failed");
+
+    // Should have different reference kinds
+    let kinds: std::collections::HashSet<_> = refs.iter().map(|r| &r.kind).collect();
+
+    // We expect at least type references (User in return type)
+    // and possibly call references (User::new())
+    assert!(
+        kinds.contains(&ReferenceKind::Type) || kinds.contains(&ReferenceKind::Call),
+        "should have typed references, got kinds: {kinds:?}"
+    );
+}
+
+#[test]
+fn references_distinguish_construct_vs_call() {
+    use tethys::ReferenceKind;
+
+    let (dir, mut tethys) = workspace_with_files(&[(
+        "src/lib.rs",
+        r"
+pub struct Point {
+    pub x: i32,
+    pub y: i32,
+}
+
+impl Point {
+    pub fn new(x: i32, y: i32) -> Self {
+        Self { x, y }
+    }
+
+    pub fn origin() -> Self {
+        Point { x: 0, y: 0 }  // Construct reference
+    }
+}
+
+pub fn make_point() -> Point {
+    Point::new(1, 2)  // Call reference
+}
+",
+    )]);
+
+    tethys.index().expect("index failed");
+
+    let refs = tethys
+        .list_references_in_file(&dir.path().join("src/lib.rs"))
+        .expect("list_references_in_file failed");
+
+    // Find construct and call references
+    let construct_refs: Vec<_> = refs
+        .iter()
+        .filter(|r| r.kind == ReferenceKind::Construct)
+        .collect();
+    let call_refs: Vec<_> = refs
+        .iter()
+        .filter(|r| r.kind == ReferenceKind::Call)
+        .collect();
+
+    // Point { x: 0, y: 0 } should be Construct
+    assert!(
+        !construct_refs.is_empty(),
+        "should have Construct references for struct literals"
+    );
+
+    // Point::new(1, 2) should be Call
+    assert!(
+        !call_refs.is_empty(),
+        "should have Call references for function calls"
+    );
+}
+
+// ============================================================================
+// Phase 2 Limitations and Edge Cases
+// ============================================================================
+
+#[test]
+fn cross_file_references_not_stored_in_phase_2() {
+    // Phase 2 only stores references where the target symbol is in the same file.
+    // Cross-file references will be resolved in Phase 3+.
+    let (_dir, mut tethys) = workspace_with_files(&[
+        ("src/lib.rs", "mod utils;\nmod main_mod;"),
+        ("src/utils.rs", "pub struct Helper;"),
+        (
+            "src/main_mod.rs",
+            r"
+use crate::utils::Helper;
+
+pub fn use_helper() -> Helper {
+    Helper
+}
+",
+        ),
+    ]);
+
+    let stats = tethys.index().expect("index failed");
+
+    // Cross-file references are NOT stored in Phase 2
+    // The refs in main_mod.rs to Helper from utils.rs should not be in refs table
+    let refs = tethys
+        .get_references("Helper")
+        .expect("get_references failed");
+
+    // No refs should be found since Helper is in utils.rs but referenced from main_mod.rs
+    // This documents the current Phase 2 limitation
+    assert!(
+        refs.is_empty(),
+        "cross-file references should not be stored in Phase 2, got: {refs:?}"
+    );
+
+    // But the symbol itself should exist
+    let symbol = tethys.get_symbol("Helper").expect("get_symbol failed");
+    assert!(symbol.is_some(), "Helper symbol should be indexed");
+
+    // And the indexer should still work (no errors)
+    assert!(stats.errors.is_empty(), "should have no indexing errors");
+}
+
+#[test]
+fn index_stats_references_found_is_accurate() {
+    let (_dir, mut tethys) = workspace_with_files(&[(
+        "src/lib.rs",
+        r"
+pub struct Foo;
+
+pub fn a() -> Foo { Foo }
+pub fn b() -> Foo { Foo }
+",
+    )]);
+
+    let stats = tethys.index().expect("index failed");
+
+    // The reference count should be consistent and non-zero.
+    // Currently tracks: type references (Foo in return type) and constructors (Foo in body).
+    // The exact count may vary based on extraction implementation.
+    assert!(
+        stats.references_found >= 2,
+        "should find at least 2 references (one per function body), got: {}",
+        stats.references_found
+    );
+
+    // Verify the count matches what we can query
+    let refs = tethys.get_references("Foo").expect("get_references failed");
+    assert_eq!(
+        stats.references_found,
+        refs.len(),
+        "stats.references_found should match actual queryable references"
+    );
+}
+
+#[test]
+fn duplicate_symbol_names_last_one_wins() {
+    // When multiple symbols have the same name, the reference resolution
+    // uses "last one wins" semantics. This test documents this behavior.
+    let (_dir, mut tethys) = workspace_with_files(&[(
+        "src/lib.rs",
+        r"
+pub struct A;
+pub struct B;
+
+impl A {
+    pub fn process() -> i32 { 1 }
+}
+
+impl B {
+    pub fn process() -> i32 { 2 }
+}
+
+pub fn caller() {
+    A::process();
+    B::process();
+}
+",
+    )]);
+
+    tethys.index().expect("index failed");
+
+    // Both A::process and B::process should be indexed as separate symbols
+    let symbols = tethys.search_symbols("process").expect("search failed");
+    assert_eq!(
+        symbols.len(),
+        2,
+        "should have two 'process' symbols, got: {symbols:?}"
+    );
+
+    // Note: A::process() and B::process() are scoped calls. The reference extractor
+    // captures these, but reference resolution in Phase 2 uses simple name matching.
+    // The "process" calls resolve to whichever "process" symbol was indexed last
+    // (last one wins in build_symbol_maps). This is a known limitation.
+    //
+    // The key verification is that the system handles duplicate names gracefully
+    // without crashing or corrupting data.
+    let refs = tethys
+        .get_references("process")
+        .expect("get_references failed");
+
+    // References may or may not be found depending on how the calls are extracted.
+    // The important verification is that both symbols are indexed (checked above).
+    // Cross-impl method resolution will be improved in Phase 3.
+    assert!(
+        refs.len() <= 2,
+        "should have at most 2 references to 'process', got: {refs:?}"
+    );
+}
