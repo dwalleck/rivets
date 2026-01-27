@@ -158,6 +158,28 @@ The project is currently in the research and planning phase. Architectural decis
 - Use `&str` instead of `String` for function parameters when ownership isn't needed
 - Favor borrowing and zero-copy operations
 
+### Rust Best Practices Skill
+
+**For detailed Rust patterns and code review, load the `rust-best-practices` skill.**
+
+This skill provides 28 rules covering:
+- Error handling (Option/Result patterns, expect vs unwrap)
+- File I/O safety (atomic writes, TOCTOU avoidance)
+- Type safety (enums, newtypes, validation)
+- Performance (loop optimization, zero-copy limits)
+- CLI development (clap, exit codes, signal handling, config files)
+- Common footguns (borrow checker, Path edge cases)
+
+**When reviewing Rust code**, apply these patterns in addition to project-specific rules above.
+
+**Deep-dive files** (load when encountering specific issues):
+- `error-handling.md` - Option patterns, Path footguns
+- `file-io.md` - Atomic writes, tempfile testing
+- `type-safety.md` - Constants, enums, newtypes
+- `performance.md` - Loop optimization
+- `cli-development.md` - clap, signals, config
+- `common-footguns.md` - TOCTOU, borrow checker
+
 ### Testing with rstest
 
 This project uses [rstest](https://docs.rs/rstest) for parameterized testing. Use rstest when you have multiple test cases that share the same test logic.
@@ -208,6 +230,71 @@ fn test_valid_priority(#[values(1, 2, 3, 4, 5)] priority: u8) {
 - Prefer `#[values]` when testing the same assertion across a range
 - Don't force rstest on tests that don't benefit from parameterization
 - Works with `#[tokio::test]` for async tests (place `#[rstest]` before `#[tokio::test]`)
+
+### Test Design Patterns
+
+Beyond parameterization with rstest, follow these patterns for robust test coverage:
+
+**Roundtrip Tests (Parse/Serialize Symmetry)**
+
+When a type has both serialization (`as_str()`, `to_string()`) and deserialization (`parse()`, `from_str()`), verify they're inverses:
+
+```rust
+#[test]
+fn reference_kind_roundtrip() {
+    let variants = [
+        ReferenceKind::Import,
+        ReferenceKind::Call,
+        ReferenceKind::Type,
+    ];
+    for kind in variants {
+        assert_eq!(
+            ReferenceKind::parse(kind.as_str()),
+            Some(kind),
+            "roundtrip failed for {kind:?}"
+        );
+    }
+}
+```
+
+**Invariant Tests (Contract Verification)**
+
+When documentation or API design promises invariants, write tests that verify them:
+
+```rust
+#[test]
+fn file_count_equals_language_sum() {
+    // Invariant: file_count == sum(files_by_language) + skipped_unknown
+    let stats = tethys.get_stats().expect("get_stats failed");
+    let language_sum: usize = stats.files_by_language.values().sum();
+    assert_eq!(
+        stats.file_count,
+        language_sum + stats.skipped_unknown_languages,
+        "file_count should equal sum of language counts + skipped"
+    );
+}
+```
+
+**Descriptive Assertions in Tests**
+
+Use `.expect("descriptive message")` instead of `.unwrap()` in tests for clearer failure output:
+
+```rust
+// Good - failure message explains context
+let result = parser.parse(input).expect("parser should handle valid input");
+let file = tethys.get_file_by_path(&path).expect("file should exist after indexing");
+
+// Avoid - failures give no context
+let result = parser.parse(input).unwrap();
+```
+
+**Test Categories to Consider:**
+
+- **Roundtrip**: `parse(serialize(x)) == x` for all serializable types
+- **Invariant**: Document promises hold under all conditions
+- **Boundary**: Edge cases (empty, max, special characters)
+- **Error paths**: Invalid inputs return appropriate errors
+- **State transitions**: Operations produce expected state changes
 
 ### Structured Logging with tracing
 
