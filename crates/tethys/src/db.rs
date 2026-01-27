@@ -498,6 +498,81 @@ impl Index {
         Ok(())
     }
 
+    /// Get statistics about the database contents.
+    pub fn get_stats(&self) -> Result<crate::types::DatabaseStats> {
+        use std::collections::HashMap;
+
+        let mut stats = crate::types::DatabaseStats::default();
+
+        // File counts by language
+        let mut stmt = self
+            .conn
+            .prepare("SELECT language, COUNT(*) FROM files GROUP BY language")?;
+        let rows = stmt.query_map([], |row| {
+            let lang_str: String = row.get(0)?;
+            let count: usize = row.get(1)?;
+            Ok((lang_str, count))
+        })?;
+
+        let mut files_by_language: HashMap<crate::types::Language, usize> = HashMap::new();
+        for row in rows {
+            let (lang_str, count) = row?;
+            if let Ok(lang) = parse_language(&lang_str) {
+                files_by_language.insert(lang, count);
+                stats.file_count += count;
+            } else {
+                tracing::warn!(
+                    language = %lang_str,
+                    count = count,
+                    "Unknown language in database, skipping from stats"
+                );
+                stats.skipped_unknown_languages += count;
+            }
+        }
+        stats.files_by_language = files_by_language;
+
+        // Symbol counts by kind
+        let mut stmt = self
+            .conn
+            .prepare("SELECT kind, COUNT(*) FROM symbols GROUP BY kind")?;
+        let rows = stmt.query_map([], |row| {
+            let kind_str: String = row.get(0)?;
+            let count: usize = row.get(1)?;
+            Ok((kind_str, count))
+        })?;
+
+        let mut symbols_by_kind: HashMap<crate::types::SymbolKind, usize> = HashMap::new();
+        for row in rows {
+            let (kind_str, count) = row?;
+            if let Ok(kind) = parse_symbol_kind(&kind_str) {
+                symbols_by_kind.insert(kind, count);
+                stats.symbol_count += count;
+            } else {
+                tracing::warn!(
+                    kind = %kind_str,
+                    count = count,
+                    "Unknown symbol kind in database, skipping from stats"
+                );
+                stats.skipped_unknown_kinds += count;
+            }
+        }
+        stats.symbols_by_kind = symbols_by_kind;
+
+        // Reference count
+        let ref_count: usize = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM refs", [], |row| row.get(0))?;
+        stats.reference_count = ref_count;
+
+        // File dependency count
+        let dep_count: usize =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM file_deps", [], |row| row.get(0))?;
+        stats.file_dependency_count = dep_count;
+
+        Ok(stats)
+    }
+
     /// Vacuum the database.
     pub fn vacuum(&self) -> Result<()> {
         self.conn.execute_batch("VACUUM")?;
@@ -648,7 +723,7 @@ pub(crate) fn row_to_symbol(row: &rusqlite::Row) -> rusqlite::Result<Symbol> {
         column,
         span: build_span(line, column, end_line, end_column),
         signature: row.get(10)?,
-        signature_details: None, // TODO: Parse from JSON column when stored
+        signature_details: None, // Not persisted to database; populated by parsers only
         visibility: parse_visibility(&row.get::<_, String>(11)?)?,
         parent_symbol_id: row.get(12)?,
     })
@@ -727,7 +802,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn temp_db() -> (TempDir, PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("should create temp directory");
         let path = dir.path().join("test.db");
         (dir, path)
     }

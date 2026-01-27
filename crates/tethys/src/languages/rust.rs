@@ -641,7 +641,7 @@ fn parse_use_as_clause(
     let (path, name) = if path_node.kind() == SCOPED_IDENTIFIER {
         parse_scoped_identifier(&path_node, content)
     } else {
-        (vec![], node_text(&path_node, content).unwrap_or_default())
+        (vec![], node_text(&path_node, content)?)
     };
 
     Some(UseStatement {
@@ -842,7 +842,10 @@ fn extract_visibility(node: &tree_sitter::Node, content: &[u8]) -> Visibility {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if child.kind() == node_kinds::VISIBILITY_MODIFIER {
-            let text = node_text(&child, content).unwrap_or_default();
+            // If we can't extract visibility text, default to private (safest)
+            let Some(text) = node_text(&child, content) else {
+                return Visibility::Private;
+            };
             return match text.as_str() {
                 "pub" => Visibility::Public,
                 s if s.starts_with("pub(crate)") => Visibility::Crate,
@@ -944,11 +947,13 @@ fn extract_parameters(params_node: &tree_sitter::Node, content: &[u8]) -> Vec<Pa
             }
             SELF_PARAMETER => {
                 // Handle &self, &mut self, self
-                let text = node_text(&child, content).unwrap_or_default();
-                parameters.push(Parameter {
-                    name: text,
-                    type_annotation: None,
-                });
+                // Skip if we can't extract the text rather than inserting empty string
+                if let Some(text) = node_text(&child, content) {
+                    parameters.push(Parameter {
+                        name: text,
+                        type_annotation: None,
+                    });
+                }
             }
             _ => {}
         }
@@ -980,8 +985,10 @@ mod tests {
         let mut parser = tree_sitter::Parser::new();
         parser
             .set_language(&tree_sitter_rust::LANGUAGE.into())
-            .unwrap();
-        parser.parse(code, None).unwrap()
+            .expect("tree-sitter-rust language should be valid");
+        parser
+            .parse(code, None)
+            .expect("parsing test code should succeed")
     }
 
     #[test]

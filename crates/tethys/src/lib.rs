@@ -43,9 +43,9 @@ mod types;
 
 pub use error::{Error, IndexError, IndexErrorKind, Result};
 pub use types::{
-    Cycle, Dependent, FileAnalysis, FileId, FunctionSignature, Impact, IndexStats, IndexUpdate,
-    IndexedFile, Language, Parameter, Reference, ReferenceKind, Span, Symbol, SymbolId, SymbolKind,
-    Visibility,
+    Cycle, DatabaseStats, Dependent, FileAnalysis, FileId, FunctionSignature, Impact, IndexStats,
+    IndexUpdate, IndexedFile, Language, Parameter, Reference, ReferenceKind, Span, Symbol,
+    SymbolId, SymbolKind, Visibility,
 };
 
 use std::collections::HashMap;
@@ -84,7 +84,8 @@ pub struct Tethys {
     file_graph: Box<dyn FileGraphOps>,
 }
 
-// TODO: Add `# Errors` documentation to public methods when implementations are complete
+// Note: `# Errors` docs deferred to avoid documentation churn during active development.
+// See https://rust-lang.github.io/api-guidelines/documentation.html#c-failure
 #[allow(clippy::missing_errors_doc)]
 impl Tethys {
     /// Create a new Tethys instance for a workspace.
@@ -126,7 +127,12 @@ impl Tethys {
         })
     }
 
-    /// Create with LSP refinement enabled (Phase 6).
+    /// Create with LSP refinement (placeholder - not yet implemented).
+    ///
+    /// # Note
+    ///
+    /// This method is a **placeholder**. LSP integration is planned for Phase 6.
+    /// Currently behaves identically to [`Self::new`] and ignores `lsp_command`.
     #[allow(unused_variables)]
     pub fn with_lsp(workspace_root: &Path, lsp_command: &str) -> Result<Self> {
         Self::new(workspace_root)
@@ -695,6 +701,14 @@ impl Tethys {
         self.db.get_symbol_by_id(id)
     }
 
+    /// Get file information by its database ID.
+    ///
+    /// Returns the indexed file metadata including its path.
+    #[must_use = "returns file info without side effects"]
+    pub fn get_file_by_id(&self, id: i64) -> Result<Option<IndexedFile>> {
+        self.db.get_file_by_id(id)
+    }
+
     // === Reference Queries ===
 
     /// Get all references to a symbol.
@@ -895,6 +909,11 @@ impl Tethys {
     /// Vacuum the database to reclaim space.
     pub fn vacuum(&self) -> Result<()> {
         self.db.vacuum()
+    }
+
+    /// Get statistics about the index database.
+    pub fn get_stats(&self) -> Result<types::DatabaseStats> {
+        self.db.get_stats()
     }
 }
 

@@ -28,6 +28,11 @@ thiserror.workspace = true
 # Logging
 tracing.workspace = true
 
+# CLI (for binary)
+clap.workspace = true
+tracing-subscriber.workspace = true
+colored.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 rstest.workspace = true

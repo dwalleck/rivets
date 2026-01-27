@@ -939,8 +939,10 @@ mod tests {
         let mut parser = tree_sitter::Parser::new();
         parser
             .set_language(&tree_sitter_c_sharp::LANGUAGE.into())
-            .unwrap();
-        parser.parse(code, None).unwrap()
+            .expect("tree-sitter-c-sharp language should be valid");
+        parser
+            .parse(code, None)
+            .expect("parsing test code should succeed")
     }
 
     #[test]
@@ -1034,10 +1036,16 @@ public class UserService {
 
         assert_eq!(symbols.len(), 2);
 
-        let class_sym = symbols.iter().find(|s| s.name == "UserService").unwrap();
+        let class_sym = symbols
+            .iter()
+            .find(|s| s.name == "UserService")
+            .expect("should find UserService");
         assert_eq!(class_sym.kind, SymbolKind::Class);
 
-        let method_sym = symbols.iter().find(|s| s.name == "Save").unwrap();
+        let method_sym = symbols
+            .iter()
+            .find(|s| s.name == "Save")
+            .expect("should find Save method");
         assert_eq!(method_sym.kind, SymbolKind::Method);
         assert_eq!(method_sym.parent_name, Some("UserService".to_string()));
         assert_eq!(method_sym.visibility, Visibility::Public);
@@ -1053,7 +1061,10 @@ public class Utils {
         let tree = parse_csharp(code);
         let symbols = extract_symbols(&tree, code.as_bytes());
 
-        let method_sym = symbols.iter().find(|s| s.name == "Add").unwrap();
+        let method_sym = symbols
+            .iter()
+            .find(|s| s.name == "Add")
+            .expect("should find Add method");
         assert_eq!(method_sym.kind, SymbolKind::Function);
     }
 
@@ -1070,7 +1081,7 @@ public class User {
         let ctor_sym = symbols
             .iter()
             .find(|s| s.name == "User" && s.kind == SymbolKind::Method)
-            .unwrap();
+            .expect("should find User constructor");
         assert_eq!(ctor_sym.parent_name, Some("User".to_string()));
     }
 
@@ -1087,7 +1098,7 @@ namespace MyApp.Services {
         let ns_sym = symbols
             .iter()
             .find(|s| s.kind == SymbolKind::Module)
-            .unwrap();
+            .expect("should find namespace module");
         assert_eq!(ns_sym.name, "MyApp.Services");
     }
 
@@ -1101,9 +1112,11 @@ public class UserService { }
         let tree = parse_csharp(code);
         let symbols = extract_symbols(&tree, code.as_bytes());
 
-        let ns_sym = symbols.iter().find(|s| s.kind == SymbolKind::Module);
-        assert!(ns_sym.is_some(), "should find file-scoped namespace");
-        assert_eq!(ns_sym.unwrap().name, "MyApp.Services");
+        let ns_sym = symbols
+            .iter()
+            .find(|s| s.kind == SymbolKind::Module)
+            .expect("should find file-scoped namespace module");
+        assert_eq!(ns_sym.name, "MyApp.Services");
     }
 
     #[test]
@@ -1125,7 +1138,10 @@ public class UserService { }
         let tree = parse_csharp(code);
         let symbols = extract_symbols(&tree, code.as_bytes());
 
-        let method = symbols.iter().find(|s| s.name == "OnInit").unwrap();
+        let method = symbols
+            .iter()
+            .find(|s| s.name == "OnInit")
+            .expect("should find OnInit method");
         assert_eq!(method.visibility, Visibility::Module); // protected maps to Module
     }
 
@@ -1135,7 +1151,10 @@ public class UserService { }
         let tree = parse_csharp(code);
         let symbols = extract_symbols(&tree, code.as_bytes());
 
-        let method = symbols.iter().find(|s| s.name == "SharedMethod").unwrap();
+        let method = symbols
+            .iter()
+            .find(|s| s.name == "SharedMethod")
+            .expect("should find SharedMethod");
         // protected internal = accessible from same assembly OR derived classes
         assert_eq!(method.visibility, Visibility::Crate);
     }
@@ -1149,7 +1168,7 @@ public class UserService { }
         let method = symbols
             .iter()
             .find(|s| s.name == "RestrictedMethod")
-            .unwrap();
+            .expect("should find RestrictedMethod");
         // private protected = accessible only from derived classes in same assembly
         assert_eq!(method.visibility, Visibility::Module);
     }
@@ -1164,8 +1183,14 @@ public class Calculator {
         let tree = parse_csharp(code);
         let symbols = extract_symbols(&tree, code.as_bytes());
 
-        let method_sym = symbols.iter().find(|s| s.name == "Add").unwrap();
-        let sig = method_sym.signature.as_ref().unwrap();
+        let method_sym = symbols
+            .iter()
+            .find(|s| s.name == "Add")
+            .expect("should find Add method");
+        let sig = method_sym
+            .signature
+            .as_ref()
+            .expect("Add method should have signature");
         assert!(sig.contains("int Add"));
         assert!(sig.contains("int a"));
     }
@@ -1180,7 +1205,10 @@ public class UserService {
         let tree = parse_csharp(code);
         let symbols = extract_symbols(&tree, code.as_bytes());
 
-        let method_sym = symbols.iter().find(|s| s.name == "GetUser").unwrap();
+        let method_sym = symbols
+            .iter()
+            .find(|s| s.name == "GetUser")
+            .expect("should find GetUser method");
         let details = method_sym
             .signature_details
             .as_ref()
@@ -1352,14 +1380,20 @@ public class Test {
         let refs = extract_references(&tree, code.as_bytes());
 
         // Foo() is called from Method1()
-        let foo_ref = refs.iter().find(|r| r.name == "Foo").unwrap();
+        let foo_ref = refs
+            .iter()
+            .find(|r| r.name == "Foo")
+            .expect("should find Foo reference");
         assert!(
             foo_ref.containing_symbol_span.is_some(),
             "should track containing symbol"
         );
 
         // Bar() is called from Method2()
-        let bar_ref = refs.iter().find(|r| r.name == "Bar").unwrap();
+        let bar_ref = refs
+            .iter()
+            .find(|r| r.name == "Bar")
+            .expect("should find Bar reference");
         assert!(bar_ref.containing_symbol_span.is_some());
 
         // They should have different containing spans

@@ -14,9 +14,11 @@
 //! | full_path | Computed on read | No redundancy; concatenation is cheap |
 //! | Span | Optional | Tree-sitter provides it, but not all sources do |
 
-use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
 
 use crate::error::IndexError;
 
@@ -121,7 +123,7 @@ impl Language {
 ///
 /// These are normalized across languages. Not all languages have all kinds
 /// (e.g., Rust has traits, C# has interfaces).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SymbolKind {
     /// Free function (not associated with a type)
@@ -230,6 +232,22 @@ impl ReferenceKind {
             Self::Inherit => "inherit",
             Self::Construct => "construct",
             Self::FieldAccess => "field_access",
+        }
+    }
+
+    /// Parse from database string representation.
+    ///
+    /// Returns `None` for unknown strings.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "import" => Some(Self::Import),
+            "call" => Some(Self::Call),
+            "type" => Some(Self::Type),
+            "inherit" => Some(Self::Inherit),
+            "construct" => Some(Self::Construct),
+            "field_access" => Some(Self::FieldAccess),
+            _ => None,
         }
     }
 }
@@ -589,6 +607,35 @@ pub struct Cycle {
     pub files: Vec<PathBuf>,
 }
 
+/// Statistics about the index database.
+///
+/// Returned by `Tethys::get_stats()`.
+///
+/// # Invariants
+///
+/// When returned from `Tethys::get_stats()`:
+/// - `file_count` equals sum of `files_by_language` values plus `skipped_unknown_languages`
+/// - `symbol_count` equals sum of `symbols_by_kind` values plus `skipped_unknown_kinds`
+#[derive(Debug, Clone, Default)]
+pub struct DatabaseStats {
+    /// Total number of indexed files
+    pub file_count: usize,
+    /// Files by language
+    pub files_by_language: HashMap<Language, usize>,
+    /// Total number of symbols
+    pub symbol_count: usize,
+    /// Symbols by kind
+    pub symbols_by_kind: HashMap<SymbolKind, usize>,
+    /// Total number of references
+    pub reference_count: usize,
+    /// Total number of file dependencies
+    pub file_dependency_count: usize,
+    /// Number of files with unrecognized language (possible version mismatch)
+    pub skipped_unknown_languages: usize,
+    /// Number of symbols with unrecognized kind (possible version mismatch)
+    pub skipped_unknown_kinds: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -917,5 +964,82 @@ mod tests {
     fn span_new_invalid_end_column_before_start_same_line() {
         let span = Span::new(10, 20, 10, 5);
         assert!(span.is_none());
+    }
+
+    // === ReferenceKind::parse() tests ===
+
+    #[test]
+    fn reference_kind_parse_import() {
+        assert_eq!(ReferenceKind::parse("import"), Some(ReferenceKind::Import));
+    }
+
+    #[test]
+    fn reference_kind_parse_call() {
+        assert_eq!(ReferenceKind::parse("call"), Some(ReferenceKind::Call));
+    }
+
+    #[test]
+    fn reference_kind_parse_type() {
+        assert_eq!(ReferenceKind::parse("type"), Some(ReferenceKind::Type));
+    }
+
+    #[test]
+    fn reference_kind_parse_inherit() {
+        assert_eq!(
+            ReferenceKind::parse("inherit"),
+            Some(ReferenceKind::Inherit)
+        );
+    }
+
+    #[test]
+    fn reference_kind_parse_construct() {
+        assert_eq!(
+            ReferenceKind::parse("construct"),
+            Some(ReferenceKind::Construct)
+        );
+    }
+
+    #[test]
+    fn reference_kind_parse_field_access() {
+        assert_eq!(
+            ReferenceKind::parse("field_access"),
+            Some(ReferenceKind::FieldAccess)
+        );
+    }
+
+    #[test]
+    fn reference_kind_parse_unknown_returns_none() {
+        assert_eq!(ReferenceKind::parse("unknown_kind"), None);
+    }
+
+    #[test]
+    fn reference_kind_parse_empty_returns_none() {
+        assert_eq!(ReferenceKind::parse(""), None);
+    }
+
+    #[test]
+    fn reference_kind_parse_is_case_sensitive() {
+        assert_eq!(ReferenceKind::parse("CALL"), None);
+        assert_eq!(ReferenceKind::parse("Call"), None);
+    }
+
+    #[test]
+    fn reference_kind_roundtrip_with_as_str() {
+        // Ensure parse(kind.as_str()) == Some(kind) for all variants
+        let variants = [
+            ReferenceKind::Import,
+            ReferenceKind::Call,
+            ReferenceKind::Type,
+            ReferenceKind::Inherit,
+            ReferenceKind::Construct,
+            ReferenceKind::FieldAccess,
+        ];
+        for kind in variants {
+            assert_eq!(
+                ReferenceKind::parse(kind.as_str()),
+                Some(kind),
+                "roundtrip failed for {kind:?}"
+            );
+        }
     }
 }

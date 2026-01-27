@@ -47,7 +47,13 @@ pub fn node_span(node: &tree_sitter::Node) -> Span {
             "Tree-sitter produced invalid span, using fallback"
         );
         // Fallback: single-character span at start position
-        Span::new(start_line, start_col, start_line, start_col + 1)
-            .expect("fallback span is always valid")
+        // Use saturating_add to prevent overflow if start_col is u32::MAX
+        Span::new(
+            start_line,
+            start_col,
+            start_line,
+            start_col.saturating_add(1),
+        )
+        .expect("fallback span is always valid: tree-sitter positions are bounded")
     })
 }

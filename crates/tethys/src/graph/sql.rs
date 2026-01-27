@@ -575,22 +575,19 @@ fn parse_path_ids(path_str: &str) -> Vec<i64> {
 
 fn parse_reference_kinds(s: &str) -> Vec<ReferenceKind> {
     s.split(',')
-        .filter_map(|kind| match kind.trim() {
-            "import" => Some(ReferenceKind::Import),
-            "call" => Some(ReferenceKind::Call),
-            "type" => Some(ReferenceKind::Type),
-            "inherit" => Some(ReferenceKind::Inherit),
-            "construct" => Some(ReferenceKind::Construct),
-            "field_access" => Some(ReferenceKind::FieldAccess),
-            "" => None, // Empty strings from split are expected
-            unknown => {
+        .filter_map(|kind| {
+            let kind = kind.trim();
+            if kind.is_empty() {
+                return None; // Empty strings from split are expected
+            }
+            ReferenceKind::parse(kind).or_else(|| {
                 tracing::warn!(
-                    unknown_kind = %unknown,
+                    unknown_kind = %kind,
                     raw_input = %s,
                     "Unknown reference kind in database, possible corruption or version mismatch"
                 );
                 None
-            }
+            })
         })
         .collect()
 }
@@ -610,9 +607,9 @@ mod tests {
     /// ```
     #[allow(clippy::too_many_lines)]
     fn setup_test_graph() -> (TempDir, std::path::PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
         let db_path = dir.path().join("test.db");
-        let mut index = Index::open(&db_path).unwrap();
+        let mut index = Index::open(&db_path).expect("failed to open test database");
 
         // Create files
         let main_file = index
@@ -635,7 +632,7 @@ mod tests {
                     parent_symbol_id: None,
                 }],
             )
-            .unwrap();
+            .expect("failed to index main.rs");
 
         let auth_file = index
             .index_file_atomic(
@@ -657,7 +654,7 @@ mod tests {
                     parent_symbol_id: None,
                 }],
             )
-            .unwrap();
+            .expect("failed to index auth.rs");
 
         let _db_file = index
             .index_file_atomic(
@@ -679,7 +676,7 @@ mod tests {
                     parent_symbol_id: None,
                 }],
             )
-            .unwrap();
+            .expect("failed to index db.rs");
 
         let cache_file = index
             .index_file_atomic(
@@ -701,42 +698,70 @@ mod tests {
                     parent_symbol_id: None,
                 }],
             )
-            .unwrap();
+            .expect("failed to index cache.rs");
 
         // Get symbol IDs
         let main_run = index
             .get_symbol_by_qualified_name("main::run")
-            .unwrap()
-            .unwrap();
+            .expect("failed to query main::run")
+            .expect("main::run not found");
         let auth_validate = index
             .get_symbol_by_qualified_name("auth::validate")
-            .unwrap()
-            .unwrap();
+            .expect("failed to query auth::validate")
+            .expect("auth::validate not found");
         let db_query = index
             .get_symbol_by_qualified_name("db::query")
-            .unwrap()
-            .unwrap();
+            .expect("failed to query db::query")
+            .expect("db::query not found");
         let cache_get = index
             .get_symbol_by_qualified_name("cache::get")
-            .unwrap()
-            .unwrap();
+            .expect("failed to query cache::get")
+            .expect("cache::get not found");
 
         // Create references: main::run -> auth::validate
         index
-            .insert_reference(auth_validate.id, main_file, "call", 5, 1, Some(main_run.id))
-            .unwrap();
+            .insert_reference(
+                auth_validate.id,
+                main_file,
+                ReferenceKind::Call.as_str(),
+                5,
+                1,
+                Some(main_run.id),
+            )
+            .expect("failed to insert auth::validate reference");
         // main::run -> cache::get
         index
-            .insert_reference(cache_get.id, main_file, "call", 6, 1, Some(main_run.id))
-            .unwrap();
+            .insert_reference(
+                cache_get.id,
+                main_file,
+                ReferenceKind::Call.as_str(),
+                6,
+                1,
+                Some(main_run.id),
+            )
+            .expect("failed to insert cache::get reference");
         // auth::validate -> db::query
         index
-            .insert_reference(db_query.id, auth_file, "call", 3, 1, Some(auth_validate.id))
-            .unwrap();
+            .insert_reference(
+                db_query.id,
+                auth_file,
+                ReferenceKind::Call.as_str(),
+                3,
+                1,
+                Some(auth_validate.id),
+            )
+            .expect("failed to insert db::query reference from auth");
         // cache::get -> db::query
         index
-            .insert_reference(db_query.id, cache_file, "call", 3, 1, Some(cache_get.id))
-            .unwrap();
+            .insert_reference(
+                db_query.id,
+                cache_file,
+                ReferenceKind::Call.as_str(),
+                3,
+                1,
+                Some(cache_get.id),
+            )
+            .expect("failed to insert db::query reference from cache");
 
         (dir, db_path)
     }
@@ -744,14 +769,16 @@ mod tests {
     #[test]
     fn get_callers_returns_direct_callers() {
         let (_dir, db_path) = setup_test_graph();
-        let graph = SqlSymbolGraph::new(&db_path).unwrap();
-        let index = Index::open(&db_path).unwrap();
+        let graph = SqlSymbolGraph::new(&db_path).expect("failed to create symbol graph");
+        let index = Index::open(&db_path).expect("failed to open index");
 
         let db_query = index
             .get_symbol_by_qualified_name("db::query")
-            .unwrap()
-            .unwrap();
-        let callers = graph.get_callers(SymbolId::from(db_query.id)).unwrap();
+            .expect("failed to query db::query")
+            .expect("db::query not found");
+        let callers = graph
+            .get_callers(SymbolId::from(db_query.id))
+            .expect("failed to get callers");
 
         // db::query is called by auth::validate and cache::get
         assert_eq!(callers.len(), 2, "expected 2 callers, got: {callers:?}");
@@ -767,14 +794,16 @@ mod tests {
     #[test]
     fn get_callers_returns_empty_for_uncalled_symbol() {
         let (_dir, db_path) = setup_test_graph();
-        let graph = SqlSymbolGraph::new(&db_path).unwrap();
-        let index = Index::open(&db_path).unwrap();
+        let graph = SqlSymbolGraph::new(&db_path).expect("failed to create symbol graph");
+        let index = Index::open(&db_path).expect("failed to open index");
 
         let main_run = index
             .get_symbol_by_qualified_name("main::run")
-            .unwrap()
-            .unwrap();
-        let callers = graph.get_callers(SymbolId::from(main_run.id)).unwrap();
+            .expect("failed to query main::run")
+            .expect("main::run not found");
+        let callers = graph
+            .get_callers(SymbolId::from(main_run.id))
+            .expect("failed to get callers");
 
         // main::run is not called by anything
         assert!(callers.is_empty(), "main::run should have no callers");
@@ -783,14 +812,16 @@ mod tests {
     #[test]
     fn get_callees_returns_direct_callees() {
         let (_dir, db_path) = setup_test_graph();
-        let graph = SqlSymbolGraph::new(&db_path).unwrap();
-        let index = Index::open(&db_path).unwrap();
+        let graph = SqlSymbolGraph::new(&db_path).expect("failed to create symbol graph");
+        let index = Index::open(&db_path).expect("failed to open index");
 
         let main_run = index
             .get_symbol_by_qualified_name("main::run")
-            .unwrap()
-            .unwrap();
-        let callees = graph.get_callees(SymbolId::from(main_run.id)).unwrap();
+            .expect("failed to query main::run")
+            .expect("main::run not found");
+        let callees = graph
+            .get_callees(SymbolId::from(main_run.id))
+            .expect("failed to get callees");
 
         // main::run calls auth::validate and cache::get
         assert_eq!(callees.len(), 2, "expected 2 callees, got: {callees:?}");
@@ -806,14 +837,16 @@ mod tests {
     #[test]
     fn get_callees_returns_empty_for_leaf_symbol() {
         let (_dir, db_path) = setup_test_graph();
-        let graph = SqlSymbolGraph::new(&db_path).unwrap();
-        let index = Index::open(&db_path).unwrap();
+        let graph = SqlSymbolGraph::new(&db_path).expect("failed to create symbol graph");
+        let index = Index::open(&db_path).expect("failed to open index");
 
         let db_query = index
             .get_symbol_by_qualified_name("db::query")
-            .unwrap()
-            .unwrap();
-        let callees = graph.get_callees(SymbolId::from(db_query.id)).unwrap();
+            .expect("failed to query db::query")
+            .expect("db::query not found");
+        let callees = graph
+            .get_callees(SymbolId::from(db_query.id))
+            .expect("failed to get callees");
 
         // db::query doesn't call anything
         assert!(callees.is_empty(), "db::query should have no callees");
@@ -822,14 +855,16 @@ mod tests {
     #[test]
     fn get_callers_includes_reference_kinds() {
         let (_dir, db_path) = setup_test_graph();
-        let graph = SqlSymbolGraph::new(&db_path).unwrap();
-        let index = Index::open(&db_path).unwrap();
+        let graph = SqlSymbolGraph::new(&db_path).expect("failed to create symbol graph");
+        let index = Index::open(&db_path).expect("failed to open index");
 
         let db_query = index
             .get_symbol_by_qualified_name("db::query")
-            .unwrap()
-            .unwrap();
-        let callers = graph.get_callers(SymbolId::from(db_query.id)).unwrap();
+            .expect("failed to query db::query")
+            .expect("db::query not found");
+        let callers = graph
+            .get_callers(SymbolId::from(db_query.id))
+            .expect("failed to get callers");
 
         // All references should be "call" type
         for caller in &callers {
@@ -844,14 +879,16 @@ mod tests {
     #[test]
     fn get_callers_includes_reference_count() {
         let (_dir, db_path) = setup_test_graph();
-        let graph = SqlSymbolGraph::new(&db_path).unwrap();
-        let index = Index::open(&db_path).unwrap();
+        let graph = SqlSymbolGraph::new(&db_path).expect("failed to create symbol graph");
+        let index = Index::open(&db_path).expect("failed to open index");
 
         let db_query = index
             .get_symbol_by_qualified_name("db::query")
-            .unwrap()
-            .unwrap();
-        let callers = graph.get_callers(SymbolId::from(db_query.id)).unwrap();
+            .expect("failed to query db::query")
+            .expect("db::query not found");
+        let callers = graph
+            .get_callers(SymbolId::from(db_query.id))
+            .expect("failed to get callers");
 
         // Each caller should have exactly 1 reference
         for caller in &callers {
@@ -866,16 +903,16 @@ mod tests {
     #[test]
     fn get_transitive_callers_finds_all_ancestors() {
         let (_dir, db_path) = setup_test_graph();
-        let graph = SqlSymbolGraph::new(&db_path).unwrap();
-        let index = Index::open(&db_path).unwrap();
+        let graph = SqlSymbolGraph::new(&db_path).expect("failed to create symbol graph");
+        let index = Index::open(&db_path).expect("failed to open index");
 
         let db_query = index
             .get_symbol_by_qualified_name("db::query")
-            .unwrap()
-            .unwrap();
+            .expect("failed to query db::query")
+            .expect("db::query not found");
         let impact = graph
             .get_transitive_callers(SymbolId::from(db_query.id), None)
-            .unwrap();
+            .expect("failed to get transitive callers");
 
         // db::query's transitive callers: auth::validate, cache::get (direct), main::run (transitive)
         assert_eq!(impact.total_caller_count(), 3, "expected 3 total callers");
@@ -900,16 +937,16 @@ mod tests {
     #[test]
     fn get_transitive_callers_respects_max_depth() {
         let (_dir, db_path) = setup_test_graph();
-        let graph = SqlSymbolGraph::new(&db_path).unwrap();
-        let index = Index::open(&db_path).unwrap();
+        let graph = SqlSymbolGraph::new(&db_path).expect("failed to create symbol graph");
+        let index = Index::open(&db_path).expect("failed to open index");
 
         let db_query = index
             .get_symbol_by_qualified_name("db::query")
-            .unwrap()
-            .unwrap();
+            .expect("failed to query db::query")
+            .expect("db::query not found");
         let impact = graph
             .get_transitive_callers(SymbolId::from(db_query.id), Some(1))
-            .unwrap();
+            .expect("failed to get transitive callers");
 
         // With max_depth=1, should only get direct callers
         assert_eq!(impact.direct_callers.len(), 2);
@@ -923,16 +960,16 @@ mod tests {
     #[test]
     fn get_transitive_callers_handles_no_callers() {
         let (_dir, db_path) = setup_test_graph();
-        let graph = SqlSymbolGraph::new(&db_path).unwrap();
-        let index = Index::open(&db_path).unwrap();
+        let graph = SqlSymbolGraph::new(&db_path).expect("failed to create symbol graph");
+        let index = Index::open(&db_path).expect("failed to open index");
 
         let main_run = index
             .get_symbol_by_qualified_name("main::run")
-            .unwrap()
-            .unwrap();
+            .expect("failed to query main::run")
+            .expect("main::run not found");
         let impact = graph
             .get_transitive_callers(SymbolId::from(main_run.id), None)
-            .unwrap();
+            .expect("failed to get transitive callers");
 
         assert_eq!(impact.total_caller_count(), 0);
         assert!(impact.direct_callers.is_empty());
@@ -942,27 +979,27 @@ mod tests {
     #[test]
     fn find_call_path_returns_shortest_path() {
         let (_dir, db_path) = setup_test_graph();
-        let graph = SqlSymbolGraph::new(&db_path).unwrap();
-        let index = Index::open(&db_path).unwrap();
+        let graph = SqlSymbolGraph::new(&db_path).expect("failed to create symbol graph");
+        let index = Index::open(&db_path).expect("failed to open index");
 
         let main_run = index
             .get_symbol_by_qualified_name("main::run")
-            .unwrap()
-            .unwrap();
+            .expect("failed to query main::run")
+            .expect("main::run not found");
         let db_query = index
             .get_symbol_by_qualified_name("db::query")
-            .unwrap()
-            .unwrap();
+            .expect("failed to query db::query")
+            .expect("db::query not found");
 
         let path = graph
             .find_call_path(SymbolId::from(main_run.id), SymbolId::from(db_query.id))
-            .unwrap();
+            .expect("failed to find call path");
 
         assert!(
             path.is_some(),
             "should find path from main::run to db::query"
         );
-        let path = path.unwrap();
+        let path = path.expect("path should exist");
 
         // Path should be: main::run -> (auth::validate OR cache::get) -> db::query
         assert_eq!(path.symbols().len(), 3, "path should have 3 symbols");
@@ -973,22 +1010,22 @@ mod tests {
     #[test]
     fn find_call_path_returns_none_for_unconnected() {
         let (_dir, db_path) = setup_test_graph();
-        let graph = SqlSymbolGraph::new(&db_path).unwrap();
-        let index = Index::open(&db_path).unwrap();
+        let graph = SqlSymbolGraph::new(&db_path).expect("failed to create symbol graph");
+        let index = Index::open(&db_path).expect("failed to open index");
 
         // db::query doesn't call main::run (reverse direction)
         let db_query = index
             .get_symbol_by_qualified_name("db::query")
-            .unwrap()
-            .unwrap();
+            .expect("failed to query db::query")
+            .expect("db::query not found");
         let main_run = index
             .get_symbol_by_qualified_name("main::run")
-            .unwrap()
-            .unwrap();
+            .expect("failed to query main::run")
+            .expect("main::run not found");
 
         let path = graph
             .find_call_path(SymbolId::from(db_query.id), SymbolId::from(main_run.id))
-            .unwrap();
+            .expect("failed to find call path");
 
         assert!(path.is_none(), "should not find path in reverse direction");
     }
@@ -996,20 +1033,20 @@ mod tests {
     #[test]
     fn find_call_path_same_symbol_returns_single_node() {
         let (_dir, db_path) = setup_test_graph();
-        let graph = SqlSymbolGraph::new(&db_path).unwrap();
-        let index = Index::open(&db_path).unwrap();
+        let graph = SqlSymbolGraph::new(&db_path).expect("failed to create symbol graph");
+        let index = Index::open(&db_path).expect("failed to open index");
 
         let main_run = index
             .get_symbol_by_qualified_name("main::run")
-            .unwrap()
-            .unwrap();
+            .expect("failed to query main::run")
+            .expect("main::run not found");
 
         let path = graph
             .find_call_path(SymbolId::from(main_run.id), SymbolId::from(main_run.id))
-            .unwrap();
+            .expect("failed to find call path");
 
         assert!(path.is_some());
-        let path = path.unwrap();
+        let path = path.expect("path should exist");
         assert_eq!(path.symbols().len(), 1);
         assert_eq!(path.symbols()[0].qualified_name, "main::run");
     }
@@ -1023,9 +1060,9 @@ mod tests {
     ///         -> cache.rs -> db.rs
     /// ```
     fn setup_file_deps_graph() -> (TempDir, std::path::PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
         let db_path = dir.path().join("test.db");
-        let mut index = Index::open(&db_path).unwrap();
+        let mut index = Index::open(&db_path).expect("failed to open index");
 
         // Create files: main.rs -> auth.rs -> db.rs
         //                       -> cache.rs -> db.rs
@@ -1038,7 +1075,7 @@ mod tests {
                 None,
                 &[],
             )
-            .unwrap();
+            .expect("failed to index main.rs");
         let auth_id = index
             .index_file_atomic(
                 std::path::Path::new("src/auth.rs"),
@@ -1048,7 +1085,7 @@ mod tests {
                 None,
                 &[],
             )
-            .unwrap();
+            .expect("failed to index auth.rs");
         let cache_id = index
             .index_file_atomic(
                 std::path::Path::new("src/cache.rs"),
@@ -1058,7 +1095,7 @@ mod tests {
                 None,
                 &[],
             )
-            .unwrap();
+            .expect("failed to index cache.rs");
         let db_id = index
             .index_file_atomic(
                 std::path::Path::new("src/db.rs"),
@@ -1068,13 +1105,21 @@ mod tests {
                 None,
                 &[],
             )
-            .unwrap();
+            .expect("failed to index db.rs");
 
         // Set up dependencies (from_file depends on to_file)
-        index.insert_file_dependency(main_id, auth_id).unwrap();
-        index.insert_file_dependency(main_id, cache_id).unwrap();
-        index.insert_file_dependency(auth_id, db_id).unwrap();
-        index.insert_file_dependency(cache_id, db_id).unwrap();
+        index
+            .insert_file_dependency(main_id, auth_id)
+            .expect("failed to insert main->auth dep");
+        index
+            .insert_file_dependency(main_id, cache_id)
+            .expect("failed to insert main->cache dep");
+        index
+            .insert_file_dependency(auth_id, db_id)
+            .expect("failed to insert auth->db dep");
+        index
+            .insert_file_dependency(cache_id, db_id)
+            .expect("failed to insert cache->db dep");
 
         (dir, db_path)
     }
@@ -1082,14 +1127,16 @@ mod tests {
     #[test]
     fn file_graph_get_dependents_returns_direct() {
         let (_dir, db_path) = setup_file_deps_graph();
-        let graph = SqlFileGraph::new(&db_path).unwrap();
-        let index = Index::open(&db_path).unwrap();
+        let graph = SqlFileGraph::new(&db_path).expect("failed to create file graph");
+        let index = Index::open(&db_path).expect("failed to open index");
 
         let db_id = index
             .get_file_id(std::path::Path::new("src/db.rs"))
-            .unwrap()
-            .unwrap();
-        let dependents = graph.get_dependents(FileId::from(db_id)).unwrap();
+            .expect("failed to query db.rs")
+            .expect("db.rs not found");
+        let dependents = graph
+            .get_dependents(FileId::from(db_id))
+            .expect("failed to get dependents");
 
         // db.rs is depended on by auth.rs and cache.rs
         assert_eq!(dependents.len(), 2);
@@ -1104,14 +1151,16 @@ mod tests {
     #[test]
     fn file_graph_get_dependencies_returns_direct() {
         let (_dir, db_path) = setup_file_deps_graph();
-        let graph = SqlFileGraph::new(&db_path).unwrap();
-        let index = Index::open(&db_path).unwrap();
+        let graph = SqlFileGraph::new(&db_path).expect("failed to create file graph");
+        let index = Index::open(&db_path).expect("failed to open index");
 
         let main_id = index
             .get_file_id(std::path::Path::new("src/main.rs"))
-            .unwrap()
-            .unwrap();
-        let dependencies = graph.get_dependencies(FileId::from(main_id)).unwrap();
+            .expect("failed to query main.rs")
+            .expect("main.rs not found");
+        let dependencies = graph
+            .get_dependencies(FileId::from(main_id))
+            .expect("failed to get dependencies");
 
         // main.rs depends on auth.rs and cache.rs
         assert_eq!(dependencies.len(), 2);
@@ -1126,16 +1175,16 @@ mod tests {
     #[test]
     fn file_graph_get_transitive_dependents() {
         let (_dir, db_path) = setup_file_deps_graph();
-        let graph = SqlFileGraph::new(&db_path).unwrap();
-        let index = Index::open(&db_path).unwrap();
+        let graph = SqlFileGraph::new(&db_path).expect("failed to create file graph");
+        let index = Index::open(&db_path).expect("failed to open index");
 
         let db_id = index
             .get_file_id(std::path::Path::new("src/db.rs"))
-            .unwrap()
-            .unwrap();
+            .expect("failed to query db.rs")
+            .expect("db.rs not found");
         let impact = graph
             .get_transitive_dependents(FileId::from(db_id), None)
-            .unwrap();
+            .expect("failed to get transitive dependents");
 
         // db.rs: direct deps = auth.rs, cache.rs; transitive = main.rs
         assert_eq!(impact.direct_dependents.len(), 2);
@@ -1146,16 +1195,16 @@ mod tests {
     #[test]
     fn file_graph_get_transitive_dependents_respects_max_depth() {
         let (_dir, db_path) = setup_file_deps_graph();
-        let graph = SqlFileGraph::new(&db_path).unwrap();
-        let index = Index::open(&db_path).unwrap();
+        let graph = SqlFileGraph::new(&db_path).expect("failed to create file graph");
+        let index = Index::open(&db_path).expect("failed to open index");
 
         let db_id = index
             .get_file_id(std::path::Path::new("src/db.rs"))
-            .unwrap()
-            .unwrap();
+            .expect("failed to query db.rs")
+            .expect("db.rs not found");
         let impact = graph
             .get_transitive_dependents(FileId::from(db_id), Some(1))
-            .unwrap();
+            .expect("failed to get transitive dependents");
 
         // With max_depth=1, should only get direct dependents
         assert_eq!(impact.direct_dependents.len(), 2);
@@ -1168,24 +1217,24 @@ mod tests {
     #[test]
     fn file_graph_find_dependency_path_returns_shortest() {
         let (_dir, db_path) = setup_file_deps_graph();
-        let graph = SqlFileGraph::new(&db_path).unwrap();
-        let index = Index::open(&db_path).unwrap();
+        let graph = SqlFileGraph::new(&db_path).expect("failed to create file graph");
+        let index = Index::open(&db_path).expect("failed to open index");
 
         let main_id = index
             .get_file_id(std::path::Path::new("src/main.rs"))
-            .unwrap()
-            .unwrap();
+            .expect("failed to query main.rs")
+            .expect("main.rs not found");
         let db_id = index
             .get_file_id(std::path::Path::new("src/db.rs"))
-            .unwrap()
-            .unwrap();
+            .expect("failed to query db.rs")
+            .expect("db.rs not found");
 
         let path = graph
             .find_dependency_path(FileId::from(main_id), FileId::from(db_id))
-            .unwrap();
+            .expect("failed to find dependency path");
 
         assert!(path.is_some(), "should find path from main.rs to db.rs");
-        let path = path.unwrap();
+        let path = path.expect("path should exist");
 
         // Path should be: main.rs -> (auth.rs OR cache.rs) -> db.rs
         assert_eq!(path.files().len(), 3, "path should have 3 files");
@@ -1196,22 +1245,22 @@ mod tests {
     #[test]
     fn file_graph_find_dependency_path_returns_none_for_unconnected() {
         let (_dir, db_path) = setup_file_deps_graph();
-        let graph = SqlFileGraph::new(&db_path).unwrap();
-        let index = Index::open(&db_path).unwrap();
+        let graph = SqlFileGraph::new(&db_path).expect("failed to create file graph");
+        let index = Index::open(&db_path).expect("failed to open index");
 
         // db.rs doesn't depend on main.rs (reverse direction)
         let db_id = index
             .get_file_id(std::path::Path::new("src/db.rs"))
-            .unwrap()
-            .unwrap();
+            .expect("failed to query db.rs")
+            .expect("db.rs not found");
         let main_id = index
             .get_file_id(std::path::Path::new("src/main.rs"))
-            .unwrap()
-            .unwrap();
+            .expect("failed to query main.rs")
+            .expect("main.rs not found");
 
         let path = graph
             .find_dependency_path(FileId::from(db_id), FileId::from(main_id))
-            .unwrap();
+            .expect("failed to find dependency path");
 
         assert!(path.is_none(), "should not find path in reverse direction");
     }
@@ -1219,20 +1268,20 @@ mod tests {
     #[test]
     fn file_graph_find_dependency_path_same_file_returns_single_node() {
         let (_dir, db_path) = setup_file_deps_graph();
-        let graph = SqlFileGraph::new(&db_path).unwrap();
-        let index = Index::open(&db_path).unwrap();
+        let graph = SqlFileGraph::new(&db_path).expect("failed to create file graph");
+        let index = Index::open(&db_path).expect("failed to open index");
 
         let main_id = index
             .get_file_id(std::path::Path::new("src/main.rs"))
-            .unwrap()
-            .unwrap();
+            .expect("failed to query main.rs")
+            .expect("main.rs not found");
 
         let path = graph
             .find_dependency_path(FileId::from(main_id), FileId::from(main_id))
-            .unwrap();
+            .expect("failed to find dependency path");
 
         assert!(path.is_some());
-        let path = path.unwrap();
+        let path = path.expect("path should exist");
         assert_eq!(path.files().len(), 1);
         assert!(path.files()[0].path.to_string_lossy().contains("main"));
     }
@@ -1240,26 +1289,26 @@ mod tests {
     #[test]
     fn file_graph_detect_cycles_returns_empty_for_acyclic() {
         let (_dir, db_path) = setup_file_deps_graph();
-        let graph = SqlFileGraph::new(&db_path).unwrap();
+        let graph = SqlFileGraph::new(&db_path).expect("failed to create file graph");
 
-        let cycles = graph.detect_cycles().unwrap();
+        let cycles = graph.detect_cycles().expect("failed to detect cycles");
         assert!(cycles.is_empty(), "acyclic graph should have no cycles");
     }
 
     #[test]
     fn file_graph_detect_cycles_involving_returns_empty_for_acyclic() {
         let (_dir, db_path) = setup_file_deps_graph();
-        let graph = SqlFileGraph::new(&db_path).unwrap();
-        let index = Index::open(&db_path).unwrap();
+        let graph = SqlFileGraph::new(&db_path).expect("failed to create file graph");
+        let index = Index::open(&db_path).expect("failed to open index");
 
         let main_id = index
             .get_file_id(std::path::Path::new("src/main.rs"))
-            .unwrap()
-            .unwrap();
+            .expect("failed to query main.rs")
+            .expect("main.rs not found");
 
         let cycles = graph
             .detect_cycles_involving(FileId::from(main_id))
-            .unwrap();
+            .expect("failed to detect cycles");
         assert!(
             cycles.is_empty(),
             "acyclic graph should have no cycles involving main.rs"

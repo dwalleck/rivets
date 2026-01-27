@@ -1188,3 +1188,158 @@ pub fn caller() {
         "should have at most 2 references to 'process', got: {refs:?}"
     );
 }
+
+// ============================================================================
+// Database Statistics Tests
+// ============================================================================
+
+#[test]
+fn get_stats_on_empty_database() {
+    let (_dir, tethys) = workspace_with_files(&[]);
+
+    let stats = tethys.get_stats().expect("get_stats failed");
+
+    assert_eq!(stats.file_count, 0);
+    assert_eq!(stats.symbol_count, 0);
+    assert_eq!(stats.reference_count, 0);
+    assert_eq!(stats.file_dependency_count, 0);
+    assert!(stats.files_by_language.is_empty());
+    assert!(stats.symbols_by_kind.is_empty());
+}
+
+#[test]
+fn get_stats_returns_correct_file_count() {
+    let (_dir, mut tethys) = workspace_with_files(&[
+        ("src/lib.rs", "pub fn hello() {}"),
+        ("src/utils.rs", "pub fn util() {}"),
+    ]);
+
+    tethys.index().expect("index failed");
+
+    let stats = tethys.get_stats().expect("get_stats failed");
+
+    assert_eq!(stats.file_count, 2, "should have 2 indexed files");
+}
+
+#[test]
+fn get_stats_counts_files_by_language() {
+    let (_dir, mut tethys) = workspace_with_files(&[
+        ("src/lib.rs", "pub fn hello() {}"),
+        ("src/utils.rs", "pub fn util() {}"),
+    ]);
+
+    tethys.index().expect("index failed");
+
+    let stats = tethys.get_stats().expect("get_stats failed");
+
+    let rust_count = stats
+        .files_by_language
+        .get(&tethys::Language::Rust)
+        .copied()
+        .unwrap_or(0);
+    assert_eq!(rust_count, 2, "should have 2 Rust files");
+}
+
+#[test]
+fn get_stats_counts_symbols_by_kind() {
+    let (_dir, mut tethys) = workspace_with_files(&[(
+        "src/lib.rs",
+        r"
+pub fn my_function() {}
+pub struct MyStruct;
+pub enum MyEnum { A, B }
+",
+    )]);
+
+    tethys.index().expect("index failed");
+
+    let stats = tethys.get_stats().expect("get_stats failed");
+
+    let fn_count = stats
+        .symbols_by_kind
+        .get(&tethys::SymbolKind::Function)
+        .copied()
+        .unwrap_or(0);
+    let struct_count = stats
+        .symbols_by_kind
+        .get(&tethys::SymbolKind::Struct)
+        .copied()
+        .unwrap_or(0);
+    let enum_count = stats
+        .symbols_by_kind
+        .get(&tethys::SymbolKind::Enum)
+        .copied()
+        .unwrap_or(0);
+
+    assert!(fn_count >= 1, "should have at least 1 function");
+    assert!(struct_count >= 1, "should have at least 1 struct");
+    assert!(enum_count >= 1, "should have at least 1 enum");
+}
+
+#[test]
+fn get_stats_counts_references() {
+    let (_dir, mut tethys) = workspace_with_files(&[(
+        "src/lib.rs",
+        r"
+pub struct Config;
+
+pub fn get_config() -> Config {
+    Config
+}
+",
+    )]);
+
+    tethys.index().expect("index failed");
+
+    let stats = tethys.get_stats().expect("get_stats failed");
+
+    // Should have references: Config in return type, Config constructor
+    assert!(
+        stats.reference_count >= 1,
+        "should have at least 1 reference"
+    );
+}
+
+#[test]
+fn get_stats_file_count_equals_language_sum() {
+    let (_dir, mut tethys) = workspace_with_files(&[
+        ("src/lib.rs", "pub fn a() {}"),
+        ("src/utils.rs", "pub fn b() {}"),
+        ("src/helpers.rs", "pub fn c() {}"),
+    ]);
+
+    tethys.index().expect("index failed");
+
+    let stats = tethys.get_stats().expect("get_stats failed");
+
+    let language_sum: usize = stats.files_by_language.values().sum();
+    assert_eq!(
+        stats.file_count,
+        language_sum + stats.skipped_unknown_languages,
+        "file_count should equal sum of files_by_language + skipped"
+    );
+}
+
+#[test]
+fn get_stats_symbol_count_equals_kind_sum() {
+    let (_dir, mut tethys) = workspace_with_files(&[(
+        "src/lib.rs",
+        r"
+pub fn func() {}
+pub struct S;
+pub enum E { A }
+pub trait T {}
+",
+    )]);
+
+    tethys.index().expect("index failed");
+
+    let stats = tethys.get_stats().expect("get_stats failed");
+
+    let kind_sum: usize = stats.symbols_by_kind.values().sum();
+    assert_eq!(
+        stats.symbol_count,
+        kind_sum + stats.skipped_unknown_kinds,
+        "symbol_count should equal sum of symbols_by_kind + skipped"
+    );
+}

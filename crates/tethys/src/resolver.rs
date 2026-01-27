@@ -184,7 +184,7 @@ fn resolve_super_path(path: &[String], current_file: &Path) -> Option<PathBuf> {
         }
         // The parent directory name as a .rs file
         let dir_name = current_dir.file_name()?.to_str()?;
-        let parent_file = parent_dir.join(format!("{dir_name}.rs"));
+        let parent_file = parent_dir.join(dir_name).with_extension("rs");
         if parent_file.exists() {
             return Some(parent_file);
         }
@@ -206,19 +206,21 @@ mod tests {
     use tempfile::TempDir;
 
     fn create_test_workspace() -> TempDir {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("should create temp directory");
         let src = dir.path().join("src");
-        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&src).expect("should create src directory");
 
         // Create typical Rust project structure
-        fs::write(src.join("lib.rs"), "mod auth;\nmod config;").unwrap();
-        fs::write(src.join("config.rs"), "pub struct Config {}").unwrap();
+        fs::write(src.join("lib.rs"), "mod auth;\nmod config;").expect("should write lib.rs");
+        fs::write(src.join("config.rs"), "pub struct Config {}").expect("should write config.rs");
 
         // Create auth as a directory module
         let auth_dir = src.join("auth");
-        fs::create_dir_all(&auth_dir).unwrap();
-        fs::write(auth_dir.join("mod.rs"), "pub struct Authenticator {}").unwrap();
-        fs::write(auth_dir.join("middleware.rs"), "pub fn check() {}").unwrap();
+        fs::create_dir_all(&auth_dir).expect("should create auth directory");
+        fs::write(auth_dir.join("mod.rs"), "pub struct Authenticator {}")
+            .expect("should write auth/mod.rs");
+        fs::write(auth_dir.join("middleware.rs"), "pub fn check() {}")
+            .expect("should write auth/middleware.rs");
 
         dir
     }
@@ -287,8 +289,9 @@ mod tests {
 
         // Create nested module structure
         let inner = crate_root.join("auth").join("inner");
-        fs::create_dir_all(&inner).unwrap();
-        fs::write(inner.join("mod.rs"), "use super::middleware;").unwrap();
+        fs::create_dir_all(&inner).expect("should create inner directory");
+        fs::write(inner.join("mod.rs"), "use super::middleware;")
+            .expect("should write inner/mod.rs");
 
         let current = inner.join("mod.rs");
         let path = vec!["super".to_string(), "middleware".to_string()];
