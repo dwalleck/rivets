@@ -80,62 +80,18 @@ impl Index {
     // === File Operations ===
 
     /// Insert or update a file record, returning the file ID.
+    ///
+    /// Delegates to [`Self::index_file_atomic`] with an empty symbol list.
     #[allow(dead_code)] // Public API, not yet used internally
     pub fn upsert_file(
-        &self,
+        &mut self,
         path: &Path,
         language: Language,
         mtime_ns: i64,
         size_bytes: u64,
         content_hash: Option<u64>,
     ) -> Result<i64> {
-        let path_str = path.to_string_lossy();
-        let lang_str = language.as_str();
-        let indexed_at = Self::now_ns()?;
-
-        // Try to update first
-        let updated = self.conn.execute(
-            "UPDATE files SET language = ?2, mtime_ns = ?3, size_bytes = ?4,
-             content_hash = ?5, indexed_at = ?6 WHERE path = ?1",
-            params![
-                path_str,
-                lang_str,
-                mtime_ns,
-                size_bytes as i64,
-                content_hash.map(|h| h as i64),
-                indexed_at
-            ],
-        )?;
-
-        if updated > 0 {
-            // Get the existing ID
-            let id: i64 = self.conn.query_row(
-                "SELECT id FROM files WHERE path = ?1",
-                [&path_str],
-                |row| row.get(0),
-            )?;
-
-            // Clear old symbols and refs for this file (they'll be re-added)
-            self.conn
-                .execute("DELETE FROM symbols WHERE file_id = ?1", [id])?;
-
-            Ok(id)
-        } else {
-            // Insert new
-            self.conn.execute(
-                "INSERT INTO files (path, language, mtime_ns, size_bytes, content_hash, indexed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    path_str,
-                    lang_str,
-                    mtime_ns,
-                    size_bytes as i64,
-                    content_hash.map(|h| h as i64),
-                    indexed_at
-                ],
-            )?;
-            Ok(self.conn.last_insert_rowid())
-        }
+        self.index_file_atomic(path, language, mtime_ns, size_bytes, content_hash, &[])
     }
 
     /// Get a file by path.
@@ -831,7 +787,7 @@ mod tests {
     #[test]
     fn upsert_file_inserts_new_file() {
         let (_dir, path) = temp_db();
-        let index = Index::open(&path).unwrap();
+        let mut index = Index::open(&path).unwrap();
 
         let file_id = index
             .upsert_file(
@@ -855,7 +811,7 @@ mod tests {
     #[test]
     fn upsert_file_updates_existing() {
         let (_dir, path) = temp_db();
-        let index = Index::open(&path).unwrap();
+        let mut index = Index::open(&path).unwrap();
 
         let id1 = index
             .upsert_file(Path::new("src/main.rs"), Language::Rust, 1000, 100, None)
@@ -874,7 +830,7 @@ mod tests {
     #[test]
     fn insert_and_list_symbols() {
         let (_dir, path) = temp_db();
-        let index = Index::open(&path).unwrap();
+        let mut index = Index::open(&path).unwrap();
 
         let file_id = index
             .upsert_file(Path::new("src/lib.rs"), Language::Rust, 1000, 100, None)
@@ -921,7 +877,7 @@ mod tests {
     #[test]
     fn search_symbols_finds_matches() {
         let (_dir, path) = temp_db();
-        let index = Index::open(&path).unwrap();
+        let mut index = Index::open(&path).unwrap();
 
         let file_id = index
             .upsert_file(Path::new("src/lib.rs"), Language::Rust, 1000, 100, None)
@@ -1052,7 +1008,7 @@ mod tests {
     #[test]
     fn insert_and_query_references() {
         let (_dir, path) = temp_db();
-        let index = Index::open(&path).unwrap();
+        let mut index = Index::open(&path).unwrap();
 
         // Create a file and symbol
         let file_id = index
@@ -1096,7 +1052,7 @@ mod tests {
     #[test]
     fn insert_file_dependency() {
         let (_dir, path) = temp_db();
-        let index = Index::open(&path).unwrap();
+        let mut index = Index::open(&path).unwrap();
 
         // Create two files
         let file1_id = index
@@ -1118,7 +1074,7 @@ mod tests {
     #[test]
     fn get_file_dependencies_and_dependents() {
         let (_dir, path) = temp_db();
-        let index = Index::open(&path).unwrap();
+        let mut index = Index::open(&path).unwrap();
 
         // Create three files: main.rs -> auth.rs -> db.rs
         let main_id = index

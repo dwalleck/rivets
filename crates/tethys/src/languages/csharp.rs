@@ -6,7 +6,11 @@
 // This is safe for practical source files (no file has 4 billion lines).
 #![allow(clippy::cast_possible_truncation)]
 
-use super::common::{ExtractedReference, ExtractedReferenceKind, ExtractedSymbol, ImportStatement};
+use std::path::PathBuf;
+
+use super::common::{
+    ExtractedReference, ExtractedReferenceKind, ExtractedSymbol, ImportContext, ImportStatement,
+};
 use super::tree_sitter_utils::{node_span, node_text};
 use super::LanguageSupport;
 use crate::types::{FunctionSignature, Parameter, Span, SymbolKind, Visibility};
@@ -109,6 +113,11 @@ impl LanguageSupport for CSharpLanguage {
             .into_iter()
             .map(|u| u.to_import_statement())
             .collect()
+    }
+
+    fn resolve_import(&self, _import: &ImportStatement, _context: &ImportContext) -> Vec<PathBuf> {
+        // TODO: Implement namespace resolution (Task 6)
+        vec![]
     }
 }
 
@@ -1379,6 +1388,46 @@ public class Test {
         assert_ne!(
             foo_ref.containing_symbol_span.unwrap().start_line(),
             bar_ref.containing_symbol_span.unwrap().start_line()
+        );
+    }
+
+    // ========================================================================
+    // resolve_import Tests (Task 5)
+    // ========================================================================
+
+    #[test]
+    fn resolve_import_returns_empty_for_csharp() {
+        use crate::languages::common::ImportContext;
+
+        let dir = tempfile::tempdir().expect("should create temp directory");
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).expect("should create src directory");
+
+        let import = ImportStatement {
+            path: vec![
+                "System".to_string(),
+                "Collections".to_string(),
+                "Generic".to_string(),
+            ],
+            imported_names: vec![],
+            is_glob: false,
+            alias: None,
+            line: 1,
+        };
+
+        let file_path = src.join("Program.cs");
+        let context = ImportContext {
+            file_path: &file_path,
+            workspace_root: &src,
+            known_files: &[],
+        };
+
+        let lang = CSharpLanguage;
+        let resolved = lang.resolve_import(&import, &context);
+
+        assert!(
+            resolved.is_empty(),
+            "C# resolve_import should return empty vec (stub)"
         );
     }
 }

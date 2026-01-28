@@ -20,7 +20,7 @@ pub mod csharp;
 pub mod rust;
 mod tree_sitter_utils;
 
-use common::{ExtractedReference, ExtractedSymbol, ImportStatement};
+use common::{ExtractedReference, ExtractedSymbol, ImportContext, ImportStatement};
 
 use crate::types::Language;
 
@@ -66,4 +66,15 @@ pub trait LanguageSupport: Send + Sync {
 
     /// Extract import statements from a parsed syntax tree.
     fn extract_imports(&self, tree: &tree_sitter::Tree, content: &[u8]) -> Vec<ImportStatement>;
+
+    /// Resolve an import statement to file paths within the workspace.
+    ///
+    /// Given an import and a context containing workspace information, returns
+    /// the paths that this import resolves to. Returns an empty vec for
+    /// unresolvable imports (e.g., external dependencies).
+    fn resolve_import(
+        &self,
+        import: &ImportStatement,
+        context: &ImportContext,
+    ) -> Vec<std::path::PathBuf>;
 }

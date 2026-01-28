@@ -65,6 +65,18 @@ impl ExtractedReferenceKind {
     }
 }
 
+/// Context needed to resolve imports within a workspace.
+#[derive(Debug)]
+#[allow(dead_code)] // Fields accessed by LanguageSupport implementations
+pub struct ImportContext<'a> {
+    /// Path of the file containing the import
+    pub file_path: &'a std::path::Path,
+    /// Root of the workspace
+    pub workspace_root: &'a std::path::Path,
+    /// All known file paths in the workspace (for lookup)
+    pub known_files: &'a [&'a std::path::Path],
+}
+
 /// A unified import statement extracted from source code.
 ///
 /// Language-specific import types (`UseStatement`, `UsingDirective`) can convert
