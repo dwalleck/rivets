@@ -703,10 +703,10 @@ pub fn get_config() -> Config {
         "should have references in file, got: {refs:?}"
     );
 
-    // All references should be to Config
-    let config_refs: Vec<_> = refs.iter().filter(|r| r.symbol_id.as_i64() > 0).collect();
+    // Check for resolved symbol references (symbol_id is Some)
+    let resolved_refs: Vec<_> = refs.iter().filter(|r| r.symbol_id.is_some()).collect();
     assert!(
-        !config_refs.is_empty(),
+        !resolved_refs.is_empty(),
         "should have resolved symbol references"
     );
 }
@@ -1050,9 +1050,8 @@ pub fn make_point() -> Point {
 }
 
 #[test]
-fn cross_file_references_not_stored() {
-    // Current limitation: Only stores references where target symbol is in the same file.
-    // Cross-file reference resolution is planned but not yet implemented.
+fn cross_file_references_are_resolved() {
+    // Cross-file references are now resolved in Pass 2 via import information.
     let (_dir, mut tethys) = workspace_with_files(&[
         ("src/lib.rs", "mod utils;\nmod main_mod;"),
         ("src/utils.rs", "pub struct Helper;"),
@@ -1070,20 +1069,19 @@ pub fn use_helper() -> Helper {
 
     let stats = tethys.index().expect("index failed");
 
-    // Cross-file references are not yet stored (same-file only for now).
-    // The refs in main_mod.rs to Helper from utils.rs should not be in refs table.
+    // Cross-file references are now resolved via Pass 2.
+    // The refs in main_mod.rs to Helper from utils.rs should be resolved.
     let refs = tethys
         .get_references("Helper")
         .expect("get_references failed");
 
-    // No refs should be found since Helper is in utils.rs but referenced from main_mod.rs.
-    // This documents the current same-file-only limitation.
+    // References should be found since Pass 2 resolves them via imports.
     assert!(
-        refs.is_empty(),
-        "cross-file references should not be stored yet, got: {refs:?}"
+        !refs.is_empty(),
+        "cross-file references should be resolved, got empty"
     );
 
-    // But the symbol itself should exist
+    // The symbol itself should exist
     let symbol = tethys.get_symbol("Helper").expect("get_symbol failed");
     assert!(symbol.is_some(), "Helper symbol should be indexed");
 
@@ -1749,4 +1747,554 @@ public class Service {
 
     // Should depend on both files that declare the MyApp.Models namespace
     assert_eq!(deps.len(), 2, "should depend on both model files");
+}
+
+// ========================================================================
+// Import Storage Tests
+// ========================================================================
+
+#[test]
+fn rust_imports_stored_during_indexing() {
+    let code = r"
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use crate::db::Index;
+
+fn main() {
+    let _map: HashMap<String, i32> = HashMap::new();
+}
+";
+    let (dir, mut tethys) = workspace_with_files(&[("src/main.rs", code)]);
+    tethys.index().expect("index failed");
+
+    let imports = tethys
+        .list_imports_in_file(&dir.path().join("src/main.rs"))
+        .expect("list_imports_in_file failed");
+
+    // Should have: HashMap from std::collections, Read and Write from std::io, Index from crate::db
+    assert!(
+        imports.len() >= 4,
+        "expected at least 4 imports, found {}",
+        imports.len()
+    );
+
+    // Check HashMap import
+    let hashmap_import = imports
+        .iter()
+        .find(|i| i.symbol_name == "HashMap")
+        .expect("should have HashMap import");
+    assert_eq!(
+        hashmap_import.source_module, "std::collections",
+        "HashMap should come from std::collections"
+    );
+
+    // Check Read import
+    let read_import = imports
+        .iter()
+        .find(|i| i.symbol_name == "Read")
+        .expect("should have Read import");
+    assert_eq!(
+        read_import.source_module, "std::io",
+        "Read should come from std::io"
+    );
+
+    // Check Write import
+    let write_import = imports
+        .iter()
+        .find(|i| i.symbol_name == "Write")
+        .expect("should have Write import");
+    assert_eq!(
+        write_import.source_module, "std::io",
+        "Write should come from std::io"
+    );
+
+    // Check Index import
+    let index_import = imports
+        .iter()
+        .find(|i| i.symbol_name == "Index")
+        .expect("should have Index import");
+    assert_eq!(
+        index_import.source_module, "crate::db",
+        "Index should come from crate::db"
+    );
+}
+
+#[test]
+fn rust_glob_import_stored_with_star() {
+    let code = r"
+use std::collections::*;
+
+fn main() {}
+";
+    let (dir, mut tethys) = workspace_with_files(&[("src/main.rs", code)]);
+    tethys.index().expect("index failed");
+
+    let imports = tethys
+        .list_imports_in_file(&dir.path().join("src/main.rs"))
+        .expect("list_imports_in_file failed");
+
+    // Should have glob import with "*"
+    let glob_import = imports
+        .iter()
+        .find(|i| i.symbol_name == "*" && i.source_module == "std::collections")
+        .expect("should have glob import");
+
+    assert_eq!(glob_import.symbol_name, "*");
+    assert_eq!(glob_import.source_module, "std::collections");
+}
+
+#[test]
+fn rust_aliased_import_stored() {
+    let code = r"
+use std::collections::HashMap as Map;
+
+fn main() {
+    let _m: Map<String, i32> = Map::new();
+}
+";
+    let (dir, mut tethys) = workspace_with_files(&[("src/main.rs", code)]);
+    tethys.index().expect("index failed");
+
+    let imports = tethys
+        .list_imports_in_file(&dir.path().join("src/main.rs"))
+        .expect("list_imports_in_file failed");
+
+    let aliased_import = imports
+        .iter()
+        .find(|i| i.symbol_name == "HashMap")
+        .expect("should have HashMap import");
+
+    assert_eq!(
+        aliased_import.alias,
+        Some("Map".to_string()),
+        "should have alias 'Map'"
+    );
+}
+
+#[test]
+fn csharp_imports_stored_during_indexing() {
+    let code = r"
+using System;
+using System.Collections.Generic;
+using MyApp.Services;
+
+namespace MyApp;
+public class Program {
+    public static void Main() {
+        var list = new List<string>();
+    }
+}
+";
+    let (dir, mut tethys) = workspace_with_files(&[("src/Program.cs", code)]);
+    tethys.index().expect("index failed");
+
+    let imports = tethys
+        .list_imports_in_file(&dir.path().join("src/Program.cs"))
+        .expect("list_imports_in_file failed");
+
+    // C# using directives import the whole namespace, stored with "*"
+    assert!(
+        imports.len() >= 3,
+        "expected at least 3 imports, found {}",
+        imports.len()
+    );
+
+    // Check System import
+    let system_import = imports
+        .iter()
+        .find(|i| i.source_module == "System")
+        .expect("should have System import");
+    assert_eq!(
+        system_import.symbol_name, "*",
+        "C# namespace import should use *"
+    );
+
+    // Check System.Collections.Generic import
+    let collections_import = imports
+        .iter()
+        .find(|i| i.source_module == "System.Collections.Generic")
+        .expect("should have System.Collections.Generic import");
+    assert_eq!(
+        collections_import.symbol_name, "*",
+        "C# namespace import should use *"
+    );
+
+    // Check MyApp.Services import
+    let services_import = imports
+        .iter()
+        .find(|i| i.source_module == "MyApp.Services")
+        .expect("should have MyApp.Services import");
+    assert_eq!(
+        services_import.symbol_name, "*",
+        "C# namespace import should use *"
+    );
+}
+
+#[test]
+fn csharp_imports_use_dot_separator() {
+    let code = r"
+using System.Collections.Generic;
+
+namespace MyApp;
+public class Program { }
+";
+    let (dir, mut tethys) = workspace_with_files(&[("src/Program.cs", code)]);
+    tethys.index().expect("index failed");
+
+    let imports = tethys
+        .list_imports_in_file(&dir.path().join("src/Program.cs"))
+        .expect("list_imports_in_file failed");
+
+    // Verify C# uses "." separator, not "::"
+    let import = imports
+        .iter()
+        .find(|i| i.source_module.contains("Collections"))
+        .expect("should have Collections import");
+
+    assert!(
+        import.source_module.contains('.'),
+        "C# imports should use '.' separator, got: {}",
+        import.source_module
+    );
+    assert!(
+        !import.source_module.contains("::"),
+        "C# imports should not use '::' separator, got: {}",
+        import.source_module
+    );
+}
+
+#[test]
+fn imports_cleared_on_reindex() {
+    let code_v1 = r"
+use std::collections::HashMap;
+
+fn main() {}
+";
+    let code_v2 = r"
+use std::io::Read;
+
+fn main() {}
+";
+
+    let (dir, mut tethys) = workspace_with_files(&[("src/main.rs", code_v1)]);
+    tethys.index().expect("first index failed");
+
+    // Check initial imports
+    let imports_v1 = tethys
+        .list_imports_in_file(&dir.path().join("src/main.rs"))
+        .expect("list_imports_in_file failed");
+    assert!(
+        imports_v1.iter().any(|i| i.symbol_name == "HashMap"),
+        "should have HashMap import initially"
+    );
+
+    // Update the file and reindex
+    std::fs::write(dir.path().join("src/main.rs"), code_v2).expect("write failed");
+    tethys.index().expect("second index failed");
+
+    // Check imports after reindex
+    let imports_v2 = tethys
+        .list_imports_in_file(&dir.path().join("src/main.rs"))
+        .expect("list_imports_in_file failed");
+
+    // Old import should be gone
+    assert!(
+        !imports_v2.iter().any(|i| i.symbol_name == "HashMap"),
+        "HashMap import should be cleared after reindex"
+    );
+
+    // New import should be present
+    assert!(
+        imports_v2.iter().any(|i| i.symbol_name == "Read"),
+        "Read import should be present after reindex"
+    );
+}
+
+#[test]
+fn list_imports_returns_not_found_for_unknown_file() {
+    let (_dir, mut tethys) = workspace_with_files(&[("src/main.rs", "fn main() {}")]);
+    tethys.index().expect("index failed");
+
+    let result = tethys.list_imports_in_file(std::path::Path::new("/nonexistent/file.rs"));
+
+    assert!(result.is_err(), "should return error for unknown file");
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("not found"),
+        "error should indicate file not found"
+    );
+}
+
+#[test]
+fn list_imports_returns_empty_for_file_without_imports() {
+    let code = r#"
+fn main() {
+    let x = 42;
+    println!("{}", x);
+}
+"#;
+    let (dir, mut tethys) = workspace_with_files(&[("src/main.rs", code)]);
+    tethys.index().expect("index failed");
+
+    let imports = tethys
+        .list_imports_in_file(&dir.path().join("src/main.rs"))
+        .expect("list_imports_in_file failed");
+
+    assert!(
+        imports.is_empty(),
+        "file without imports should return empty list"
+    );
+}
+
+// ========================================================================
+// Cross-File Reference Resolution Tests (Pass 2)
+// ========================================================================
+
+#[test]
+fn cross_file_references_resolved_via_explicit_import() {
+    // Test that references to symbols imported via explicit import are resolved
+    let (_dir, mut tethys) = workspace_with_files(&[
+        ("src/lib.rs", "mod utils;\nmod main_mod;"),
+        (
+            "src/utils.rs",
+            r"
+pub struct Helper;
+
+impl Helper {
+    pub fn assist() {}
+}
+",
+        ),
+        (
+            "src/main_mod.rs",
+            r"
+use crate::utils::Helper;
+
+pub fn use_helper() -> Helper {
+    Helper
+}
+",
+        ),
+    ]);
+
+    tethys.index().expect("index failed");
+
+    // The Helper symbol should now have references from main_mod.rs
+    let refs = tethys
+        .get_references("Helper")
+        .expect("get_references failed");
+
+    // After Pass 2, cross-file references via explicit imports should be resolved
+    // We expect at least one reference from the main_mod.rs file
+    assert!(
+        !refs.is_empty(),
+        "Helper should have cross-file references resolved via explicit import"
+    );
+}
+
+#[test]
+fn cross_file_references_resolved_via_glob_import() {
+    // Test that references to symbols imported via glob import are resolved
+    let (_dir, mut tethys) = workspace_with_files(&[
+        ("src/lib.rs", "mod prelude;\nmod consumer;"),
+        (
+            "src/prelude.rs",
+            r"
+pub struct Config;
+pub struct Settings;
+",
+        ),
+        (
+            "src/consumer.rs",
+            r"
+use crate::prelude::*;
+
+pub fn get_config() -> Config {
+    Config
+}
+",
+        ),
+    ]);
+
+    tethys.index().expect("index failed");
+
+    // Config should have references from consumer.rs resolved via glob import
+    let refs = tethys
+        .get_references("Config")
+        .expect("get_references failed");
+
+    assert!(
+        !refs.is_empty(),
+        "Config should have cross-file references resolved via glob import"
+    );
+}
+
+#[test]
+fn unresolved_external_crate_references_remain_unresolved() {
+    // Test that references to external crate symbols remain unresolved
+    let (dir, mut tethys) = workspace_with_files(&[(
+        "src/main.rs",
+        r"
+use std::collections::HashMap;
+
+fn main() {
+    let map: HashMap<String, i32> = HashMap::new();
+}
+",
+    )]);
+
+    tethys.index().expect("index failed");
+
+    // HashMap is from std, not our workspace, so there should be no symbol for it
+    let symbol = tethys
+        .get_symbol("HashMap")
+        .expect("get_symbol should not error");
+    assert!(
+        symbol.is_none(),
+        "HashMap from std should not be indexed (external crate)"
+    );
+
+    // References to HashMap should remain unresolved (can be checked via list_references_in_file)
+    let refs = tethys
+        .list_references_in_file(&dir.path().join("src/main.rs"))
+        .expect("list_references_in_file failed");
+
+    // Any unresolved references should still have symbol_id = None
+    let unresolved_refs: Vec<_> = refs.iter().filter(|r| r.symbol_id.is_none()).collect();
+
+    // We expect unresolved references because HashMap and String are external
+    // The exact count depends on what's extracted, but we should have some unresolved refs
+    assert!(
+        !unresolved_refs.is_empty(),
+        "references to external crate symbols should remain unresolved"
+    );
+}
+
+#[test]
+fn cross_file_reference_resolution_with_aliased_import() {
+    // Test that aliased imports resolve correctly
+    let (_dir, mut tethys) = workspace_with_files(&[
+        ("src/lib.rs", "mod types;\nmod consumer;"),
+        (
+            "src/types.rs",
+            r"
+pub struct Configuration;
+",
+        ),
+        (
+            "src/consumer.rs",
+            r"
+use crate::types::Configuration as Config;
+
+pub fn get_config() -> Config {
+    Config
+}
+",
+        ),
+    ]);
+
+    tethys.index().expect("index failed");
+
+    // Configuration should have references even though it's used as Config
+    let refs = tethys
+        .get_references("Configuration")
+        .expect("get_references failed");
+
+    // After Pass 2, references using the alias should be resolved
+    assert!(
+        !refs.is_empty(),
+        "Configuration should have cross-file references resolved via aliased import"
+    );
+}
+
+#[test]
+fn multiple_files_importing_same_symbol() {
+    // Test that when multiple files import the same symbol, all references are resolved
+    let (_dir, mut tethys) = workspace_with_files(&[
+        ("src/lib.rs", "mod shared;\nmod a;\nmod b;"),
+        (
+            "src/shared.rs",
+            r"
+pub struct Shared;
+",
+        ),
+        (
+            "src/a.rs",
+            r"
+use crate::shared::Shared;
+
+pub fn use_shared_a() -> Shared {
+    Shared
+}
+",
+        ),
+        (
+            "src/b.rs",
+            r"
+use crate::shared::Shared;
+
+pub fn use_shared_b() -> Shared {
+    Shared
+}
+",
+        ),
+    ]);
+
+    tethys.index().expect("index failed");
+
+    // Shared should have references from both a.rs and b.rs
+    let refs = tethys
+        .get_references("Shared")
+        .expect("get_references failed");
+
+    // We expect references from both files
+    assert!(
+        refs.len() >= 2,
+        "Shared should have references from multiple files, got: {}",
+        refs.len()
+    );
+}
+
+#[test]
+fn csharp_cross_file_reference_resolution() {
+    // Test that C# cross-file references are resolved via using directives
+    let (_dir, mut tethys) = workspace_with_files(&[
+        (
+            "Services/UserService.cs",
+            r"
+namespace MyApp.Services;
+
+public class UserService {
+    public void Save() { }
+}
+",
+        ),
+        (
+            "Controllers/UserController.cs",
+            r"
+using MyApp.Services;
+
+namespace MyApp.Controllers;
+
+public class UserController {
+    public void Create() {
+        var svc = new UserService();
+    }
+}
+",
+        ),
+    ]);
+
+    tethys.index().expect("index failed");
+
+    // UserService should have references from UserController.cs
+    let refs = tethys
+        .get_references("UserService")
+        .expect("get_references failed");
+
+    // After Pass 2, the `new UserService()` reference should be resolved
+    assert!(
+        !refs.is_empty(),
+        "UserService should have cross-file references resolved via C# using directive"
+    );
 }

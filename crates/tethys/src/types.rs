@@ -545,16 +545,35 @@ impl Symbol {
     }
 }
 
+/// An import statement tracked for cross-file reference resolution.
+///
+/// Imports capture what each file imports from other modules, enabling
+/// resolution of unqualified symbol references.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Import {
+    /// Foreign key to the file containing this import
+    pub file_id: FileId,
+    /// The imported symbol name (e.g., `Index`) or `*` for glob imports
+    pub symbol_name: String,
+    /// The source module path (e.g., `crate::db` or `MyApp.Services`)
+    pub source_module: String,
+    /// Optional alias (e.g., `use foo as bar` would have alias `bar`)
+    pub alias: Option<String>,
+}
+
 /// A reference to a symbol (usage, not definition).
 ///
 /// Tracks where symbols are used throughout the codebase. Combined with
 /// `in_symbol_id`, enables "who calls X?" queries at symbol granularity.
+///
+/// References may be unresolved (`symbol_id = None`) after initial indexing.
+/// Pass 2 resolves these by matching `reference_name` to symbols in other files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Reference {
     /// Database primary key
     pub id: i64,
-    /// Foreign key to the referenced symbol
-    pub symbol_id: SymbolId,
+    /// Foreign key to the referenced symbol (None if unresolved)
+    pub symbol_id: Option<SymbolId>,
     /// Foreign key to the file containing this reference
     pub file_id: FileId,
     /// How the symbol is being used
@@ -567,6 +586,9 @@ pub struct Reference {
     pub span: Option<Span>,
     /// Symbol that contains this reference (for "who calls X?" queries)
     pub in_symbol_id: Option<SymbolId>,
+    /// Name of the referenced symbol for later resolution (e.g., `Index::open`).
+    /// Only populated for unresolved references.
+    pub reference_name: Option<String>,
 }
 
 /// Analysis results from parsing a single file.

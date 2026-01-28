@@ -731,45 +731,49 @@ mod tests {
         // Create references: main::run -> auth::validate
         index
             .insert_reference(
-                auth_validate.id,
+                Some(auth_validate.id),
                 main_file,
                 ReferenceKind::Call.as_str(),
                 5,
                 1,
                 Some(main_run.id),
+                None,
             )
             .expect("failed to insert auth::validate reference");
         // main::run -> cache::get
         index
             .insert_reference(
-                cache_get.id,
+                Some(cache_get.id),
                 main_file,
                 ReferenceKind::Call.as_str(),
                 6,
                 1,
                 Some(main_run.id),
+                None,
             )
             .expect("failed to insert cache::get reference");
         // auth::validate -> db::query
         index
             .insert_reference(
-                db_query.id,
+                Some(db_query.id),
                 auth_file,
                 ReferenceKind::Call.as_str(),
                 3,
                 1,
                 Some(auth_validate.id),
+                None,
             )
             .expect("failed to insert db::query reference from auth");
         // cache::get -> db::query
         index
             .insert_reference(
-                db_query.id,
+                Some(db_query.id),
                 cache_file,
                 ReferenceKind::Call.as_str(),
                 3,
                 1,
                 Some(cache_get.id),
+                None,
             )
             .expect("failed to insert db::query reference from cache");
 

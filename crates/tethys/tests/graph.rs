@@ -630,19 +630,19 @@ fn get_callers_finds_intra_file_callers() {
 }
 
 #[test]
-fn get_callers_cross_file_refs_not_resolved() {
+fn get_callers_cross_file_refs_resolved() {
     let (_dir, mut tethys) = workspace_with_call_graph();
     tethys.index().expect("index failed");
 
     // Connection is referenced from other files via `use crate::db::Connection`,
-    // but cross-file symbol resolution is not yet implemented, so callers should be empty.
+    // Cross-file references are now resolved in Pass 2.
     let callers = tethys
         .get_callers("Connection")
         .expect("get_callers for Connection should succeed");
 
     assert!(
-        callers.is_empty(),
-        "cross-file callers should not be resolved yet, got: {callers:?}"
+        !callers.is_empty(),
+        "cross-file callers should be resolved, got empty"
     );
 }
 
@@ -786,18 +786,17 @@ fn get_symbol_impact_target_points_to_correct_file() {
 }
 
 #[test]
-fn get_symbol_impact_cross_file_returns_empty() {
+fn get_symbol_impact_cross_file_resolved() {
     let (_dir, mut tethys) = workspace_with_call_graph();
     tethys.index().expect("index failed");
 
-    // Connection's callers are all cross-file, so impact should be empty
+    // Connection's callers are cross-file - now resolved in Pass 2
     let impact = tethys
         .get_symbol_impact("Connection")
         .expect("get_symbol_impact for Connection should succeed");
 
     assert!(
-        impact.direct_dependents.is_empty(),
-        "cross-file dependents should not be resolved yet, got: {:?}",
-        impact.direct_dependents
+        !impact.direct_dependents.is_empty(),
+        "cross-file dependents should be resolved, got empty"
     );
 }

@@ -42,9 +42,9 @@ mod types;
 
 pub use error::{Error, IndexError, IndexErrorKind, Result};
 pub use types::{
-    Cycle, DatabaseStats, Dependent, FileAnalysis, FileId, FunctionSignature, Impact, IndexStats,
-    IndexUpdate, IndexedFile, Language, Parameter, ParameterKind, Reference, ReferenceKind, Span,
-    Symbol, SymbolId, SymbolKind, Visibility,
+    Cycle, DatabaseStats, Dependent, FileAnalysis, FileId, FunctionSignature, Impact, Import,
+    IndexStats, IndexUpdate, IndexedFile, Language, Parameter, ParameterKind, Reference,
+    ReferenceKind, Span, Symbol, SymbolId, SymbolKind, Visibility,
 };
 
 use std::collections::HashMap;
@@ -145,6 +145,7 @@ impl Tethys {
     /// Uses deferred dependency resolution to handle circular dependencies:
     /// 1. First pass: Index all files, queue dependencies that can't resolve
     /// 2. Resolution passes: Retry pending dependencies until no progress
+    #[allow(clippy::too_many_lines)]
     pub fn index(&mut self) -> Result<IndexStats> {
         let start = Instant::now();
         let mut files_indexed = 0;
@@ -246,6 +247,15 @@ impl Tethys {
                 from_file = %from_path.display(),
                 dep_path = %dep_path.display(),
                 "Dependency unresolved after all passes (likely external crate)"
+            );
+        }
+
+        // Pass 2: Resolve cross-file references using import information
+        let resolved_refs = self.resolve_cross_file_references()?;
+        if resolved_refs > 0 {
+            tracing::info!(
+                resolved_count = resolved_refs,
+                "Resolved cross-file references"
             );
         }
 
@@ -373,6 +383,9 @@ impl Tethys {
         // Store references for resolvable symbols
         let refs_stored = self.store_references(file_id, &refs, &name_to_id, &span_to_id)?;
 
+        // Store imports in the database for cross-file reference resolution
+        self.store_imports(file_id, &imports, language)?;
+
         // Compute and store file dependencies (L2: only for actually used symbols)
         self.compute_dependencies(path, file_id, &imports, &refs, pending)?;
 
@@ -410,7 +423,10 @@ impl Tethys {
 
     /// Store extracted references in the database.
     ///
-    /// Only stores references where the target symbol can be resolved.
+    /// Stores ALL references, including unresolved ones. For unresolved references
+    /// (cross-file symbols), `symbol_id` is set to `None` and `reference_name` is
+    /// populated for later resolution in Pass 2.
+    ///
     /// Returns the count of references stored.
     fn store_references(
         &self,
@@ -422,36 +438,114 @@ impl Tethys {
         let mut count = 0;
 
         for r in refs {
-            // Try to resolve the target symbol by name
-            let Some(&symbol_id) = name_to_id.get(&r.name) else {
-                // Cross-file symbol resolution not yet implemented
+            let qualified_name = Self::build_qualified_name(&r.name, r.path.as_deref());
+
+            // Try same-file resolution: simple name first, then qualified name
+            let symbol_id = name_to_id
+                .get(&r.name)
+                .or_else(|| name_to_id.get(&qualified_name))
+                .copied();
+
+            // For unresolved references, store the name for Pass 2 cross-file resolution
+            let reference_name = if symbol_id.is_none() {
                 trace!(
-                    reference_name = %r.name,
+                    reference_name = %qualified_name,
                     line = r.line,
-                    "Skipping cross-file reference (symbol not in this file)"
+                    "Storing unresolved reference for later resolution"
                 );
-                continue;
+                Some(qualified_name)
+            } else {
+                None
             };
 
-            // Resolve containing symbol if present
             let in_symbol_id = r
                 .containing_symbol_span
                 .and_then(|span| span_to_id.get(&span).copied());
 
-            // Insert the reference
-            let db_kind = r.kind.to_db_kind();
             self.db.insert_reference(
                 symbol_id,
                 file_id,
-                db_kind.as_str(),
+                r.kind.to_db_kind().as_str(),
                 r.line,
                 r.column,
                 in_symbol_id,
+                reference_name.as_deref(),
             )?;
             count += 1;
         }
 
         Ok(count)
+    }
+
+    /// Build a qualified name from a simple name and optional path segments.
+    ///
+    /// Examples:
+    /// - `("open", Some(["Index"]))` -> `"Index::open"`
+    /// - `("Foo", None)` -> `"Foo"`
+    /// - `("bar", Some([]))` -> `"bar"`
+    fn build_qualified_name(name: &str, path: Option<&[String]>) -> String {
+        match path {
+            Some(segments) if !segments.is_empty() => {
+                format!("{}::{}", segments.join("::"), name)
+            }
+            _ => name.to_string(),
+        }
+    }
+
+    /// Store extracted imports in the database for cross-file reference resolution.
+    ///
+    /// Imports are stored with language-appropriate path separators:
+    /// - Rust: `::` (e.g., `crate::db`, `std::collections`)
+    /// - C#: `.` (e.g., `MyApp.Services`, `System.Collections.Generic`)
+    ///
+    /// Clears old imports for this file before storing new ones (for re-indexing).
+    fn store_imports(
+        &self,
+        file_id: FileId,
+        imports: &[common::ImportStatement],
+        language: Language,
+    ) -> Result<()> {
+        // Clear old imports for this file (for re-indexing)
+        self.db.clear_imports_for_file(file_id)?;
+
+        // Determine path separator based on language
+        let separator = match language {
+            Language::Rust => "::",
+            Language::CSharp => ".",
+        };
+
+        for import in imports {
+            let source = import.path.join(separator);
+
+            // Handle glob imports
+            if import.is_glob {
+                self.db
+                    .insert_import(file_id, "*", &source, import.alias.as_deref())?;
+                continue;
+            }
+
+            // For explicit imports: store each imported name
+            if import.imported_names.is_empty() {
+                // Namespace/module import (C# style) or module import without braces
+                // Store with "*" to indicate "all from this module"
+                self.db
+                    .insert_import(file_id, "*", &source, import.alias.as_deref())?;
+            } else {
+                // Store each explicitly imported name
+                for name in &import.imported_names {
+                    self.db
+                        .insert_import(file_id, name, &source, import.alias.as_deref())?;
+                }
+            }
+        }
+
+        trace!(
+            file_id = %file_id,
+            import_count = imports.len(),
+            "Stored imports for file"
+        );
+
+        Ok(())
     }
 
     /// Compute and store file-level dependencies based on use statements and actual references.
@@ -721,6 +815,330 @@ impl Tethys {
         Ok(still_pending)
     }
 
+    /// Resolve cross-file references against the symbol database (Pass 2).
+    ///
+    /// After all files are indexed (Pass 1), this method resolves unresolved
+    /// references by matching them to symbols discovered in other files via
+    /// the imports table.
+    ///
+    /// Returns the number of references successfully resolved.
+    fn resolve_cross_file_references(&self) -> Result<usize> {
+        let unresolved = self.db.get_unresolved_references()?;
+        if unresolved.is_empty() {
+            return Ok(0);
+        }
+
+        debug!(
+            unresolved_count = unresolved.len(),
+            "Starting cross-file reference resolution (Pass 2)"
+        );
+
+        let mut resolved_count = 0;
+
+        // Group by file for efficiency - avoids repeated import lookups
+        let mut by_file: HashMap<FileId, Vec<Reference>> = HashMap::new();
+        for ref_ in unresolved {
+            by_file.entry(ref_.file_id).or_default().push(ref_);
+        }
+
+        // FIXME: Assumes crate root is workspace_root/src/. Does not detect actual
+        // main/lib location from Cargo.toml. Needs Cargo.toml parsing support.
+        let crate_root = self.workspace_root.join("src");
+
+        for (file_id, refs) in by_file {
+            resolved_count += self.resolve_refs_for_file(file_id, refs, &crate_root)?;
+        }
+
+        Ok(resolved_count)
+    }
+
+    /// Resolve references for a single file using its imports.
+    fn resolve_refs_for_file(
+        &self,
+        file_id: FileId,
+        refs: Vec<Reference>,
+        crate_root: &Path,
+    ) -> Result<usize> {
+        let imports = self.db.get_imports_for_file(file_id)?;
+        if imports.is_empty() {
+            return Ok(0);
+        }
+
+        // Get the current file's path for relative path resolution
+        let current_file_path = if let Some(f) = self.db.get_file_by_id(file_id)? {
+            Some(self.workspace_root.join(&f.path))
+        } else {
+            warn!(
+                file_id = %file_id,
+                "File not found during reference resolution - possible database inconsistency"
+            );
+            None
+        };
+
+        // Build import structures
+        let (explicit_imports, glob_imports) = Self::build_import_maps(&imports);
+
+        let mut resolved_count = 0;
+
+        for ref_ in refs {
+            let Some(ref_name) = &ref_.reference_name else {
+                continue;
+            };
+
+            let resolved = self.try_resolve_reference(
+                &ref_,
+                ref_name,
+                &explicit_imports,
+                &glob_imports,
+                current_file_path.as_deref(),
+                crate_root,
+                file_id,
+            )?;
+
+            if resolved {
+                resolved_count += 1;
+            }
+        }
+
+        Ok(resolved_count)
+    }
+
+    /// Build lookup maps from imports for reference resolution.
+    fn build_import_maps(imports: &[Import]) -> (HashMap<&str, (&str, &str)>, Vec<&str>) {
+        let mut explicit_imports: HashMap<&str, (&str, &str)> = HashMap::new();
+        let mut glob_imports: Vec<&str> = Vec::new();
+
+        for imp in imports {
+            if imp.symbol_name == "*" {
+                glob_imports.push(&imp.source_module);
+            } else {
+                let lookup_name = imp.alias.as_deref().unwrap_or(&imp.symbol_name);
+                if let Some((prev_symbol, prev_module)) =
+                    explicit_imports.insert(lookup_name, (&imp.symbol_name, &imp.source_module))
+                {
+                    trace!(
+                        lookup_name = %lookup_name,
+                        prev_symbol = %prev_symbol,
+                        prev_module = %prev_module,
+                        new_symbol = %imp.symbol_name,
+                        new_module = %imp.source_module,
+                        "Import name collision: overwriting previous import"
+                    );
+                }
+            }
+        }
+
+        (explicit_imports, glob_imports)
+    }
+
+    /// Try to resolve a single reference using imports and fallback search.
+    #[allow(clippy::too_many_arguments)]
+    fn try_resolve_reference(
+        &self,
+        ref_: &Reference,
+        ref_name: &str,
+        explicit_imports: &HashMap<&str, (&str, &str)>,
+        glob_imports: &[&str],
+        current_file_path: Option<&Path>,
+        crate_root: &Path,
+        file_id: FileId,
+    ) -> Result<bool> {
+        let is_qualified = ref_name.contains("::");
+
+        // Try explicit imports
+        if let Some(symbol) = self.resolve_via_explicit_import(
+            ref_name,
+            explicit_imports,
+            current_file_path,
+            crate_root,
+            is_qualified,
+        )? {
+            trace!(
+                ref_id = ref_.id,
+                ref_name = %ref_name,
+                symbol_id = %symbol.id,
+                "Resolved reference via explicit import"
+            );
+            self.db.resolve_reference(ref_.id, symbol.id)?;
+            return Ok(true);
+        }
+
+        // Try glob imports
+        for source_module in glob_imports {
+            if let Some(symbol) = self.resolve_symbol_in_module(
+                ref_name,
+                source_module,
+                current_file_path,
+                crate_root,
+                is_qualified,
+            )? {
+                trace!(
+                    ref_id = ref_.id,
+                    ref_name = %ref_name,
+                    symbol_id = %symbol.id,
+                    "Resolved reference via glob import"
+                );
+                self.db.resolve_reference(ref_.id, symbol.id)?;
+                return Ok(true);
+            }
+        }
+
+        // Fallback search differs for qualified vs simple names
+        if let Some(symbol) = self.fallback_symbol_search(ref_name, is_qualified)? {
+            trace!(
+                ref_id = ref_.id,
+                ref_name = %ref_name,
+                symbol_id = %symbol.id,
+                "Resolved reference via fallback search"
+            );
+            self.db.resolve_reference(ref_.id, symbol.id)?;
+            return Ok(true);
+        }
+
+        trace!(
+            ref_name = %ref_name,
+            file_id = %file_id,
+            "Reference remains unresolved (likely external crate)"
+        );
+        Ok(false)
+    }
+
+    /// Resolve a reference via explicit import lookup.
+    ///
+    /// For qualified references like `Index::open`, looks up the first segment (`Index`)
+    /// and searches for the full qualified name in that module.
+    fn resolve_via_explicit_import(
+        &self,
+        ref_name: &str,
+        explicit_imports: &HashMap<&str, (&str, &str)>,
+        current_file_path: Option<&Path>,
+        crate_root: &Path,
+        is_qualified: bool,
+    ) -> Result<Option<Symbol>> {
+        let lookup_name = if is_qualified {
+            ref_name
+                .split_once("::")
+                .map_or(ref_name, |(first, _)| first)
+        } else {
+            ref_name
+        };
+
+        let Some((symbol_name, source_module)) = explicit_imports.get(lookup_name) else {
+            return Ok(None);
+        };
+
+        // For qualified refs, build the full qualified name using the imported symbol
+        let search_name = if is_qualified {
+            if let Some((_, rest)) = ref_name.split_once("::") {
+                format!("{symbol_name}::{rest}")
+            } else {
+                (*symbol_name).to_string()
+            }
+        } else {
+            (*symbol_name).to_string()
+        };
+
+        self.resolve_symbol_in_module(
+            &search_name,
+            source_module,
+            current_file_path,
+            crate_root,
+            is_qualified,
+        )
+    }
+
+    /// Resolve a symbol within a specific module (source path).
+    ///
+    /// Translates the module path to a file path, then searches for the symbol.
+    /// Uses qualified name matching for qualified references, simple name for others.
+    fn resolve_symbol_in_module(
+        &self,
+        symbol_name: &str,
+        source_module: &str,
+        current_file_path: Option<&Path>,
+        crate_root: &Path,
+        use_qualified_search: bool,
+    ) -> Result<Option<Symbol>> {
+        let Some(target_file_id) =
+            self.resolve_module_to_file_id(source_module, current_file_path, crate_root)?
+        else {
+            return Ok(None);
+        };
+
+        if use_qualified_search {
+            self.db
+                .search_symbol_by_qualified_name_in_file(symbol_name, target_file_id)
+        } else {
+            self.db.search_symbol_in_file(symbol_name, target_file_id)
+        }
+    }
+
+    /// Translate a module path (e.g., `crate::db`) to a file ID.
+    fn resolve_module_to_file_id(
+        &self,
+        source_module: &str,
+        current_file_path: Option<&Path>,
+        crate_root: &Path,
+    ) -> Result<Option<FileId>> {
+        let Some(current_path) = current_file_path else {
+            trace!(
+                source_module = %source_module,
+                "Cannot resolve module: no current file path"
+            );
+            return Ok(None);
+        };
+
+        let path_segments: Vec<String> = source_module.split("::").map(String::from).collect();
+
+        let Some(resolved_file) = resolve_module_path(&path_segments, current_path, crate_root)
+        else {
+            trace!(
+                source_module = %source_module,
+                "Cannot resolve module: path resolution failed (likely external crate)"
+            );
+            return Ok(None);
+        };
+
+        let relative_path = self.relative_path(&resolved_file);
+        let file_id = self.db.get_file_id(relative_path)?;
+
+        if file_id.is_none() {
+            trace!(
+                source_module = %source_module,
+                resolved_file = %resolved_file.display(),
+                "Cannot resolve module: target file not indexed"
+            );
+        }
+
+        Ok(file_id)
+    }
+
+    /// Fallback symbol search when import-based resolution fails.
+    ///
+    /// For qualified names, searches by exact `qualified_name` match.
+    /// For simple names, searches by name across all files (safe for unambiguous symbols).
+    fn fallback_symbol_search(&self, ref_name: &str, is_qualified: bool) -> Result<Option<Symbol>> {
+        if is_qualified {
+            self.db.get_symbol_by_qualified_name(ref_name)
+        } else {
+            let Some(symbol) = self.db.search_symbol_by_name(ref_name)? else {
+                return Ok(None);
+            };
+            // Verify the symbol's file exists
+            if self.db.get_file_by_id(symbol.file_id)?.is_some() {
+                Ok(Some(symbol))
+            } else {
+                warn!(
+                    ref_name = %ref_name,
+                    symbol_id = %symbol.id,
+                    file_id = %symbol.file_id,
+                    "Symbol found but file record missing - database may be inconsistent"
+                );
+                Ok(None)
+            }
+        }
+    }
+
     /// Discover source files in the workspace.
     fn discover_files(
         &self,
@@ -922,6 +1340,21 @@ impl Tethys {
             .ok_or_else(|| Error::NotFound(format!("file: {}", path.display())))?;
 
         self.db.list_references_in_file(file_id)
+    }
+
+    // === Import Queries ===
+
+    /// List all imports for a file.
+    ///
+    /// Returns the import statements extracted from the file during indexing.
+    /// Each import includes the symbol name, source module, and optional alias.
+    pub fn list_imports_in_file(&self, path: &Path) -> Result<Vec<Import>> {
+        let file_id = self
+            .db
+            .get_file_id(self.relative_path(path))?
+            .ok_or_else(|| Error::NotFound(format!("file: {}", path.display())))?;
+
+        self.db.get_imports_for_file(file_id)
     }
 
     // === Dependency Queries ===
@@ -1153,5 +1586,32 @@ mod tests {
         let result = Tethys::new(Path::new("/nonexistent/path/that/does/not/exist"));
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_qualified_name_with_single_segment_path() {
+        let result = Tethys::build_qualified_name("open", Some(&["Index".to_string()]));
+        assert_eq!(result, "Index::open");
+    }
+
+    #[test]
+    fn build_qualified_name_with_multi_segment_path() {
+        let result = Tethys::build_qualified_name(
+            "open",
+            Some(&["crate".to_string(), "db".to_string(), "Index".to_string()]),
+        );
+        assert_eq!(result, "crate::db::Index::open");
+    }
+
+    #[test]
+    fn build_qualified_name_with_empty_path() {
+        let result = Tethys::build_qualified_name("foo", Some(&[]));
+        assert_eq!(result, "foo");
+    }
+
+    #[test]
+    fn build_qualified_name_with_none_path() {
+        let result = Tethys::build_qualified_name("bar", None);
+        assert_eq!(result, "bar");
     }
 }
