@@ -982,9 +982,15 @@ fn extract_parameters(params_node: &tree_sitter::Node, content: &[u8]) -> Vec<Pa
                 // Handle &self, &mut self, self
                 // Skip if we can't extract the text rather than inserting empty string
                 if let Some(text) = node_text(&child, content) {
+                    let kind = match text.as_str() {
+                        "&mut self" => crate::types::ParameterKind::SelfMutRef,
+                        "&self" => crate::types::ParameterKind::SelfRef,
+                        _ => crate::types::ParameterKind::SelfValue,
+                    };
                     parameters.push(Parameter {
                         name: text,
                         type_annotation: None,
+                        kind,
                     });
                 }
             }
@@ -1007,6 +1013,7 @@ fn extract_parameter(param_node: &tree_sitter::Node, content: &[u8]) -> Option<P
     Some(Parameter {
         name,
         type_annotation,
+        kind: crate::types::ParameterKind::Regular,
     })
 }
 

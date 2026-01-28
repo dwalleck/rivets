@@ -266,6 +266,15 @@ impl ReferenceKind {
     }
 }
 
+/// Raw deserialization helper for [`Span`] that validates invariants on deserialize.
+#[derive(Deserialize)]
+struct SpanRaw {
+    start_line: u32,
+    start_column: u32,
+    end_line: u32,
+    end_column: u32,
+}
+
 /// A start/end position span in a file.
 ///
 /// Positions are 1-indexed (first line is 1, first column is 1) to match
@@ -273,6 +282,7 @@ impl ReferenceKind {
 ///
 /// Use [`Span::new`] to construct a span with validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "SpanRaw")]
 pub struct Span {
     /// Starting line (1-indexed)
     start_line: u32,
@@ -282,6 +292,25 @@ pub struct Span {
     end_line: u32,
     /// Ending column (1-indexed, exclusive)
     end_column: u32,
+}
+
+impl TryFrom<SpanRaw> for Span {
+    type Error = String;
+
+    fn try_from(raw: SpanRaw) -> std::result::Result<Self, Self::Error> {
+        Span::new(
+            raw.start_line,
+            raw.start_column,
+            raw.end_line,
+            raw.end_column,
+        )
+        .ok_or_else(|| {
+            format!(
+                "invalid span: end ({},{}) is before start ({},{})",
+                raw.end_line, raw.end_column, raw.start_line, raw.start_column
+            )
+        })
+    }
 }
 
 impl Span {
@@ -377,6 +406,19 @@ impl FunctionSignature {
     }
 }
 
+/// Distinguishes self parameters from regular parameters at the type level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ParameterKind {
+    /// `self` (owned)
+    SelfValue,
+    /// `&self` (shared reference)
+    SelfRef,
+    /// `&mut self` (mutable reference)
+    SelfMutRef,
+    /// A regular named parameter
+    Regular,
+}
+
 /// A function parameter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Parameter {
@@ -384,19 +426,24 @@ pub struct Parameter {
     pub name: String,
     /// Type annotation (e.g., "i64", "&str", "`Option<User>`")
     pub type_annotation: Option<String>,
+    /// Whether this is a self parameter or a regular parameter.
+    pub kind: ParameterKind,
 }
 
 impl Parameter {
     /// Check if this is a self parameter (&self, &mut self, self).
     #[must_use]
     pub fn is_self(&self) -> bool {
-        self.name == "self" || self.name == "&self" || self.name == "&mut self"
+        matches!(
+            self.kind,
+            ParameterKind::SelfValue | ParameterKind::SelfRef | ParameterKind::SelfMutRef
+        )
     }
 
     /// Check if this is a mutable self parameter.
     #[must_use]
     pub fn is_mut_self(&self) -> bool {
-        self.name == "&mut self"
+        self.kind == ParameterKind::SelfMutRef
     }
 
     /// Check if this is a reference parameter (starts with &).
@@ -768,6 +815,7 @@ mod tests {
             vec![Parameter {
                 name: "&self".to_string(),
                 type_annotation: None,
+                kind: ParameterKind::SelfRef,
             }],
         );
         assert!(sig.is_method());
@@ -786,6 +834,7 @@ mod tests {
             vec![Parameter {
                 name: "other".to_string(),
                 type_annotation: Some("i32".to_string()),
+                kind: ParameterKind::Regular,
             }],
         );
         assert!(!sig.is_method());
@@ -799,14 +848,17 @@ mod tests {
                 Parameter {
                     name: "&self".to_string(),
                     type_annotation: None,
+                    kind: ParameterKind::SelfRef,
                 },
                 Parameter {
                     name: "x".to_string(),
                     type_annotation: Some("i32".to_string()),
+                    kind: ParameterKind::Regular,
                 },
                 Parameter {
                     name: "y".to_string(),
                     type_annotation: Some("i32".to_string()),
+                    kind: ParameterKind::Regular,
                 },
             ],
         );
@@ -820,6 +872,7 @@ mod tests {
             vec![Parameter {
                 name: "x".to_string(),
                 type_annotation: Some("i32".to_string()),
+                kind: ParameterKind::Regular,
             }],
         );
         assert_eq!(sig.param_count(), 1);
@@ -831,17 +884,20 @@ mod tests {
     fn parameter_is_self_for_self_variants() {
         assert!(Parameter {
             name: "self".to_string(),
-            type_annotation: None
+            type_annotation: None,
+            kind: ParameterKind::SelfValue,
         }
         .is_self());
         assert!(Parameter {
             name: "&self".to_string(),
-            type_annotation: None
+            type_annotation: None,
+            kind: ParameterKind::SelfRef,
         }
         .is_self());
         assert!(Parameter {
             name: "&mut self".to_string(),
-            type_annotation: None
+            type_annotation: None,
+            kind: ParameterKind::SelfMutRef,
         }
         .is_self());
     }
@@ -850,12 +906,14 @@ mod tests {
     fn parameter_is_self_false_for_regular_param() {
         assert!(!Parameter {
             name: "other".to_string(),
-            type_annotation: None
+            type_annotation: None,
+            kind: ParameterKind::Regular,
         }
         .is_self());
         assert!(!Parameter {
             name: "self_ref".to_string(),
-            type_annotation: None
+            type_annotation: None,
+            kind: ParameterKind::Regular,
         }
         .is_self());
     }
@@ -864,17 +922,20 @@ mod tests {
     fn parameter_is_mut_self_only_for_mut_self() {
         assert!(Parameter {
             name: "&mut self".to_string(),
-            type_annotation: None
+            type_annotation: None,
+            kind: ParameterKind::SelfMutRef,
         }
         .is_mut_self());
         assert!(!Parameter {
             name: "&self".to_string(),
-            type_annotation: None
+            type_annotation: None,
+            kind: ParameterKind::SelfRef,
         }
         .is_mut_self());
         assert!(!Parameter {
             name: "self".to_string(),
-            type_annotation: None
+            type_annotation: None,
+            kind: ParameterKind::SelfValue,
         }
         .is_mut_self());
     }
@@ -883,17 +944,20 @@ mod tests {
     fn parameter_is_reference_for_reference_types() {
         assert!(Parameter {
             name: "x".to_string(),
-            type_annotation: Some("&str".to_string())
+            type_annotation: Some("&str".to_string()),
+            kind: ParameterKind::Regular,
         }
         .is_reference());
         assert!(Parameter {
             name: "x".to_string(),
-            type_annotation: Some("&mut String".to_string())
+            type_annotation: Some("&mut String".to_string()),
+            kind: ParameterKind::Regular,
         }
         .is_reference());
         assert!(Parameter {
             name: "x".to_string(),
-            type_annotation: Some("&'a T".to_string())
+            type_annotation: Some("&'a T".to_string()),
+            kind: ParameterKind::Regular,
         }
         .is_reference());
     }
@@ -902,12 +966,14 @@ mod tests {
     fn parameter_is_reference_false_for_owned_types() {
         assert!(!Parameter {
             name: "x".to_string(),
-            type_annotation: Some("String".to_string())
+            type_annotation: Some("String".to_string()),
+            kind: ParameterKind::Regular,
         }
         .is_reference());
         assert!(!Parameter {
             name: "x".to_string(),
-            type_annotation: Some("i32".to_string())
+            type_annotation: Some("i32".to_string()),
+            kind: ParameterKind::Regular,
         }
         .is_reference());
     }
@@ -916,7 +982,8 @@ mod tests {
     fn parameter_is_reference_false_for_none_type() {
         assert!(!Parameter {
             name: "x".to_string(),
-            type_annotation: None
+            type_annotation: None,
+            kind: ParameterKind::Regular,
         }
         .is_reference());
     }
@@ -960,6 +1027,29 @@ mod tests {
     fn span_new_invalid_end_column_before_start_same_line() {
         let span = Span::new(10, 20, 10, 5);
         assert!(span.is_none());
+    }
+
+    #[test]
+    fn span_deserialize_rejects_invalid() {
+        let json = r#"{"start_line":10,"start_column":20,"end_line":10,"end_column":5}"#;
+        let result: std::result::Result<Span, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "should reject span where end < start");
+    }
+
+    #[test]
+    fn span_deserialize_accepts_valid() {
+        let json = r#"{"start_line":1,"start_column":1,"end_line":5,"end_column":10}"#;
+        let span: Span = serde_json::from_str(json).expect("valid span should deserialize");
+        assert_eq!(span.start_line(), 1);
+        assert_eq!(span.end_line(), 5);
+    }
+
+    #[test]
+    fn span_roundtrip_serde() {
+        let span = Span::new(3, 5, 10, 20).expect("valid span");
+        let json = serde_json::to_string(&span).expect("serialize");
+        let deserialized: Span = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(span, deserialized);
     }
 
     // === ReferenceKind::parse() tests ===

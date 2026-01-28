@@ -527,3 +527,277 @@ fn single_file_workspace_detect_cycles_returns_error() {
         "detect_cycles should return error (not yet implemented)"
     );
 }
+
+// ============================================================================
+// Symbol-Level Graph Analysis Tests: get_callers
+// ============================================================================
+
+/// Create a workspace with intra-file symbol references for symbol graph testing.
+///
+/// This workspace has symbols that call other symbols within the same file,
+/// which is required for the symbol graph since cross-file reference resolution
+/// is not yet implemented.
+///
+/// Symbol graph:
+/// ```text
+///   process() -> validate() -> Helper::new()
+///                            -> Helper::check()
+/// ```
+fn workspace_with_intra_file_calls() -> (TempDir, Tethys) {
+    let dir = tempfile::tempdir().expect("failed to create temp dir");
+
+    fs::create_dir_all(dir.path().join("src")).expect("failed to create src dir");
+
+    fs::write(
+        dir.path().join("src/lib.rs"),
+        r"
+pub struct Helper;
+
+impl Helper {
+    pub fn new() -> Helper {
+        Helper
+    }
+
+    pub fn check(&self) -> bool {
+        true
+    }
+}
+
+pub fn validate() -> bool {
+    let h = Helper::new();
+    h.check()
+}
+
+pub fn process() -> bool {
+    validate()
+}
+",
+    )
+    .expect("failed to write lib.rs");
+
+    let tethys = Tethys::new(dir.path()).expect("failed to create Tethys");
+    (dir, tethys)
+}
+
+#[test]
+fn get_callers_returns_error_for_nonexistent_symbol() {
+    let (_dir, mut tethys) = workspace_with_call_graph();
+    tethys.index().expect("index failed");
+
+    let result = tethys.get_callers("NonExistent");
+
+    assert!(
+        result.is_err(),
+        "should return error for non-existent symbol"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("not found") || err.contains("Not found") || err.contains("NonExistent"),
+        "error should indicate symbol not found, got: {err}"
+    );
+}
+
+#[test]
+fn get_callers_returns_empty_for_uncalled_symbol() {
+    let (_dir, mut tethys) = workspace_with_intra_file_calls();
+    tethys.index().expect("index failed");
+
+    // process is the top-level function - nothing calls it
+    let callers = tethys
+        .get_callers("process")
+        .expect("get_callers for process should succeed");
+
+    assert!(
+        callers.is_empty(),
+        "process should have no callers, got: {callers:?}"
+    );
+}
+
+#[test]
+fn get_callers_finds_intra_file_callers() {
+    let (_dir, mut tethys) = workspace_with_intra_file_calls();
+    tethys.index().expect("index failed");
+
+    // validate is called by process
+    let callers = tethys
+        .get_callers("validate")
+        .expect("get_callers for validate should succeed");
+
+    assert!(
+        !callers.is_empty(),
+        "validate should have at least one caller (process)"
+    );
+}
+
+#[test]
+fn get_callers_cross_file_refs_not_resolved() {
+    let (_dir, mut tethys) = workspace_with_call_graph();
+    tethys.index().expect("index failed");
+
+    // Connection is referenced from other files via `use crate::db::Connection`,
+    // but cross-file symbol resolution is not yet implemented, so callers should be empty.
+    let callers = tethys
+        .get_callers("Connection")
+        .expect("get_callers for Connection should succeed");
+
+    assert!(
+        callers.is_empty(),
+        "cross-file callers should not be resolved yet, got: {callers:?}"
+    );
+}
+
+// ============================================================================
+// Symbol-Level Graph Analysis Tests: get_symbol_dependencies
+// ============================================================================
+
+#[test]
+fn get_symbol_dependencies_returns_error_for_nonexistent_symbol() {
+    let (_dir, mut tethys) = workspace_with_call_graph();
+    tethys.index().expect("index failed");
+
+    let result = tethys.get_symbol_dependencies("DoesNotExist");
+
+    assert!(
+        result.is_err(),
+        "should return error for non-existent symbol"
+    );
+}
+
+#[test]
+fn get_symbol_dependencies_returns_empty_for_leaf_symbol() {
+    let (_dir, mut tethys) = workspace_with_intra_file_calls();
+    tethys.index().expect("index failed");
+
+    // Helper is a leaf struct with no outgoing calls
+    let deps = tethys
+        .get_symbol_dependencies("Helper")
+        .expect("get_symbol_dependencies for Helper should succeed");
+
+    assert!(
+        deps.is_empty(),
+        "Helper (leaf struct) should have no dependencies, got: {deps:?}"
+    );
+}
+
+#[test]
+fn get_symbol_dependencies_finds_callees() {
+    let (_dir, mut tethys) = workspace_with_intra_file_calls();
+    tethys.index().expect("index failed");
+
+    // validate calls Helper::new and Helper::check
+    let deps = tethys
+        .get_symbol_dependencies("validate")
+        .expect("get_symbol_dependencies for validate should succeed");
+
+    assert!(!deps.is_empty(), "validate should have dependencies");
+}
+
+#[test]
+fn get_symbol_dependencies_cross_file_not_resolved() {
+    let (_dir, mut tethys) = workspace_with_call_graph();
+    tethys.index().expect("index failed");
+
+    // main references User and Cache from other files, but cross-file
+    // resolution is not implemented, so dependencies should be empty.
+    let deps = tethys
+        .get_symbol_dependencies("main")
+        .expect("get_symbol_dependencies for main should succeed");
+
+    assert!(
+        deps.is_empty(),
+        "cross-file dependencies should not be resolved yet, got: {deps:?}"
+    );
+}
+
+// ============================================================================
+// Symbol-Level Graph Analysis Tests: get_symbol_impact
+// ============================================================================
+
+#[test]
+fn get_symbol_impact_returns_error_for_nonexistent_symbol() {
+    let (_dir, mut tethys) = workspace_with_call_graph();
+    tethys.index().expect("index failed");
+
+    let result = tethys.get_symbol_impact("NoSuchSymbol");
+
+    assert!(
+        result.is_err(),
+        "should return error for non-existent symbol"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("not found") || err.contains("Not found") || err.contains("NoSuchSymbol"),
+        "error should indicate symbol not found, got: {err}"
+    );
+}
+
+#[test]
+fn get_symbol_impact_returns_empty_for_uncalled_symbol() {
+    let (_dir, mut tethys) = workspace_with_intra_file_calls();
+    tethys.index().expect("index failed");
+
+    // process is never called by other symbols
+    let impact = tethys
+        .get_symbol_impact("process")
+        .expect("get_symbol_impact for process should succeed");
+
+    assert!(
+        impact.direct_dependents.is_empty(),
+        "process should have no direct dependents, got: {:?}",
+        impact.direct_dependents
+    );
+    assert!(
+        impact.transitive_dependents.is_empty(),
+        "process should have no transitive dependents, got: {:?}",
+        impact.transitive_dependents
+    );
+}
+
+#[test]
+fn get_symbol_impact_finds_direct_dependents() {
+    let (_dir, mut tethys) = workspace_with_intra_file_calls();
+    tethys.index().expect("index failed");
+
+    // validate is called by process directly
+    let impact = tethys
+        .get_symbol_impact("validate")
+        .expect("get_symbol_impact for validate should succeed");
+
+    assert!(
+        !impact.direct_dependents.is_empty(),
+        "validate should have direct dependents (process)"
+    );
+}
+
+#[test]
+fn get_symbol_impact_target_points_to_correct_file() {
+    let (_dir, mut tethys) = workspace_with_intra_file_calls();
+    tethys.index().expect("index failed");
+
+    let impact = tethys
+        .get_symbol_impact("validate")
+        .expect("get_symbol_impact for validate should succeed");
+
+    assert!(
+        impact.target.to_string_lossy().contains("lib.rs"),
+        "validate impact target should be lib.rs, got: {:?}",
+        impact.target
+    );
+}
+
+#[test]
+fn get_symbol_impact_cross_file_returns_empty() {
+    let (_dir, mut tethys) = workspace_with_call_graph();
+    tethys.index().expect("index failed");
+
+    // Connection's callers are all cross-file, so impact should be empty
+    let impact = tethys
+        .get_symbol_impact("Connection")
+        .expect("get_symbol_impact for Connection should succeed");
+
+    assert!(
+        impact.direct_dependents.is_empty(),
+        "cross-file dependents should not be resolved yet, got: {:?}",
+        impact.direct_dependents
+    );
+}

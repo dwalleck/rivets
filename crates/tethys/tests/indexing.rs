@@ -54,10 +54,7 @@ fn main() {
     let stats = tethys.index().expect("index failed");
 
     assert_eq!(stats.files_indexed, 1);
-    assert!(
-        stats.symbols_found >= 1,
-        "should find at least the main function"
-    );
+    assert_eq!(stats.symbols_found, 1, "should find the main function");
 }
 
 #[test]
@@ -90,9 +87,9 @@ pub fn create_user(name: &str, age: u32) -> User {
 
     assert_eq!(stats.files_indexed, 1);
     // Should find: User (struct), new (method), greet (method), create_user (function)
-    assert!(
-        stats.symbols_found >= 4,
-        "expected at least 4 symbols, found {}",
+    assert_eq!(
+        stats.symbols_found, 4,
+        "expected 4 symbols (User, new, greet, create_user), found {}",
         stats.symbols_found
     );
 }
@@ -127,11 +124,11 @@ pub fn logout() {
     let stats = tethys.index().expect("index failed");
 
     assert_eq!(stats.files_indexed, 2);
-    // main.rs: main function
+    // main.rs: main function + mod declaration
     // auth.rs: authenticate, logout functions
-    assert!(
-        stats.symbols_found >= 3,
-        "expected at least 3 symbols, found {}",
+    assert_eq!(
+        stats.symbols_found, 4,
+        "expected 4 symbols (main, auth mod, authenticate, logout), found {}",
         stats.symbols_found
     );
 }
@@ -236,7 +233,11 @@ pub fn validate_token() {}
     let results = tethys.search_symbols("auth").expect("search failed");
 
     // Should find authenticate_user and authorize_request
-    assert!(results.len() >= 2);
+    assert_eq!(
+        results.len(),
+        2,
+        "should find authenticate_user and authorize_request"
+    );
 
     let names: Vec<&str> = results.iter().map(|s| s.name.as_str()).collect();
     assert!(names.iter().any(|n| n.contains("auth")));
@@ -763,9 +764,10 @@ pub fn another_helper_use() -> Helper {
     // - Helper::assist() call
     // - Helper return type
     // - Helper constructor
-    assert!(
-        refs.len() >= 2,
-        "should have multiple references to Helper, got: {refs:?}"
+    assert_eq!(
+        refs.len(),
+        2,
+        "should have 2 references to Helper, got: {refs:?}"
     );
 }
 
@@ -1134,9 +1136,9 @@ pub fn b() -> Foo { Foo }
     // The reference count should be consistent and non-zero.
     // Currently tracks: type references (Foo in return type) and constructors (Foo in body).
     // The exact count may vary based on extraction implementation.
-    assert!(
-        stats.references_found >= 2,
-        "should find at least 2 references (one per function body), got: {}",
+    assert_eq!(
+        stats.references_found, 2,
+        "should find 2 references (one Foo constructor per function body), got: {}",
         stats.references_found
     );
 
@@ -1290,9 +1292,9 @@ pub enum MyEnum { A, B }
         .copied()
         .unwrap_or(0);
 
-    assert!(fn_count >= 1, "should have at least 1 function");
-    assert!(struct_count >= 1, "should have at least 1 struct");
-    assert!(enum_count >= 1, "should have at least 1 enum");
+    assert_eq!(fn_count, 1, "should have exactly 1 function");
+    assert_eq!(struct_count, 1, "should have exactly 1 struct");
+    assert_eq!(enum_count, 1, "should have exactly 1 enum");
 }
 
 #[test]
@@ -1313,9 +1315,9 @@ pub fn get_config() -> Config {
     let stats = tethys.get_stats().expect("get_stats failed");
 
     // Should have references: Config in return type, Config constructor
-    assert!(
-        stats.reference_count >= 1,
-        "should have at least 1 reference"
+    assert_eq!(
+        stats.reference_count, 1,
+        "should have exactly 1 reference (Config constructor)"
     );
 }
 
@@ -1363,6 +1365,97 @@ pub trait T {}
     );
 }
 
+// ============================================================================
+// Transaction Atomicity Tests
+// ============================================================================
+
+#[test]
+fn reindex_preserves_data_when_file_becomes_unreadable() {
+    // Test that a successful index followed by a failed re-index doesn't corrupt
+    // existing data. The index_file_atomic method uses a SQLite transaction, so
+    // if re-indexing fails, the original file and symbols should remain intact.
+    let (dir, mut tethys) = workspace_with_files(&[(
+        "src/lib.rs",
+        r"
+pub fn original_function() -> i32 {
+    42
+}
+
+pub struct OriginalStruct {
+    pub value: String,
+}
+",
+    )]);
+
+    // First index should succeed
+    let stats = tethys.index().expect("first index should succeed");
+    assert_eq!(stats.files_indexed, 1, "should index 1 file");
+    assert!(
+        stats.symbols_found >= 2,
+        "should find at least 2 symbols (function + struct)"
+    );
+
+    // Verify symbols are queryable
+    let symbols_before = tethys
+        .list_symbols(&dir.path().join("src/lib.rs"))
+        .expect("list_symbols should work after first index");
+    let names_before: Vec<&str> = symbols_before.iter().map(|s| s.name.as_str()).collect();
+    assert!(
+        names_before.contains(&"original_function"),
+        "should find original_function before re-index"
+    );
+    assert!(
+        names_before.contains(&"OriginalStruct"),
+        "should find OriginalStruct before re-index"
+    );
+
+    // Now corrupt the file with invalid UTF-8 so re-indexing fails
+    fs::write(
+        dir.path().join("src/lib.rs"),
+        [0xFF, 0xFE, 0x00, 0x01, 0x80, 0x81],
+    )
+    .expect("failed to write corrupt file");
+
+    // Re-index should complete (errors are collected, not propagated)
+    let stats2 = tethys
+        .index()
+        .expect("re-index should complete despite errors");
+    assert!(
+        !stats2.errors.is_empty(),
+        "re-index should report errors for corrupt file"
+    );
+
+    // The original symbols should still be queryable because the failed re-index
+    // should not have modified the database (transaction rollback).
+    // Note: index_file_atomic is only reached if UTF-8 parsing succeeds, so
+    // the file entry from the first index remains untouched.
+    let file = tethys
+        .get_file(&dir.path().join("src/lib.rs"))
+        .expect("get_file should not error");
+    assert!(
+        file.is_some(),
+        "file entry should still exist after failed re-index"
+    );
+
+    let symbols_after = tethys
+        .list_symbols(&dir.path().join("src/lib.rs"))
+        .expect("list_symbols should work after failed re-index");
+    let names_after: Vec<&str> = symbols_after.iter().map(|s| s.name.as_str()).collect();
+    assert!(
+        names_after.contains(&"original_function"),
+        "original_function should survive failed re-index, got: {names_after:?}"
+    );
+    assert!(
+        names_after.contains(&"OriginalStruct"),
+        "OriginalStruct should survive failed re-index, got: {names_after:?}"
+    );
+    assert_eq!(
+        symbols_before.len(),
+        symbols_after.len(),
+        "symbol count should be unchanged after failed re-index"
+    );
+}
+
 // C# Indexing Tests
 
 #[test]
@@ -1383,10 +1476,10 @@ public class Program {
     let stats = tethys.index().expect("index failed");
 
     assert_eq!(stats.files_indexed, 1);
-    // Should find: Program (class), Main (function - static method)
-    assert!(
-        stats.symbols_found >= 2,
-        "should find at least 2 symbols (class + method), found {}",
+    // Should find: Program (class), Main (method)
+    assert_eq!(
+        stats.symbols_found, 2,
+        "should find 2 symbols (Program class + Main method), found {}",
         stats.symbols_found
     );
     assert!(stats.errors.is_empty(), "should have no indexing errors");
@@ -1472,9 +1565,10 @@ public class UserService {
         .expect("list_symbols failed");
 
     // Should find: UserService (class), Save (method), Delete (method)
-    assert!(
-        symbols.len() >= 3,
-        "should find at least 3 symbols, found {}",
+    assert_eq!(
+        symbols.len(),
+        3,
+        "should find 3 symbols (UserService, Save, Delete), found {}",
         symbols.len()
     );
 

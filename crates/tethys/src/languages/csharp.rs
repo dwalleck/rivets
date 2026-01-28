@@ -978,6 +978,7 @@ fn extract_parameter(param_node: &tree_sitter::Node, content: &[u8]) -> Option<P
     Some(Parameter {
         name,
         type_annotation,
+        kind: crate::types::ParameterKind::Regular,
     })
 }
 

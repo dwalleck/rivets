@@ -43,8 +43,8 @@ mod types;
 pub use error::{Error, IndexError, IndexErrorKind, Result};
 pub use types::{
     Cycle, DatabaseStats, Dependent, FileAnalysis, FileId, FunctionSignature, Impact, IndexStats,
-    IndexUpdate, IndexedFile, Language, Parameter, Reference, ReferenceKind, Span, Symbol,
-    SymbolId, SymbolKind, Visibility,
+    IndexUpdate, IndexedFile, Language, Parameter, ParameterKind, Reference, ReferenceKind, Span,
+    Symbol, SymbolId, SymbolKind, Visibility,
 };
 
 use std::collections::HashMap;
