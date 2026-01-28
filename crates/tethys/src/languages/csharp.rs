@@ -72,7 +72,6 @@ mod node_kinds {
 }
 
 /// C# language support implementation.
-#[allow(dead_code)] // Used via trait object in get_language_support()
 pub struct CSharpLanguage;
 
 impl LanguageSupport for CSharpLanguage {
@@ -261,7 +260,14 @@ fn extract_invocation_reference(
     match function.kind() {
         IDENTIFIER => {
             // Simple call: `Foo()`
-            let name = node_text(&function, content)?;
+            let Some(name) = node_text(&function, content) else {
+                tracing::trace!(
+                    kind = function.kind(),
+                    line = function.start_position().row + 1,
+                    "Failed to extract identifier text from invocation expression, skipping"
+                );
+                return None;
+            };
             Some(ExtractedReference {
                 name,
                 kind: ExtractedReferenceKind::Call,
@@ -296,7 +302,14 @@ fn extract_object_creation(node: &tree_sitter::Node, content: &[u8]) -> Option<E
     for child in node.children(&mut cursor) {
         match child.kind() {
             IDENTIFIER => {
-                let name = node_text(&child, content)?;
+                let Some(name) = node_text(&child, content) else {
+                    tracing::trace!(
+                        kind = child.kind(),
+                        line = child.start_position().row + 1,
+                        "Failed to extract identifier from object creation, skipping"
+                    );
+                    continue;
+                };
                 return Some(ExtractedReference {
                     name,
                     kind: ExtractedReferenceKind::Constructor,
@@ -320,21 +333,34 @@ fn extract_object_creation(node: &tree_sitter::Node, content: &[u8]) -> Option<E
             GENERIC_NAME => {
                 // Generic type like `List<string>`
                 if let Some(name_node) = child.child_by_field_name("name") {
-                    let name = node_text(&name_node, content)?;
-                    return Some(ExtractedReference {
-                        name,
-                        kind: ExtractedReferenceKind::Constructor,
-                        line: child.start_position().row as u32 + 1,
-                        column: child.start_position().column as u32 + 1,
-                        path: None,
-                        containing_symbol_span: None,
-                    });
+                    if let Some(name) = node_text(&name_node, content) {
+                        return Some(ExtractedReference {
+                            name,
+                            kind: ExtractedReferenceKind::Constructor,
+                            line: child.start_position().row as u32 + 1,
+                            column: child.start_position().column as u32 + 1,
+                            path: None,
+                            containing_symbol_span: None,
+                        });
+                    }
+                    tracing::trace!(
+                        kind = name_node.kind(),
+                        line = name_node.start_position().row + 1,
+                        "Failed to extract generic type name from object creation, trying fallback"
+                    );
                 }
                 // Fallback: get the identifier child
                 let mut inner_cursor = child.walk();
                 for inner_child in child.children(&mut inner_cursor) {
                     if inner_child.kind() == IDENTIFIER {
-                        let name = node_text(&inner_child, content)?;
+                        let Some(name) = node_text(&inner_child, content) else {
+                            tracing::trace!(
+                                kind = inner_child.kind(),
+                                line = inner_child.start_position().row + 1,
+                                "Failed to extract identifier from generic type fallback, skipping"
+                            );
+                            continue;
+                        };
                         return Some(ExtractedReference {
                             name,
                             kind: ExtractedReferenceKind::Constructor,
@@ -500,6 +526,13 @@ fn parse_using_directive(node: &tree_sitter::Node, content: &[u8]) -> Option<Usi
                     }
                 }
             }
+        }
+        if found_alias.is_none() {
+            tracing::debug!(
+                line = line,
+                directive_text = %full_text,
+                "Failed to extract alias from using directive with '=' character"
+            );
         }
         found_alias
     } else {
@@ -682,7 +715,15 @@ fn extract_type_declaration(
     kind: SymbolKind,
 ) -> Option<ExtractedSymbol> {
     let name_node = node.child_by_field_name("name")?;
-    let name = node_text(&name_node, content)?;
+    let Some(name) = node_text(&name_node, content) else {
+        tracing::trace!(
+            kind = ?kind,
+            node_kind = node.kind(),
+            line = node.start_position().row + 1,
+            "Failed to extract type declaration name, skipping"
+        );
+        return None;
+    };
     let visibility = extract_visibility(node, content);
 
     Some(ExtractedSymbol {
@@ -702,7 +743,14 @@ fn extract_type_declaration(
 fn extract_namespace(node: &tree_sitter::Node, content: &[u8]) -> Option<ExtractedSymbol> {
     // The name can be an identifier or a qualified_name
     let name_node = node.child_by_field_name("name")?;
-    let name = node_text(&name_node, content)?;
+    let Some(name) = node_text(&name_node, content) else {
+        tracing::trace!(
+            kind = node.kind(),
+            line = node.start_position().row + 1,
+            "Failed to extract namespace name, skipping"
+        );
+        return None;
+    };
 
     Some(ExtractedSymbol {
         name,
@@ -724,7 +772,14 @@ fn extract_method(
     parent_name: Option<&str>,
 ) -> Option<ExtractedSymbol> {
     let name_node = node.child_by_field_name("name")?;
-    let name = node_text(&name_node, content)?;
+    let Some(name) = node_text(&name_node, content) else {
+        tracing::trace!(
+            kind = node.kind(),
+            line = node.start_position().row + 1,
+            "Failed to extract method name, skipping"
+        );
+        return None;
+    };
 
     let visibility = extract_visibility(node, content);
     let signature = extract_method_signature(node, content);
@@ -750,7 +805,14 @@ fn extract_constructor(
     parent_name: Option<&str>,
 ) -> Option<ExtractedSymbol> {
     let name_node = node.child_by_field_name("name")?;
-    let name = node_text(&name_node, content)?;
+    let Some(name) = node_text(&name_node, content) else {
+        tracing::trace!(
+            kind = node.kind(),
+            line = node.start_position().row + 1,
+            "Failed to extract constructor name, skipping"
+        );
+        return None;
+    };
 
     let visibility = extract_visibility(node, content);
     let signature = extract_constructor_signature(node, content);

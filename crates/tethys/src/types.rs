@@ -1057,4 +1057,66 @@ mod tests {
         let kind = ReferenceKind::Unknown("anything".to_string());
         assert_eq!(kind.as_str(), "unknown");
     }
+
+    // === Roundtrip tests for enum serialization/parsing ===
+
+    #[test]
+    fn symbol_kind_roundtrip() {
+        let variants = [
+            SymbolKind::Function,
+            SymbolKind::Method,
+            SymbolKind::Struct,
+            SymbolKind::Class,
+            SymbolKind::Enum,
+            SymbolKind::Trait,
+            SymbolKind::Interface,
+            SymbolKind::Const,
+            SymbolKind::Static,
+            SymbolKind::Module,
+            SymbolKind::TypeAlias,
+            SymbolKind::Macro,
+        ];
+        for kind in variants {
+            let db_str = kind.as_str();
+            let parsed = crate::db::parse_symbol_kind(db_str);
+            assert_eq!(
+                parsed.expect("parse should succeed"),
+                kind,
+                "roundtrip failed for {kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn visibility_roundtrip() {
+        let variants = [
+            Visibility::Public,
+            Visibility::Crate,
+            Visibility::Module,
+            Visibility::Private,
+        ];
+        for vis in variants {
+            let db_str = vis.as_str();
+            let parsed = crate::db::parse_visibility(db_str);
+            assert_eq!(
+                parsed.expect("parse should succeed"),
+                vis,
+                "roundtrip failed for {vis:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn language_roundtrip() {
+        let variants = [Language::Rust, Language::CSharp];
+        for lang in variants {
+            let db_str = lang.as_str();
+            let parsed = crate::db::parse_language(db_str);
+            assert_eq!(
+                parsed.expect("parse should succeed"),
+                lang,
+                "roundtrip failed for {lang:?}"
+            );
+        }
+    }
 }

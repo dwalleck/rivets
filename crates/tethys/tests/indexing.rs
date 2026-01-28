@@ -1362,3 +1362,138 @@ pub trait T {}
         "symbol_count should equal sum of symbols_by_kind + skipped"
     );
 }
+
+// C# Indexing Tests
+
+#[test]
+fn index_single_csharp_file_extracts_class() {
+    let (_dir, mut tethys) = workspace_with_files(&[(
+        "src/Program.cs",
+        r#"
+using System;
+
+public class Program {
+    public static void Main() {
+        Console.WriteLine("Hello");
+    }
+}
+"#,
+    )]);
+
+    let stats = tethys.index().expect("index failed");
+
+    assert_eq!(stats.files_indexed, 1);
+    // Should find: Program (class), Main (function - static method)
+    assert!(
+        stats.symbols_found >= 2,
+        "should find at least 2 symbols (class + method), found {}",
+        stats.symbols_found
+    );
+    assert!(stats.errors.is_empty(), "should have no indexing errors");
+}
+
+#[test]
+fn get_stats_counts_csharp_files_by_language() {
+    let (_dir, mut tethys) = workspace_with_files(&[
+        ("src/lib.rs", "pub fn hello() {}"),
+        ("src/utils.rs", "pub fn util() {}"),
+        (
+            "src/Program.cs",
+            r#"
+using System;
+
+public class Program {
+    public static void Main() {
+        Console.WriteLine("Hello");
+    }
+}
+"#,
+        ),
+        (
+            "src/Helper.cs",
+            r"
+public class Helper {
+    public void Assist() { }
+}
+",
+        ),
+    ]);
+
+    tethys.index().expect("index failed");
+
+    let stats = tethys.get_stats().expect("get_stats failed");
+
+    let rust_count = stats
+        .files_by_language
+        .get(&tethys::Language::Rust)
+        .copied()
+        .unwrap_or(0);
+    let csharp_count = stats
+        .files_by_language
+        .get(&tethys::Language::CSharp)
+        .copied()
+        .unwrap_or(0);
+
+    assert_eq!(rust_count, 2, "should have 2 Rust files");
+    assert_eq!(csharp_count, 2, "should have 2 C# files");
+    assert_eq!(stats.file_count, 4, "should have 4 total files");
+
+    // Verify invariant: file_count == sum(files_by_language) + skipped
+    let language_sum: usize = stats.files_by_language.values().sum();
+    assert_eq!(
+        stats.file_count,
+        language_sum + stats.skipped_unknown_languages,
+        "file_count should equal sum of files_by_language + skipped"
+    );
+}
+
+#[test]
+fn list_symbols_returns_csharp_symbols() {
+    let (dir, mut tethys) = workspace_with_files(&[(
+        "src/UserService.cs",
+        r"
+using System;
+
+public class UserService {
+    public void Save(string name) {
+        Console.WriteLine(name);
+    }
+
+    public void Delete(int id) {
+    }
+}
+",
+    )]);
+
+    tethys.index().expect("index failed");
+
+    let symbols = tethys
+        .list_symbols(&dir.path().join("src/UserService.cs"))
+        .expect("list_symbols failed");
+
+    // Should find: UserService (class), Save (method), Delete (method)
+    assert!(
+        symbols.len() >= 3,
+        "should find at least 3 symbols, found {}",
+        symbols.len()
+    );
+
+    let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+    assert!(
+        names.contains(&"UserService"),
+        "should find UserService class"
+    );
+    assert!(names.contains(&"Save"), "should find Save method");
+    assert!(names.contains(&"Delete"), "should find Delete method");
+
+    // Verify methods have correct parent
+    let save_sym = symbols
+        .iter()
+        .find(|s| s.name == "Save")
+        .expect("should find Save symbol");
+    assert_eq!(
+        save_sym.kind,
+        tethys::SymbolKind::Method,
+        "Save should be a Method"
+    );
+}

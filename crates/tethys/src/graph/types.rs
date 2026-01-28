@@ -163,3 +163,181 @@ impl FilePath {
         self.files
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{Language, SymbolKind, Visibility};
+    use std::path::PathBuf;
+
+    /// Create a test symbol with minimal required fields.
+    fn make_test_symbol(id: i64, name: &str) -> Symbol {
+        Symbol {
+            id,
+            file_id: 1,
+            name: name.to_string(),
+            module_path: "test".to_string(),
+            qualified_name: name.to_string(),
+            kind: SymbolKind::Function,
+            line: 1,
+            column: 1,
+            span: None,
+            signature: None,
+            signature_details: None,
+            visibility: Visibility::Public,
+            parent_symbol_id: None,
+        }
+    }
+
+    /// Create a test indexed file with minimal required fields.
+    fn make_test_file(id: i64, path: &str) -> IndexedFile {
+        IndexedFile {
+            id,
+            path: PathBuf::from(path),
+            language: Language::Rust,
+            mtime_ns: 0,
+            size_bytes: 0,
+            content_hash: None,
+            indexed_at: 0,
+        }
+    }
+
+    // === CallPath invariant tests ===
+
+    #[test]
+    fn call_path_new_returns_none_for_empty_symbols() {
+        let result = CallPath::new(vec![], vec![]);
+        assert!(
+            result.is_none(),
+            "CallPath::new should return None for empty symbols"
+        );
+    }
+
+    #[test]
+    fn call_path_new_returns_none_for_mismatched_edge_count() {
+        let sym1 = make_test_symbol(1, "foo");
+        let sym2 = make_test_symbol(2, "bar");
+
+        // Two symbols should have exactly one edge (edges.len() == symbols.len() - 1)
+        // Provide zero edges - should fail
+        let result = CallPath::new(vec![sym1.clone(), sym2.clone()], vec![]);
+        assert!(
+            result.is_none(),
+            "CallPath::new should return None when edges.len() != symbols.len() - 1"
+        );
+
+        // Provide two edges for two symbols - should fail
+        let result = CallPath::new(
+            vec![sym1.clone(), sym2.clone()],
+            vec![ReferenceKind::Call, ReferenceKind::Call],
+        );
+        assert!(
+            result.is_none(),
+            "CallPath::new should return None when edges.len() > symbols.len() - 1"
+        );
+    }
+
+    #[test]
+    fn call_path_new_accepts_valid_inputs() {
+        // Single symbol, zero edges
+        let sym1 = make_test_symbol(1, "foo");
+        let result = CallPath::new(vec![sym1.clone()], vec![]);
+        assert!(
+            result.is_some(),
+            "CallPath::new should accept single symbol with no edges"
+        );
+        let path = result.expect("should be valid");
+        assert_eq!(path.symbols().len(), 1);
+        assert_eq!(path.edges().len(), 0);
+
+        // Two symbols, one edge
+        let sym2 = make_test_symbol(2, "bar");
+        let result = CallPath::new(vec![sym1.clone(), sym2.clone()], vec![ReferenceKind::Call]);
+        assert!(
+            result.is_some(),
+            "CallPath::new should accept two symbols with one edge"
+        );
+        let path = result.expect("should be valid");
+        assert_eq!(path.symbols().len(), 2);
+        assert_eq!(path.edges().len(), 1);
+        assert_eq!(path.edges()[0], ReferenceKind::Call);
+
+        // Three symbols, two edges
+        let sym3 = make_test_symbol(3, "baz");
+        let result = CallPath::new(
+            vec![sym1, sym2, sym3],
+            vec![ReferenceKind::Call, ReferenceKind::Type],
+        );
+        assert!(
+            result.is_some(),
+            "CallPath::new should accept three symbols with two edges"
+        );
+        let path = result.expect("should be valid");
+        assert_eq!(path.symbols().len(), 3);
+        assert_eq!(path.edges().len(), 2);
+    }
+
+    #[test]
+    fn call_path_single_creates_trivial_path() {
+        let sym = make_test_symbol(1, "foo");
+        let path = CallPath::single(sym.clone());
+
+        assert_eq!(path.symbols().len(), 1);
+        assert_eq!(path.symbols()[0].name, "foo");
+        assert!(path.edges().is_empty());
+    }
+
+    // === FilePath invariant tests ===
+
+    #[test]
+    fn file_path_new_returns_none_for_empty_files() {
+        let result = FilePath::new(vec![]);
+        assert!(
+            result.is_none(),
+            "FilePath::new should return None for empty files"
+        );
+    }
+
+    #[test]
+    fn file_path_new_accepts_valid_inputs() {
+        // Single file
+        let file1 = make_test_file(1, "src/main.rs");
+        let result = FilePath::new(vec![file1.clone()]);
+        assert!(result.is_some(), "FilePath::new should accept single file");
+        let path = result.expect("should be valid");
+        assert_eq!(path.files().len(), 1);
+        assert_eq!(path.files()[0].path, PathBuf::from("src/main.rs"));
+
+        // Multiple files
+        let file2 = make_test_file(2, "src/lib.rs");
+        let file3 = make_test_file(3, "src/util.rs");
+        let result = FilePath::new(vec![file1, file2, file3]);
+        assert!(
+            result.is_some(),
+            "FilePath::new should accept multiple files"
+        );
+        let path = result.expect("should be valid");
+        assert_eq!(path.files().len(), 3);
+    }
+
+    #[test]
+    fn file_path_single_creates_trivial_path() {
+        let file = make_test_file(1, "src/main.rs");
+        let path = FilePath::single(file);
+
+        assert_eq!(path.files().len(), 1);
+        assert_eq!(path.files()[0].path, PathBuf::from("src/main.rs"));
+    }
+
+    #[test]
+    fn file_path_into_files_returns_owned_files() {
+        let first_file = make_test_file(1, "src/main.rs");
+        let second_file = make_test_file(2, "src/lib.rs");
+        let path = FilePath::new(vec![first_file, second_file]).expect("should be valid");
+
+        let files = path.into_files();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].path, PathBuf::from("src/main.rs"));
+        assert_eq!(files[1].path, PathBuf::from("src/lib.rs"));
+    }
+}

@@ -68,7 +68,6 @@ mod node_kinds {
 }
 
 /// Rust language support implementation.
-#[allow(dead_code)] // Used via trait object in get_language_support()
 pub struct RustLanguage;
 
 impl LanguageSupport for RustLanguage {
@@ -277,7 +276,14 @@ fn extract_call_reference(
     match function.kind() {
         IDENTIFIER => {
             // Simple call: `foo()`
-            let name = node_text(&function, content)?;
+            let Some(name) = node_text(&function, content) else {
+                tracing::trace!(
+                    kind = function.kind(),
+                    line = function.start_position().row + 1,
+                    "Failed to extract identifier text from call expression, skipping"
+                );
+                return None;
+            };
             Some(ExtractedReference {
                 name,
                 kind: ExtractedReferenceKind::Call,
@@ -302,7 +308,14 @@ fn extract_call_reference(
         FIELD_EXPRESSION => {
             // Method call: `user.greet()` - the method name is the "field"
             let field = function.child_by_field_name("field")?;
-            let name = node_text(&field, content)?;
+            let Some(name) = node_text(&field, content) else {
+                tracing::trace!(
+                    kind = field.kind(),
+                    line = field.start_position().row + 1,
+                    "Failed to extract field text from method call, skipping"
+                );
+                return None;
+            };
             Some(ExtractedReference {
                 name,
                 kind: ExtractedReferenceKind::Call,
@@ -329,7 +342,14 @@ fn extract_struct_constructor(
 
     match name_node.kind() {
         TYPE_IDENTIFIER => {
-            let name = node_text(&name_node, content)?;
+            let Some(name) = node_text(&name_node, content) else {
+                tracing::trace!(
+                    kind = name_node.kind(),
+                    line = name_node.start_position().row + 1,
+                    "Failed to extract type identifier text from struct constructor, skipping"
+                );
+                return None;
+            };
             Some(ExtractedReference {
                 name,
                 kind: ExtractedReferenceKind::Constructor,
@@ -749,7 +769,14 @@ fn extract_function(
     parent_name: Option<&str>,
 ) -> Option<ExtractedSymbol> {
     let name_node = node.child_by_field_name("name")?;
-    let name = node_text(&name_node, content)?;
+    let Some(name) = node_text(&name_node, content) else {
+        tracing::trace!(
+            kind = node.kind(),
+            line = node.start_position().row + 1,
+            "Failed to extract function name, skipping"
+        );
+        return None;
+    };
 
     let visibility = extract_visibility(node, content);
     let signature = extract_function_signature(node, content);
@@ -777,7 +804,15 @@ fn extract_simple_definition(
     kind: SymbolKind,
 ) -> Option<ExtractedSymbol> {
     let name_node = node.child_by_field_name("name")?;
-    let name = node_text(&name_node, content)?;
+    let Some(name) = node_text(&name_node, content) else {
+        tracing::trace!(
+            kind = ?kind,
+            node_kind = node.kind(),
+            line = node.start_position().row + 1,
+            "Failed to extract name from simple definition, skipping"
+        );
+        return None;
+    };
     let visibility = extract_visibility(node, content);
 
     Some(ExtractedSymbol {
@@ -795,7 +830,14 @@ fn extract_simple_definition(
 
 fn extract_macro(node: &tree_sitter::Node, content: &[u8]) -> Option<ExtractedSymbol> {
     let name_node = node.child_by_field_name("name")?;
-    let name = node_text(&name_node, content)?;
+    let Some(name) = node_text(&name_node, content) else {
+        tracing::trace!(
+            kind = node.kind(),
+            line = node.start_position().row + 1,
+            "Failed to extract macro name, skipping"
+        );
+        return None;
+    };
 
     Some(ExtractedSymbol {
         name,

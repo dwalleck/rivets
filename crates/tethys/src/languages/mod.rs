@@ -28,7 +28,6 @@ use crate::types::Language;
 ///
 /// Returns `None` for languages that are declared but not yet implemented.
 #[must_use]
-#[allow(dead_code)] // Public API, will be used when language-agnostic indexing is implemented
 #[allow(clippy::unnecessary_wraps)] // Option return is intentional for future language stubs
 pub fn get_language_support(lang: Language) -> Option<&'static dyn LanguageSupport> {
     match lang {
@@ -41,7 +40,7 @@ pub fn get_language_support(lang: Language) -> Option<&'static dyn LanguageSuppo
 ///
 /// Each supported language implements this trait to define how symbols,
 /// imports, and references are extracted from tree-sitter syntax trees.
-#[allow(dead_code)] // Public API trait, implementations forthcoming
+#[allow(dead_code)] // Some trait methods (extensions, lsp_command, resolve_import) not yet used
 pub trait LanguageSupport: Send + Sync {
     /// File extensions this language handles.
     fn extensions(&self) -> &[&str];

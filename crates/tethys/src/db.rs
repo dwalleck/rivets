@@ -1,8 +1,8 @@
 //! `SQLite` storage layer for Tethys.
 //!
 //! This module manages the `SQLite` database that stores indexed symbols and references.
-//! `SQLite` is the source of truth; petgraph is used for graph algorithms with subgraphs
-//! loaded on-demand.
+//! `SQLite` is the source of truth for all persistent data. See `graph::sql` for
+//! graph traversal queries built on top of this storage layer.
 
 // SQLite uses i64 for all integer storage. These casts are intentional and safe for
 // practical values (file sizes, line numbers, timestamps within reasonable bounds).
