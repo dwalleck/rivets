@@ -167,14 +167,14 @@ impl FilePath {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Language, SymbolKind, Visibility};
+    use crate::types::{FileId, Language, SymbolId, SymbolKind, Visibility};
     use std::path::PathBuf;
 
     /// Create a test symbol with minimal required fields.
     fn make_test_symbol(id: i64, name: &str) -> Symbol {
         Symbol {
-            id,
-            file_id: 1,
+            id: SymbolId::from(id),
+            file_id: FileId::from(1),
             name: name.to_string(),
             module_path: "test".to_string(),
             qualified_name: name.to_string(),
@@ -192,7 +192,7 @@ mod tests {
     /// Create a test indexed file with minimal required fields.
     fn make_test_file(id: i64, path: &str) -> IndexedFile {
         IndexedFile {
-            id,
+            id: FileId::from(id),
             path: PathBuf::from(path),
             language: Language::Rust,
             mtime_ns: 0,

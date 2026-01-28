@@ -65,8 +65,8 @@ pub fn run(
             f.path.display().to_string()
         } else {
             tracing::warn!(
-                symbol_id = sym.id,
-                file_id = sym.file_id,
+                symbol_id = %sym.id,
+                file_id = %sym.file_id,
                 symbol_name = %sym.name,
                 "Symbol references non-existent file (database inconsistency)"
             );

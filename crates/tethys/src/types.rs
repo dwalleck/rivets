@@ -26,7 +26,8 @@ use crate::error::IndexError;
 ///
 /// This newtype provides type safety for function signatures that accept
 /// both symbol and file IDs, preventing accidental parameter swaps.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct SymbolId(i64);
 
 impl SymbolId {
@@ -34,6 +35,12 @@ impl SymbolId {
     #[must_use]
     pub fn as_i64(self) -> i64 {
         self.0
+    }
+}
+
+impl std::fmt::Display for SymbolId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -47,7 +54,8 @@ impl From<i64> for SymbolId {
 ///
 /// This newtype provides type safety for function signatures that accept
 /// both symbol and file IDs, preventing accidental parameter swaps.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct FileId(i64);
 
 impl FileId {
@@ -55,6 +63,12 @@ impl FileId {
     #[must_use]
     pub fn as_i64(self) -> i64 {
         self.0
+    }
+}
+
+impl std::fmt::Display for FileId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -462,7 +476,7 @@ impl Parameter {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexedFile {
     /// Database primary key
-    pub id: i64,
+    pub id: FileId,
     /// Path relative to workspace root
     pub path: PathBuf,
     /// Detected language
@@ -484,9 +498,9 @@ pub struct IndexedFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Symbol {
     /// Database primary key
-    pub id: i64,
+    pub id: SymbolId,
     /// Foreign key to the containing file
-    pub file_id: i64,
+    pub file_id: FileId,
     /// Simple name without qualification (e.g., "save")
     pub name: String,
     /// Module path to this symbol (e.g., "`crate::storage::issue`")
@@ -508,7 +522,7 @@ pub struct Symbol {
     /// Visibility level
     pub visibility: Visibility,
     /// Parent symbol ID for nested definitions
-    pub parent_symbol_id: Option<i64>,
+    pub parent_symbol_id: Option<SymbolId>,
 }
 
 impl Symbol {
@@ -540,9 +554,9 @@ pub struct Reference {
     /// Database primary key
     pub id: i64,
     /// Foreign key to the referenced symbol
-    pub symbol_id: i64,
+    pub symbol_id: SymbolId,
     /// Foreign key to the file containing this reference
-    pub file_id: i64,
+    pub file_id: FileId,
     /// How the symbol is being used
     pub kind: ReferenceKind,
     /// Line number of the reference (1-indexed)
@@ -552,7 +566,7 @@ pub struct Reference {
     /// Full extent of the reference (optional)
     pub span: Option<Span>,
     /// Symbol that contains this reference (for "who calls X?" queries)
-    pub in_symbol_id: Option<i64>,
+    pub in_symbol_id: Option<SymbolId>,
 }
 
 /// Analysis results from parsing a single file.
@@ -705,8 +719,8 @@ mod tests {
     #[test]
     fn symbol_full_path_with_module() {
         let symbol = Symbol {
-            id: 1,
-            file_id: 1,
+            id: SymbolId::from(1),
+            file_id: FileId::from(1),
             name: "save".to_string(),
             module_path: "crate::storage::issue".to_string(),
             qualified_name: "IssueStorage::save".to_string(),
@@ -729,8 +743,8 @@ mod tests {
     #[test]
     fn symbol_full_path_without_module() {
         let symbol = Symbol {
-            id: 1,
-            file_id: 1,
+            id: SymbolId::from(1),
+            file_id: FileId::from(1),
             name: "main".to_string(),
             module_path: String::new(),
             qualified_name: "main".to_string(),

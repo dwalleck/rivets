@@ -17,7 +17,8 @@ use tracing::trace;
 
 use crate::error::{Error, Result};
 use crate::types::{
-    IndexedFile, Language, Reference, ReferenceKind, Span, Symbol, SymbolKind, Visibility,
+    FileId, IndexedFile, Language, Reference, ReferenceKind, Span, Symbol, SymbolId, SymbolKind,
+    Visibility,
 };
 
 /// Data required to insert a symbol into the database.
@@ -34,7 +35,7 @@ pub struct SymbolData<'a> {
     pub span: Option<Span>,
     pub signature: Option<&'a str>,
     pub visibility: Visibility,
-    pub parent_symbol_id: Option<i64>,
+    pub parent_symbol_id: Option<SymbolId>,
 }
 
 /// `SQLite` database wrapper for Tethys index.
@@ -90,7 +91,7 @@ impl Index {
         mtime_ns: i64,
         size_bytes: u64,
         content_hash: Option<u64>,
-    ) -> Result<i64> {
+    ) -> Result<FileId> {
         self.index_file_atomic(path, language, mtime_ns, size_bytes, content_hash, &[])
     }
 
@@ -110,24 +111,24 @@ impl Index {
     }
 
     /// Get file ID by path.
-    pub fn get_file_id(&self, path: &Path) -> Result<Option<i64>> {
+    pub fn get_file_id(&self, path: &Path) -> Result<Option<FileId>> {
         let path_str = path.to_string_lossy();
 
         self.conn
             .query_row("SELECT id FROM files WHERE path = ?1", [&path_str], |row| {
-                row.get(0)
+                row.get::<_, i64>(0).map(FileId::from)
             })
             .optional()
             .map_err(Into::into)
     }
 
     /// Get a file by its database ID.
-    pub fn get_file_by_id(&self, id: i64) -> Result<Option<IndexedFile>> {
+    pub fn get_file_by_id(&self, id: FileId) -> Result<Option<IndexedFile>> {
         self.conn
             .query_row(
                 "SELECT id, path, language, mtime_ns, size_bytes, content_hash, indexed_at
                  FROM files WHERE id = ?1",
-                [id],
+                [id.as_i64()],
                 row_to_indexed_file,
             )
             .optional()
@@ -146,7 +147,7 @@ impl Index {
         size_bytes: u64,
         content_hash: Option<u64>,
         symbols: &[SymbolData],
-    ) -> Result<i64> {
+    ) -> Result<FileId> {
         let tx = self.conn.transaction()?;
 
         let path_str = path.to_string_lossy();
@@ -212,13 +213,13 @@ impl Index {
                     sym.span.map(|s| s.end_column()),
                     sym.signature,
                     sym.visibility.as_str(),
-                    sym.parent_symbol_id
+                    sym.parent_symbol_id.map(SymbolId::as_i64)
                 ],
             )?;
         }
 
         tx.commit()?;
-        Ok(file_id)
+        Ok(FileId::from(file_id))
     }
 
     // === Symbol Operations ===
@@ -228,7 +229,7 @@ impl Index {
     #[allow(clippy::too_many_arguments)] // Database row has many columns
     pub fn insert_symbol(
         &self,
-        file_id: i64,
+        file_id: FileId,
         name: &str,
         module_path: &str,
         qualified_name: &str,
@@ -238,14 +239,14 @@ impl Index {
         span: Option<Span>,
         signature: Option<&str>,
         visibility: Visibility,
-        parent_symbol_id: Option<i64>,
-    ) -> Result<i64> {
+        parent_symbol_id: Option<SymbolId>,
+    ) -> Result<SymbolId> {
         self.conn.execute(
             "INSERT INTO symbols (file_id, name, module_path, qualified_name, kind, line, column,
              end_line, end_column, signature, visibility, parent_symbol_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
-                file_id,
+                file_id.as_i64(),
                 name,
                 module_path,
                 qualified_name,
@@ -256,14 +257,14 @@ impl Index {
                 span.map(|s| s.end_column()),
                 signature,
                 visibility.as_str(),
-                parent_symbol_id
+                parent_symbol_id.map(SymbolId::as_i64)
             ],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        Ok(SymbolId::from(self.conn.last_insert_rowid()))
     }
 
     /// List symbols in a file.
-    pub fn list_symbols_in_file(&self, file_id: i64) -> Result<Vec<Symbol>> {
+    pub fn list_symbols_in_file(&self, file_id: FileId) -> Result<Vec<Symbol>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, file_id, name, module_path, qualified_name, kind, line, column,
              end_line, end_column, signature, visibility, parent_symbol_id
@@ -271,7 +272,7 @@ impl Index {
         )?;
 
         let symbols = stmt
-            .query_map([file_id], row_to_symbol)?
+            .query_map([file_id.as_i64()], row_to_symbol)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(symbols)
@@ -304,15 +305,15 @@ impl Index {
     }
 
     /// Get a symbol by its database ID.
-    pub fn get_symbol_by_id(&self, id: i64) -> Result<Option<Symbol>> {
-        trace!(symbol_id = id, "Looking up symbol by ID");
+    pub fn get_symbol_by_id(&self, id: SymbolId) -> Result<Option<Symbol>> {
+        trace!(symbol_id = %id, "Looking up symbol by ID");
         let mut stmt = self.conn.prepare(
             "SELECT id, file_id, name, module_path, qualified_name, kind, line, column,
              end_line, end_column, signature, visibility, parent_symbol_id
              FROM symbols WHERE id = ?1",
         )?;
 
-        let mut rows = stmt.query([id])?;
+        let mut rows = stmt.query([id.as_i64()])?;
         match rows.next()? {
             Some(row) => Ok(Some(row_to_symbol(row)?)),
             None => Ok(None),
@@ -359,46 +360,53 @@ impl Index {
     #[allow(clippy::too_many_arguments)]
     pub fn insert_reference(
         &self,
-        symbol_id: i64,
-        file_id: i64,
+        symbol_id: SymbolId,
+        file_id: FileId,
         kind: &str,
         line: u32,
         column: u32,
-        in_symbol_id: Option<i64>,
+        in_symbol_id: Option<SymbolId>,
     ) -> Result<i64> {
         self.conn.execute(
             "INSERT INTO refs (symbol_id, file_id, kind, line, column, in_symbol_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![symbol_id, file_id, kind, line, column, in_symbol_id],
+            params![
+                symbol_id.as_i64(),
+                file_id.as_i64(),
+                kind,
+                line,
+                column,
+                in_symbol_id.map(SymbolId::as_i64)
+            ],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
 
     /// Get all references to a symbol.
-    pub fn get_references_to_symbol(&self, symbol_id: i64) -> Result<Vec<Reference>> {
-        trace!(symbol_id, "Getting references to symbol");
+    pub fn get_references_to_symbol(&self, symbol_id: SymbolId) -> Result<Vec<Reference>> {
+        trace!(symbol_id = %symbol_id, "Getting references to symbol");
         let mut stmt = self.conn.prepare(
             "SELECT id, symbol_id, file_id, kind, line, column, end_line, end_column, in_symbol_id
              FROM refs WHERE symbol_id = ?1 ORDER BY file_id, line",
         )?;
 
         let refs = stmt
-            .query_map([symbol_id], row_to_reference)?
+            .query_map([symbol_id.as_i64()], row_to_reference)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(refs)
     }
 
     /// List all outgoing references from a file.
-    pub fn list_references_in_file(&self, file_id: i64) -> Result<Vec<Reference>> {
-        trace!(file_id, "Listing references in file");
+    pub fn list_references_in_file(&self, file_id: FileId) -> Result<Vec<Reference>> {
+        trace!(file_id = %file_id, "Listing references in file");
         let mut stmt = self.conn.prepare(
             "SELECT id, symbol_id, file_id, kind, line, column, end_line, end_column, in_symbol_id
              FROM refs WHERE file_id = ?1 ORDER BY line, column",
         )?;
 
         let refs = stmt
-            .query_map([file_id], row_to_reference)?
+            .query_map([file_id.as_i64()], row_to_reference)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(refs)
@@ -409,38 +417,42 @@ impl Index {
     /// Insert or update a file-level dependency.
     ///
     /// Records that `from_file_id` depends on `to_file_id`.
-    pub fn insert_file_dependency(&self, from_file_id: i64, to_file_id: i64) -> Result<()> {
+    pub fn insert_file_dependency(&self, from_file_id: FileId, to_file_id: FileId) -> Result<()> {
         // Use upsert (ON CONFLICT) to handle duplicates (increments ref_count)
         self.conn.execute(
             "INSERT INTO file_deps (from_file_id, to_file_id, ref_count)
              VALUES (?1, ?2, 1)
              ON CONFLICT(from_file_id, to_file_id) DO UPDATE SET ref_count = ref_count + 1",
-            params![from_file_id, to_file_id],
+            params![from_file_id.as_i64(), to_file_id.as_i64()],
         )?;
         Ok(())
     }
 
     /// Get files that the given file depends on.
-    pub fn get_file_dependencies(&self, file_id: i64) -> Result<Vec<i64>> {
+    pub fn get_file_dependencies(&self, file_id: FileId) -> Result<Vec<FileId>> {
         let mut stmt = self
             .conn
             .prepare("SELECT to_file_id FROM file_deps WHERE from_file_id = ?1")?;
 
         let deps = stmt
-            .query_map([file_id], |row| row.get(0))?
+            .query_map([file_id.as_i64()], |row| {
+                row.get::<_, i64>(0).map(FileId::from)
+            })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(deps)
     }
 
     /// Get files that depend on the given file.
-    pub fn get_file_dependents(&self, file_id: i64) -> Result<Vec<i64>> {
+    pub fn get_file_dependents(&self, file_id: FileId) -> Result<Vec<FileId>> {
         let mut stmt = self
             .conn
             .prepare("SELECT from_file_id FROM file_deps WHERE to_file_id = ?1")?;
 
         let deps = stmt
-            .query_map([file_id], |row| row.get(0))?
+            .query_map([file_id.as_i64()], |row| {
+                row.get::<_, i64>(0).map(FileId::from)
+            })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(deps)
@@ -598,7 +610,7 @@ pub(crate) fn parse_visibility(s: &str) -> rusqlite::Result<Visibility> {
 /// Expected columns: id, path, language, `mtime_ns`, `size_bytes`, `content_hash`, `indexed_at`
 pub(crate) fn row_to_indexed_file(row: &rusqlite::Row) -> rusqlite::Result<IndexedFile> {
     Ok(IndexedFile {
-        id: row.get(0)?,
+        id: FileId::from(row.get::<_, i64>(0)?),
         path: PathBuf::from(row.get::<_, String>(1)?),
         language: parse_language(row.get::<_, String>(2)?.as_str())?,
         mtime_ns: row.get(3)?,
@@ -632,13 +644,13 @@ fn row_to_reference(row: &rusqlite::Row) -> rusqlite::Result<Reference> {
 
     Ok(Reference {
         id: row.get(0)?,
-        symbol_id: row.get(1)?,
-        file_id: row.get(2)?,
+        symbol_id: SymbolId::from(row.get::<_, i64>(1)?),
+        file_id: FileId::from(row.get::<_, i64>(2)?),
         kind: parse_reference_kind(&row.get::<_, String>(3)?)?,
         line,
         column,
         span: build_span(line, column, end_line, end_column),
-        in_symbol_id: row.get(8)?,
+        in_symbol_id: row.get::<_, Option<i64>>(8)?.map(SymbolId::from),
     })
 }
 
@@ -669,8 +681,8 @@ pub(crate) fn row_to_symbol(row: &rusqlite::Row) -> rusqlite::Result<Symbol> {
     let end_column: Option<u32> = row.get(9)?;
 
     Ok(Symbol {
-        id: row.get(0)?,
-        file_id: row.get(1)?,
+        id: SymbolId::from(row.get::<_, i64>(0)?),
+        file_id: FileId::from(row.get::<_, i64>(1)?),
         name: row.get(2)?,
         module_path: row.get(3)?,
         qualified_name: row.get(4)?,
@@ -681,7 +693,7 @@ pub(crate) fn row_to_symbol(row: &rusqlite::Row) -> rusqlite::Result<Symbol> {
         signature: row.get(10)?,
         signature_details: None, // Not persisted to database; populated by parsers only
         visibility: parse_visibility(&row.get::<_, String>(11)?)?,
-        parent_symbol_id: row.get(12)?,
+        parent_symbol_id: row.get::<_, Option<i64>>(12)?.map(SymbolId::from),
     })
 }
 
@@ -799,7 +811,7 @@ mod tests {
             )
             .unwrap();
 
-        assert!(file_id > 0);
+        assert!(file_id.as_i64() > 0);
 
         let file = index.get_file(Path::new("src/main.rs")).unwrap();
         assert!(file.is_some());

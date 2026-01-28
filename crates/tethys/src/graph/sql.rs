@@ -606,7 +606,7 @@ fn parse_reference_kinds(s: &str) -> Vec<ReferenceKind> {
 mod tests {
     use super::*;
     use crate::db::Index;
-    use crate::types::{FileId, Language, SymbolId, SymbolKind, Visibility};
+    use crate::types::{Language, SymbolKind, Visibility};
     use tempfile::TempDir;
 
     /// Create a test database with a known call graph:
@@ -787,7 +787,7 @@ mod tests {
             .expect("failed to query db::query")
             .expect("db::query not found");
         let callers = graph
-            .get_callers(SymbolId::from(db_query.id))
+            .get_callers(db_query.id)
             .expect("failed to get callers");
 
         // db::query is called by auth::validate and cache::get
@@ -812,7 +812,7 @@ mod tests {
             .expect("failed to query main::run")
             .expect("main::run not found");
         let callers = graph
-            .get_callers(SymbolId::from(main_run.id))
+            .get_callers(main_run.id)
             .expect("failed to get callers");
 
         // main::run is not called by anything
@@ -830,7 +830,7 @@ mod tests {
             .expect("failed to query main::run")
             .expect("main::run not found");
         let callees = graph
-            .get_callees(SymbolId::from(main_run.id))
+            .get_callees(main_run.id)
             .expect("failed to get callees");
 
         // main::run calls auth::validate and cache::get
@@ -855,7 +855,7 @@ mod tests {
             .expect("failed to query db::query")
             .expect("db::query not found");
         let callees = graph
-            .get_callees(SymbolId::from(db_query.id))
+            .get_callees(db_query.id)
             .expect("failed to get callees");
 
         // db::query doesn't call anything
@@ -873,7 +873,7 @@ mod tests {
             .expect("failed to query db::query")
             .expect("db::query not found");
         let callers = graph
-            .get_callers(SymbolId::from(db_query.id))
+            .get_callers(db_query.id)
             .expect("failed to get callers");
 
         // All references should be "call" type
@@ -897,7 +897,7 @@ mod tests {
             .expect("failed to query db::query")
             .expect("db::query not found");
         let callers = graph
-            .get_callers(SymbolId::from(db_query.id))
+            .get_callers(db_query.id)
             .expect("failed to get callers");
 
         // Each caller should have exactly 1 reference
@@ -921,7 +921,7 @@ mod tests {
             .expect("failed to query db::query")
             .expect("db::query not found");
         let impact = graph
-            .get_transitive_callers(SymbolId::from(db_query.id), None)
+            .get_transitive_callers(db_query.id, None)
             .expect("failed to get transitive callers");
 
         // db::query's transitive callers: auth::validate, cache::get (direct), main::run (transitive)
@@ -955,7 +955,7 @@ mod tests {
             .expect("failed to query db::query")
             .expect("db::query not found");
         let impact = graph
-            .get_transitive_callers(SymbolId::from(db_query.id), Some(1))
+            .get_transitive_callers(db_query.id, Some(1))
             .expect("failed to get transitive callers");
 
         // With max_depth=1, should only get direct callers
@@ -978,7 +978,7 @@ mod tests {
             .expect("failed to query main::run")
             .expect("main::run not found");
         let impact = graph
-            .get_transitive_callers(SymbolId::from(main_run.id), None)
+            .get_transitive_callers(main_run.id, None)
             .expect("failed to get transitive callers");
 
         assert_eq!(impact.total_caller_count(), 0);
@@ -1002,7 +1002,7 @@ mod tests {
             .expect("db::query not found");
 
         let path = graph
-            .find_call_path(SymbolId::from(main_run.id), SymbolId::from(db_query.id))
+            .find_call_path(main_run.id, db_query.id)
             .expect("failed to find call path");
 
         assert!(
@@ -1034,7 +1034,7 @@ mod tests {
             .expect("main::run not found");
 
         let path = graph
-            .find_call_path(SymbolId::from(db_query.id), SymbolId::from(main_run.id))
+            .find_call_path(db_query.id, main_run.id)
             .expect("failed to find call path");
 
         assert!(path.is_none(), "should not find path in reverse direction");
@@ -1052,7 +1052,7 @@ mod tests {
             .expect("main::run not found");
 
         let path = graph
-            .find_call_path(SymbolId::from(main_run.id), SymbolId::from(main_run.id))
+            .find_call_path(main_run.id, main_run.id)
             .expect("failed to find call path");
 
         assert!(path.is_some());
@@ -1145,7 +1145,7 @@ mod tests {
             .expect("failed to query db.rs")
             .expect("db.rs not found");
         let dependents = graph
-            .get_dependents(FileId::from(db_id))
+            .get_dependents(db_id)
             .expect("failed to get dependents");
 
         // db.rs is depended on by auth.rs and cache.rs
@@ -1169,7 +1169,7 @@ mod tests {
             .expect("failed to query main.rs")
             .expect("main.rs not found");
         let dependencies = graph
-            .get_dependencies(FileId::from(main_id))
+            .get_dependencies(main_id)
             .expect("failed to get dependencies");
 
         // main.rs depends on auth.rs and cache.rs
@@ -1193,7 +1193,7 @@ mod tests {
             .expect("failed to query db.rs")
             .expect("db.rs not found");
         let impact = graph
-            .get_transitive_dependents(FileId::from(db_id), None)
+            .get_transitive_dependents(db_id, None)
             .expect("failed to get transitive dependents");
 
         // db.rs: direct deps = auth.rs, cache.rs; transitive = main.rs
@@ -1213,7 +1213,7 @@ mod tests {
             .expect("failed to query db.rs")
             .expect("db.rs not found");
         let impact = graph
-            .get_transitive_dependents(FileId::from(db_id), Some(1))
+            .get_transitive_dependents(db_id, Some(1))
             .expect("failed to get transitive dependents");
 
         // With max_depth=1, should only get direct dependents
@@ -1240,7 +1240,7 @@ mod tests {
             .expect("db.rs not found");
 
         let path = graph
-            .find_dependency_path(FileId::from(main_id), FileId::from(db_id))
+            .find_dependency_path(main_id, db_id)
             .expect("failed to find dependency path");
 
         assert!(path.is_some(), "should find path from main.rs to db.rs");
@@ -1269,7 +1269,7 @@ mod tests {
             .expect("main.rs not found");
 
         let path = graph
-            .find_dependency_path(FileId::from(db_id), FileId::from(main_id))
+            .find_dependency_path(db_id, main_id)
             .expect("failed to find dependency path");
 
         assert!(path.is_none(), "should not find path in reverse direction");
@@ -1287,7 +1287,7 @@ mod tests {
             .expect("main.rs not found");
 
         let path = graph
-            .find_dependency_path(FileId::from(main_id), FileId::from(main_id))
+            .find_dependency_path(main_id, main_id)
             .expect("failed to find dependency path");
 
         assert!(path.is_some());
@@ -1325,7 +1325,7 @@ mod tests {
             .expect("failed to query main.rs")
             .expect("main.rs not found");
 
-        let result = graph.detect_cycles_involving(FileId::from(main_id));
+        let result = graph.detect_cycles_involving(main_id);
         assert!(
             result.is_err(),
             "detect_cycles_involving should return an error"

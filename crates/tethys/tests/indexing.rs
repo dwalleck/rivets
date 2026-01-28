@@ -5,7 +5,7 @@
 
 use std::fs;
 use tempfile::TempDir;
-use tethys::Tethys;
+use tethys::{SymbolId, Tethys};
 
 /// Create a temporary workspace with the given files.
 /// Returns the temp directory (must be kept alive) and the Tethys instance.
@@ -724,7 +724,7 @@ pub fn get_config() -> Config {
     );
 
     // All references should be to Config
-    let config_refs: Vec<_> = refs.iter().filter(|r| r.symbol_id > 0).collect();
+    let config_refs: Vec<_> = refs.iter().filter(|r| r.symbol_id.as_i64() > 0).collect();
     assert!(
         !config_refs.is_empty(),
         "should have resolved symbol references"
@@ -900,7 +900,7 @@ fn get_symbol_by_id_returns_none_for_invalid_id() {
     tethys.index().expect("index failed");
 
     let symbol = tethys
-        .get_symbol_by_id(999_999)
+        .get_symbol_by_id(SymbolId::from(999_999))
         .expect("get_symbol_by_id should not error");
 
     assert!(symbol.is_none(), "should return None for non-existent ID");

@@ -63,7 +63,7 @@ use tracing::{debug, trace, warn};
 #[derive(Debug)]
 struct PendingDependency {
     /// The file ID that has the dependency.
-    from_file_id: i64,
+    from_file_id: FileId,
     /// The path to the file being depended on (relative to workspace root).
     dep_path: PathBuf,
 }
@@ -213,14 +213,14 @@ impl Tethys {
                 Ok(Some(f)) => Some((f.path, p.dep_path)),
                 Ok(None) => {
                     warn!(
-                        file_id = p.from_file_id,
+                        file_id = %p.from_file_id,
                         "File not found when building unresolved deps list"
                     );
                     None
                 }
                 Err(e) => {
                     warn!(
-                        file_id = p.from_file_id,
+                        file_id = %p.from_file_id,
                         error = %e,
                         "DB error when building unresolved deps list"
                     );
@@ -371,17 +371,19 @@ impl Tethys {
     /// Build lookup maps from symbols for reference resolution.
     ///
     /// Returns (`name -> id`, `span -> id`) maps.
-    fn build_symbol_maps(symbols: &[Symbol]) -> (HashMap<String, i64>, HashMap<Span, i64>) {
-        let mut name_to_id: HashMap<String, i64> = HashMap::new();
-        let mut span_to_id: HashMap<Span, i64> = HashMap::new();
+    fn build_symbol_maps(
+        symbols: &[Symbol],
+    ) -> (HashMap<String, SymbolId>, HashMap<Span, SymbolId>) {
+        let mut name_to_id: HashMap<String, SymbolId> = HashMap::new();
+        let mut span_to_id: HashMap<Span, SymbolId> = HashMap::new();
 
         for sym in symbols {
             // Map name to ID (log if duplicate, last one wins)
             if let Some(prev_id) = name_to_id.insert(sym.name.clone(), sym.id) {
                 trace!(
                     name = %sym.name,
-                    new_id = sym.id,
-                    prev_id,
+                    new_id = %sym.id,
+                    prev_id = %prev_id,
                     "Duplicate symbol name in file, using newer"
                 );
             }
@@ -401,10 +403,10 @@ impl Tethys {
     /// Returns the count of references stored.
     fn store_references(
         &self,
-        file_id: i64,
+        file_id: FileId,
         refs: &[common::ExtractedReference],
-        name_to_id: &HashMap<String, i64>,
-        span_to_id: &HashMap<Span, i64>,
+        name_to_id: &HashMap<String, SymbolId>,
+        span_to_id: &HashMap<Span, SymbolId>,
     ) -> Result<usize> {
         let mut count = 0;
 
@@ -451,7 +453,7 @@ impl Tethys {
     fn compute_dependencies(
         &self,
         current_file: &Path,
-        file_id: i64,
+        file_id: FileId,
         imports: &[common::ImportStatement],
         refs: &[common::ExtractedReference],
         pending: &mut Vec<PendingDependency>,
@@ -642,8 +644,8 @@ impl Tethys {
     /// file IDs that could not be resolved (logged as warnings).
     fn file_ids_to_paths(
         &self,
-        file_ids: Vec<i64>,
-        source_file_id: i64,
+        file_ids: Vec<FileId>,
+        source_file_id: FileId,
     ) -> Result<(Vec<PathBuf>, usize)> {
         let mut paths = Vec::new();
         let mut missing_count = 0;
@@ -652,8 +654,8 @@ impl Tethys {
                 paths.push(file.path);
             } else {
                 warn!(
-                    source_file_id,
-                    missing_file_id = dep_id,
+                    source_file_id = %source_file_id,
+                    missing_file_id = %dep_id,
                     "file_deps references non-existent file, possible database corruption"
                 );
                 missing_count += 1;
@@ -716,7 +718,7 @@ impl Tethys {
     }
 
     /// Get a symbol by its database ID.
-    pub fn get_symbol_by_id(&self, id: i64) -> Result<Option<Symbol>> {
+    pub fn get_symbol_by_id(&self, id: SymbolId) -> Result<Option<Symbol>> {
         self.db.get_symbol_by_id(id)
     }
 
@@ -724,7 +726,7 @@ impl Tethys {
     ///
     /// Returns the indexed file metadata including its path.
     #[must_use = "returns file info without side effects"]
-    pub fn get_file_by_id(&self, id: i64) -> Result<Option<IndexedFile>> {
+    pub fn get_file_by_id(&self, id: FileId) -> Result<Option<IndexedFile>> {
         self.db.get_file_by_id(id)
     }
 
@@ -801,7 +803,7 @@ impl Tethys {
 
         let file_impact = self
             .file_graph
-            .get_transitive_dependents(FileId::from(file_id), Some(50))?;
+            .get_transitive_dependents(file_id, Some(50))?;
 
         // Convert FileImpact to public Impact type
         Ok(Impact {
@@ -834,7 +836,7 @@ impl Tethys {
             .get_symbol_by_qualified_name(qualified_name)?
             .ok_or_else(|| Error::NotFound(format!("symbol: {qualified_name}")))?;
 
-        let callers = self.symbol_graph.get_callers(SymbolId::from(symbol.id))?;
+        let callers = self.symbol_graph.get_callers(symbol.id)?;
 
         // Convert CallerInfo to Dependent
         callers
@@ -860,7 +862,7 @@ impl Tethys {
             .get_symbol_by_qualified_name(qualified_name)?
             .ok_or_else(|| Error::NotFound(format!("symbol: {qualified_name}")))?;
 
-        let callees = self.symbol_graph.get_callees(SymbolId::from(symbol.id))?;
+        let callees = self.symbol_graph.get_callees(symbol.id)?;
 
         Ok(callees.into_iter().map(|c| c.symbol).collect())
     }
@@ -874,7 +876,7 @@ impl Tethys {
 
         let impact = self
             .symbol_graph
-            .get_transitive_callers(SymbolId::from(symbol.id), Some(50))?;
+            .get_transitive_callers(symbol.id, Some(50))?;
 
         // Convert CallerInfo to Dependent
         let caller_to_dependent = |caller: graph::CallerInfo| -> Result<Dependent> {
@@ -931,9 +933,7 @@ impl Tethys {
             .get_file_id(self.relative_path(to))?
             .ok_or_else(|| Error::NotFound(format!("file: {}", to.display())))?;
 
-        let path = self
-            .file_graph
-            .find_dependency_path(FileId::from(from_id), FileId::from(to_id))?;
+        let path = self.file_graph.find_dependency_path(from_id, to_id)?;
 
         Ok(path.map(|p| p.into_files().into_iter().map(|f| f.path).collect()))
     }
