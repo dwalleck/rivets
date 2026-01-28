@@ -19,7 +19,6 @@ use crate::types::{FunctionSignature, Parameter, Span, SymbolKind, Visibility};
 ///
 /// These match the node types defined in tree-sitter-c-sharp. Using constants
 /// prevents typos and makes supported node types explicit.
-#[allow(dead_code)] // Constants used by extraction functions called from tests
 mod node_kinds {
     // Type declarations
     pub const CLASS_DECLARATION: &str = "class_declaration";
@@ -31,8 +30,6 @@ mod node_kinds {
     // Members
     pub const METHOD_DECLARATION: &str = "method_declaration";
     pub const CONSTRUCTOR_DECLARATION: &str = "constructor_declaration";
-    pub const PROPERTY_DECLARATION: &str = "property_declaration";
-    pub const FIELD_DECLARATION: &str = "field_declaration";
 
     // Namespaces & imports
     pub const NAMESPACE_DECLARATION: &str = "namespace_declaration";
@@ -48,27 +45,18 @@ mod node_kinds {
     pub const IDENTIFIER: &str = "identifier";
     pub const QUALIFIED_NAME: &str = "qualified_name";
     pub const GENERIC_NAME: &str = "generic_name";
-    pub const PREDEFINED_TYPE: &str = "predefined_type";
 
     // Structure
     pub const DECLARATION_LIST: &str = "declaration_list";
     pub const PARAMETER_LIST: &str = "parameter_list";
     pub const PARAMETER: &str = "parameter";
     pub const MODIFIER: &str = "modifier";
-    pub const BASE_LIST: &str = "base_list";
 
     // Keywords used as modifiers
     pub const PUBLIC: &str = "public";
     pub const PRIVATE: &str = "private";
     pub const PROTECTED: &str = "protected";
     pub const INTERNAL: &str = "internal";
-    pub const STATIC: &str = "static";
-    pub const ASYNC: &str = "async";
-
-    // Type references
-    pub const TYPE_ARGUMENT_LIST: &str = "type_argument_list";
-    pub const NULLABLE_TYPE: &str = "nullable_type";
-    pub const ARRAY_TYPE: &str = "array_type";
 }
 
 /// C# language support implementation.
@@ -124,7 +112,6 @@ impl LanguageSupport for CSharpLanguage {
 ///
 /// Note: This is a transient parsing type, not stored in the database.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // Public API, used by tests and future indexer integration
 pub struct UsingDirective {
     /// Namespace segments (e.g., `["System", "Collections", "Generic"]`)
     pub namespace: Vec<String>,
@@ -139,7 +126,6 @@ pub struct UsingDirective {
 impl UsingDirective {
     /// Convert to the common `ImportStatement` representation.
     #[must_use]
-    #[allow(dead_code)] // Public API, will be used when indexer integrates C# support
     pub fn to_import_statement(&self) -> ImportStatement {
         ImportStatement {
             path: self.namespace.clone(),
@@ -152,7 +138,6 @@ impl UsingDirective {
 }
 
 /// Extract references (usages) from a C# syntax tree.
-#[allow(dead_code)] // Public API, used by tests and future indexer integration
 pub fn extract_references(tree: &tree_sitter::Tree, content: &[u8]) -> Vec<ExtractedReference> {
     let mut refs = Vec::new();
     let root = tree.root_node();
@@ -466,7 +451,6 @@ fn collect_qualified_name_path(
 }
 
 /// Extract using directives from a C# syntax tree.
-#[allow(dead_code)] // Public API, used by tests and future indexer integration
 pub fn extract_using_directives(tree: &tree_sitter::Tree, content: &[u8]) -> Vec<UsingDirective> {
     let mut directives = Vec::new();
     let root = tree.root_node();
@@ -573,7 +557,6 @@ fn parse_using_directive(node: &tree_sitter::Node, content: &[u8]) -> Option<Usi
 }
 
 /// Extract symbols from a C# syntax tree.
-#[allow(dead_code)] // Public API, used by tests and future indexer integration
 pub fn extract_symbols(tree: &tree_sitter::Tree, content: &[u8]) -> Vec<ExtractedSymbol> {
     let mut symbols = Vec::new();
     let root = tree.root_node();

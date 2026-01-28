@@ -1557,6 +1557,105 @@ public class UserService {
 }
 
 #[test]
+fn indexes_csharp_class() {
+    let code = r"
+public class UserService {
+    public void Save(User user) { }
+}
+";
+    let (_dir, mut tethys) = workspace_with_files(&[("UserService.cs", code)]);
+    let stats = tethys.index().expect("index failed");
+
+    assert_eq!(stats.files_indexed, 1, "should index 1 C# file");
+    assert!(stats.symbols_found >= 2, "should find class + method");
+}
+
+#[test]
+fn indexes_csharp_symbols() {
+    let code = r"
+namespace MyApp.Services;
+
+public class Calculator {
+    public int Add(int a, int b) { return a + b; }
+    public static int Multiply(int a, int b) { return a * b; }
+}
+
+public interface ICalculator {
+    int Add(int a, int b);
+}
+";
+    let (_dir, mut tethys) = workspace_with_files(&[("Calculator.cs", code)]);
+    tethys.index().expect("index failed");
+
+    let symbols = tethys.search_symbols("Calculator").expect("search failed");
+    assert!(!symbols.is_empty(), "should find Calculator symbol");
+
+    let symbols = tethys.search_symbols("ICalculator").expect("search failed");
+    assert!(!symbols.is_empty(), "should find ICalculator interface");
+}
+
+#[test]
+fn indexes_mixed_rust_and_csharp() {
+    let rust_code = r"
+pub fn hello() {}
+";
+    let csharp_code = r"
+public class Greeter {
+    public void Hello() { }
+}
+";
+    let (_dir, mut tethys) =
+        workspace_with_files(&[("src/lib.rs", rust_code), ("Greeter.cs", csharp_code)]);
+    let stats = tethys.index().expect("index failed");
+
+    assert_eq!(
+        stats.files_indexed, 2,
+        "should index both Rust and C# files"
+    );
+}
+
+#[test]
+fn csharp_stats_include_language() {
+    let code = "public class Foo { }";
+    let (_dir, mut tethys) = workspace_with_files(&[("Foo.cs", code)]);
+    tethys.index().expect("index failed");
+
+    let stats = tethys.get_stats().expect("get_stats failed");
+    let csharp_count = stats
+        .files_by_language
+        .get(&tethys::Language::CSharp)
+        .copied()
+        .unwrap_or(0);
+    assert_eq!(csharp_count, 1, "should count 1 C# file in stats");
+}
+
+#[test]
+fn csharp_references_are_stored() {
+    // Define User in the same file so references can be resolved
+    let code = r"
+public class User {
+    public void Save() { }
+}
+
+public class Test {
+    public void Run() {
+        var user = new User();
+        user.Save();
+    }
+}
+";
+    let (_dir, mut tethys) = workspace_with_files(&[("Test.cs", code)]);
+    let stats = tethys.index().expect("index failed");
+
+    // Should find references: User constructor (new User())
+    assert!(
+        stats.references_found > 0,
+        "should find references in C# code, found: {}",
+        stats.references_found
+    );
+}
+
+#[test]
 fn csharp_namespace_dependency_resolution() {
     let service_code = r"
 namespace MyApp.Services;
