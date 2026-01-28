@@ -34,9 +34,16 @@ struct DbConnection {
 }
 
 impl DbConnection {
-    /// Open a new connection to the database.
+    /// Open a new connection to the database with standard pragmas.
+    ///
+    /// Configures WAL mode for better concurrency and enables foreign key enforcement.
     fn open(db_path: &Path) -> Result<Self> {
         let conn = Connection::open(db_path)?;
+
+        // Apply same pragmas as Index::open for consistency
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -285,7 +292,10 @@ impl FileGraphOps for SqlFileGraph {
                 )
                 .optional()?;
 
-            path_str.map(|s| parse_path_ids(&s))
+            match path_str {
+                Some(s) => Some(parse_path_ids(&s)?),
+                None => None,
+            }
         };
 
         let Some(file_ids) = file_ids else {
@@ -306,16 +316,15 @@ impl FileGraphOps for SqlFileGraph {
     }
 
     fn detect_cycles(&self) -> Result<Vec<crate::types::Cycle>> {
-        tracing::warn!("Cycle detection not yet implemented, returning empty result");
-        Ok(vec![])
+        Err(Error::Internal(
+            "cycle detection not yet implemented".to_string(),
+        ))
     }
 
-    fn detect_cycles_involving(&self, file_id: FileId) -> Result<Vec<crate::types::Cycle>> {
-        tracing::warn!(
-            file_id = %file_id.as_i64(),
-            "Cycle detection not yet implemented, returning empty result"
-        );
-        Ok(vec![])
+    fn detect_cycles_involving(&self, _file_id: FileId) -> Result<Vec<crate::types::Cycle>> {
+        Err(Error::Internal(
+            "cycle detection not yet implemented".to_string(),
+        ))
     }
 }
 
@@ -447,6 +456,7 @@ impl SymbolGraphOps for SqlSymbolGraph {
             let (symbol, depth) = row?;
             max_depth_reached = max_depth_reached.max(depth);
 
+            // Simplified: actual ref counts/kinds not tracked through recursive CTE
             let caller_info = CallerInfo {
                 symbol,
                 reference_count: 1,
@@ -521,7 +531,10 @@ impl SymbolGraphOps for SqlSymbolGraph {
                 )
                 .optional()?;
 
-            path_str.map(|s| parse_path_ids(&s))
+            match path_str {
+                Some(s) => Some(parse_path_ids(&s)?),
+                None => None,
+            }
         };
 
         let Some(symbol_ids) = symbol_ids else {
@@ -548,27 +561,23 @@ impl SymbolGraphOps for SqlSymbolGraph {
 /// Parse a comma-separated path string into a vector of i64 IDs.
 ///
 /// Used by path-finding queries that store traversal paths as comma-separated strings
-/// in SQL. Invalid IDs are logged as warnings and skipped.
-fn parse_path_ids(path_str: &str) -> Vec<i64> {
+/// in SQL.
+///
+/// # Errors
+///
+/// Returns `Error::Internal` if any ID in the path cannot be parsed as an integer,
+/// which indicates database corruption or a version mismatch.
+fn parse_path_ids(path_str: &str) -> Result<Vec<i64>> {
     path_str
         .split(',')
-        .filter_map(|id| {
+        .filter(|id| !id.trim().is_empty())
+        .map(|id| {
             let trimmed = id.trim();
-            if trimmed.is_empty() {
-                return None;
-            }
-            match trimmed.parse() {
-                Ok(id) => Some(id),
-                Err(e) => {
-                    tracing::warn!(
-                        raw_id = %trimmed,
-                        error = %e,
-                        raw_path = %path_str,
-                        "Failed to parse ID in path, possible database corruption"
-                    );
-                    None
-                }
-            }
+            trimmed.parse().map_err(|e| {
+                Error::Internal(format!(
+                    "failed to parse ID '{trimmed}' in path '{path_str}': {e} (possible database corruption)"
+                ))
+            })
         })
         .collect()
 }
@@ -580,14 +589,15 @@ fn parse_reference_kinds(s: &str) -> Vec<ReferenceKind> {
             if kind.is_empty() {
                 return None; // Empty strings from split are expected
             }
-            ReferenceKind::parse(kind).or_else(|| {
+            let parsed = ReferenceKind::parse_or_unknown(kind);
+            if parsed.is_unknown() {
                 tracing::warn!(
                     unknown_kind = %kind,
                     raw_input = %s,
                     "Unknown reference kind in database, possible corruption or version mismatch"
                 );
-                None
-            })
+            }
+            Some(parsed)
         })
         .collect()
 }
@@ -1287,16 +1297,25 @@ mod tests {
     }
 
     #[test]
-    fn file_graph_detect_cycles_returns_empty_for_acyclic() {
+    fn file_graph_detect_cycles_returns_not_implemented_error() {
         let (_dir, db_path) = setup_file_deps_graph();
         let graph = SqlFileGraph::new(&db_path).expect("failed to create file graph");
 
-        let cycles = graph.detect_cycles().expect("failed to detect cycles");
-        assert!(cycles.is_empty(), "acyclic graph should have no cycles");
+        let result = graph.detect_cycles();
+        assert!(result.is_err(), "detect_cycles should return an error");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, Error::Internal(_)),
+            "error should be Internal variant"
+        );
+        assert!(
+            err.to_string().contains("not yet implemented"),
+            "error message should indicate not implemented"
+        );
     }
 
     #[test]
-    fn file_graph_detect_cycles_involving_returns_empty_for_acyclic() {
+    fn file_graph_detect_cycles_involving_returns_not_implemented_error() {
         let (_dir, db_path) = setup_file_deps_graph();
         let graph = SqlFileGraph::new(&db_path).expect("failed to create file graph");
         let index = Index::open(&db_path).expect("failed to open index");
@@ -1306,12 +1325,19 @@ mod tests {
             .expect("failed to query main.rs")
             .expect("main.rs not found");
 
-        let cycles = graph
-            .detect_cycles_involving(FileId::from(main_id))
-            .expect("failed to detect cycles");
+        let result = graph.detect_cycles_involving(FileId::from(main_id));
         assert!(
-            cycles.is_empty(),
-            "acyclic graph should have no cycles involving main.rs"
+            result.is_err(),
+            "detect_cycles_involving should return an error"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, Error::Internal(_)),
+            "error should be Internal variant"
+        );
+        assert!(
+            err.to_string().contains("not yet implemented"),
+            "error message should indicate not implemented"
         );
     }
 }

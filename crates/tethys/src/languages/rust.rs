@@ -805,7 +805,7 @@ fn extract_macro(node: &tree_sitter::Node, content: &[u8]) -> Option<ExtractedSy
         span: Some(node_span(node)),
         signature: None,
         signature_details: None,
-        visibility: Visibility::Public, // macros are typically public if exported
+        visibility: Visibility::Public, // Default to Public; tree-sitter doesn't expose macro_export
         parent_name: None,
     })
 }

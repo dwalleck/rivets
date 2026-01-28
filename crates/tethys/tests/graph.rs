@@ -241,21 +241,29 @@ fn get_dependency_chain_finds_shortest_path() {
 // ============================================================================
 
 #[test]
-fn detect_cycles_returns_empty_for_acyclic() {
+fn detect_cycles_returns_not_implemented_error() {
     let (_dir, mut tethys) = workspace_with_call_graph();
     tethys.index().expect("index failed");
 
-    let cycles = tethys.detect_cycles().expect("detect_cycles failed");
+    let result = tethys.detect_cycles();
 
-    // Our test graph is acyclic
-    assert!(cycles.is_empty(), "acyclic graph should have no cycles");
+    // Cycle detection is not yet implemented and returns an error
+    assert!(
+        result.is_err(),
+        "detect_cycles should return error (not yet implemented)"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("not yet implemented"),
+        "error should indicate not implemented, got: {err}"
+    );
 }
 
-/// NOTE: Cycle detection is stubbed in Phase 3 and will be fully implemented in a future phase.
-/// This test verifies that cycle detection can be called without error and documents
-/// the expected behavior once fully implemented.
+/// NOTE: Cycle detection is not yet implemented. This test verifies that the
+/// cyclic dependencies ARE recorded in the `file_deps` table, even though
+/// cycle detection returns an error.
 #[test]
-fn detect_cycles_returns_empty_when_cycles_exist() {
+fn cyclic_dependencies_are_recorded_in_file_deps() {
     let dir = tempfile::tempdir().expect("failed to create temp dir");
     fs::create_dir_all(dir.path().join("src")).unwrap();
 
@@ -300,18 +308,12 @@ impl B {
     let mut tethys = Tethys::new(dir.path()).expect("failed to create Tethys");
     tethys.index().expect("index failed");
 
-    let cycles = tethys.detect_cycles().expect("detect_cycles failed");
-
-    // Phase 3 limitation: cycle detection is stubbed and returns empty
-    // This will be fully implemented in a future phase
-    // For now, we verify the API works without errors
-    assert!(
-        cycles.is_empty(),
-        "cycle detection is stubbed in Phase 3, should return empty"
-    );
+    // Cycle detection returns error (not yet implemented)
+    let result = tethys.detect_cycles();
+    assert!(result.is_err(), "detect_cycles should return error");
 
     // Verify the cyclic dependencies ARE recorded in the file_deps table
-    // (cycle detection is stubbed, but dependencies are tracked)
+    // (cycle detection is not implemented, but dependencies are tracked)
     let deps_a = tethys
         .get_dependencies(std::path::Path::new("src/a.rs"))
         .expect("get_dependencies failed");
@@ -329,8 +331,7 @@ impl B {
     );
 }
 
-/// NOTE: Cycle detection is stubbed in Phase 3.
-/// This test verifies that the three-file cyclic dependencies are recorded.
+/// This test verifies that three-file cyclic dependencies are recorded in `file_deps`.
 #[test]
 fn three_file_cycle_dependencies_are_recorded() {
     let dir = tempfile::tempdir().expect("failed to create temp dir");
@@ -408,9 +409,12 @@ impl C {
         "c.rs should depend on a.rs, got: {deps_c:?}"
     );
 
-    // Phase 3 limitation: cycle detection API is stubbed
-    let cycles = tethys.detect_cycles().expect("detect_cycles failed");
-    assert!(cycles.is_empty(), "cycle detection is stubbed in Phase 3");
+    // Cycle detection is not yet implemented
+    let result = tethys.detect_cycles();
+    assert!(
+        result.is_err(),
+        "detect_cycles should return error (not yet implemented)"
+    );
 }
 
 // ============================================================================
@@ -484,32 +488,31 @@ fn graph_operations_work_after_reindex() {
         "impact analysis should work after reindex"
     );
 
-    let cycles = tethys
-        .detect_cycles()
-        .expect("detect_cycles failed after reindex");
-
+    // Cycle detection consistently returns error (not yet implemented)
+    let result = tethys.detect_cycles();
     assert!(
-        cycles.is_empty(),
-        "cycle detection should work after reindex"
+        result.is_err(),
+        "detect_cycles should return error (not yet implemented)"
     );
 }
 
 #[test]
-fn empty_workspace_has_no_cycles() {
+fn empty_workspace_detect_cycles_returns_error() {
     let dir = tempfile::tempdir().expect("failed to create temp dir");
     let mut tethys = Tethys::new(dir.path()).expect("failed to create Tethys");
 
     tethys.index().expect("index failed");
 
-    let cycles = tethys
-        .detect_cycles()
-        .expect("detect_cycles failed on empty workspace");
-
-    assert!(cycles.is_empty(), "empty workspace should have no cycles");
+    // Cycle detection is not yet implemented
+    let result = tethys.detect_cycles();
+    assert!(
+        result.is_err(),
+        "detect_cycles should return error (not yet implemented)"
+    );
 }
 
 #[test]
-fn single_file_workspace_has_no_cycles() {
+fn single_file_workspace_detect_cycles_returns_error() {
     let dir = tempfile::tempdir().expect("failed to create temp dir");
     fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::write(dir.path().join("src/lib.rs"), "pub fn hello() {}").unwrap();
@@ -517,10 +520,10 @@ fn single_file_workspace_has_no_cycles() {
     let mut tethys = Tethys::new(dir.path()).expect("failed to create Tethys");
     tethys.index().expect("index failed");
 
-    let cycles = tethys.detect_cycles().expect("detect_cycles failed");
-
+    // Cycle detection is not yet implemented
+    let result = tethys.detect_cycles();
     assert!(
-        cycles.is_empty(),
-        "single file workspace should have no cycles"
+        result.is_err(),
+        "detect_cycles should return error (not yet implemented)"
     );
 }

@@ -116,25 +116,26 @@ pub fn resolve_module_path(
 }
 
 /// Try to resolve a path as a .rs file or directory with mod.rs.
-fn resolve_as_module(path: &Path) -> PathBuf {
+///
+/// Returns `None` if neither variant exists on disk, avoiding phantom dependencies.
+fn resolve_as_module(path: &Path) -> Option<PathBuf> {
     // Try as a .rs file first
     let rs_path = path.with_extension("rs");
     if rs_path.exists() {
-        return rs_path;
+        return Some(rs_path);
     }
 
     // Try as a directory with mod.rs
     let mod_rs = path.join("mod.rs");
     if mod_rs.exists() {
-        return mod_rs;
+        return Some(mod_rs);
     }
 
-    // Return .rs variant as best guess
-    rs_path
+    // Neither variant exists - return None instead of a phantom path
+    None
 }
 
 /// Resolve a crate-relative path.
-#[allow(clippy::unnecessary_wraps)] // Returns Option for API consistency with resolve_module_path
 fn resolve_crate_path(path: &[String], crate_root: &Path) -> Option<PathBuf> {
     if path.is_empty() {
         return Some(crate_root.to_path_buf());
@@ -146,7 +147,7 @@ fn resolve_crate_path(path: &[String], crate_root: &Path) -> Option<PathBuf> {
         result.push(segment);
     }
 
-    Some(resolve_as_module(&result))
+    resolve_as_module(&result)
 }
 
 /// Resolve a self-relative path (sibling module).
@@ -162,7 +163,7 @@ fn resolve_self_path(path: &[String], current_file: &Path) -> Option<PathBuf> {
         result.push(segment);
     }
 
-    Some(resolve_as_module(&result))
+    resolve_as_module(&result)
 }
 
 /// Resolve a super-relative path (parent module).
@@ -196,7 +197,7 @@ fn resolve_super_path(path: &[String], current_file: &Path) -> Option<PathBuf> {
         result.push(segment);
     }
 
-    Some(resolve_as_module(&result))
+    resolve_as_module(&result)
 }
 
 #[cfg(test)]

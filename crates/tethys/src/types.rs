@@ -22,10 +22,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::IndexError;
 
-// ============================================================================
-// Strongly-typed ID wrappers
-// ============================================================================
-
 /// A strongly-typed symbol ID to prevent mixing with file IDs.
 ///
 /// This newtype provides type safety for function signatures that accept
@@ -67,10 +63,6 @@ impl From<i64> for FileId {
         Self(id)
     }
 }
-
-// ============================================================================
-// Enums
-// ============================================================================
 
 /// Supported programming languages.
 ///
@@ -204,7 +196,7 @@ impl Visibility {
 }
 
 /// Reference kinds - how a symbol is used at a reference site.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReferenceKind {
     /// Import statement (`use` in Rust, `using` in C#)
@@ -219,10 +211,15 @@ pub enum ReferenceKind {
     Construct,
     /// Field access on a struct/class instance
     FieldAccess,
+    /// Unknown reference kind from database (possible version mismatch or corruption).
+    /// Contains the raw string value that could not be parsed.
+    Unknown(String),
 }
 
 impl ReferenceKind {
     /// Convert to database string representation.
+    ///
+    /// For known variants, returns the canonical string. For `Unknown`, returns `"unknown"`.
     #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -232,12 +229,14 @@ impl ReferenceKind {
             Self::Inherit => "inherit",
             Self::Construct => "construct",
             Self::FieldAccess => "field_access",
+            Self::Unknown(_) => "unknown",
         }
     }
 
     /// Parse from database string representation.
     ///
-    /// Returns `None` for unknown strings.
+    /// Returns `None` for unknown strings. Use [`ReferenceKind::parse_or_unknown`]
+    /// to preserve unrecognized values as `Unknown(String)`.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         match s {
@@ -250,13 +249,24 @@ impl ReferenceKind {
             _ => None,
         }
     }
+
+    /// Parse from database string, preserving unknown values.
+    ///
+    /// Unlike [`ReferenceKind::parse`], this never returns `None`. Unknown strings
+    /// are wrapped in `ReferenceKind::Unknown(String)` to preserve the original value.
+    #[must_use]
+    pub fn parse_or_unknown(s: &str) -> Self {
+        Self::parse(s).unwrap_or_else(|| Self::Unknown(s.to_string()))
+    }
+
+    /// Returns `true` if this is an `Unknown` variant.
+    #[must_use]
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown(_))
+    }
 }
 
-// ============================================================================
-// Core Entities (stored in database)
-// ============================================================================
-
-/// A source/end position span in a file.
+/// A start/end position span in a file.
 ///
 /// Positions are 1-indexed (first line is 1, first column is 1) to match
 /// editor conventions.
@@ -316,10 +326,6 @@ impl Span {
         self.end_column
     }
 }
-
-// ============================================================================
-// Function Signature Types
-// ============================================================================
 
 /// Structured representation of a function/method signature.
 ///
@@ -418,7 +424,7 @@ pub struct IndexedFile {
     pub mtime_ns: i64,
     /// File size in bytes
     pub size_bytes: u64,
-    /// xxHash64 of file content (for change detection)
+    /// Content hash for change detection (algorithm TBD, not yet implemented)
     pub content_hash: Option<u64>,
     /// When this file was last indexed (unix timestamp)
     pub indexed_at: i64,
@@ -502,10 +508,6 @@ pub struct Reference {
     pub in_symbol_id: Option<i64>,
 }
 
-// ============================================================================
-// Transient Types (not stored directly)
-// ============================================================================
-
 /// Analysis results from parsing a single file.
 ///
 /// This is the intermediate representation produced by the parser before
@@ -528,10 +530,6 @@ pub struct FileAnalysis {
     /// References to other symbols
     pub references: Vec<Reference>,
 }
-
-// ============================================================================
-// Operation Results
-// ============================================================================
 
 /// Statistics from a full index operation.
 ///
@@ -572,10 +570,6 @@ pub struct IndexUpdate {
     pub errors: Vec<IndexError>,
 }
 
-// ============================================================================
-// Query Results
-// ============================================================================
-
 /// Result of impact analysis.
 ///
 /// Shows which files/symbols would be affected by changes to a target.
@@ -614,8 +608,10 @@ pub struct Cycle {
 /// # Invariants
 ///
 /// When returned from `Tethys::get_stats()`:
-/// - `file_count` equals sum of `files_by_language` values plus `skipped_unknown_languages`
-/// - `symbol_count` equals sum of `symbols_by_kind` values plus `skipped_unknown_kinds`
+/// - `file_count` equals sum of `files_by_language` values (unknown languages are tracked
+///   separately in `skipped_unknown_languages`)
+/// - `symbol_count` equals sum of `symbols_by_kind` values (unknown kinds are tracked
+///   separately in `skipped_unknown_kinds`)
 #[derive(Debug, Clone, Default)]
 pub struct DatabaseStats {
     /// Total number of indexed files
@@ -1025,7 +1021,9 @@ mod tests {
 
     #[test]
     fn reference_kind_roundtrip_with_as_str() {
-        // Ensure parse(kind.as_str()) == Some(kind) for all variants
+        // Ensure parse(kind.as_str()) == Some(kind) for all known variants.
+        // Unknown doesn't roundtrip: parse_or_unknown("xyz") -> Unknown("xyz"),
+        // Unknown.as_str() -> "unknown", so it's intentionally excluded.
         let variants = [
             ReferenceKind::Import,
             ReferenceKind::Call,
@@ -1035,11 +1033,28 @@ mod tests {
             ReferenceKind::FieldAccess,
         ];
         for kind in variants {
-            assert_eq!(
-                ReferenceKind::parse(kind.as_str()),
-                Some(kind),
-                "roundtrip failed for {kind:?}"
-            );
+            let as_str = kind.as_str();
+            let parsed = ReferenceKind::parse(as_str);
+            assert_eq!(parsed, Some(kind.clone()), "roundtrip failed for {kind:?}");
         }
+    }
+
+    #[test]
+    fn reference_kind_parse_or_unknown_preserves_unknown_values() {
+        let kind = ReferenceKind::parse_or_unknown("some_future_kind");
+        assert_eq!(kind, ReferenceKind::Unknown("some_future_kind".to_string()));
+        assert!(kind.is_unknown());
+    }
+
+    #[test]
+    fn reference_kind_parse_or_unknown_returns_known_for_valid_kinds() {
+        assert_eq!(ReferenceKind::parse_or_unknown("call"), ReferenceKind::Call);
+        assert!(!ReferenceKind::parse_or_unknown("call").is_unknown());
+    }
+
+    #[test]
+    fn reference_kind_unknown_as_str_returns_unknown() {
+        let kind = ReferenceKind::Unknown("anything".to_string());
+        assert_eq!(kind.as_str(), "unknown");
     }
 }

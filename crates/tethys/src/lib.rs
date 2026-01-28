@@ -37,7 +37,6 @@ mod db;
 mod error;
 mod graph;
 mod languages;
-mod parser;
 mod resolver;
 mod types;
 
@@ -132,6 +131,10 @@ impl Tethys {
     /// Currently behaves identically to [`Self::new`] and ignores `lsp_command`.
     #[allow(unused_variables)]
     pub fn with_lsp(workspace_root: &Path, lsp_command: &str) -> Result<Self> {
+        tracing::warn!(
+            lsp_command,
+            "LSP integration not yet implemented, falling back to tree-sitter only"
+        );
         Self::new(workspace_root)
     }
 
@@ -173,11 +176,16 @@ impl Tethys {
                     references_found += ref_count;
                 }
                 Err(e) => {
-                    errors.push(IndexError::new(
-                        file_path.clone(),
-                        IndexErrorKind::ParseFailed,
-                        e.to_string(),
-                    ));
+                    let kind = match &e {
+                        Error::Io(_) => IndexErrorKind::IoError,
+                        Error::Database(_) => IndexErrorKind::DatabaseError,
+                        Error::Parser(_) => IndexErrorKind::ParseFailed,
+                        // Fallback for other error types
+                        Error::Config(_) | Error::NotFound(_) | Error::Internal(_) => {
+                            IndexErrorKind::ParseFailed
+                        }
+                    };
+                    errors.push(IndexError::new(file_path.clone(), kind, e.to_string()));
                 }
             }
         }
@@ -418,11 +426,11 @@ impl Tethys {
                 .and_then(|span| span_to_id.get(&span).copied());
 
             // Insert the reference
-            let kind_str = r.kind.to_db_kind().as_str();
+            let db_kind = r.kind.to_db_kind();
             self.db.insert_reference(
                 symbol_id,
                 file_id,
-                kind_str,
+                db_kind.as_str(),
                 r.line,
                 r.column,
                 in_symbol_id,
@@ -462,7 +470,7 @@ impl Tethys {
             }
         }
 
-        // Crate root is the src/ directory (or where the main/lib file lives)
+        // Currently assumes crate root is workspace_root/src/ — does not detect actual main/lib location
         let crate_root = self.workspace_root.join("src");
 
         // Track which files we depend on (dedupe)
@@ -628,22 +636,30 @@ impl Tethys {
         path.strip_prefix(&self.workspace_root).unwrap_or(path)
     }
 
-    /// Convert a list of file IDs to their paths, logging warnings for missing files.
-    fn file_ids_to_paths(&self, file_ids: Vec<i64>, source_file_id: i64) -> Result<Vec<PathBuf>> {
+    /// Convert a list of file IDs to their paths, tracking missing files.
+    ///
+    /// Returns `(found_paths, missing_count)` where `missing_count` is the number of
+    /// file IDs that could not be resolved (logged as warnings).
+    fn file_ids_to_paths(
+        &self,
+        file_ids: Vec<i64>,
+        source_file_id: i64,
+    ) -> Result<(Vec<PathBuf>, usize)> {
         let mut paths = Vec::new();
+        let mut missing_count = 0;
         for dep_id in file_ids {
-            match self.db.get_file_by_id(dep_id)? {
-                Some(file) => paths.push(file.path),
-                None => {
-                    warn!(
-                        source_file_id,
-                        missing_file_id = dep_id,
-                        "file_deps references non-existent file, possible database corruption"
-                    );
-                }
+            if let Some(file) = self.db.get_file_by_id(dep_id)? {
+                paths.push(file.path);
+            } else {
+                warn!(
+                    source_file_id,
+                    missing_file_id = dep_id,
+                    "file_deps references non-existent file, possible database corruption"
+                );
+                missing_count += 1;
             }
         }
-        Ok(paths)
+        Ok((paths, missing_count))
     }
 
     /// Incrementally update index for changed files.
@@ -687,10 +703,11 @@ impl Tethys {
 
     /// List all symbols defined in a file.
     pub fn list_symbols(&self, path: &Path) -> Result<Vec<Symbol>> {
-        match self.db.get_file_id(self.relative_path(path))? {
-            Some(file_id) => self.db.list_symbols_in_file(file_id),
-            None => Ok(vec![]),
-        }
+        let file_id = self
+            .db
+            .get_file_id(self.relative_path(path))?
+            .ok_or_else(|| Error::NotFound(format!("file: {}", path.display())))?;
+        self.db.list_symbols_in_file(file_id)
     }
 
     /// Get a symbol by its qualified name (exact match).
@@ -716,9 +733,10 @@ impl Tethys {
     /// Get all references to a symbol.
     pub fn get_references(&self, qualified_name: &str) -> Result<Vec<Reference>> {
         // First find the symbol by qualified name
-        let Some(symbol) = self.db.get_symbol_by_qualified_name(qualified_name)? else {
-            return Ok(vec![]);
-        };
+        let symbol = self
+            .db
+            .get_symbol_by_qualified_name(qualified_name)?
+            .ok_or_else(|| Error::NotFound(format!("symbol: {qualified_name}")))?;
 
         // Then get all references to it
         self.db.get_references_to_symbol(symbol.id)
@@ -726,9 +744,10 @@ impl Tethys {
 
     /// List all outgoing references from a file.
     pub fn list_references_in_file(&self, path: &Path) -> Result<Vec<Reference>> {
-        let Some(file_id) = self.db.get_file_id(self.relative_path(path))? else {
-            return Ok(vec![]);
-        };
+        let file_id = self
+            .db
+            .get_file_id(self.relative_path(path))?
+            .ok_or_else(|| Error::NotFound(format!("file: {}", path.display())))?;
 
         self.db.list_references_in_file(file_id)
     }
@@ -737,22 +756,40 @@ impl Tethys {
 
     /// Get files that directly depend on the given file.
     pub fn get_dependents(&self, path: &Path) -> Result<Vec<PathBuf>> {
-        let Some(file_id) = self.db.get_file_id(self.relative_path(path))? else {
-            return Ok(vec![]);
-        };
+        let file_id = self
+            .db
+            .get_file_id(self.relative_path(path))?
+            .ok_or_else(|| Error::NotFound(format!("file: {}", path.display())))?;
 
         let dependent_ids = self.db.get_file_dependents(file_id)?;
-        self.file_ids_to_paths(dependent_ids, file_id)
+        let (paths, missing_count) = self.file_ids_to_paths(dependent_ids, file_id)?;
+        if missing_count > 0 {
+            debug!(
+                file = %path.display(),
+                missing_count,
+                "Some dependent file IDs could not be resolved"
+            );
+        }
+        Ok(paths)
     }
 
     /// Get files that the given file directly depends on.
     pub fn get_dependencies(&self, path: &Path) -> Result<Vec<PathBuf>> {
-        let Some(file_id) = self.db.get_file_id(self.relative_path(path))? else {
-            return Ok(vec![]);
-        };
+        let file_id = self
+            .db
+            .get_file_id(self.relative_path(path))?
+            .ok_or_else(|| Error::NotFound(format!("file: {}", path.display())))?;
 
         let dep_ids = self.db.get_file_dependencies(file_id)?;
-        self.file_ids_to_paths(dep_ids, file_id)
+        let (paths, missing_count) = self.file_ids_to_paths(dep_ids, file_id)?;
+        if missing_count > 0 {
+            debug!(
+                file = %path.display(),
+                missing_count,
+                "Some dependency file IDs could not be resolved"
+            );
+        }
+        Ok(paths)
     }
 
     /// Get impact analysis: direct and transitive dependents of a file.

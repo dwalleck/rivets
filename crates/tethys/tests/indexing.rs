@@ -202,16 +202,22 @@ pub fn world() {}
 }
 
 #[test]
-fn list_symbols_returns_empty_for_unknown_file() {
+fn list_symbols_returns_not_found_for_unknown_file() {
     let (_dir, mut tethys) = workspace_with_files(&[("src/lib.rs", "fn foo() {}")]);
 
     tethys.index().expect("index failed");
 
-    let symbols = tethys
-        .list_symbols(std::path::Path::new("/nonexistent/file.rs"))
-        .expect("list_symbols failed");
+    let result = tethys.list_symbols(std::path::Path::new("/nonexistent/file.rs"));
 
-    assert!(symbols.is_empty());
+    assert!(
+        result.is_err(),
+        "should return NotFound error for unknown file"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, tethys::Error::NotFound(_)),
+        "expected NotFound error, got: {err:?}"
+    );
 }
 
 #[test]
@@ -862,7 +868,7 @@ pub fn another() -> Data {
 // ============================================================================
 
 #[test]
-fn get_references_returns_empty_for_nonexistent_symbol() {
+fn get_references_returns_not_found_for_nonexistent_symbol() {
     let (_dir, mut tethys) = workspace_with_files(&[(
         "src/lib.rs",
         r"
@@ -872,13 +878,16 @@ pub fn real_function() {}
 
     tethys.index().expect("index failed");
 
-    let refs = tethys
-        .get_references("symbol_that_does_not_exist")
-        .expect("get_references should not error");
+    let result = tethys.get_references("symbol_that_does_not_exist");
 
     assert!(
-        refs.is_empty(),
-        "should return empty vec for nonexistent symbol"
+        result.is_err(),
+        "should return NotFound error for nonexistent symbol"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, tethys::Error::NotFound(_)),
+        "expected NotFound error, got: {err:?}"
     );
 }
 
@@ -923,16 +932,22 @@ pub fn unrelated_function() -> i32 {
 }
 
 #[test]
-fn list_references_in_file_returns_empty_for_unknown_file() {
+fn list_references_in_file_returns_not_found_for_unknown_file() {
     let (_dir, mut tethys) = workspace_with_files(&[("src/lib.rs", "fn foo() {}")]);
 
     tethys.index().expect("index failed");
 
-    let refs = tethys
-        .list_references_in_file(std::path::Path::new("src/nonexistent.rs"))
-        .expect("list_references_in_file should not error");
+    let result = tethys.list_references_in_file(std::path::Path::new("src/nonexistent.rs"));
 
-    assert!(refs.is_empty(), "should return empty vec for unknown file");
+    assert!(
+        result.is_err(),
+        "should return NotFound error for unknown file"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, tethys::Error::NotFound(_)),
+        "expected NotFound error, got: {err:?}"
+    );
 }
 
 #[test]
@@ -1135,9 +1150,9 @@ pub fn b() -> Foo { Foo }
 }
 
 #[test]
-fn duplicate_symbol_names_last_one_wins() {
-    // When multiple symbols have the same name, the reference resolution
-    // uses "last one wins" semantics. This test documents this behavior.
+fn duplicate_symbol_names_are_indexed_separately() {
+    // When multiple symbols have the same name in different contexts (e.g., impl blocks),
+    // they should be indexed as separate symbols with distinct qualified names.
     let (_dir, mut tethys) = workspace_with_files(&[(
         "src/lib.rs",
         r"
@@ -1169,24 +1184,28 @@ pub fn caller() {
         "should have two 'process' symbols, got: {symbols:?}"
     );
 
-    // Note: A::process() and B::process() are scoped calls. The reference extractor
-    // captures these, but reference resolution in Phase 2 uses simple name matching.
-    // The "process" calls resolve to whichever "process" symbol was indexed last
-    // (last one wins in build_symbol_maps). This is a known limitation.
-    //
-    // The key verification is that the system handles duplicate names gracefully
-    // without crashing or corrupting data.
-    let refs = tethys
-        .get_references("process")
-        .expect("get_references failed");
-
-    // References may or may not be found depending on how the calls are extracted.
-    // The important verification is that both symbols are indexed (checked above).
-    // Cross-impl method resolution will be improved in Phase 3.
+    // Verify both symbols have qualified names
+    let qualified_names: Vec<_> = symbols.iter().map(|s| s.qualified_name.as_str()).collect();
     assert!(
-        refs.len() <= 2,
-        "should have at most 2 references to 'process', got: {refs:?}"
+        qualified_names.contains(&"A::process"),
+        "should have A::process, got: {qualified_names:?}"
     );
+    assert!(
+        qualified_names.contains(&"B::process"),
+        "should have B::process, got: {qualified_names:?}"
+    );
+
+    // Get references using qualified names - each should work independently
+    // Note: Cross-impl method resolution is a known limitation in Phase 2.
+    // References may or may not be found depending on how scoped calls are extracted.
+    for sym in &symbols {
+        let refs_result = tethys.get_references(&sym.qualified_name);
+        assert!(
+            refs_result.is_ok(),
+            "get_references for {} should succeed",
+            sym.qualified_name
+        );
+    }
 }
 
 // ============================================================================
