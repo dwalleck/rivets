@@ -24,10 +24,6 @@ fn workspace_with_files(files: &[(&str, &str)]) -> (TempDir, Tethys) {
     (dir, tethys)
 }
 
-// ============================================================================
-// Phase 1: Basic Indexing
-// ============================================================================
-
 #[test]
 fn index_empty_workspace_returns_zero_stats() {
     let (_dir, mut tethys) = workspace_with_files(&[]);
@@ -171,10 +167,6 @@ fn this_is_not_valid {
     // We don't assert on errors because tree-sitter is forgiving
 }
 
-// ============================================================================
-// Phase 1: Symbol Queries After Indexing
-// ============================================================================
-
 #[test]
 fn list_symbols_returns_symbols_in_file() {
     let (dir, mut tethys) = workspace_with_files(&[(
@@ -268,10 +260,6 @@ fn search_symbols_with_empty_query_returns_empty() {
     assert!(results.is_empty());
 }
 
-// ============================================================================
-// Edge Case Tests
-// ============================================================================
-
 #[test]
 fn index_handles_non_utf8_file_gracefully() {
     let dir = tempfile::tempdir().expect("failed to create temp dir");
@@ -311,10 +299,6 @@ fn index_handles_empty_rust_file() {
     assert_eq!(stats.symbols_found, 0);
     assert!(stats.errors.is_empty());
 }
-
-// ============================================================================
-// Phase 2: Dependency Detection
-// ============================================================================
 
 #[test]
 fn get_dependencies_for_file_using_internal_module() {
@@ -656,10 +640,6 @@ impl C {
     );
 }
 
-// ============================================================================
-// Phase 2: Reference Storage and Queries
-// ============================================================================
-
 #[test]
 fn index_stores_references_for_same_file_symbols() {
     let (_dir, mut tethys) = workspace_with_files(&[(
@@ -865,10 +845,6 @@ pub fn another() -> Data {
     );
 }
 
-// ============================================================================
-// Edge Cases and Error Handling
-// ============================================================================
-
 #[test]
 fn get_references_returns_not_found_for_nonexistent_symbol() {
     let (_dir, mut tethys) = workspace_with_files(&[(
@@ -1073,10 +1049,6 @@ pub fn make_point() -> Point {
     );
 }
 
-// ============================================================================
-// Phase 2 Limitations and Edge Cases
-// ============================================================================
-
 #[test]
 fn cross_file_references_not_stored_in_phase_2() {
     // Phase 2 only stores references where the target symbol is in the same file.
@@ -1209,10 +1181,6 @@ pub fn caller() {
         );
     }
 }
-
-// ============================================================================
-// Database Statistics Tests
-// ============================================================================
 
 #[test]
 fn get_stats_on_empty_database() {
@@ -1364,10 +1332,6 @@ pub trait T {}
         "symbol_count should equal sum of symbols_by_kind + skipped"
     );
 }
-
-// ============================================================================
-// Transaction Atomicity Tests
-// ============================================================================
 
 #[test]
 fn reindex_preserves_data_when_file_becomes_unreadable() {
@@ -1590,4 +1554,80 @@ public class UserService {
         tethys::SymbolKind::Method,
         "Save should be a Method"
     );
+}
+
+#[test]
+fn csharp_namespace_dependency_resolution() {
+    let service_code = r"
+namespace MyApp.Services;
+
+public class UserService {
+    public void Save() { }
+}
+";
+    let controller_code = r"
+using MyApp.Services;
+
+namespace MyApp.Controllers;
+
+public class UserController {
+    public void Create() {
+        var svc = new UserService();
+        svc.Save();
+    }
+}
+";
+    let (dir, mut tethys) = workspace_with_files(&[
+        ("Services/UserService.cs", service_code),
+        ("Controllers/UserController.cs", controller_code),
+    ]);
+    let stats = tethys.index().expect("index failed");
+    assert_eq!(stats.files_indexed, 2);
+
+    // UserController.cs depends on UserService.cs via `using MyApp.Services`
+    let deps = tethys
+        .get_dependencies(&dir.path().join("Controllers/UserController.cs"))
+        .expect("get_dependencies failed");
+
+    assert_eq!(deps.len(), 1, "should have 1 dependency");
+    assert!(
+        deps[0].ends_with("Services/UserService.cs"),
+        "should depend on UserService.cs, got: {:?}",
+        deps[0]
+    );
+}
+
+#[test]
+fn csharp_namespace_shared_by_multiple_files() {
+    let model_a = r"
+namespace MyApp.Models;
+public class User { }
+";
+    let model_b = r"
+namespace MyApp.Models;
+public class Order { }
+";
+    let consumer = r"
+using MyApp.Models;
+namespace MyApp.Services;
+public class Service {
+    public void Run() {
+        var u = new User();
+        var o = new Order();
+    }
+}
+";
+    let (dir, mut tethys) = workspace_with_files(&[
+        ("Models/User.cs", model_a),
+        ("Models/Order.cs", model_b),
+        ("Services/Service.cs", consumer),
+    ]);
+    tethys.index().expect("index failed");
+
+    let deps = tethys
+        .get_dependencies(&dir.path().join("Services/Service.cs"))
+        .expect("get_dependencies failed");
+
+    // Should depend on both files that declare the MyApp.Models namespace
+    assert_eq!(deps.len(), 2, "should depend on both model files");
 }

@@ -336,6 +336,25 @@ impl Index {
         }
     }
 
+    /// Search symbols by their kind (e.g., `SymbolKind::Module` for namespaces).
+    ///
+    /// This is used to build namespace-to-file maps for C# dependency resolution.
+    pub fn search_symbols_by_kind(&self, kind: SymbolKind, limit: usize) -> Result<Vec<Symbol>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, file_id, name, module_path, qualified_name, kind, line, column,
+             end_line, end_column, signature, visibility, parent_symbol_id
+             FROM symbols
+             WHERE kind = ?1
+             LIMIT ?2",
+        )?;
+
+        let symbols = stmt
+            .query_map(params![kind.as_str(), limit as i64], row_to_symbol)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(symbols)
+    }
+
     /// Get total counts for stats.
     #[allow(dead_code)] // Public API, not yet used internally
     pub fn get_counts(&self) -> Result<(usize, usize, usize)> {
@@ -410,6 +429,23 @@ impl Index {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(refs)
+    }
+
+    /// Get all files of a specific language.
+    ///
+    /// Used for language-specific dependency resolution passes.
+    pub fn get_files_by_language(&self, language: Language) -> Result<Vec<IndexedFile>> {
+        let lang_str = language.as_str();
+        let mut stmt = self.conn.prepare(
+            "SELECT id, path, language, mtime_ns, size_bytes, content_hash, indexed_at
+             FROM files WHERE language = ?1",
+        )?;
+
+        let files = stmt
+            .query_map([lang_str], row_to_indexed_file)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(files)
     }
 
     // === File Dependency Operations ===

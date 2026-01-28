@@ -190,6 +190,17 @@ impl Tethys {
             }
         }
 
+        // C# namespace resolution pass: resolve using directives via namespace map
+        // This must happen after all files are indexed so we have the complete namespace map
+        let namespace_map = self.build_namespace_map()?;
+        if !namespace_map.is_empty() {
+            debug!(
+                namespace_count = namespace_map.len(),
+                "Resolving C# dependencies via namespace map"
+            );
+            self.resolve_csharp_dependencies(&namespace_map)?;
+        }
+
         // Resolution passes: retry pending dependencies until stable
         let mut prev_count = pending.len() + 1;
         let mut pass = 0;
@@ -522,6 +533,133 @@ impl Tethys {
                         from_file_id: file_id,
                         dep_path,
                     });
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Maximum number of namespace symbols to query for C# dependency resolution.
+    ///
+    /// This limit exists to prevent unbounded queries on very large codebases.
+    /// If this limit is reached, some C# dependencies may not be resolved.
+    const NAMESPACE_QUERY_LIMIT: usize = 10_000;
+
+    /// Build a namespace-to-file map from indexed C# Module symbols.
+    ///
+    /// This enables C# `using` directive resolution: `using MyApp.Services`
+    /// resolves to whichever files declare `namespace MyApp.Services`.
+    fn build_namespace_map(&self) -> Result<HashMap<String, Vec<FileId>>> {
+        use std::collections::HashSet;
+
+        let mut map: HashMap<String, Vec<FileId>> = HashMap::new();
+
+        // Query all Module-kind symbols (namespaces)
+        let symbols = self
+            .db
+            .search_symbols_by_kind(SymbolKind::Module, Self::NAMESPACE_QUERY_LIMIT)?;
+
+        if symbols.len() >= Self::NAMESPACE_QUERY_LIMIT {
+            warn!(
+                limit = Self::NAMESPACE_QUERY_LIMIT,
+                "Namespace query limit reached, some C# dependencies may not be resolved"
+            );
+        }
+
+        // Fetch all C# file IDs upfront to avoid N+1 queries
+        let csharp_file_ids: HashSet<FileId> = self
+            .db
+            .get_files_by_language(Language::CSharp)?
+            .into_iter()
+            .map(|f| f.id)
+            .collect();
+
+        for sym in symbols {
+            // Only include C# files (Rust modules use different resolution)
+            if csharp_file_ids.contains(&sym.file_id) {
+                map.entry(sym.name.clone()).or_default().push(sym.file_id);
+            }
+        }
+
+        Ok(map)
+    }
+
+    /// Resolve C# file dependencies using namespace-to-file mapping.
+    ///
+    /// For each C# file, look at its `using` directives and find which files
+    /// declare those namespaces. Record file-level dependencies.
+    fn resolve_csharp_dependencies(
+        &mut self,
+        namespace_map: &HashMap<String, Vec<FileId>>,
+    ) -> Result<()> {
+        // Get language support once before the loop
+        let Some(lang_support) = languages::get_language_support(Language::CSharp) else {
+            tracing::error!("No language support for C#, cannot resolve C# dependencies");
+            return Ok(());
+        };
+
+        if let Err(e) = self
+            .parser
+            .set_language(&lang_support.tree_sitter_language())
+        {
+            tracing::error!(
+                error = %e,
+                "Failed to set parser language to C#, cannot resolve C# dependencies"
+            );
+            return Ok(());
+        }
+
+        // Get all C# files
+        let csharp_files = self.db.get_files_by_language(Language::CSharp)?;
+
+        for file in &csharp_files {
+            // Get the using directives for this file by re-parsing
+            let full_path = self.workspace_root.join(&file.path);
+            let content = match std::fs::read(&full_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(
+                        file = %full_path.display(),
+                        error = %e,
+                        "Failed to read C# file for dependency resolution"
+                    );
+                    continue;
+                }
+            };
+            let content_str = match std::str::from_utf8(&content) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(
+                        file = %full_path.display(),
+                        error = %e,
+                        "C# file is not valid UTF-8, skipping dependency resolution"
+                    );
+                    continue;
+                }
+            };
+
+            let Some(tree) = self.parser.parse(content_str, None) else {
+                warn!(
+                    file = %full_path.display(),
+                    "Failed to parse C# file for dependency resolution"
+                );
+                continue;
+            };
+
+            let imports = lang_support.extract_imports(&tree, content_str.as_bytes());
+
+            for import in &imports {
+                // Join path segments to form namespace name: ["MyApp", "Services"] -> "MyApp.Services"
+                let namespace = import.path.join(".");
+
+                if let Some(file_ids) = namespace_map.get(&namespace) {
+                    for &dep_file_id in file_ids {
+                        // Don't add self-dependency
+                        if dep_file_id != file.id {
+                            self.db.insert_file_dependency(file.id, dep_file_id)?;
+                        }
+                    }
                 }
             }
         }
