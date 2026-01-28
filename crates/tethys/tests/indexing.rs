@@ -1050,9 +1050,9 @@ pub fn make_point() -> Point {
 }
 
 #[test]
-fn cross_file_references_not_stored_in_phase_2() {
-    // Phase 2 only stores references where the target symbol is in the same file.
-    // Cross-file references will be resolved in Phase 3+.
+fn cross_file_references_not_stored() {
+    // Current limitation: Only stores references where target symbol is in the same file.
+    // Cross-file reference resolution is planned but not yet implemented.
     let (_dir, mut tethys) = workspace_with_files(&[
         ("src/lib.rs", "mod utils;\nmod main_mod;"),
         ("src/utils.rs", "pub struct Helper;"),
@@ -1070,17 +1070,17 @@ pub fn use_helper() -> Helper {
 
     let stats = tethys.index().expect("index failed");
 
-    // Cross-file references are NOT stored in Phase 2
-    // The refs in main_mod.rs to Helper from utils.rs should not be in refs table
+    // Cross-file references are not yet stored (same-file only for now).
+    // The refs in main_mod.rs to Helper from utils.rs should not be in refs table.
     let refs = tethys
         .get_references("Helper")
         .expect("get_references failed");
 
-    // No refs should be found since Helper is in utils.rs but referenced from main_mod.rs
-    // This documents the current Phase 2 limitation
+    // No refs should be found since Helper is in utils.rs but referenced from main_mod.rs.
+    // This documents the current same-file-only limitation.
     assert!(
         refs.is_empty(),
-        "cross-file references should not be stored in Phase 2, got: {refs:?}"
+        "cross-file references should not be stored yet, got: {refs:?}"
     );
 
     // But the symbol itself should exist
@@ -1170,7 +1170,7 @@ pub fn caller() {
     );
 
     // Get references using qualified names - each should work independently
-    // Note: Cross-impl method resolution is a known limitation in Phase 2.
+    // Note: Cross-impl method resolution is a known limitation (same-file only).
     // References may or may not be found depending on how scoped calls are extracted.
     for sym in &symbols {
         let refs_result = tethys.get_references(&sym.qualified_name);
@@ -1588,10 +1588,30 @@ public interface ICalculator {
     tethys.index().expect("index failed");
 
     let symbols = tethys.search_symbols("Calculator").expect("search failed");
-    assert!(!symbols.is_empty(), "should find Calculator symbol");
+    let calculator = symbols
+        .iter()
+        .find(|s| s.name == "Calculator" && s.kind == tethys::SymbolKind::Class);
+    assert!(
+        calculator.is_some(),
+        "should find Calculator as a Class, got: {:?}",
+        symbols
+            .iter()
+            .map(|s| (&s.name, s.kind))
+            .collect::<Vec<_>>()
+    );
 
     let symbols = tethys.search_symbols("ICalculator").expect("search failed");
-    assert!(!symbols.is_empty(), "should find ICalculator interface");
+    let interface = symbols
+        .iter()
+        .find(|s| s.name == "ICalculator" && s.kind == tethys::SymbolKind::Interface);
+    assert!(
+        interface.is_some(),
+        "should find ICalculator as an Interface, got: {:?}",
+        symbols
+            .iter()
+            .map(|s| (&s.name, s.kind))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]

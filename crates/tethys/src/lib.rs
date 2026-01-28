@@ -483,7 +483,8 @@ impl Tethys {
             }
         }
 
-        // Currently assumes crate root is workspace_root/src/ — does not detect actual main/lib location
+        // FIXME: Assumes crate root is workspace_root/src/. Does not detect actual
+        // main/lib location from Cargo.toml. Needs Cargo.toml parsing support.
         let crate_root = self.workspace_root.join("src");
 
         // Track which files we depend on (dedupe)
@@ -543,7 +544,9 @@ impl Tethys {
     /// Maximum number of namespace symbols to query for C# dependency resolution.
     ///
     /// This limit exists to prevent unbounded queries on very large codebases.
-    /// If this limit is reached, some C# dependencies may not be resolved.
+    /// 10,000 covers typical enterprise C# projects (1000-5000 files averaging 2-3
+    /// namespaces each). If this limit is reached, some C# dependencies may not
+    /// be resolved and a warning is logged.
     const NAMESPACE_QUERY_LIMIT: usize = 10_000;
 
     /// Build a namespace-to-file map from indexed C# Module symbols.
@@ -593,22 +596,20 @@ impl Tethys {
         &mut self,
         namespace_map: &HashMap<String, Vec<FileId>>,
     ) -> Result<()> {
-        // Get language support once before the loop
-        let Some(lang_support) = languages::get_language_support(Language::CSharp) else {
-            tracing::error!("No language support for C#, cannot resolve C# dependencies");
-            return Ok(());
-        };
+        // Track processing statistics for visibility
+        let mut files_processed: usize = 0;
+        let mut files_skipped_read: usize = 0;
+        let mut files_skipped_utf8: usize = 0;
+        let mut files_skipped_parse: usize = 0;
 
-        if let Err(e) = self
-            .parser
+        // Get language support once before the loop
+        let lang_support = languages::get_language_support(Language::CSharp).ok_or_else(|| {
+            Error::Parser("No language support for C#, cannot resolve C# dependencies".to_string())
+        })?;
+
+        self.parser
             .set_language(&lang_support.tree_sitter_language())
-        {
-            tracing::error!(
-                error = %e,
-                "Failed to set parser language to C#, cannot resolve C# dependencies"
-            );
-            return Ok(());
-        }
+            .map_err(|e| Error::Parser(format!("Failed to set parser language to C#: {e}")))?;
 
         // Get all C# files
         let csharp_files = self.db.get_files_by_language(Language::CSharp)?;
@@ -624,6 +625,7 @@ impl Tethys {
                         error = %e,
                         "Failed to read C# file for dependency resolution"
                     );
+                    files_skipped_read += 1;
                     continue;
                 }
             };
@@ -635,6 +637,7 @@ impl Tethys {
                         error = %e,
                         "C# file is not valid UTF-8, skipping dependency resolution"
                     );
+                    files_skipped_utf8 += 1;
                     continue;
                 }
             };
@@ -644,6 +647,7 @@ impl Tethys {
                     file = %full_path.display(),
                     "Failed to parse C# file for dependency resolution"
                 );
+                files_skipped_parse += 1;
                 continue;
             };
 
@@ -661,6 +665,34 @@ impl Tethys {
                         }
                     }
                 }
+            }
+
+            files_processed += 1;
+        }
+
+        // Log summary if any files were skipped
+        let total_skipped = files_skipped_read + files_skipped_utf8 + files_skipped_parse;
+        let total_files = files_processed + total_skipped;
+        if total_skipped > 0 {
+            if total_skipped > files_processed {
+                // More than half failed - likely a systemic issue
+                tracing::error!(
+                    total_files,
+                    files_processed,
+                    files_skipped_read,
+                    files_skipped_utf8,
+                    files_skipped_parse,
+                    "C# dependency resolution mostly failed - check file permissions and encoding"
+                );
+            } else {
+                warn!(
+                    total_files,
+                    files_processed,
+                    files_skipped_read,
+                    files_skipped_utf8,
+                    files_skipped_parse,
+                    "C# dependency resolution completed with some files skipped"
+                );
             }
         }
 

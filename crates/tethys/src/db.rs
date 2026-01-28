@@ -1154,4 +1154,434 @@ mod tests {
         assert_eq!(db_dependents.len(), 1);
         assert_eq!(db_dependents[0], auth_id);
     }
+
+    // ========================================================================
+    // search_symbols_by_kind Tests
+    // ========================================================================
+
+    #[test]
+    fn search_symbols_by_kind_filters_correctly() {
+        let (_dir, path) = temp_db();
+        let mut index = Index::open(&path).expect("should open database");
+
+        let file_id = index
+            .upsert_file(Path::new("src/lib.rs"), Language::Rust, 1000, 100, None)
+            .expect("should insert file");
+
+        // Insert symbols of different kinds
+        index
+            .insert_symbol(
+                file_id,
+                "my_function",
+                "crate",
+                "my_function",
+                SymbolKind::Function,
+                10,
+                1,
+                None,
+                Some("fn my_function()"),
+                Visibility::Public,
+                None,
+            )
+            .expect("should insert function symbol");
+
+        index
+            .insert_symbol(
+                file_id,
+                "MyStruct",
+                "crate",
+                "MyStruct",
+                SymbolKind::Struct,
+                20,
+                1,
+                None,
+                None,
+                Visibility::Public,
+                None,
+            )
+            .expect("should insert struct symbol");
+
+        index
+            .insert_symbol(
+                file_id,
+                "another_fn",
+                "crate",
+                "another_fn",
+                SymbolKind::Function,
+                30,
+                1,
+                None,
+                None,
+                Visibility::Private,
+                None,
+            )
+            .expect("should insert another function symbol");
+
+        // Search for functions only
+        let functions = index
+            .search_symbols_by_kind(SymbolKind::Function, 100)
+            .expect("should search by kind");
+        assert_eq!(functions.len(), 2, "should find exactly 2 functions");
+        assert!(
+            functions.iter().all(|s| s.kind == SymbolKind::Function),
+            "all results should be functions"
+        );
+
+        // Search for structs only
+        let structs = index
+            .search_symbols_by_kind(SymbolKind::Struct, 100)
+            .expect("should search by kind");
+        assert_eq!(structs.len(), 1, "should find exactly 1 struct");
+        assert_eq!(structs[0].name, "MyStruct");
+    }
+
+    #[test]
+    fn search_symbols_by_kind_respects_limit() {
+        let (_dir, path) = temp_db();
+        let mut index = Index::open(&path).expect("should open database");
+
+        let file_id = index
+            .upsert_file(Path::new("src/lib.rs"), Language::Rust, 1000, 100, None)
+            .expect("should insert file");
+
+        // Insert 5 functions
+        for i in 0..5 {
+            index
+                .insert_symbol(
+                    file_id,
+                    &format!("func_{i}"),
+                    "crate",
+                    &format!("func_{i}"),
+                    SymbolKind::Function,
+                    (10 + i * 10) as u32,
+                    1,
+                    None,
+                    None,
+                    Visibility::Public,
+                    None,
+                )
+                .expect("should insert function symbol");
+        }
+
+        // Search with limit of 2
+        let results = index
+            .search_symbols_by_kind(SymbolKind::Function, 2)
+            .expect("should search by kind");
+        assert_eq!(results.len(), 2, "should respect limit of 2");
+
+        // Search with limit of 10 (more than available)
+        let results = index
+            .search_symbols_by_kind(SymbolKind::Function, 10)
+            .expect("should search by kind");
+        assert_eq!(results.len(), 5, "should return all 5 functions");
+    }
+
+    #[test]
+    fn search_symbols_by_kind_returns_empty_when_no_matches() {
+        let (_dir, path) = temp_db();
+        let mut index = Index::open(&path).expect("should open database");
+
+        let file_id = index
+            .upsert_file(Path::new("src/lib.rs"), Language::Rust, 1000, 100, None)
+            .expect("should insert file");
+
+        // Insert only functions
+        index
+            .insert_symbol(
+                file_id,
+                "my_function",
+                "crate",
+                "my_function",
+                SymbolKind::Function,
+                10,
+                1,
+                None,
+                None,
+                Visibility::Public,
+                None,
+            )
+            .expect("should insert function symbol");
+
+        // Search for modules (none exist)
+        let modules = index
+            .search_symbols_by_kind(SymbolKind::Module, 100)
+            .expect("should search by kind");
+        assert!(
+            modules.is_empty(),
+            "should return empty vec when no matches"
+        );
+
+        // Search for traits (none exist)
+        let traits = index
+            .search_symbols_by_kind(SymbolKind::Trait, 100)
+            .expect("should search by kind");
+        assert!(traits.is_empty(), "should return empty vec for traits");
+    }
+
+    #[test]
+    fn search_symbols_by_kind_with_multiple_kinds_in_database() {
+        let (_dir, path) = temp_db();
+        let mut index = Index::open(&path).expect("should open database");
+
+        let file_id = index
+            .upsert_file(Path::new("src/lib.rs"), Language::Rust, 1000, 100, None)
+            .expect("should insert file");
+
+        // Insert various symbol kinds
+        let kinds_and_names = [
+            (SymbolKind::Function, "my_func"),
+            (SymbolKind::Struct, "MyStruct"),
+            (SymbolKind::Module, "my_module"),
+            (SymbolKind::Trait, "MyTrait"),
+            (SymbolKind::Enum, "MyEnum"),
+            (SymbolKind::Const, "MY_CONST"),
+        ];
+
+        for (i, (kind, name)) in kinds_and_names.iter().enumerate() {
+            index
+                .insert_symbol(
+                    file_id,
+                    name,
+                    "crate",
+                    name,
+                    *kind,
+                    (10 + i * 10) as u32,
+                    1,
+                    None,
+                    None,
+                    Visibility::Public,
+                    None,
+                )
+                .expect("should insert symbol");
+        }
+
+        // Each kind should return exactly one result
+        for (kind, expected_name) in kinds_and_names {
+            let results = index
+                .search_symbols_by_kind(kind, 100)
+                .expect("should search by kind");
+            assert_eq!(results.len(), 1, "should find exactly 1 {kind:?} symbol");
+            assert_eq!(
+                results[0].name, expected_name,
+                "symbol name should match for {kind:?}"
+            );
+            assert_eq!(results[0].kind, kind, "symbol kind should match");
+        }
+    }
+
+    #[test]
+    fn search_symbols_by_kind_with_zero_limit() {
+        let (_dir, path) = temp_db();
+        let mut index = Index::open(&path).expect("should open database");
+
+        let file_id = index
+            .upsert_file(Path::new("src/lib.rs"), Language::Rust, 1000, 100, None)
+            .expect("should insert file");
+
+        // Insert some functions
+        for i in 0..3 {
+            index
+                .insert_symbol(
+                    file_id,
+                    &format!("func_{i}"),
+                    "crate",
+                    &format!("func_{i}"),
+                    SymbolKind::Function,
+                    (10 + i * 10) as u32,
+                    1,
+                    None,
+                    None,
+                    Visibility::Public,
+                    None,
+                )
+                .expect("should insert function symbol");
+        }
+
+        // Search with limit of 0 should return empty
+        let results = index
+            .search_symbols_by_kind(SymbolKind::Function, 0)
+            .expect("should handle zero limit");
+        assert!(results.is_empty(), "limit=0 should return empty vec");
+    }
+
+    #[test]
+    fn search_symbols_by_kind_returns_complete_symbol_data() {
+        let (_dir, path) = temp_db();
+        let mut index = Index::open(&path).expect("should open database");
+
+        let file_id = index
+            .upsert_file(Path::new("src/lib.rs"), Language::Rust, 1000, 100, None)
+            .expect("should insert file");
+
+        // Insert a symbol with all fields populated
+        let span = Span::new(42, 8, 50, 1).expect("valid span");
+        index
+            .insert_symbol(
+                file_id,
+                "my_func",
+                "crate::module",
+                "crate::module::my_func",
+                SymbolKind::Function,
+                42,
+                8,
+                Some(span),
+                Some("fn my_func(x: i32) -> bool"),
+                Visibility::Private,
+                None,
+            )
+            .expect("should insert symbol");
+
+        let results = index
+            .search_symbols_by_kind(SymbolKind::Function, 10)
+            .expect("should search");
+        assert_eq!(results.len(), 1, "should find one function");
+
+        let sym = &results[0];
+        assert_eq!(sym.name, "my_func", "name should match");
+        assert_eq!(sym.module_path, "crate::module", "module_path should match");
+        assert_eq!(
+            sym.qualified_name, "crate::module::my_func",
+            "qualified_name should match"
+        );
+        assert_eq!(sym.kind, SymbolKind::Function, "kind should match");
+        assert_eq!(sym.line, 42, "line should match");
+        assert_eq!(sym.column, 8, "column should match");
+        assert!(sym.span.is_some(), "span should be present");
+        let sym_span = sym.span.expect("span should exist");
+        assert_eq!(sym_span.start_line(), 42, "span start_line should match");
+        assert_eq!(sym_span.end_line(), 50, "span end_line should match");
+        assert_eq!(
+            sym.signature,
+            Some("fn my_func(x: i32) -> bool".to_string()),
+            "signature should match"
+        );
+        assert_eq!(
+            sym.visibility,
+            Visibility::Private,
+            "visibility should match"
+        );
+        assert!(sym.parent_symbol_id.is_none(), "parent should be None");
+    }
+
+    // ========================================================================
+    // get_files_by_language Tests
+    // ========================================================================
+
+    #[test]
+    fn get_files_by_language_filters_correctly() {
+        let (_dir, path) = temp_db();
+        let mut index = Index::open(&path).expect("should open database");
+
+        // Insert Rust files
+        index
+            .upsert_file(Path::new("src/main.rs"), Language::Rust, 1000, 100, None)
+            .expect("should insert file");
+        index
+            .upsert_file(Path::new("src/lib.rs"), Language::Rust, 1000, 200, None)
+            .expect("should insert file");
+
+        // Insert C# files
+        index
+            .upsert_file(
+                Path::new("src/Program.cs"),
+                Language::CSharp,
+                1000,
+                150,
+                None,
+            )
+            .expect("should insert file");
+
+        // Get Rust files
+        let rust_files = index
+            .get_files_by_language(Language::Rust)
+            .expect("should get files by language");
+        assert_eq!(rust_files.len(), 2, "should find 2 Rust files");
+        assert!(
+            rust_files.iter().all(|f| f.language == Language::Rust),
+            "all files should be Rust"
+        );
+
+        // Get C# files
+        let csharp_files = index
+            .get_files_by_language(Language::CSharp)
+            .expect("should get files by language");
+        assert_eq!(csharp_files.len(), 1, "should find 1 C# file");
+        assert_eq!(csharp_files[0].language, Language::CSharp);
+    }
+
+    #[test]
+    fn get_files_by_language_returns_empty_when_no_matches() {
+        let (_dir, path) = temp_db();
+        let mut index = Index::open(&path).expect("should open database");
+
+        // Insert only Rust files
+        index
+            .upsert_file(Path::new("src/main.rs"), Language::Rust, 1000, 100, None)
+            .expect("should insert file");
+
+        // Get C# files (none exist)
+        let csharp_files = index
+            .get_files_by_language(Language::CSharp)
+            .expect("should get files by language");
+        assert!(
+            csharp_files.is_empty(),
+            "should return empty vec when no C# files exist"
+        );
+    }
+
+    #[test]
+    fn get_files_by_language_with_mixed_languages() {
+        let (_dir, path) = temp_db();
+        let mut index = Index::open(&path).expect("should open database");
+
+        // Insert files of mixed languages
+        let rust_paths = ["src/main.rs", "src/lib.rs", "src/utils.rs"];
+        let csharp_paths = ["src/Program.cs", "src/Service.cs"];
+
+        for p in rust_paths {
+            index
+                .upsert_file(Path::new(p), Language::Rust, 1000, 100, None)
+                .expect("should insert Rust file");
+        }
+
+        for p in csharp_paths {
+            index
+                .upsert_file(Path::new(p), Language::CSharp, 1000, 100, None)
+                .expect("should insert C# file");
+        }
+
+        // Verify Rust files
+        let rust_files = index
+            .get_files_by_language(Language::Rust)
+            .expect("should get Rust files");
+        assert_eq!(rust_files.len(), 3, "should find 3 Rust files");
+
+        let rust_file_paths: Vec<_> = rust_files
+            .iter()
+            .map(|f| f.path.to_string_lossy().to_string())
+            .collect();
+        for expected_path in rust_paths {
+            assert!(
+                rust_file_paths.contains(&expected_path.to_string()),
+                "should contain {expected_path}"
+            );
+        }
+
+        // Verify C# files
+        let csharp_files = index
+            .get_files_by_language(Language::CSharp)
+            .expect("should get C# files");
+        assert_eq!(csharp_files.len(), 2, "should find 2 C# files");
+
+        let csharp_file_paths: Vec<_> = csharp_files
+            .iter()
+            .map(|f| f.path.to_string_lossy().to_string())
+            .collect();
+        for expected_path in csharp_paths {
+            assert!(
+                csharp_file_paths.contains(&expected_path.to_string()),
+                "should contain {expected_path}"
+            );
+        }
+    }
 }
