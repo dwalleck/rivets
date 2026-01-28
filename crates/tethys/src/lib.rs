@@ -54,7 +54,7 @@ use std::time::{Instant, UNIX_EPOCH};
 
 use db::{Index, SymbolData};
 use graph::{FileGraphOps, SqlFileGraph, SqlSymbolGraph, SymbolGraphOps};
-use languages::rust;
+use languages::common;
 use resolver::resolve_module_path;
 use tracing::{debug, trace, warn};
 
@@ -108,10 +108,7 @@ impl Tethys {
             .join("tethys.db");
         let db = Index::open(&db_path)?;
 
-        let mut parser = tree_sitter::Parser::new();
-        parser
-            .set_language(&tree_sitter_rust::LANGUAGE.into())
-            .map_err(|e| Error::Parser(e.to_string()))?;
+        let parser = tree_sitter::Parser::new();
 
         // Initialize graph operations with their own DB connections
         let symbol_graph: Box<dyn SymbolGraphOps> = Box::new(SqlSymbolGraph::new(&db_path)?);
@@ -167,12 +164,6 @@ impl Tethys {
                 files_skipped += 1;
                 continue;
             };
-
-            // Only Rust is implemented for now
-            if language != Language::Rust {
-                files_skipped += 1;
-                continue;
-            }
 
             // Read and parse the file
             match self.index_file(&file_path, language, &mut pending) {
@@ -269,6 +260,15 @@ impl Tethys {
         let content_str = std::str::from_utf8(&content)
             .map_err(|_| Error::Parser("file is not valid UTF-8".to_string()))?;
 
+        // Get language support for extraction
+        let lang_support = languages::get_language_support(language)
+            .ok_or_else(|| Error::Parser(format!("no support for language: {language:?}")))?;
+
+        // Set parser to the correct tree-sitter language
+        self.parser
+            .set_language(&lang_support.tree_sitter_language())
+            .map_err(|e| Error::Parser(e.to_string()))?;
+
         // Get file metadata
         let metadata = std::fs::metadata(path)?;
         #[allow(clippy::cast_possible_truncation)] // Nanoseconds fit in i64 for centuries
@@ -302,11 +302,11 @@ impl Tethys {
             .ok_or_else(|| Error::Parser("failed to parse file".to_string()))?;
 
         // Extract symbols
-        let extracted = rust::extract_symbols(&tree, content_str.as_bytes());
+        let extracted = lang_support.extract_symbols(&tree, content_str.as_bytes());
 
-        // Extract use statements and references for dependency detection
-        let uses = rust::extract_use_statements(&tree, content_str.as_bytes());
-        let refs = rust::extract_references(&tree, content_str.as_bytes());
+        // Extract import statements and references for dependency detection
+        let imports = lang_support.extract_imports(&tree, content_str.as_bytes());
+        let refs = lang_support.extract_references(&tree, content_str.as_bytes());
 
         // Convert to SymbolData for atomic insertion
         let qualified_names: Vec<String> = extracted
@@ -355,7 +355,7 @@ impl Tethys {
         let refs_stored = self.store_references(file_id, &refs, &name_to_id, &span_to_id)?;
 
         // Compute and store file dependencies (L2: only for actually used symbols)
-        self.compute_dependencies(path, file_id, &uses, &refs, pending)?;
+        self.compute_dependencies(path, file_id, &imports, &refs, pending)?;
 
         Ok((extracted.len(), refs_stored))
     }
@@ -394,7 +394,7 @@ impl Tethys {
     fn store_references(
         &self,
         file_id: i64,
-        refs: &[rust::ExtractedReference],
+        refs: &[common::ExtractedReference],
         name_to_id: &HashMap<String, i64>,
         span_to_id: &HashMap<Span, i64>,
     ) -> Result<usize> {
@@ -444,8 +444,8 @@ impl Tethys {
         &self,
         current_file: &Path,
         file_id: i64,
-        uses: &[rust::UseStatement],
-        refs: &[rust::ExtractedReference],
+        imports: &[common::ImportStatement],
+        refs: &[common::ExtractedReference],
         pending: &mut Vec<PendingDependency>,
     ) -> Result<()> {
         use std::collections::HashSet;
@@ -468,17 +468,17 @@ impl Tethys {
         // Track which files we depend on (dedupe)
         let mut depended_files: HashSet<PathBuf> = HashSet::new();
 
-        for use_stmt in uses {
+        for import_stmt in imports {
             // Skip glob imports - can't determine what's used
-            if use_stmt.is_glob {
+            if import_stmt.is_glob {
                 continue;
             }
 
-            // Check if any imported name from this use statement is actually referenced
+            // Check if any imported name from this import statement is actually referenced
             let mut is_used = false;
-            for name in &use_stmt.imported_names {
+            for name in &import_stmt.imported_names {
                 // Check both the original name and alias
-                let lookup_name = use_stmt.alias.as_ref().unwrap_or(name);
+                let lookup_name = import_stmt.alias.as_ref().unwrap_or(name);
                 if referenced_names.contains(lookup_name.as_str()) {
                     is_used = true;
                     break;
@@ -491,7 +491,9 @@ impl Tethys {
             }
 
             // Resolve the module path to a file
-            if let Some(resolved) = resolve_module_path(&use_stmt.path, current_file, &crate_root) {
+            if let Some(resolved) =
+                resolve_module_path(&import_stmt.path, current_file, &crate_root)
+            {
                 // Make the path relative to workspace root
                 let dep_path = self.relative_path(&resolved).to_path_buf();
                 depended_files.insert(dep_path);

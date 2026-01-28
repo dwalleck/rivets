@@ -6,6 +6,7 @@
 // This is safe for practical source files (no file has 4 billion lines).
 #![allow(clippy::cast_possible_truncation)]
 
+use super::common::{ExtractedReference, ExtractedReferenceKind, ExtractedSymbol, ImportStatement};
 use super::tree_sitter_utils::{node_span, node_text};
 use super::LanguageSupport;
 use crate::types::{FunctionSignature, Parameter, Span, SymbolKind, Visibility};
@@ -82,53 +83,32 @@ impl LanguageSupport for CSharpLanguage {
     fn lsp_command(&self) -> Option<&str> {
         Some("csharp-ls")
     }
-}
 
-/// An extracted reference (usage of a symbol) from C# source code.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // Public API, used by tests and future indexer integration
-pub struct ExtractedReference {
-    /// Name of the referenced symbol
-    pub name: String,
-    /// Kind of reference
-    pub kind: ExtractedReferenceKind,
-    /// Line number (1-indexed)
-    pub line: u32,
-    /// Column number (1-indexed)
-    pub column: u32,
-    /// The scoped path if this is a qualified reference (e.g., `System.Collections.Generic`)
-    pub path: Option<Vec<String>>,
-    /// Span of the containing symbol (method/constructor) for "who calls X?" queries.
-    /// `None` for top-level references (e.g., field initializers).
-    /// Resolved to `in_symbol_id` during indexing.
-    pub containing_symbol_span: Option<Span>,
-}
+    fn extract_symbols(
+        &self,
+        tree: &tree_sitter::Tree,
+        content: &[u8],
+    ) -> Vec<super::common::ExtractedSymbol> {
+        extract_symbols(tree, content)
+    }
 
-/// Kind of reference extracted from C# source code.
-///
-/// Note: This is distinct from `types::ReferenceKind` which is the domain model
-/// stored in the database. This enum represents what we extract from the AST.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // Public API, used by tests and future indexer integration
-pub enum ExtractedReferenceKind {
-    /// Method or function call
-    Call,
-    /// Type annotation (e.g., `User user`)
-    Type,
-    /// Object constructor (e.g., `new User()`)
-    Constructor,
-}
+    fn extract_references(
+        &self,
+        tree: &tree_sitter::Tree,
+        content: &[u8],
+    ) -> Vec<super::common::ExtractedReference> {
+        extract_references(tree, content)
+    }
 
-impl ExtractedReferenceKind {
-    /// Convert to database reference kind.
-    #[must_use]
-    #[allow(dead_code)] // Public API, will be used when indexer integrates C# support
-    pub fn to_db_kind(self) -> crate::types::ReferenceKind {
-        match self {
-            Self::Call => crate::types::ReferenceKind::Call,
-            Self::Type => crate::types::ReferenceKind::Type,
-            Self::Constructor => crate::types::ReferenceKind::Construct,
-        }
+    fn extract_imports(
+        &self,
+        tree: &tree_sitter::Tree,
+        content: &[u8],
+    ) -> Vec<super::common::ImportStatement> {
+        extract_using_directives(tree, content)
+            .into_iter()
+            .map(|u| u.to_import_statement())
+            .collect()
     }
 }
 
@@ -148,20 +128,19 @@ pub struct UsingDirective {
     pub line: u32,
 }
 
-/// An extracted symbol from C# source code.
-#[derive(Debug, Clone)]
-#[allow(dead_code)] // Public API, used by tests and future indexer integration
-pub struct ExtractedSymbol {
-    pub name: String,
-    pub kind: SymbolKind,
-    pub line: u32,
-    pub column: u32,
-    pub span: Option<Span>,
-    pub signature: Option<String>,
-    #[allow(dead_code)] // Populated for future use by callers
-    pub signature_details: Option<FunctionSignature>,
-    pub visibility: Visibility,
-    pub parent_name: Option<String>,
+impl UsingDirective {
+    /// Convert to the common `ImportStatement` representation.
+    #[must_use]
+    #[allow(dead_code)] // Public API, will be used when indexer integrates C# support
+    pub fn to_import_statement(&self) -> ImportStatement {
+        ImportStatement {
+            path: self.namespace.clone(),
+            imported_names: Vec::new(),
+            is_glob: false,
+            alias: self.alias.clone(),
+            line: self.line,
+        }
+    }
 }
 
 /// Extract references (usages) from a C# syntax tree.

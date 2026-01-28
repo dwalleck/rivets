@@ -15,9 +15,12 @@
 //! The trait-based design allows language-specific logic while maintaining
 //! a uniform interface for the indexer.
 
+pub mod common;
 pub mod csharp;
 pub mod rust;
 mod tree_sitter_utils;
+
+use common::{ExtractedReference, ExtractedSymbol, ImportStatement};
 
 use crate::types::Language;
 
@@ -51,9 +54,16 @@ pub trait LanguageSupport: Send + Sync {
     /// Returns `None` if no LSP is configured for this language.
     fn lsp_command(&self) -> Option<&str>;
 
-    // TODO: Phase 1-2 - Add these methods
-    // fn extract_symbols(&self, tree: &Tree, content: &[u8]) -> Vec<Symbol>;
-    // fn extract_imports(&self, tree: &Tree, content: &[u8]) -> Vec<UseStatement>;
-    // fn extract_references(&self, tree: &Tree, content: &[u8]) -> Vec<SymbolRef>;
-    // fn resolve_import(&self, path: &[String], current: &Path, root: &Path) -> Option<PathBuf>;
+    /// Extract symbols from a parsed syntax tree.
+    fn extract_symbols(&self, tree: &tree_sitter::Tree, content: &[u8]) -> Vec<ExtractedSymbol>;
+
+    /// Extract references (usages) from a parsed syntax tree.
+    fn extract_references(
+        &self,
+        tree: &tree_sitter::Tree,
+        content: &[u8],
+    ) -> Vec<ExtractedReference>;
+
+    /// Extract import statements from a parsed syntax tree.
+    fn extract_imports(&self, tree: &tree_sitter::Tree, content: &[u8]) -> Vec<ImportStatement>;
 }

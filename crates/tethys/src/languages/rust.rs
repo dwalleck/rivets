@@ -6,6 +6,7 @@
 // This is safe for practical source files (no file has 4 billion lines).
 #![allow(clippy::cast_possible_truncation)]
 
+use super::common::{ExtractedReference, ExtractedReferenceKind, ExtractedSymbol, ImportStatement};
 use super::tree_sitter_utils::{node_span, node_text};
 use super::LanguageSupport;
 use crate::types::{FunctionSignature, Parameter, Span, SymbolKind, Visibility};
@@ -77,50 +78,24 @@ impl LanguageSupport for RustLanguage {
     fn lsp_command(&self) -> Option<&str> {
         Some("rust-analyzer")
     }
-}
 
-/// An extracted reference (usage of a symbol) from Rust source code.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExtractedReference {
-    /// Name of the referenced symbol
-    pub name: String,
-    /// Kind of reference
-    pub kind: ExtractedReferenceKind,
-    /// Line number (1-indexed)
-    pub line: u32,
-    /// Column number (1-indexed)
-    pub column: u32,
-    /// The scoped path if this is a qualified reference (e.g., `crate::auth::authenticate`)
-    pub path: Option<Vec<String>>,
-    /// Span of the containing symbol (function/method) for "who calls X?" queries.
-    /// `None` for top-level references (e.g., static initializers).
-    /// Resolved to `in_symbol_id` during indexing.
-    pub containing_symbol_span: Option<Span>,
-}
+    fn extract_symbols(&self, tree: &tree_sitter::Tree, content: &[u8]) -> Vec<ExtractedSymbol> {
+        extract_symbols(tree, content)
+    }
 
-/// Kind of reference extracted from Rust source code.
-///
-/// Note: This is distinct from `types::ReferenceKind` which is the domain model
-/// stored in the database. This enum represents what we extract from the AST.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExtractedReferenceKind {
-    /// Function or method call
-    Call,
-    /// Type annotation (e.g., `user: User`)
-    Type,
-    /// Struct constructor (e.g., `User { name: ... }`)
-    Constructor,
-}
+    fn extract_references(
+        &self,
+        tree: &tree_sitter::Tree,
+        content: &[u8],
+    ) -> Vec<ExtractedReference> {
+        extract_references(tree, content)
+    }
 
-impl ExtractedReferenceKind {
-    /// Convert to database reference kind.
-    #[must_use]
-    pub fn to_db_kind(self) -> crate::types::ReferenceKind {
-        match self {
-            Self::Call => crate::types::ReferenceKind::Call,
-            Self::Type => crate::types::ReferenceKind::Type,
-            Self::Constructor => crate::types::ReferenceKind::Construct,
-        }
+    fn extract_imports(&self, tree: &tree_sitter::Tree, content: &[u8]) -> Vec<ImportStatement> {
+        extract_use_statements(tree, content)
+            .into_iter()
+            .map(|u| u.to_import_statement())
+            .collect()
     }
 }
 
@@ -142,19 +117,19 @@ pub struct UseStatement {
     pub line: u32,
 }
 
-/// An extracted symbol from Rust source code.
-#[derive(Debug, Clone)]
-pub struct ExtractedSymbol {
-    pub name: String,
-    pub kind: SymbolKind,
-    pub line: u32,
-    pub column: u32,
-    pub span: Option<Span>,
-    pub signature: Option<String>,
-    #[allow(dead_code)] // Populated for future use by callers
-    pub signature_details: Option<FunctionSignature>,
-    pub visibility: Visibility,
-    pub parent_name: Option<String>,
+impl UseStatement {
+    /// Convert to the common `ImportStatement` representation.
+    #[must_use]
+    #[allow(dead_code)] // Public API, will be used when language-agnostic indexing is implemented
+    pub fn to_import_statement(&self) -> ImportStatement {
+        ImportStatement {
+            path: self.path.clone(),
+            imported_names: self.imported_names.clone(),
+            is_glob: self.is_glob,
+            alias: self.alias.clone(),
+            line: self.line,
+        }
+    }
 }
 
 /// Extract references (usages) from a Rust syntax tree.
