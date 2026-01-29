@@ -7,6 +7,7 @@
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
@@ -18,7 +19,7 @@ use super::{
 };
 use crate::db::{row_to_indexed_file, row_to_symbol};
 use crate::error::{Error, Result};
-use crate::types::{FileId, IndexedFile, ReferenceKind, Symbol, SymbolId};
+use crate::types::{Cycle, FileId, IndexedFile, ReferenceKind, Symbol, SymbolId};
 
 /// Default maximum depth for recursive graph traversals.
 ///
@@ -117,6 +118,169 @@ impl SqlFileGraph {
         let file = stmt.query_row([id], row_to_indexed_file).optional()?;
 
         Ok(file)
+    }
+
+    /// Get all unique file IDs that participate in dependencies.
+    ///
+    /// Returns file IDs that appear in the `file_deps` table (either as source or target).
+    fn get_all_file_ids_in_deps(&self) -> Result<Vec<FileId>> {
+        let conn = self.db.lock()?;
+
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT id FROM (
+                SELECT from_file_id AS id FROM file_deps
+                UNION
+                SELECT to_file_id AS id FROM file_deps
+             )",
+        )?;
+
+        let ids = stmt
+            .query_map([], |row| row.get::<_, i64>(0).map(FileId::from))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(ids)
+    }
+
+    /// Get file IDs that the given file depends on.
+    fn get_dependencies_as_ids(&self, file_id: FileId) -> Result<Vec<FileId>> {
+        let conn = self.db.lock()?;
+
+        let mut stmt = conn.prepare("SELECT to_file_id FROM file_deps WHERE from_file_id = ?1")?;
+
+        let deps = stmt
+            .query_map([file_id.as_i64()], |row| {
+                row.get::<_, i64>(0).map(FileId::from)
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(deps)
+    }
+
+    /// Build an adjacency list representation of the dependency graph.
+    ///
+    /// Returns a map from file ID to list of files it depends on (outgoing edges).
+    fn build_adjacency_list(&self) -> Result<HashMap<FileId, Vec<FileId>>> {
+        let conn = self.db.lock()?;
+
+        let mut stmt = conn.prepare("SELECT from_file_id, to_file_id FROM file_deps")?;
+
+        let rows = stmt.query_map([], |row| {
+            let from: i64 = row.get(0)?;
+            let to: i64 = row.get(1)?;
+            Ok((FileId::from(from), FileId::from(to)))
+        })?;
+
+        let mut adj: HashMap<FileId, Vec<FileId>> = HashMap::new();
+        for result in rows {
+            let (from, to) = result?;
+            adj.entry(from).or_default().push(to);
+        }
+
+        Ok(adj)
+    }
+
+    /// DFS-based cycle detection.
+    ///
+    /// Uses standard cycle detection with visited set and recursion stack.
+    /// When a back edge is found, reconstructs the cycle path.
+    ///
+    /// # Complexity
+    ///
+    /// - **Time**: O(V + E) for the DFS traversal where V = nodes, E = edges.
+    ///   Deduplication adds O(C × L × log C) where C = cycle count, L = avg cycle length.
+    /// - **Space**: O(V) for visited/recursion sets, plus O(C × L) for storing cycles.
+    fn find_cycles_dfs(&self, adj: &HashMap<FileId, Vec<FileId>>) -> Result<Vec<Cycle>> {
+        let mut visited: HashSet<FileId> = HashSet::new();
+        let mut rec_stack: HashSet<FileId> = HashSet::new();
+        let mut path: Vec<FileId> = Vec::new();
+        let mut cycles: Vec<Vec<FileId>> = Vec::new();
+
+        // Get all nodes that participate in the graph
+        let all_nodes: HashSet<FileId> = adj
+            .iter()
+            .flat_map(|(from, tos)| std::iter::once(*from).chain(tos.iter().copied()))
+            .collect();
+
+        let edge_count: usize = adj.values().map(Vec::len).sum();
+        tracing::debug!(
+            node_count = all_nodes.len(),
+            edge_count = edge_count,
+            "Starting cycle detection with DFS"
+        );
+
+        for &start in &all_nodes {
+            if !visited.contains(&start) {
+                dfs_visit_for_cycles(
+                    start,
+                    adj,
+                    &mut visited,
+                    &mut rec_stack,
+                    &mut path,
+                    &mut cycles,
+                );
+            }
+        }
+
+        let raw_cycle_count = cycles.len();
+
+        // Deduplicate cycles (same cycle can be discovered from different starting nodes)
+        let unique_cycles = deduplicate_cycles(cycles);
+
+        tracing::debug!(
+            raw_cycles = raw_cycle_count,
+            unique_cycles = unique_cycles.len(),
+            "DFS traversal complete, deduplicating cycles"
+        );
+
+        // Convert file IDs to Cycle structs with paths
+        let result: Result<Vec<Cycle>> = unique_cycles
+            .into_iter()
+            .map(|ids| self.ids_to_cycle(&ids))
+            .collect();
+
+        if let Ok(ref cycles) = result {
+            tracing::info!(cycle_count = cycles.len(), "Cycle detection complete");
+        }
+
+        result
+    }
+
+    /// Convert a list of file IDs to a `Cycle` struct with file paths.
+    fn ids_to_cycle(&self, ids: &[FileId]) -> Result<Cycle> {
+        let mut files = Vec::with_capacity(ids.len());
+
+        for (idx, &id) in ids.iter().enumerate() {
+            let file = self
+                .get_file_by_id(id.as_i64())
+                .map_err(|e| {
+                    tracing::error!(
+                        error = %e,
+                        file_id = id.as_i64(),
+                        cycle_position = idx,
+                        cycle_length = ids.len(),
+                        "Database error while resolving file for cycle"
+                    );
+                    e
+                })?
+                .ok_or_else(|| {
+                    tracing::error!(
+                        file_id = id.as_i64(),
+                        cycle_position = idx,
+                        cycle_length = ids.len(),
+                        "File not found in database but referenced in dependency cycle \
+                         (possible data integrity issue)"
+                    );
+                    Error::NotFound(format!(
+                        "file id: {} (position {} in cycle of length {})",
+                        id.as_i64(),
+                        idx,
+                        ids.len()
+                    ))
+                })?;
+            files.push(file.path);
+        }
+
+        Ok(Cycle { files })
     }
 }
 
@@ -315,17 +479,112 @@ impl FileGraphOps for SqlFileGraph {
         Ok(FilePath::new(files))
     }
 
-    fn detect_cycles(&self) -> Result<Vec<crate::types::Cycle>> {
-        Err(Error::Internal(
-            "cycle detection not yet implemented".to_string(),
-        ))
+    fn detect_cycles(&self) -> Result<Vec<Cycle>> {
+        let adj = self.build_adjacency_list()?;
+        self.find_cycles_dfs(&adj)
     }
 
-    fn detect_cycles_involving(&self, _file_id: FileId) -> Result<Vec<crate::types::Cycle>> {
-        Err(Error::Internal(
-            "cycle detection not yet implemented".to_string(),
-        ))
+    fn detect_cycles_involving(&self, file_id: FileId) -> Result<Vec<Cycle>> {
+        let all_cycles = self.detect_cycles()?;
+
+        // Get the target file path once, propagating errors instead of swallowing them
+        let target_file = self
+            .get_file_by_id(file_id.as_i64())?
+            .ok_or_else(|| Error::NotFound(format!("file id: {}", file_id.as_i64())))?;
+
+        // Filter to cycles that contain the target file
+        Ok(all_cycles
+            .into_iter()
+            .filter(|cycle| cycle.files.contains(&target_file.path))
+            .collect())
     }
+}
+
+// === Cycle Detection Helper Functions ===
+
+/// Recursive DFS visitor for cycle detection.
+///
+/// Traverses the graph marking nodes as visited. When a back edge is found
+/// (an edge to a node still in the current DFS path/recursion stack), a cycle
+/// is recorded. Back edges indicate cycles because we've reached a node we're
+/// still in the process of exploring.
+fn dfs_visit_for_cycles(
+    node: FileId,
+    adj: &HashMap<FileId, Vec<FileId>>,
+    visited: &mut HashSet<FileId>,
+    rec_stack: &mut HashSet<FileId>,
+    path: &mut Vec<FileId>,
+    cycles: &mut Vec<Vec<FileId>>,
+) {
+    visited.insert(node);
+    rec_stack.insert(node);
+    path.push(node);
+
+    if let Some(neighbors) = adj.get(&node) {
+        for &neighbor in neighbors {
+            if !visited.contains(&neighbor) {
+                dfs_visit_for_cycles(neighbor, adj, visited, rec_stack, path, cycles);
+            } else if rec_stack.contains(&neighbor) {
+                // Back edge found - extract the cycle
+                if let Some(cycle_start_idx) = path.iter().position(|&id| id == neighbor) {
+                    let cycle: Vec<FileId> = path[cycle_start_idx..].to_vec();
+                    cycles.push(cycle);
+                }
+            }
+        }
+    }
+
+    path.pop();
+    rec_stack.remove(&node);
+}
+
+/// Deduplicate cycles by normalizing their representation.
+///
+/// Two cycles are considered the same if they contain the same nodes in the same
+/// circular order, regardless of which node they start with.
+///
+/// We only normalize the starting point, not direction, because the DFS discovers
+/// cycles by following directed edges. In a directed graph, A→B→C→A and C→B→A→C
+/// are topologically distinct, so direction is semantically meaningful.
+fn deduplicate_cycles(cycles: Vec<Vec<FileId>>) -> Vec<Vec<FileId>> {
+    let mut seen: HashSet<Vec<FileId>> = HashSet::new();
+    let mut unique: Vec<Vec<FileId>> = Vec::new();
+
+    for cycle in cycles {
+        if cycle.is_empty() {
+            continue;
+        }
+
+        // Normalize: rotate so the smallest ID is first
+        let normalized = normalize_cycle(&cycle);
+
+        if seen.insert(normalized.clone()) {
+            unique.push(normalized);
+        }
+    }
+
+    unique
+}
+
+/// Normalize a cycle by rotating it so the smallest ID is first.
+fn normalize_cycle(cycle: &[FileId]) -> Vec<FileId> {
+    if cycle.is_empty() {
+        return Vec::new();
+    }
+
+    // Find the index of the minimum element
+    let min_idx = cycle
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, id)| id.as_i64())
+        .map_or(0, |(idx, _)| idx);
+
+    // Rotate so minimum is first
+    let mut normalized = Vec::with_capacity(cycle.len());
+    normalized.extend_from_slice(&cycle[min_idx..]);
+    normalized.extend_from_slice(&cycle[..min_idx]);
+
+    normalized
 }
 
 impl SymbolGraphOps for SqlSymbolGraph {
@@ -1300,26 +1559,238 @@ mod tests {
         assert!(path.files()[0].path.to_string_lossy().contains("main"));
     }
 
+    // === Cycle Detection Tests ===
+
+    /// Create a test database with a simple A -> B -> A cycle.
+    fn setup_simple_cycle_graph() -> (TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let db_path = dir.path().join("test.db");
+        let mut index = Index::open(&db_path).expect("failed to open test database");
+
+        // Create files: a.rs <-> b.rs (mutual dependency = cycle)
+        let a_id = index
+            .index_file_atomic(
+                std::path::Path::new("src/a.rs"),
+                Language::Rust,
+                1000,
+                100,
+                None,
+                &[],
+            )
+            .expect("failed to index a.rs");
+        let b_id = index
+            .index_file_atomic(
+                std::path::Path::new("src/b.rs"),
+                Language::Rust,
+                1000,
+                100,
+                None,
+                &[],
+            )
+            .expect("failed to index b.rs");
+
+        // A depends on B, B depends on A
+        index
+            .insert_file_dependency(a_id, b_id)
+            .expect("failed to insert a->b dep");
+        index
+            .insert_file_dependency(b_id, a_id)
+            .expect("failed to insert b->a dep");
+
+        (dir, db_path)
+    }
+
+    /// Create a test database with a longer A -> B -> C -> A cycle.
+    fn setup_three_node_cycle_graph() -> (TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let db_path = dir.path().join("test.db");
+        let mut index = Index::open(&db_path).expect("failed to open test database");
+
+        // Create files: a.rs -> b.rs -> c.rs -> a.rs
+        let a_id = index
+            .index_file_atomic(
+                std::path::Path::new("src/a.rs"),
+                Language::Rust,
+                1000,
+                100,
+                None,
+                &[],
+            )
+            .expect("failed to index a.rs");
+        let b_id = index
+            .index_file_atomic(
+                std::path::Path::new("src/b.rs"),
+                Language::Rust,
+                1000,
+                100,
+                None,
+                &[],
+            )
+            .expect("failed to index b.rs");
+        let c_id = index
+            .index_file_atomic(
+                std::path::Path::new("src/c.rs"),
+                Language::Rust,
+                1000,
+                100,
+                None,
+                &[],
+            )
+            .expect("failed to index c.rs");
+
+        // A -> B -> C -> A
+        index
+            .insert_file_dependency(a_id, b_id)
+            .expect("failed to insert a->b dep");
+        index
+            .insert_file_dependency(b_id, c_id)
+            .expect("failed to insert b->c dep");
+        index
+            .insert_file_dependency(c_id, a_id)
+            .expect("failed to insert c->a dep");
+
+        (dir, db_path)
+    }
+
+    /// Create a test database with a self-referential file (imports itself).
+    fn setup_self_loop_graph() -> (TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let db_path = dir.path().join("test.db");
+        let mut index = Index::open(&db_path).expect("failed to open test database");
+
+        let a_id = index
+            .index_file_atomic(
+                std::path::Path::new("src/self_ref.rs"),
+                Language::Rust,
+                1000,
+                100,
+                None,
+                &[],
+            )
+            .expect("failed to index self_ref.rs");
+
+        // Self-dependency
+        index
+            .insert_file_dependency(a_id, a_id)
+            .expect("failed to insert self-dependency");
+
+        (dir, db_path)
+    }
+
     #[test]
-    fn file_graph_detect_cycles_returns_not_implemented_error() {
-        let (_dir, db_path) = setup_file_deps_graph();
+    fn detect_cycles_finds_simple_two_node_cycle() {
+        let (_dir, db_path) = setup_simple_cycle_graph();
         let graph = SqlFileGraph::new(&db_path).expect("failed to create file graph");
 
-        let result = graph.detect_cycles();
-        assert!(result.is_err(), "detect_cycles should return an error");
-        let err = result.unwrap_err();
+        let cycles = graph.detect_cycles().expect("failed to detect cycles");
+
+        assert_eq!(cycles.len(), 1, "should find exactly one cycle");
+
+        let cycle = &cycles[0];
+        assert_eq!(cycle.files.len(), 2, "cycle should contain 2 files");
+
+        // Both files should be present
+        let paths: Vec<String> = cycle
+            .files
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
         assert!(
-            matches!(err, Error::Internal(_)),
-            "error should be Internal variant"
+            paths.iter().any(|p| p.contains("a.rs")),
+            "cycle should contain a.rs"
         );
         assert!(
-            err.to_string().contains("not yet implemented"),
-            "error message should indicate not implemented"
+            paths.iter().any(|p| p.contains("b.rs")),
+            "cycle should contain b.rs"
         );
     }
 
     #[test]
-    fn file_graph_detect_cycles_involving_returns_not_implemented_error() {
+    fn detect_cycles_finds_three_node_cycle() {
+        let (_dir, db_path) = setup_three_node_cycle_graph();
+        let graph = SqlFileGraph::new(&db_path).expect("failed to create file graph");
+
+        let cycles = graph.detect_cycles().expect("failed to detect cycles");
+
+        assert_eq!(cycles.len(), 1, "should find exactly one cycle");
+
+        let cycle = &cycles[0];
+        assert_eq!(cycle.files.len(), 3, "cycle should contain 3 files");
+
+        let paths: Vec<String> = cycle
+            .files
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        assert!(
+            paths.iter().any(|p| p.contains("a.rs")),
+            "cycle should contain a.rs"
+        );
+        assert!(
+            paths.iter().any(|p| p.contains("b.rs")),
+            "cycle should contain b.rs"
+        );
+        assert!(
+            paths.iter().any(|p| p.contains("c.rs")),
+            "cycle should contain c.rs"
+        );
+    }
+
+    #[test]
+    fn detect_cycles_finds_self_loop() {
+        let (_dir, db_path) = setup_self_loop_graph();
+        let graph = SqlFileGraph::new(&db_path).expect("failed to create file graph");
+
+        let cycles = graph.detect_cycles().expect("failed to detect cycles");
+
+        assert_eq!(cycles.len(), 1, "should find exactly one cycle");
+
+        let cycle = &cycles[0];
+        assert_eq!(
+            cycle.files.len(),
+            1,
+            "self-loop cycle should contain 1 file"
+        );
+        assert!(
+            cycle.files[0].display().to_string().contains("self_ref.rs"),
+            "cycle should contain self_ref.rs"
+        );
+    }
+
+    #[test]
+    fn detect_cycles_returns_empty_for_acyclic_graph() {
+        // The setup_file_deps_graph creates an acyclic graph:
+        // main.rs -> auth.rs -> db.rs
+        //         -> cache.rs -> db.rs
+        let (_dir, db_path) = setup_file_deps_graph();
+        let graph = SqlFileGraph::new(&db_path).expect("failed to create file graph");
+
+        let cycles = graph.detect_cycles().expect("failed to detect cycles");
+
+        assert!(cycles.is_empty(), "acyclic graph should have no cycles");
+    }
+
+    #[test]
+    fn detect_cycles_involving_filters_to_specified_file() {
+        let (_dir, db_path) = setup_simple_cycle_graph();
+        let graph = SqlFileGraph::new(&db_path).expect("failed to create file graph");
+        let index = Index::open(&db_path).expect("failed to open index");
+
+        let a_id = index
+            .get_file_id(std::path::Path::new("src/a.rs"))
+            .expect("failed to query a.rs")
+            .expect("a.rs not found");
+
+        let cycles = graph
+            .detect_cycles_involving(a_id)
+            .expect("failed to detect cycles");
+
+        assert_eq!(cycles.len(), 1, "should find the cycle involving a.rs");
+    }
+
+    #[test]
+    fn detect_cycles_involving_returns_empty_for_file_not_in_cycle() {
+        // Use the acyclic graph - no file is in a cycle
         let (_dir, db_path) = setup_file_deps_graph();
         let graph = SqlFileGraph::new(&db_path).expect("failed to create file graph");
         let index = Index::open(&db_path).expect("failed to open index");
@@ -1329,19 +1800,234 @@ mod tests {
             .expect("failed to query main.rs")
             .expect("main.rs not found");
 
-        let result = graph.detect_cycles_involving(main_id);
+        let cycles = graph
+            .detect_cycles_involving(main_id)
+            .expect("failed to detect cycles");
+
+        assert!(cycles.is_empty(), "file not in a cycle should return empty");
+    }
+
+    #[test]
+    fn detect_cycles_handles_multiple_cycles() {
+        // Create a graph with two independent cycles
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let db_path = dir.path().join("test.db");
+        let mut index = Index::open(&db_path).expect("failed to open test database");
+
+        // Cycle 1: a.rs <-> b.rs
+        let a_id = index
+            .index_file_atomic(
+                std::path::Path::new("src/a.rs"),
+                Language::Rust,
+                1000,
+                100,
+                None,
+                &[],
+            )
+            .expect("failed to index a.rs");
+        let b_id = index
+            .index_file_atomic(
+                std::path::Path::new("src/b.rs"),
+                Language::Rust,
+                1000,
+                100,
+                None,
+                &[],
+            )
+            .expect("failed to index b.rs");
+
+        // Cycle 2: x.rs <-> y.rs
+        let x_id = index
+            .index_file_atomic(
+                std::path::Path::new("src/x.rs"),
+                Language::Rust,
+                1000,
+                100,
+                None,
+                &[],
+            )
+            .expect("failed to index x.rs");
+        let y_id = index
+            .index_file_atomic(
+                std::path::Path::new("src/y.rs"),
+                Language::Rust,
+                1000,
+                100,
+                None,
+                &[],
+            )
+            .expect("failed to index y.rs");
+
+        // Set up both cycles
+        index
+            .insert_file_dependency(a_id, b_id)
+            .expect("failed to insert a->b dep");
+        index
+            .insert_file_dependency(b_id, a_id)
+            .expect("failed to insert b->a dep");
+        index
+            .insert_file_dependency(x_id, y_id)
+            .expect("failed to insert x->y dep");
+        index
+            .insert_file_dependency(y_id, x_id)
+            .expect("failed to insert y->x dep");
+
+        let graph = SqlFileGraph::new(&db_path).expect("failed to create file graph");
+        let cycles = graph.detect_cycles().expect("failed to detect cycles");
+
+        assert_eq!(cycles.len(), 2, "should find both cycles");
+
+        // Verify both cycles are represented
+        let all_files: std::collections::HashSet<String> = cycles
+            .iter()
+            .flat_map(|c| c.files.iter().map(|p| p.display().to_string()))
+            .collect();
+
+        assert!(all_files.iter().any(|p| p.contains("a.rs")));
+        assert!(all_files.iter().any(|p| p.contains("b.rs")));
+        assert!(all_files.iter().any(|p| p.contains("x.rs")));
+        assert!(all_files.iter().any(|p| p.contains("y.rs")));
+    }
+
+    #[test]
+    fn detect_cycles_deduplicates_same_cycle() {
+        // A -> B -> A forms one cycle, not two
+        let (_dir, db_path) = setup_simple_cycle_graph();
+        let graph = SqlFileGraph::new(&db_path).expect("failed to create file graph");
+
+        let cycles = graph.detect_cycles().expect("failed to detect cycles");
+
+        // The A->B->A cycle should only be reported once, not twice
+        // (once starting from A, once starting from B)
+        assert_eq!(cycles.len(), 1, "same cycle should only be reported once");
+
+        // Verify the cycle contains both files (normalization correctness)
+        let cycle = &cycles[0];
+        assert_eq!(cycle.files.len(), 2, "cycle should contain 2 files");
+
+        let paths: Vec<String> = cycle
+            .files
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        assert!(
+            paths.iter().any(|p| p.contains("a.rs")),
+            "cycle should contain a.rs"
+        );
+        assert!(
+            paths.iter().any(|p| p.contains("b.rs")),
+            "cycle should contain b.rs"
+        );
+    }
+
+    // === Helper function tests ===
+
+    #[test]
+    fn normalize_cycle_rotates_to_smallest() {
+        // Test the normalization function directly
+        let cycle = vec![FileId::from(5), FileId::from(2), FileId::from(8)];
+        let normalized = super::normalize_cycle(&cycle);
+
+        // Should rotate so 2 (smallest) is first
+        assert_eq!(normalized[0].as_i64(), 2);
+        assert_eq!(normalized[1].as_i64(), 8);
+        assert_eq!(normalized[2].as_i64(), 5);
+    }
+
+    #[test]
+    fn normalize_cycle_handles_empty() {
+        let cycle: Vec<FileId> = vec![];
+        let normalized = super::normalize_cycle(&cycle);
+        assert!(normalized.is_empty());
+    }
+
+    #[test]
+    fn normalize_cycle_handles_single_element() {
+        let cycle = vec![FileId::from(42)];
+        let normalized = super::normalize_cycle(&cycle);
+        assert_eq!(normalized.len(), 1);
+        assert_eq!(normalized[0].as_i64(), 42);
+    }
+
+    #[test]
+    fn detect_cycles_handles_completely_empty_database() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let db_path = dir.path().join("test.db");
+
+        // Create database but don't index any files
+        let _index = Index::open(&db_path).expect("failed to create database");
+
+        let graph = SqlFileGraph::new(&db_path).expect("failed to create file graph");
+        let cycles = graph
+            .detect_cycles()
+            .expect("should succeed on empty database");
+
+        assert!(cycles.is_empty(), "empty database should have no cycles");
+    }
+
+    #[test]
+    fn detect_cycles_involving_returns_error_for_nonexistent_file() {
+        let (_dir, db_path) = setup_simple_cycle_graph();
+        let graph = SqlFileGraph::new(&db_path).expect("failed to create file graph");
+
+        // Use a file ID that doesn't exist
+        let nonexistent_id = FileId::from(99999);
+        let result = graph.detect_cycles_involving(nonexistent_id);
+
         assert!(
             result.is_err(),
-            "detect_cycles_involving should return an error"
+            "should return error for non-existent file, not empty vec"
         );
-        let err = result.unwrap_err();
+        let err = result.unwrap_err().to_string();
         assert!(
-            matches!(err, Error::Internal(_)),
-            "error should be Internal variant"
+            err.contains("not found") || err.contains("Not found"),
+            "error should indicate file not found: {err}"
         );
-        assert!(
-            err.to_string().contains("not yet implemented"),
-            "error message should indicate not implemented"
+    }
+
+    #[test]
+    fn detect_cycles_handles_large_cycle() {
+        const CYCLE_SIZE: usize = 100;
+
+        // Create a cycle with 100 files: file0 -> file1 -> ... -> file99 -> file0
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let db_path = dir.path().join("test.db");
+        let mut index = Index::open(&db_path).expect("failed to open test database");
+
+        let mut file_ids = Vec::with_capacity(CYCLE_SIZE);
+
+        for i in 0..CYCLE_SIZE {
+            let id = index
+                .index_file_atomic(
+                    std::path::Path::new(&format!("src/file{i}.rs")),
+                    Language::Rust,
+                    1000,
+                    100,
+                    None,
+                    &[],
+                )
+                .expect("failed to index file");
+            file_ids.push(id);
+        }
+
+        // Create cycle: 0 -> 1 -> 2 -> ... -> 99 -> 0
+        for i in 0..CYCLE_SIZE {
+            let next = (i + 1) % CYCLE_SIZE;
+            index
+                .insert_file_dependency(file_ids[i], file_ids[next])
+                .expect("failed to insert dependency");
+        }
+
+        let graph = SqlFileGraph::new(&db_path).expect("failed to create file graph");
+        let cycles = graph
+            .detect_cycles()
+            .expect("should handle large cycle without stack overflow");
+
+        assert_eq!(cycles.len(), 1, "should find exactly one large cycle");
+        assert_eq!(
+            cycles[0].files.len(),
+            CYCLE_SIZE,
+            "cycle should contain all {CYCLE_SIZE} files"
         );
     }
 }
