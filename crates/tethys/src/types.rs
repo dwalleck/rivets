@@ -663,7 +663,7 @@ pub struct FileAnalysis {
 }
 
 /// Options for configuring the indexing process.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct IndexOptions {
     /// Enable LSP-based resolution for references that tree-sitter cannot resolve.
     ///
@@ -671,19 +671,89 @@ pub struct IndexOptions {
     /// appropriate language server and use `goto_definition` to resolve remaining
     /// unresolved references.
     use_lsp: bool,
+
+    /// Enable streaming writes during indexing.
+    ///
+    /// When enabled, parsed files are written to `SQLite` immediately via a background
+    /// writer thread instead of accumulating all data in memory. This reduces memory
+    /// usage from O(n) to O(1) for large codebases.
+    ///
+    /// Default: false (traditional batch mode)
+    use_streaming: bool,
+
+    /// Batch size for streaming writes.
+    ///
+    /// Number of files to accumulate before committing a transaction.
+    /// Only used when `use_streaming` is true.
+    ///
+    /// Default: 100
+    streaming_batch_size: usize,
 }
 
 impl IndexOptions {
     /// Create options with LSP resolution enabled.
     #[must_use]
     pub fn with_lsp() -> Self {
-        Self { use_lsp: true }
+        Self {
+            use_lsp: true,
+            use_streaming: false,
+            streaming_batch_size: 100,
+        }
+    }
+
+    /// Create options with streaming writes enabled.
+    #[must_use]
+    pub fn with_streaming() -> Self {
+        Self {
+            use_lsp: false,
+            use_streaming: true,
+            streaming_batch_size: 100,
+        }
+    }
+
+    /// Create options with streaming writes and a custom batch size.
+    #[must_use]
+    pub fn with_streaming_batch_size(batch_size: usize) -> Self {
+        Self {
+            use_lsp: false,
+            use_streaming: true,
+            streaming_batch_size: batch_size,
+        }
+    }
+
+    /// Enable streaming writes on this options instance.
+    #[must_use]
+    pub fn streaming(mut self) -> Self {
+        self.use_streaming = true;
+        self
     }
 
     /// Check if LSP-based resolution is enabled.
     #[must_use]
     pub fn use_lsp(&self) -> bool {
         self.use_lsp
+    }
+
+    /// Check if streaming writes are enabled.
+    #[must_use]
+    pub fn use_streaming(&self) -> bool {
+        self.use_streaming
+    }
+
+    /// Get the streaming batch size.
+    #[must_use]
+    pub fn streaming_batch_size(&self) -> usize {
+        self.streaming_batch_size
+    }
+}
+
+impl Default for IndexOptions {
+    fn default() -> Self {
+        Self {
+            use_lsp: false,
+            use_streaming: false,
+            streaming_batch_size: 100,
+        }
     }
 }
 

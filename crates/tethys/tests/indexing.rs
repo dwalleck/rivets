@@ -2541,3 +2541,112 @@ pub fn function_{i}(t: Type{i}) -> i32 {{
     drop(dir1);
     drop(dir2);
 }
+
+// ============================================================================
+// Streaming Mode Tests
+// ============================================================================
+
+/// Test that streaming mode produces the same results as batch mode.
+#[test]
+fn streaming_mode_produces_same_results_as_batch_mode() {
+    use tethys::IndexOptions;
+
+    let code = r#"
+pub struct User {
+    pub name: String,
+}
+
+impl User {
+    pub fn new(name: String) -> Self {
+        Self { name }
+    }
+
+    pub fn greet(&self) -> String {
+        format!("Hello, {}!", self.name)
+    }
+}
+
+pub fn create_user(name: &str) -> User {
+    User::new(name.to_string())
+}
+"#;
+
+    // Index with batch mode (default)
+    let (dir1, mut tethys1) = workspace_with_files(&[("src/lib.rs", code)]);
+    let stats_batch = tethys1.index().expect("batch index failed");
+
+    // Index with streaming mode
+    let (dir2, mut tethys2) = workspace_with_files(&[("src/lib.rs", code)]);
+    let stats_streaming = tethys2
+        .index_with_options(IndexOptions::with_streaming())
+        .expect("streaming index failed");
+
+    // Verify same counts
+    assert_eq!(
+        stats_batch.files_indexed, stats_streaming.files_indexed,
+        "files_indexed should match"
+    );
+    assert_eq!(
+        stats_batch.symbols_found, stats_streaming.symbols_found,
+        "symbols_found should match"
+    );
+    assert_eq!(
+        stats_batch.references_found, stats_streaming.references_found,
+        "references_found should match"
+    );
+
+    // Verify same symbols searchable
+    let symbols1 = tethys1.search_symbols("").expect("search 1 failed");
+    let symbols2 = tethys2.search_symbols("").expect("search 2 failed");
+
+    assert_eq!(symbols1.len(), symbols2.len(), "symbol count should match");
+
+    let names1: std::collections::HashSet<_> = symbols1.iter().map(|s| &s.name).collect();
+    let names2: std::collections::HashSet<_> = symbols2.iter().map(|s| &s.name).collect();
+    assert_eq!(names1, names2, "symbol names should match");
+
+    drop(dir1);
+    drop(dir2);
+}
+
+/// Test streaming mode with multiple files.
+#[test]
+fn streaming_mode_handles_multiple_files() {
+    use tethys::IndexOptions;
+
+    let (dir, mut tethys) = workspace_with_files(&[
+        ("src/main.rs", "fn main() { let u = user::User::new(); }"),
+        (
+            "src/user.rs",
+            "pub struct User; impl User { pub fn new() -> Self { Self } }",
+        ),
+        ("src/utils.rs", "pub fn helper() -> i32 { 42 }"),
+    ]);
+
+    let stats = tethys
+        .index_with_options(IndexOptions::with_streaming_batch_size(2))
+        .expect("streaming index failed");
+
+    assert_eq!(stats.files_indexed, 3);
+    assert!(stats.symbols_found >= 4); // main, User, new, helper
+
+    drop(dir);
+}
+
+/// Test streaming mode handles empty workspace.
+#[test]
+fn streaming_mode_handles_empty_workspace() {
+    use tethys::IndexOptions;
+
+    let (dir, mut tethys) = workspace_with_files(&[]);
+
+    let stats = tethys
+        .index_with_options(IndexOptions::with_streaming())
+        .expect("streaming index failed");
+
+    assert_eq!(stats.files_indexed, 0);
+    assert_eq!(stats.symbols_found, 0);
+    assert_eq!(stats.references_found, 0);
+
+    drop(dir);
+}

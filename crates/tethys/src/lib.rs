@@ -33,6 +33,7 @@
 //! # Ok::<(), tethys::Error>(())
 //! ```
 
+mod batch_writer;
 mod db;
 mod error;
 mod graph;
@@ -57,6 +58,7 @@ use std::time::{Instant, UNIX_EPOCH};
 
 use rayon::prelude::*;
 
+use batch_writer::BatchWriter;
 use db::{Index, SymbolData};
 use graph::{FileGraphOps, SqlFileGraph, SqlSymbolGraph, SymbolGraphOps};
 use languages::common;
@@ -209,24 +211,36 @@ impl Tethys {
             .collect();
 
         let total_files = source_files.len();
-        info!(total_files, "Starting parallel file parsing (Pass 1a)");
-
-        // Phase 1a: Parallel parsing with rayon
-        // Use AtomicUsize for thread-safe progress tracking
-        let progress_counter = AtomicUsize::new(0);
-        let parse_errors: Mutex<Vec<IndexError>> = Mutex::new(Vec::new());
         let workspace_root = self.workspace_root.clone();
 
-        let parsed_files: Vec<ParsedFileData> = source_files
-            .par_iter()
-            .filter_map(|(file_path, language)| {
+        if options.use_streaming() {
+            // =====================================================================
+            // STREAMING MODE: Parse in parallel, write immediately to background thread
+            // Memory usage is O(batch_size) instead of O(n)
+            // =====================================================================
+            info!(
+                total_files,
+                batch_size = options.streaming_batch_size(),
+                "Starting streaming indexing (parse + write in parallel)"
+            );
+
+            let batch_writer =
+                BatchWriter::new(self.db_path.clone(), options.streaming_batch_size());
+
+            let progress_counter = AtomicUsize::new(0);
+            let parse_errors: Mutex<Vec<IndexError>> = Mutex::new(Vec::new());
+
+            // Parse in parallel and send to background writer
+            source_files.par_iter().for_each(|(file_path, language)| {
                 let current = progress_counter.fetch_add(1, Ordering::Relaxed);
                 if current.is_multiple_of(100) {
                     trace!(progress = current, total = total_files, "Parsing files...");
                 }
 
                 match Self::parse_file_static(&workspace_root, file_path, *language) {
-                    Ok(data) => Some(data),
+                    Ok(data) => {
+                        batch_writer.send(data);
+                    }
                     Err(e) => {
                         let kind = match &e {
                             Error::Io(_) => IndexErrorKind::IoError,
@@ -236,8 +250,6 @@ impl Tethys {
                                 IndexErrorKind::ParseFailed
                             }
                         };
-                        // Handle mutex poisoning - we still want to collect errors even if
-                        // another thread panicked. PoisonError contains the guard.
                         match parse_errors.lock() {
                             Ok(mut guard) => {
                                 guard.push(IndexError::new(file_path.clone(), kind, e.to_string()));
@@ -254,62 +266,150 @@ impl Tethys {
                                 ));
                             }
                         }
-                        None
                     }
                 }
-            })
-            .collect();
+            });
 
-        // Collect parse errors, recovering from mutex poisoning if needed
-        match parse_errors.into_inner() {
-            Ok(parse_errors_vec) => {
-                errors.extend(parse_errors_vec);
-            }
-            Err(poisoned) => {
-                tracing::warn!(
-                    "Mutex was poisoned during parallel parsing, recovering collected errors"
-                );
-                errors.extend(poisoned.into_inner());
-            }
-        }
+            // Wait for batch writer to finish
+            let write_result = batch_writer.finish()?;
+            files_indexed = write_result.stats.files_written;
+            symbols_found = write_result.stats.symbols_written;
+            references_found = write_result.stats.references_written;
 
-        info!(
-            parsed_count = parsed_files.len(),
-            error_count = errors.len(),
-            "Parallel parsing complete (Pass 1a), starting sequential write (Pass 1b)"
-        );
-
-        // Phase 1b: Sequential database writes
-        // This must be sequential because rusqlite Connection is not Sync
-        for data in &parsed_files {
-            match self.write_parsed_file(data, &mut pending) {
-                Ok((sym_count, ref_count)) => {
-                    files_indexed += 1;
-                    symbols_found += sym_count;
-                    references_found += ref_count;
+            // Collect parse errors
+            match parse_errors.into_inner() {
+                Ok(parse_errors_vec) => {
+                    errors.extend(parse_errors_vec);
                 }
-                Err(e) => {
-                    let kind = match &e {
-                        Error::Io(_) => IndexErrorKind::IoError,
-                        Error::Database(_) => IndexErrorKind::DatabaseError,
-                        Error::Parser(_) => IndexErrorKind::ParseFailed,
-                        Error::Config(_) | Error::NotFound(_) | Error::Internal(_) => {
-                            IndexErrorKind::ParseFailed
+                Err(poisoned) => {
+                    tracing::warn!(
+                        "Mutex was poisoned during parallel parsing, recovering collected errors"
+                    );
+                    errors.extend(poisoned.into_inner());
+                }
+            }
+
+            info!(
+                files_indexed,
+                symbols_found,
+                references_found,
+                batches = write_result.stats.batches_committed,
+                "Streaming indexing complete"
+            );
+
+            // Compute file-level dependencies from stored data
+            // This is done after all files are written so all file IDs are known
+            self.compute_all_dependencies(&mut pending)?;
+        } else {
+            // =====================================================================
+            // BATCH MODE (default): Parse all files in parallel, then write sequentially
+            // Memory usage is O(n) where n = number of files
+            // =====================================================================
+            info!(total_files, "Starting parallel file parsing (Pass 1a)");
+
+            // Phase 1a: Parallel parsing with rayon
+            // Use AtomicUsize for thread-safe progress tracking
+            let progress_counter = AtomicUsize::new(0);
+            let parse_errors: Mutex<Vec<IndexError>> = Mutex::new(Vec::new());
+
+            let parsed_files: Vec<ParsedFileData> = source_files
+                .par_iter()
+                .filter_map(|(file_path, language)| {
+                    let current = progress_counter.fetch_add(1, Ordering::Relaxed);
+                    if current.is_multiple_of(100) {
+                        trace!(progress = current, total = total_files, "Parsing files...");
+                    }
+
+                    match Self::parse_file_static(&workspace_root, file_path, *language) {
+                        Ok(data) => Some(data),
+                        Err(e) => {
+                            let kind = match &e {
+                                Error::Io(_) => IndexErrorKind::IoError,
+                                Error::Database(_) => IndexErrorKind::DatabaseError,
+                                Error::Parser(_) => IndexErrorKind::ParseFailed,
+                                Error::Config(_) | Error::NotFound(_) | Error::Internal(_) => {
+                                    IndexErrorKind::ParseFailed
+                                }
+                            };
+                            // Handle mutex poisoning - we still want to collect errors even if
+                            // another thread panicked. PoisonError contains the guard.
+                            match parse_errors.lock() {
+                                Ok(mut guard) => {
+                                    guard.push(IndexError::new(
+                                        file_path.clone(),
+                                        kind,
+                                        e.to_string(),
+                                    ));
+                                }
+                                Err(poisoned) => {
+                                    tracing::warn!(
+                                        file = %file_path.display(),
+                                        "Mutex poisoned during error collection, recovering"
+                                    );
+                                    poisoned.into_inner().push(IndexError::new(
+                                        file_path.clone(),
+                                        kind,
+                                        e.to_string(),
+                                    ));
+                                }
+                            }
+                            None
                         }
-                    };
-                    errors.push(IndexError::new(
-                        data.relative_path.clone(),
-                        kind,
-                        e.to_string(),
-                    ));
+                    }
+                })
+                .collect();
+
+            // Collect parse errors, recovering from mutex poisoning if needed
+            match parse_errors.into_inner() {
+                Ok(parse_errors_vec) => {
+                    errors.extend(parse_errors_vec);
+                }
+                Err(poisoned) => {
+                    tracing::warn!(
+                        "Mutex was poisoned during parallel parsing, recovering collected errors"
+                    );
+                    errors.extend(poisoned.into_inner());
                 }
             }
-        }
 
-        info!(
-            files_indexed,
-            symbols_found, references_found, "Sequential write complete (Pass 1b)"
-        );
+            info!(
+                parsed_count = parsed_files.len(),
+                error_count = errors.len(),
+                "Parallel parsing complete (Pass 1a), starting sequential write (Pass 1b)"
+            );
+
+            // Phase 1b: Sequential database writes
+            // This must be sequential because rusqlite Connection is not Sync
+            for data in &parsed_files {
+                match self.write_parsed_file(data, &mut pending) {
+                    Ok((sym_count, ref_count)) => {
+                        files_indexed += 1;
+                        symbols_found += sym_count;
+                        references_found += ref_count;
+                    }
+                    Err(e) => {
+                        let kind = match &e {
+                            Error::Io(_) => IndexErrorKind::IoError,
+                            Error::Database(_) => IndexErrorKind::DatabaseError,
+                            Error::Parser(_) => IndexErrorKind::ParseFailed,
+                            Error::Config(_) | Error::NotFound(_) | Error::Internal(_) => {
+                                IndexErrorKind::ParseFailed
+                            }
+                        };
+                        errors.push(IndexError::new(
+                            data.relative_path.clone(),
+                            kind,
+                            e.to_string(),
+                        ));
+                    }
+                }
+            }
+
+            info!(
+                files_indexed,
+                symbols_found, references_found, "Sequential write complete (Pass 1b)"
+            );
+        }
 
         // C# namespace resolution pass: resolve using directives via namespace map
         // This must happen after all files are indexed so we have the complete namespace map
@@ -950,6 +1050,169 @@ impl Tethys {
                 }
                 None => {
                     // Target file not indexed yet - queue for resolution pass
+                    pending.push(PendingDependency {
+                        from_file_id: file_id,
+                        dep_path,
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Compute file-level dependencies for all indexed files from stored data.
+    ///
+    /// This is used in streaming mode where dependencies cannot be computed during
+    /// writing because the batch writer operates in a separate thread without access
+    /// to Tethys state (`workspace_root`, module resolution).
+    ///
+    /// The method iterates over all indexed files, loads their imports and references
+    /// from the database, and computes dependencies using the same logic as
+    /// `compute_dependencies`.
+    fn compute_all_dependencies(&mut self, pending: &mut Vec<PendingDependency>) -> Result<()> {
+        let files = self.db.list_all_files()?;
+        let file_count = files.len();
+
+        debug!(
+            file_count,
+            "Computing file-level dependencies from stored data"
+        );
+
+        for file in files {
+            // Load imports and references from database
+            let imports = self.db.get_imports_for_file(file.id)?;
+            let refs = self.db.list_references_in_file(file.id)?;
+
+            // Convert database imports to the format compute_dependencies expects
+            let import_statements = Self::convert_imports_to_statements(&imports, file.language);
+
+            // Extract just the reference names for dependency checking
+            let ref_names: Vec<String> = refs
+                .iter()
+                .filter_map(|r| r.reference_name.clone())
+                .collect();
+
+            // Compute dependencies using the converted data
+            let full_path = self.workspace_root.join(&file.path);
+            self.compute_dependencies_from_stored(
+                &full_path,
+                file.id,
+                &import_statements,
+                &ref_names,
+                pending,
+            )?;
+        }
+
+        debug!(
+            file_count,
+            pending_count = pending.len(),
+            "File dependency computation complete"
+        );
+
+        Ok(())
+    }
+
+    /// Convert database Import records back to `ImportStatement` format.
+    ///
+    /// This is needed for streaming mode where we need to compute dependencies
+    /// from stored data rather than the original parsed data.
+    fn convert_imports_to_statements(
+        imports: &[Import],
+        language: Language,
+    ) -> Vec<common::ImportStatement> {
+        use std::collections::HashMap;
+
+        // Group imports by source_module to reconstruct ImportStatement
+        let mut grouped: HashMap<&str, Vec<&Import>> = HashMap::new();
+        for import in imports {
+            grouped
+                .entry(&import.source_module)
+                .or_default()
+                .push(import);
+        }
+
+        let separator = match language {
+            Language::Rust => "::",
+            Language::CSharp => ".",
+        };
+
+        grouped
+            .into_iter()
+            .map(|(source_module, module_imports)| {
+                let path: Vec<String> = source_module.split(separator).map(String::from).collect();
+                let is_glob = module_imports.iter().any(|i| i.symbol_name == "*");
+                let imported_names: Vec<String> = module_imports
+                    .iter()
+                    .filter(|i| i.symbol_name != "*")
+                    .map(|i| i.symbol_name.clone())
+                    .collect();
+                let alias = module_imports.first().and_then(|i| i.alias.clone());
+
+                common::ImportStatement {
+                    path,
+                    imported_names,
+                    is_glob,
+                    alias,
+                    line: 0, // Not needed for dependency computation
+                }
+            })
+            .collect()
+    }
+
+    /// Compute dependencies from stored import/reference data.
+    ///
+    /// Similar to `compute_dependencies` but takes pre-processed data rather than
+    /// `ExtractedReference` objects. Used in streaming mode.
+    fn compute_dependencies_from_stored(
+        &self,
+        current_file: &Path,
+        file_id: FileId,
+        imports: &[common::ImportStatement],
+        reference_names: &[String],
+        pending: &mut Vec<PendingDependency>,
+    ) -> Result<()> {
+        use std::collections::HashSet;
+
+        // Build a set of actually referenced names
+        let refs_set: HashSet<&str> = reference_names.iter().map(String::as_str).collect();
+
+        let crate_root = self.workspace_root.join("src");
+        let mut depended_files: HashSet<PathBuf> = HashSet::new();
+
+        for import_stmt in imports {
+            if import_stmt.is_glob {
+                continue;
+            }
+
+            // Check if any imported name is actually referenced
+            let mut is_used = false;
+            for name in &import_stmt.imported_names {
+                let lookup_name = import_stmt.alias.as_ref().unwrap_or(name);
+                if refs_set.contains(lookup_name.as_str()) {
+                    is_used = true;
+                    break;
+                }
+            }
+
+            if !is_used {
+                continue;
+            }
+
+            if let Some(resolved) =
+                resolve_module_path(&import_stmt.path, current_file, &crate_root)
+            {
+                let dep_path = self.relative_path(&resolved).to_path_buf();
+                depended_files.insert(dep_path);
+            }
+        }
+
+        for dep_path in depended_files {
+            match self.db.get_file_id(&dep_path)? {
+                Some(dep_file_id) => {
+                    self.db.insert_file_dependency(file_id, dep_file_id)?;
+                }
+                None => {
                     pending.push(PendingDependency {
                         from_file_id: file_id,
                         dep_path,

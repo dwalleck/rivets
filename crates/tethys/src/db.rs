@@ -655,6 +655,22 @@ impl Index {
         Ok(files)
     }
 
+    /// Get all indexed files.
+    ///
+    /// Used for dependency computation after streaming writes.
+    pub fn list_all_files(&self) -> Result<Vec<IndexedFile>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, path, language, mtime_ns, size_bytes, content_hash, indexed_at
+             FROM files ORDER BY path",
+        )?;
+
+        let files = stmt
+            .query_map([], row_to_indexed_file)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(files)
+    }
+
     // === File Dependency Operations ===
 
     /// Insert or update a file-level dependency.
