@@ -55,6 +55,7 @@ use std::time::{Instant, UNIX_EPOCH};
 use db::{Index, SymbolData};
 use graph::{FileGraphOps, SqlFileGraph, SqlSymbolGraph, SymbolGraphOps};
 use languages::common;
+use lsp::LspProvider;
 use resolver::resolve_module_path;
 use tracing::{debug, info, trace, warn};
 
@@ -288,15 +289,35 @@ impl Tethys {
         }
 
         // Pass 3: LSP-based resolution (optional)
+        // Resolve each language separately using its appropriate LSP server
         let lsp_resolved_count = if options.use_lsp() {
-            // Use rust-analyzer for Rust files
-            // TODO: Add C# LSP support when needed
-            let provider = lsp::RustAnalyzerProvider;
-            let count = self.resolve_via_lsp(&provider)?;
-            if count > 0 {
-                tracing::info!(resolved_count = count, "Resolved references via LSP");
+            let mut total_resolved = 0;
+
+            // Resolve Rust files with rust-analyzer
+            let rust_provider = lsp::AnyProvider::for_language(Language::Rust);
+            let rust_count = self.resolve_via_lsp(&rust_provider, Language::Rust)?;
+            if rust_count > 0 {
+                tracing::info!(
+                    language = "rust",
+                    resolved_count = rust_count,
+                    "Resolved references via LSP"
+                );
             }
-            count
+            total_resolved += rust_count;
+
+            // Resolve C# files with csharp-ls
+            let csharp_provider = lsp::AnyProvider::for_language(Language::CSharp);
+            let csharp_count = self.resolve_via_lsp(&csharp_provider, Language::CSharp)?;
+            if csharp_count > 0 {
+                tracing::info!(
+                    language = "csharp",
+                    resolved_count = csharp_count,
+                    "Resolved references via LSP"
+                );
+            }
+            total_resolved += csharp_count;
+
+            total_resolved
         } else {
             0
         };
@@ -1190,7 +1211,7 @@ impl Tethys {
     ///
     /// # Design
     ///
-    /// - LSP is spawned lazily (only if there are unresolved refs)
+    /// - LSP is spawned lazily (only if there are unresolved refs for this language)
     /// - LSP stays alive for batch queries (amortizes startup cost)
     /// - Shutdown on completion
     /// - Matches LSP definition locations to symbols by file path + line number
@@ -1198,20 +1219,39 @@ impl Tethys {
     /// # Arguments
     ///
     /// * `provider` - The LSP provider to use (e.g., `RustAnalyzerProvider`)
+    /// * `language` - The language to filter references by (e.g., `Language::Rust`)
     ///
     /// # Returns
     ///
     /// The number of references successfully resolved via LSP.
     #[allow(clippy::too_many_lines)]
-    fn resolve_via_lsp(&self, provider: &dyn lsp::LspProvider) -> Result<usize> {
-        // Get unresolved references with file path information
-        let unresolved = self.db.get_unresolved_references_for_lsp()?;
+    fn resolve_via_lsp(
+        &self,
+        provider: &dyn lsp::LspProvider,
+        language: Language,
+    ) -> Result<usize> {
+        // Get unresolved references with file path information, filtered by language
+        let all_unresolved = self.db.get_unresolved_references_for_lsp()?;
+        let unresolved: Vec<_> = all_unresolved
+            .into_iter()
+            .filter(|r| {
+                r.file_path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|ext| Language::from_extension(ext) == Some(language))
+            })
+            .collect();
+
         if unresolved.is_empty() {
-            debug!("No unresolved references for LSP resolution");
+            debug!(
+                language = ?language,
+                "No unresolved references for LSP resolution"
+            );
             return Ok(0);
         }
 
         debug!(
+            language = ?language,
             unresolved_count = unresolved.len(),
             "Starting LSP resolution pass (Pass 3)"
         );
@@ -1223,8 +1263,11 @@ impl Tethys {
                 // User explicitly requested LSP with --lsp flag, so log at error level
                 tracing::error!(
                     error = %e,
+                    language = ?language,
+                    install_hint = %provider.install_hint(),
                     "LSP server failed to start - LSP resolution skipped. \
-                     Install rust-analyzer or remove --lsp flag."
+                     {} Or remove --lsp flag.",
+                    provider.install_hint()
                 );
                 return Ok(0);
             }
@@ -1260,6 +1303,7 @@ impl Tethys {
         }
 
         debug!(
+            language = ?language,
             resolved_count = resolved_count,
             total_unresolved = unresolved.len(),
             lsp_errors = lsp_errors,
@@ -1744,6 +1788,7 @@ impl Tethys {
     ///
     /// If LSP fails to start or returns errors, falls back to DB-only results
     /// and logs a warning.
+    #[allow(clippy::too_many_lines)]
     pub fn get_callers_with_lsp(&self, qualified_name: &str) -> Result<Vec<Dependent>> {
         use std::collections::HashSet;
 
@@ -1767,7 +1812,8 @@ impl Tethys {
         let symbol_file_path = self.workspace_root.join(&symbol_file.path);
 
         // Step 3: Spawn LSP and call find_references
-        let provider = lsp::RustAnalyzerProvider;
+        // Select the appropriate LSP provider based on the symbol's file language
+        let provider = lsp::AnyProvider::for_language(symbol_file.language);
         let mut lsp_client = match lsp::LspClient::start(&provider, &self.workspace_root) {
             Ok(client) => client,
             Err(e) => {
@@ -1775,8 +1821,11 @@ impl Tethys {
                 tracing::error!(
                     error = %e,
                     symbol = %qualified_name,
+                    language = ?symbol_file.language,
+                    install_hint = %provider.install_hint(),
                     "LSP server failed to start - returning DB-only callers. \
-                     Install rust-analyzer or remove --lsp flag."
+                     {} Or remove --lsp flag.",
+                    provider.install_hint()
                 );
                 return self.convert_callers_to_dependents(db_callers);
             }
