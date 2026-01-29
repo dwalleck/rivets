@@ -37,6 +37,7 @@ mod db;
 mod error;
 mod graph;
 mod languages;
+pub mod lsp;
 mod resolver;
 mod types;
 
