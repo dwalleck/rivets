@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use colored::Colorize;
-use tethys::Tethys;
+use tethys::{IndexOptions, Tethys};
 
 use super::ensure_lsp_if_requested;
 
@@ -15,11 +15,17 @@ pub fn run(workspace: &Path, rebuild: bool, lsp: bool) -> Result<(), tethys::Err
 
     let mut tethys = Tethys::new(workspace)?;
 
+    let options = if lsp {
+        IndexOptions::with_lsp()
+    } else {
+        IndexOptions::default()
+    };
+
     let stats = if rebuild {
         println!("{}", "Rebuilding index from scratch".yellow());
-        tethys.rebuild()?
+        tethys.rebuild_with_options(options)?
     } else {
-        tethys.index()?
+        tethys.index_with_options(options)?
     };
 
     // Display results
@@ -66,6 +72,14 @@ pub fn run(workspace: &Path, rebuild: bool, lsp: bool) -> Result<(), tethys::Err
             "{}: {} (likely external crates)",
             "Unresolved dependencies".dimmed(),
             stats.unresolved_dependencies.len()
+        );
+    }
+
+    if stats.lsp_resolved_count > 0 {
+        println!(
+            "{}: {} references via LSP",
+            "LSP resolved".cyan(),
+            stats.lsp_resolved_count
         );
     }
 

@@ -17,7 +17,7 @@ use tracing::trace;
 
 use crate::error::{Error, Result};
 use crate::types::{
-    FileId, Import, IndexedFile, Language, Reference, ReferenceKind, Span, Symbol, SymbolId,
+    FileId, Import, IndexedFile, Language, RefId, Reference, ReferenceKind, Span, Symbol, SymbolId,
     SymbolKind, Visibility,
 };
 
@@ -467,6 +467,34 @@ impl Index {
             .map_err(Into::into)
     }
 
+    /// Find a symbol at a specific file and line.
+    ///
+    /// This is used to match LSP `goto_definition` results to our indexed symbols.
+    /// The LSP returns file path and line number; we find the symbol defined at that line.
+    ///
+    /// Returns the symbol whose definition starts at the given line. If multiple symbols
+    /// are defined on the same line, returns the one with the lowest column number.
+    pub fn find_symbol_at_line(&self, file_id: FileId, line: u32) -> Result<Option<Symbol>> {
+        trace!(
+            file_id = %file_id,
+            line = line,
+            "Finding symbol at line"
+        );
+
+        let mut stmt = self.conn.prepare(
+            "SELECT id, file_id, name, module_path, qualified_name, kind, line, column,
+             end_line, end_column, signature, visibility, parent_symbol_id
+             FROM symbols
+             WHERE file_id = ?1 AND line = ?2
+             ORDER BY column ASC
+             LIMIT 1",
+        )?;
+
+        stmt.query_row(params![file_id.as_i64(), line], row_to_symbol)
+            .optional()
+            .map_err(Into::into)
+    }
+
     // === Reference Operations ===
     // These operations support symbol-level "who calls X?" queries.
     // See graph/sql.rs for higher-level graph traversal using these primitives.
@@ -517,6 +545,47 @@ impl Index {
         let refs = stmt
             .query_map([], row_to_reference)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(refs)
+    }
+
+    /// Get unresolved references with file path information for LSP queries.
+    ///
+    /// Returns references where `symbol_id` is NULL, including the file path
+    /// from the files table. LSP clients need file paths (not database IDs) to
+    /// issue `goto_definition` requests.
+    ///
+    /// Positions are returned as 1-indexed (as stored in DB). Convert to 0-indexed
+    /// before passing to LSP clients.
+    pub fn get_unresolved_references_for_lsp(
+        &self,
+    ) -> Result<Vec<crate::types::UnresolvedRefForLsp>> {
+        trace!("Getting unresolved references for LSP resolution");
+        let mut stmt = self.conn.prepare(
+            "SELECT r.id, r.file_id, f.path, r.line, r.column, r.reference_name
+             FROM refs r
+             JOIN files f ON r.file_id = f.id
+             WHERE r.symbol_id IS NULL AND r.reference_name IS NOT NULL
+             ORDER BY f.path, r.line, r.column",
+        )?;
+
+        let refs = stmt
+            .query_map([], |row| {
+                Ok(crate::types::UnresolvedRefForLsp {
+                    ref_id: RefId::from(row.get::<_, i64>(0)?),
+                    file_id: FileId::from(row.get::<_, i64>(1)?),
+                    file_path: PathBuf::from(row.get::<_, String>(2)?),
+                    line: row.get(3)?,
+                    column: row.get(4)?,
+                    reference_name: row.get(5)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        trace!(
+            unresolved_count = refs.len(),
+            "Found unresolved references for LSP"
+        );
 
         Ok(refs)
     }
@@ -2453,5 +2522,334 @@ mod tests {
             .search_symbol_by_qualified_name_in_file("Index::open", file3_id)
             .expect("search should succeed");
         assert!(result.is_none(), "should not find symbol in wrong file");
+    }
+
+    // ========================================================================
+    // get_unresolved_references_for_lsp Tests
+    // ========================================================================
+
+    #[test]
+    fn get_unresolved_references_for_lsp_includes_file_path() {
+        let (_dir, path) = temp_db();
+        let mut index = Index::open(&path).expect("should open database");
+
+        let file_id = index
+            .upsert_file(Path::new("src/main.rs"), Language::Rust, 1000, 100, None)
+            .expect("should insert file");
+
+        // Insert an unresolved reference
+        index
+            .insert_reference(None, file_id, "call", 10, 5, None, Some("Index::open"))
+            .expect("should insert unresolved reference");
+
+        // Get unresolved refs for LSP
+        let refs = index
+            .get_unresolved_references_for_lsp()
+            .expect("should get unresolved refs for LSP");
+        assert_eq!(refs.len(), 1, "should have 1 unresolved reference");
+
+        let r = &refs[0];
+        assert_eq!(r.file_id, file_id, "file_id should match");
+        assert_eq!(
+            r.file_path,
+            PathBuf::from("src/main.rs"),
+            "file_path should be included"
+        );
+        assert_eq!(r.line, 10, "line should match");
+        assert_eq!(r.column, 5, "column should match");
+        assert_eq!(
+            r.reference_name, "Index::open",
+            "reference_name should match"
+        );
+    }
+
+    #[test]
+    fn get_unresolved_references_for_lsp_excludes_resolved() {
+        let (_dir, path) = temp_db();
+        let mut index = Index::open(&path).expect("should open database");
+
+        let file_id = index
+            .upsert_file(Path::new("src/lib.rs"), Language::Rust, 1000, 100, None)
+            .expect("should insert file");
+
+        // Create a symbol
+        let symbol_id = index
+            .insert_symbol(
+                file_id,
+                "my_func",
+                "crate",
+                "my_func",
+                SymbolKind::Function,
+                5,
+                1,
+                None,
+                None,
+                Visibility::Public,
+                None,
+            )
+            .expect("should insert symbol");
+
+        // Insert a resolved reference
+        index
+            .insert_reference(Some(symbol_id), file_id, "call", 10, 5, None, None)
+            .expect("should insert resolved reference");
+
+        // Insert an unresolved reference
+        index
+            .insert_reference(None, file_id, "call", 15, 3, None, Some("Other::func"))
+            .expect("should insert unresolved reference");
+
+        // Get unresolved refs for LSP - should only return the unresolved one
+        let refs = index
+            .get_unresolved_references_for_lsp()
+            .expect("should get unresolved refs for LSP");
+        assert_eq!(refs.len(), 1, "should only have 1 unresolved reference");
+        assert_eq!(refs[0].reference_name, "Other::func");
+    }
+
+    #[test]
+    fn get_unresolved_references_for_lsp_excludes_refs_without_name() {
+        let (_dir, path) = temp_db();
+        let mut index = Index::open(&path).expect("should open database");
+
+        let file_id = index
+            .upsert_file(Path::new("src/main.rs"), Language::Rust, 1000, 100, None)
+            .expect("should insert file");
+
+        // Insert an unresolved reference WITH reference_name
+        index
+            .insert_reference(None, file_id, "call", 10, 5, None, Some("Index::open"))
+            .expect("should insert unresolved reference with name");
+
+        // Insert an unresolved reference WITHOUT reference_name
+        // (This shouldn't happen in practice, but the query should handle it)
+        index
+            .insert_reference(None, file_id, "call", 20, 3, None, None)
+            .expect("should insert unresolved reference without name");
+
+        // Get unresolved refs for LSP - should only return the one with a name
+        let refs = index
+            .get_unresolved_references_for_lsp()
+            .expect("should get unresolved refs for LSP");
+        assert_eq!(
+            refs.len(),
+            1,
+            "should only include refs with reference_name"
+        );
+        assert_eq!(refs[0].reference_name, "Index::open");
+    }
+
+    #[test]
+    fn get_unresolved_references_for_lsp_ordered_by_path_and_line() {
+        let (_dir, path) = temp_db();
+        let mut index = Index::open(&path).expect("should open database");
+
+        let file_a = index
+            .upsert_file(Path::new("src/a.rs"), Language::Rust, 1000, 100, None)
+            .expect("should insert file");
+        let file_b = index
+            .upsert_file(Path::new("src/b.rs"), Language::Rust, 1000, 100, None)
+            .expect("should insert file");
+
+        // Insert out of order
+        index
+            .insert_reference(None, file_b, "call", 20, 1, None, Some("B::two"))
+            .expect("insert ref");
+        index
+            .insert_reference(None, file_a, "call", 15, 1, None, Some("A::two"))
+            .expect("insert ref");
+        index
+            .insert_reference(None, file_a, "call", 5, 1, None, Some("A::one"))
+            .expect("insert ref");
+        index
+            .insert_reference(None, file_b, "call", 10, 1, None, Some("B::one"))
+            .expect("insert ref");
+
+        let refs = index
+            .get_unresolved_references_for_lsp()
+            .expect("should get refs");
+        assert_eq!(refs.len(), 4);
+
+        // Should be ordered by path (src/a.rs before src/b.rs), then by line
+        assert_eq!(refs[0].file_path, PathBuf::from("src/a.rs"));
+        assert_eq!(refs[0].line, 5);
+        assert_eq!(refs[0].reference_name, "A::one");
+
+        assert_eq!(refs[1].file_path, PathBuf::from("src/a.rs"));
+        assert_eq!(refs[1].line, 15);
+        assert_eq!(refs[1].reference_name, "A::two");
+
+        assert_eq!(refs[2].file_path, PathBuf::from("src/b.rs"));
+        assert_eq!(refs[2].line, 10);
+        assert_eq!(refs[2].reference_name, "B::one");
+
+        assert_eq!(refs[3].file_path, PathBuf::from("src/b.rs"));
+        assert_eq!(refs[3].line, 20);
+        assert_eq!(refs[3].reference_name, "B::two");
+    }
+
+    // ========================================================================
+    // find_symbol_at_line Tests
+    // ========================================================================
+
+    #[test]
+    fn find_symbol_at_line_finds_symbol() {
+        let (_dir, path) = temp_db();
+        let mut index = Index::open(&path).expect("should open database");
+
+        let file_id = index
+            .upsert_file(Path::new("src/lib.rs"), Language::Rust, 1000, 100, None)
+            .expect("should insert file");
+
+        // Insert symbol at line 10
+        index
+            .insert_symbol(
+                file_id,
+                "my_function",
+                "",
+                "my_function",
+                SymbolKind::Function,
+                10,
+                1,
+                None,
+                None,
+                Visibility::Public,
+                None,
+            )
+            .expect("should insert symbol");
+
+        let result = index
+            .find_symbol_at_line(file_id, 10)
+            .expect("should query without error");
+
+        assert!(result.is_some(), "should find symbol at line 10");
+        let symbol = result.unwrap();
+        assert_eq!(symbol.name, "my_function");
+        assert_eq!(symbol.line, 10);
+    }
+
+    #[test]
+    fn find_symbol_at_line_returns_none_for_wrong_line() {
+        let (_dir, path) = temp_db();
+        let mut index = Index::open(&path).expect("should open database");
+
+        let file_id = index
+            .upsert_file(Path::new("src/lib.rs"), Language::Rust, 1000, 100, None)
+            .expect("should insert file");
+
+        // Insert symbol at line 10
+        index
+            .insert_symbol(
+                file_id,
+                "my_function",
+                "",
+                "my_function",
+                SymbolKind::Function,
+                10,
+                1,
+                None,
+                None,
+                Visibility::Public,
+                None,
+            )
+            .expect("should insert symbol");
+
+        let result = index
+            .find_symbol_at_line(file_id, 15)
+            .expect("should query without error");
+
+        assert!(result.is_none(), "should not find symbol at line 15");
+    }
+
+    #[test]
+    fn find_symbol_at_line_returns_none_for_wrong_file() {
+        let (_dir, path) = temp_db();
+        let mut index = Index::open(&path).expect("should open database");
+
+        let file_a = index
+            .upsert_file(Path::new("src/a.rs"), Language::Rust, 1000, 100, None)
+            .expect("should insert file");
+        let file_b = index
+            .upsert_file(Path::new("src/b.rs"), Language::Rust, 1000, 100, None)
+            .expect("should insert file");
+
+        // Insert symbol in file_a at line 10
+        index
+            .insert_symbol(
+                file_a,
+                "my_function",
+                "",
+                "my_function",
+                SymbolKind::Function,
+                10,
+                1,
+                None,
+                None,
+                Visibility::Public,
+                None,
+            )
+            .expect("should insert symbol");
+
+        // Try to find it in file_b
+        let result = index
+            .find_symbol_at_line(file_b, 10)
+            .expect("should query without error");
+
+        assert!(result.is_none(), "should not find symbol in wrong file");
+    }
+
+    #[test]
+    fn find_symbol_at_line_picks_first_column_when_multiple() {
+        let (_dir, path) = temp_db();
+        let mut index = Index::open(&path).expect("should open database");
+
+        let file_id = index
+            .upsert_file(Path::new("src/lib.rs"), Language::Rust, 1000, 100, None)
+            .expect("should insert file");
+
+        // Insert two symbols at the same line, different columns
+        // Insert column 10 first (higher)
+        index
+            .insert_symbol(
+                file_id,
+                "second_symbol",
+                "",
+                "second_symbol",
+                SymbolKind::Const,
+                5,
+                10,
+                None,
+                None,
+                Visibility::Private,
+                None,
+            )
+            .expect("should insert symbol");
+
+        // Insert column 1 second (lower)
+        index
+            .insert_symbol(
+                file_id,
+                "first_symbol",
+                "",
+                "first_symbol",
+                SymbolKind::Const,
+                5,
+                1,
+                None,
+                None,
+                Visibility::Private,
+                None,
+            )
+            .expect("should insert symbol");
+
+        let result = index
+            .find_symbol_at_line(file_id, 5)
+            .expect("should query without error");
+
+        assert!(result.is_some(), "should find a symbol");
+        let symbol = result.unwrap();
+        // Should get the one with lower column due to ORDER BY column ASC
+        assert_eq!(symbol.name, "first_symbol");
+        assert_eq!(symbol.column, 1);
     }
 }

@@ -44,8 +44,8 @@ mod types;
 pub use error::{Error, IndexError, IndexErrorKind, Result};
 pub use types::{
     Cycle, DatabaseStats, Dependent, FileAnalysis, FileId, FunctionSignature, Impact, Import,
-    IndexStats, IndexUpdate, IndexedFile, Language, Parameter, ParameterKind, Reference,
-    ReferenceKind, Span, Symbol, SymbolId, SymbolKind, Visibility,
+    IndexOptions, IndexStats, IndexUpdate, IndexedFile, Language, Parameter, ParameterKind,
+    Reference, ReferenceKind, Span, Symbol, SymbolId, SymbolKind, UnresolvedRefForLsp, Visibility,
 };
 
 use std::collections::HashMap;
@@ -56,7 +56,7 @@ use db::{Index, SymbolData};
 use graph::{FileGraphOps, SqlFileGraph, SqlSymbolGraph, SymbolGraphOps};
 use languages::common;
 use resolver::resolve_module_path;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 /// A dependency that couldn't be resolved because the target file wasn't indexed yet.
 ///
@@ -146,8 +146,35 @@ impl Tethys {
     /// Uses deferred dependency resolution to handle circular dependencies:
     /// 1. First pass: Index all files, queue dependencies that can't resolve
     /// 2. Resolution passes: Retry pending dependencies until no progress
-    #[allow(clippy::too_many_lines)]
+    ///
+    /// For LSP-based resolution, use [`Self::index_with_options`] with
+    /// [`IndexOptions::with_lsp()`].
     pub fn index(&mut self) -> Result<IndexStats> {
+        self.index_with_options(IndexOptions::default())
+    }
+
+    /// Index all source files with custom options.
+    ///
+    /// # Arguments
+    ///
+    /// * `options` - Configuration for the indexing process, including whether
+    ///   to use LSP for additional resolution.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use tethys::{Tethys, IndexOptions};
+    /// use std::path::Path;
+    ///
+    /// let mut tethys = Tethys::new(Path::new("/path/to/workspace"))?;
+    ///
+    /// // Index with LSP refinement enabled
+    /// let stats = tethys.index_with_options(IndexOptions::with_lsp())?;
+    /// println!("Resolved {} references via LSP", stats.lsp_resolved_count);
+    /// # Ok::<(), tethys::Error>(())
+    /// ```
+    #[allow(clippy::too_many_lines)]
+    pub fn index_with_options(&mut self, options: IndexOptions) -> Result<IndexStats> {
         let start = Instant::now();
         let mut files_indexed = 0;
         let mut symbols_found = 0;
@@ -260,6 +287,20 @@ impl Tethys {
             );
         }
 
+        // Pass 3: LSP-based resolution (optional)
+        let lsp_resolved_count = if options.use_lsp() {
+            // Use rust-analyzer for Rust files
+            // TODO: Add C# LSP support when needed
+            let provider = lsp::RustAnalyzerProvider;
+            let count = self.resolve_via_lsp(&provider)?;
+            if count > 0 {
+                tracing::info!(resolved_count = count, "Resolved references via LSP");
+            }
+            count
+        } else {
+            0
+        };
+
         Ok(IndexStats {
             files_indexed,
             symbols_found,
@@ -269,6 +310,7 @@ impl Tethys {
             directories_skipped,
             errors,
             unresolved_dependencies,
+            lsp_resolved_count,
         })
     }
 
@@ -1140,6 +1182,223 @@ impl Tethys {
         }
     }
 
+    /// Resolve references using LSP `goto_definition` (Pass 3).
+    ///
+    /// After tree-sitter resolution (Pass 2), some references may still be unresolved
+    /// (e.g., external crate symbols, complex type inference). This pass uses the
+    /// language server to resolve them.
+    ///
+    /// # Design
+    ///
+    /// - LSP is spawned lazily (only if there are unresolved refs)
+    /// - LSP stays alive for batch queries (amortizes startup cost)
+    /// - Shutdown on completion
+    /// - Matches LSP definition locations to symbols by file path + line number
+    ///
+    /// # Arguments
+    ///
+    /// * `provider` - The LSP provider to use (e.g., `RustAnalyzerProvider`)
+    ///
+    /// # Returns
+    ///
+    /// The number of references successfully resolved via LSP.
+    #[allow(clippy::too_many_lines)]
+    fn resolve_via_lsp(&self, provider: &dyn lsp::LspProvider) -> Result<usize> {
+        // Get unresolved references with file path information
+        let unresolved = self.db.get_unresolved_references_for_lsp()?;
+        if unresolved.is_empty() {
+            debug!("No unresolved references for LSP resolution");
+            return Ok(0);
+        }
+
+        debug!(
+            unresolved_count = unresolved.len(),
+            "Starting LSP resolution pass (Pass 3)"
+        );
+
+        // Start LSP lazily - only if there are refs to resolve
+        let mut client = match lsp::LspClient::start(provider, &self.workspace_root) {
+            Ok(c) => c,
+            Err(e) => {
+                // User explicitly requested LSP with --lsp flag, so log at error level
+                tracing::error!(
+                    error = %e,
+                    "LSP server failed to start - LSP resolution skipped. \
+                     Install rust-analyzer or remove --lsp flag."
+                );
+                return Ok(0);
+            }
+        };
+
+        let mut resolved_count = 0;
+        let mut lsp_errors = 0;
+
+        for unresolved_ref in &unresolved {
+            match self.resolve_single_ref_via_lsp(&mut client, unresolved_ref, &mut lsp_errors) {
+                Ok(true) => resolved_count += 1,
+                Ok(false) => {}
+                Err(e) => {
+                    warn!(
+                        ref_id = %unresolved_ref.ref_id,
+                        error = %e,
+                        "Database error during LSP resolution"
+                    );
+                }
+            }
+        }
+
+        // Graceful shutdown
+        if let Err(e) = client.shutdown() {
+            warn!(error = %e, "LSP shutdown failed");
+        }
+
+        if lsp_errors > 5 {
+            info!(
+                total_errors = lsp_errors,
+                "Additional LSP errors suppressed"
+            );
+        }
+
+        debug!(
+            resolved_count = resolved_count,
+            total_unresolved = unresolved.len(),
+            lsp_errors = lsp_errors,
+            "LSP resolution pass complete"
+        );
+
+        Ok(resolved_count)
+    }
+
+    /// Attempt to resolve a single reference via LSP.
+    ///
+    /// Returns `Ok(true)` if resolved, `Ok(false)` if not resolved (but no error),
+    /// or `Err` for database errors.
+    fn resolve_single_ref_via_lsp(
+        &self,
+        client: &mut lsp::LspClient,
+        unresolved_ref: &UnresolvedRefForLsp,
+        lsp_errors: &mut usize,
+    ) -> Result<bool> {
+        // Construct absolute file path for LSP
+        let file_path = self.workspace_root.join(&unresolved_ref.file_path);
+
+        // LSP uses 0-indexed positions, our DB uses 1-indexed
+        let lsp_line = unresolved_ref.line.saturating_sub(1);
+        let lsp_col = unresolved_ref.column.saturating_sub(1);
+
+        // Call goto_definition
+        let definition = match client.goto_definition(&file_path, lsp_line, lsp_col) {
+            Ok(Some(loc)) => loc,
+            Ok(None) => {
+                trace!(
+                    ref_id = %unresolved_ref.ref_id,
+                    ref_name = %unresolved_ref.reference_name,
+                    "LSP returned no definition"
+                );
+                return Ok(false);
+            }
+            Err(e) => {
+                *lsp_errors += 1;
+                // Log first error at warn level so users see something went wrong
+                if *lsp_errors == 1 {
+                    warn!(
+                        ref_id = %unresolved_ref.ref_id,
+                        error = %e,
+                        "LSP goto_definition failed (further errors logged at trace level)"
+                    );
+                } else if *lsp_errors <= 5 {
+                    trace!(
+                        ref_id = %unresolved_ref.ref_id,
+                        error = %e,
+                        "LSP goto_definition failed"
+                    );
+                }
+                return Ok(false);
+            }
+        };
+
+        // Extract file path from LSP URI and convert to relative path
+        let Some(def_path) = Self::uri_to_path(definition.uri.as_str()) else {
+            trace!(
+                uri = definition.uri.as_str(),
+                "Cannot parse LSP definition URI"
+            );
+            return Ok(false);
+        };
+
+        // Make the path relative to workspace root
+        let Ok(relative_def_path) = def_path.strip_prefix(&self.workspace_root) else {
+            trace!(
+                def_path = %def_path.display(),
+                "Definition outside workspace, skipping"
+            );
+            return Ok(false);
+        };
+
+        // Look up the file in our DB
+        let Some(def_file_id) = self.db.get_file_id(relative_def_path)? else {
+            trace!(
+                def_path = %relative_def_path.display(),
+                "Definition file not in index"
+            );
+            return Ok(false);
+        };
+
+        // LSP returns 0-indexed, convert to 1-indexed for DB lookup
+        let def_line = definition.range.start.line + 1;
+
+        // Find the symbol at that line
+        let Some(symbol) = self.db.find_symbol_at_line(def_file_id, def_line)? else {
+            trace!(
+                def_path = %relative_def_path.display(),
+                def_line = def_line,
+                "No symbol found at definition line"
+            );
+            return Ok(false);
+        };
+
+        // Resolve the reference
+        self.db
+            .resolve_reference(unresolved_ref.ref_id.as_i64(), symbol.id)?;
+
+        trace!(
+            ref_id = %unresolved_ref.ref_id,
+            symbol_id = %symbol.id,
+            symbol_name = %symbol.name,
+            "Resolved reference via LSP"
+        );
+
+        Ok(true)
+    }
+
+    /// Convert a file URI to a filesystem path.
+    ///
+    /// Handles `file://` URIs from LSP responses, including percent-encoded
+    /// characters (e.g., `%20` for spaces).
+    fn uri_to_path(uri: &str) -> Option<PathBuf> {
+        use percent_encoding::percent_decode_str;
+
+        // Strip file:// prefix
+        let path_str = uri.strip_prefix("file://")?;
+
+        // Decode percent-encoded characters (%20 -> space, etc.)
+        let decoded = percent_decode_str(path_str).decode_utf8().ok()?;
+
+        // On Unix, paths start with /, so we have file:///path
+        // On Windows, paths start with drive letter, so we have file:///C:/path
+        #[cfg(windows)]
+        {
+            // Remove leading / before drive letter: /C:/path -> C:/path
+            let path_str = decoded.strip_prefix('/').unwrap_or(&decoded);
+            Some(PathBuf::from(path_str))
+        }
+
+        #[cfg(not(windows))]
+        {
+            Some(PathBuf::from(decoded.as_ref()))
+        }
+    }
+
     /// Discover source files in the workspace.
     fn discover_files(
         &self,
@@ -1276,6 +1535,14 @@ impl Tethys {
     pub fn rebuild(&mut self) -> Result<IndexStats> {
         self.db.clear()?;
         self.index()
+    }
+
+    /// Rebuild the entire index from scratch with options.
+    ///
+    /// See [`index_with_options`](Self::index_with_options) for details on options.
+    pub fn rebuild_with_options(&mut self, options: IndexOptions) -> Result<IndexStats> {
+        self.db.clear()?;
+        self.index_with_options(options)
     }
 
     // === File Queries ===
@@ -1614,5 +1881,79 @@ mod tests {
     fn build_qualified_name_with_none_path() {
         let result = Tethys::build_qualified_name("bar", None);
         assert_eq!(result, "bar");
+    }
+
+    // ========================================================================
+    // uri_to_path Tests
+    // ========================================================================
+
+    #[test]
+    fn uri_to_path_handles_unix_path() {
+        let uri = "file:///home/user/project/src/main.rs";
+        let result = Tethys::uri_to_path(uri);
+        assert!(result.is_some());
+        assert_eq!(
+            result.unwrap(),
+            PathBuf::from("/home/user/project/src/main.rs")
+        );
+    }
+
+    #[test]
+    fn uri_to_path_returns_none_for_non_file_uri() {
+        let uri = "https://example.com/file.rs";
+        let result = Tethys::uri_to_path(uri);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn uri_to_path_returns_none_for_empty_string() {
+        let result = Tethys::uri_to_path("");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn uri_to_path_decodes_percent_encoded_spaces() {
+        let uri = "file:///home/user/my%20project/src/main.rs";
+        let result = Tethys::uri_to_path(uri);
+        assert_eq!(
+            result,
+            Some(PathBuf::from("/home/user/my project/src/main.rs"))
+        );
+    }
+
+    // ========================================================================
+    // IndexOptions Tests
+    // ========================================================================
+
+    #[test]
+    fn index_options_default_has_lsp_disabled() {
+        let options = IndexOptions::default();
+        assert!(!options.use_lsp());
+    }
+
+    #[test]
+    fn index_options_with_lsp_enables_lsp() {
+        let options = IndexOptions::with_lsp();
+        assert!(options.use_lsp());
+    }
+
+    #[test]
+    fn index_with_options_returns_zero_lsp_resolved_when_disabled() {
+        let workspace = temp_workspace();
+
+        // Create a simple Rust file
+        let src_dir = workspace.path().join("src");
+        std::fs::create_dir_all(&src_dir).expect("create src dir");
+        std::fs::write(src_dir.join("lib.rs"), "pub fn hello() {}").expect("write file");
+
+        let mut tethys = Tethys::new(workspace.path()).expect("create tethys");
+        let stats = tethys
+            .index_with_options(IndexOptions::default())
+            .expect("index");
+
+        assert_eq!(
+            stats.lsp_resolved_count, 0,
+            "LSP resolved count should be 0 when use_lsp is false"
+        );
     }
 }

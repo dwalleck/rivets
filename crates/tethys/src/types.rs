@@ -78,6 +78,34 @@ impl From<i64> for FileId {
     }
 }
 
+/// Database primary key for a reference.
+///
+/// This newtype provides type safety for function signatures that accept
+/// reference IDs, preventing accidental parameter swaps with symbol or file IDs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RefId(i64);
+
+impl RefId {
+    /// Extract the raw i64 value.
+    #[must_use]
+    pub fn as_i64(self) -> i64 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for RefId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<i64> for RefId {
+    fn from(id: i64) -> Self {
+        Self(id)
+    }
+}
+
 /// Supported programming languages.
 ///
 /// Adding a new language requires implementing the `LanguageSupport` trait.
@@ -561,6 +589,26 @@ pub struct Import {
     pub alias: Option<String>,
 }
 
+/// An unresolved reference with file path information for LSP queries.
+///
+/// This is a denormalized view of references that includes the file path,
+/// suitable for passing to LSP clients which need file paths, not database IDs.
+#[derive(Debug, Clone)]
+pub struct UnresolvedRefForLsp {
+    /// Database primary key of the reference
+    pub ref_id: RefId,
+    /// Foreign key to the file containing this reference
+    pub file_id: FileId,
+    /// Path to the file (relative to workspace root)
+    pub file_path: PathBuf,
+    /// Line number of the reference (1-indexed, as stored in DB)
+    pub line: u32,
+    /// Column number of the reference (1-indexed, as stored in DB)
+    pub column: u32,
+    /// Name of the referenced symbol for resolution (e.g., `Index::open`)
+    pub reference_name: String,
+}
+
 /// A reference to a symbol (usage, not definition).
 ///
 /// Tracks where symbols are used throughout the codebase. Combined with
@@ -614,9 +662,35 @@ pub struct FileAnalysis {
     pub references: Vec<Reference>,
 }
 
+/// Options for configuring the indexing process.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct IndexOptions {
+    /// Enable LSP-based resolution for references that tree-sitter cannot resolve.
+    ///
+    /// When enabled, after the tree-sitter resolution pass, tethys will spawn the
+    /// appropriate language server and use `goto_definition` to resolve remaining
+    /// unresolved references.
+    use_lsp: bool,
+}
+
+impl IndexOptions {
+    /// Create options with LSP resolution enabled.
+    #[must_use]
+    pub fn with_lsp() -> Self {
+        Self { use_lsp: true }
+    }
+
+    /// Check if LSP-based resolution is enabled.
+    #[must_use]
+    pub fn use_lsp(&self) -> bool {
+        self.use_lsp
+    }
+}
+
 /// Statistics from a full index operation.
 ///
-/// Returned by `Tethys::index()` and `Tethys::rebuild()`.
+/// Returned by [`Tethys::index()`], [`Tethys::index_with_options()`],
+/// [`Tethys::rebuild()`], and [`Tethys::rebuild_with_options()`].
 #[derive(Debug, Clone)]
 pub struct IndexStats {
     /// Number of files successfully indexed
@@ -636,6 +710,10 @@ pub struct IndexStats {
     /// Dependencies that couldn't be resolved (`from_file`, `dep_path`).
     /// These are typically external crate dependencies or missing files.
     pub unresolved_dependencies: Vec<(PathBuf, PathBuf)>,
+    /// Number of references resolved via LSP (Pass 3).
+    ///
+    /// Only non-zero when `IndexOptions::use_lsp` was set.
+    pub lsp_resolved_count: usize,
 }
 
 /// Statistics from an incremental update.
