@@ -117,6 +117,8 @@ pub struct OwnedSymbolData {
     pub signature: Option<String>,
     pub visibility: Visibility,
     pub parent_symbol_id: Option<SymbolId>,
+    /// Whether this symbol is a test function.
+    pub is_test: bool,
 }
 
 impl OwnedSymbolData {
@@ -133,6 +135,7 @@ impl OwnedSymbolData {
     /// * `signature` - Optional type signature
     /// * `visibility` - The symbol's visibility
     /// * `parent_symbol_id` - Optional parent symbol ID for nested symbols
+    /// * `is_test` - Whether this symbol is a test function
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: String,
@@ -145,6 +148,7 @@ impl OwnedSymbolData {
         signature: Option<String>,
         visibility: Visibility,
         parent_symbol_id: Option<SymbolId>,
+        is_test: bool,
     ) -> Self {
         debug_assert!(!name.is_empty(), "symbol name must not be empty");
         debug_assert!(line > 0, "line numbers should be 1-indexed");
@@ -159,6 +163,7 @@ impl OwnedSymbolData {
             signature,
             visibility,
             parent_symbol_id,
+            is_test,
         }
     }
 
@@ -175,6 +180,7 @@ impl OwnedSymbolData {
             signature: self.signature.as_deref(),
             visibility: self.visibility,
             parent_symbol_id: self.parent_symbol_id,
+            is_test: self.is_test,
         }
     }
 }
@@ -196,6 +202,7 @@ mod tests {
             Some("fn foo() -> i32".to_string()),
             Visibility::Public,
             None,
+            false,
         );
 
         let borrowed = owned.as_symbol_data();
@@ -205,6 +212,7 @@ mod tests {
         assert_eq!(borrowed.qualified_name, "crate::bar::foo");
         assert_eq!(borrowed.kind, SymbolKind::Function);
         assert_eq!(borrowed.line, 10);
+        assert!(!borrowed.is_test);
     }
 
     #[test]
@@ -236,10 +244,12 @@ mod tests {
             Some("fn test_fn()".to_string()),
             Visibility::Public,
             None,
+            true,
         );
 
         assert_eq!(owned.name, "test_fn");
         assert_eq!(owned.line, 5);
         assert_eq!(owned.kind, SymbolKind::Function);
+        assert!(owned.is_test);
     }
 }

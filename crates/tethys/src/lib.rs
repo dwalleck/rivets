@@ -630,6 +630,7 @@ impl Tethys {
                 signature: sym.signature.as_deref(),
                 visibility: sym.visibility,
                 parent_symbol_id: None, // TODO: parent_symbol_id
+                is_test: sym.is_test,
             })
             .collect();
 
@@ -758,6 +759,7 @@ impl Tethys {
                     sym.signature.clone(),
                     sym.visibility,
                     None, // TODO: parent_symbol_id
+                    sym.is_test,
                 )
             })
             .collect();
@@ -2747,6 +2749,133 @@ impl Tethys {
     /// Get statistics about the index database.
     pub fn get_stats(&self) -> Result<types::DatabaseStats> {
         self.db.get_stats()
+    }
+
+    // === Test Topology ===
+
+    /// Get all test symbols in the index.
+    ///
+    /// Returns symbols where `is_test = true`. These are functions/methods
+    /// annotated with test framework attributes:
+    /// - Rust: `#[test]`, `#[tokio::test]`, `#[rstest]`, etc.
+    /// - C#: `[Test]`, `[Fact]`, `[Theory]`, `[TestMethod]`, etc.
+    pub fn get_test_symbols(&self) -> Result<Vec<Symbol>> {
+        self.db.get_test_symbols()
+    }
+
+    /// Get tests that are affected by changes to the specified files.
+    ///
+    /// This uses the file dependency graph to find test files that depend
+    /// (directly or transitively) on the changed files, then returns the
+    /// test symbols from those files.
+    ///
+    /// # Arguments
+    ///
+    /// * `changed_files` - Paths to files that have changed (relative to workspace root)
+    ///
+    /// # Returns
+    ///
+    /// A list of test symbols from files that depend on the changed files.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use tethys::Tethys;
+    /// use std::path::{Path, PathBuf};
+    ///
+    /// let tethys = Tethys::new(Path::new("/path/to/workspace"))?;
+    /// let changed = vec![PathBuf::from("src/auth.rs")];
+    /// let affected_tests = tethys.get_affected_tests(&changed)?;
+    /// for test in affected_tests {
+    ///     println!("Run test: {} in {:?}", test.qualified_name, test.file_id);
+    /// }
+    /// # Ok::<(), tethys::Error>(())
+    /// ```
+    pub fn get_affected_tests(&self, changed_files: &[PathBuf]) -> Result<Vec<Symbol>> {
+        use std::collections::HashSet;
+
+        // Get file IDs for the changed files
+        let changed_file_ids: Vec<FileId> = changed_files
+            .iter()
+            .filter_map(|path| {
+                let relative = self.relative_path(path);
+                match self.db.get_file_id(relative) {
+                    Ok(Some(id)) => Some(id),
+                    Ok(None) => {
+                        debug!(
+                            path = %path.display(),
+                            "Changed file not in index, skipping"
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "Error looking up changed file"
+                        );
+                        None
+                    }
+                }
+            })
+            .collect();
+
+        if changed_file_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Use reverse traversal: find all files that depend on changed files
+        // This is O(V+E) total instead of O(T * V) where T = test files
+        let mut affected_file_ids: HashSet<FileId> = HashSet::new();
+
+        // Changed files themselves are affected
+        affected_file_ids.extend(changed_file_ids.iter().copied());
+
+        // For each changed file, get all transitive dependents using the graph infrastructure
+        for &file_id in &changed_file_ids {
+            match self.file_graph.get_transitive_dependents(file_id, None) {
+                Ok(impact) => {
+                    // Add direct dependents
+                    for dep in &impact.direct_dependents {
+                        affected_file_ids.insert(dep.file.id);
+                    }
+                    // Add transitive dependents
+                    for dep in &impact.transitive_dependents {
+                        affected_file_ids.insert(dep.file.id);
+                    }
+                    debug!(
+                        file_id = %file_id,
+                        direct = impact.direct_dependents.len(),
+                        transitive = impact.transitive_dependents.len(),
+                        "Found dependents for changed file"
+                    );
+                }
+                Err(e) => {
+                    // File might not exist or other error - log and continue
+                    warn!(
+                        file_id = %file_id,
+                        error = %e,
+                        "Error getting transitive dependents"
+                    );
+                }
+            }
+        }
+
+        // Get all test symbols and filter to affected files
+        let all_tests = self.db.get_test_symbols()?;
+        let affected_tests: Vec<Symbol> = all_tests
+            .into_iter()
+            .filter(|test| affected_file_ids.contains(&test.file_id))
+            .collect();
+
+        debug!(
+            affected_test_count = affected_tests.len(),
+            affected_file_count = affected_file_ids.len(),
+            changed_file_count = changed_files.len(),
+            "Found affected tests"
+        );
+
+        Ok(affected_tests)
     }
 }
 

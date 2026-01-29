@@ -108,6 +108,16 @@ enum Commands {
         #[arg(short = 'n', long, default_value = "10")]
         max_depth: usize,
     },
+
+    /// Find tests affected by changes to specified files
+    AffectedTests {
+        /// Files that have changed (relative or absolute paths)
+        files: Vec<String>,
+
+        /// Output only test names (one per line, for CI integration)
+        #[arg(long)]
+        names_only: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -167,6 +177,9 @@ fn main() -> ExitCode {
             direction,
             max_depth,
         } => cli::reachable::run(&workspace, &symbol, &direction, Some(max_depth)),
+        Commands::AffectedTests { files, names_only } => {
+            cli::affected_tests::run(&workspace, &files, names_only)
+        }
     };
 
     match result {

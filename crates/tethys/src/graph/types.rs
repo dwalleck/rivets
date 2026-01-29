@@ -186,6 +186,7 @@ mod tests {
             signature_details: None,
             visibility: Visibility::Public,
             parent_symbol_id: None,
+            is_test: false,
         }
     }
 

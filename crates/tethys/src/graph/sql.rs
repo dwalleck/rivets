@@ -80,7 +80,7 @@ impl SqlSymbolGraph {
 
         let mut stmt = conn.prepare(
             "SELECT id, file_id, name, module_path, qualified_name, kind, line, column,
-             end_line, end_column, signature, visibility, parent_symbol_id
+             end_line, end_column, signature, visibility, parent_symbol_id, is_test
              FROM symbols WHERE id = ?1",
         )?;
 
@@ -869,6 +869,7 @@ mod tests {
                     signature: Some("fn run()"),
                     visibility: Visibility::Public,
                     parent_symbol_id: None,
+                    is_test: false,
                 }],
             )
             .expect("failed to index main.rs");
@@ -891,6 +892,7 @@ mod tests {
                     signature: Some("fn validate()"),
                     visibility: Visibility::Public,
                     parent_symbol_id: None,
+                    is_test: false,
                 }],
             )
             .expect("failed to index auth.rs");
@@ -913,6 +915,7 @@ mod tests {
                     signature: Some("fn query()"),
                     visibility: Visibility::Public,
                     parent_symbol_id: None,
+                    is_test: false,
                 }],
             )
             .expect("failed to index db.rs");
@@ -935,6 +938,7 @@ mod tests {
                     signature: Some("fn get()"),
                     visibility: Visibility::Public,
                     parent_symbol_id: None,
+                    is_test: false,
                 }],
             )
             .expect("failed to index cache.rs");

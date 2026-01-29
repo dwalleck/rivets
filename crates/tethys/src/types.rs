@@ -551,6 +551,12 @@ pub struct Symbol {
     pub visibility: Visibility,
     /// Parent symbol ID for nested definitions
     pub parent_symbol_id: Option<SymbolId>,
+    /// Whether this symbol is a test function.
+    ///
+    /// Detected by language-specific test attributes:
+    /// - Rust: `#[test]`, `#[tokio::test]`, `#[async_std::test]`, `#[rstest]`, `#[quickcheck]`, `#[proptest]`
+    /// - C#: `[Test]`, `[TestMethod]`, `[Fact]`, `[Theory]`, `[TestCase]`
+    pub is_test: bool,
 }
 
 impl Symbol {
@@ -968,6 +974,7 @@ mod tests {
             signature_details: None,
             visibility: Visibility::Public,
             parent_symbol_id: None,
+            is_test: false,
         };
 
         assert_eq!(
@@ -992,6 +999,7 @@ mod tests {
             signature_details: None,
             visibility: Visibility::Private,
             parent_symbol_id: None,
+            is_test: false,
         };
 
         assert_eq!(symbol.full_path(), "main");

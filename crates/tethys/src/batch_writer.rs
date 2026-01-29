@@ -414,6 +414,7 @@ mod tests {
                 Some("fn main()".to_string()),
                 Visibility::Public,
                 None,
+                false,
             )],
             vec![],
             vec![],

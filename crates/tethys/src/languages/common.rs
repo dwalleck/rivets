@@ -18,6 +18,12 @@ pub struct ExtractedSymbol {
     pub signature_details: Option<FunctionSignature>,
     pub visibility: Visibility,
     pub parent_name: Option<String>,
+    /// Whether this symbol is a test function.
+    ///
+    /// Detected by language-specific test attributes:
+    /// - Rust: `#[test]`, `#[tokio::test]`, `#[rstest]`
+    /// - C#: `[Test]`, `[Fact]`, `[Theory]`, `[TestMethod]`
+    pub is_test: bool,
 }
 
 /// An extracted reference (usage of a symbol) from source code.

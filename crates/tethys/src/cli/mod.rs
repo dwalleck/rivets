@@ -2,6 +2,7 @@
 
 mod display;
 
+pub mod affected_tests;
 pub mod callers;
 pub mod cycles;
 pub mod impact;

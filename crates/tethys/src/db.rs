@@ -36,6 +36,8 @@ pub struct SymbolData<'a> {
     pub signature: Option<&'a str>,
     pub visibility: Visibility,
     pub parent_symbol_id: Option<SymbolId>,
+    /// Whether this symbol is a test function.
+    pub is_test: bool,
 }
 
 /// `SQLite` database wrapper for Tethys index.
@@ -200,8 +202,8 @@ impl Index {
         for sym in symbols {
             tx.execute(
                 "INSERT INTO symbols (file_id, name, module_path, qualified_name, kind, line, column,
-                 end_line, end_column, signature, visibility, parent_symbol_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                 end_line, end_column, signature, visibility, parent_symbol_id, is_test)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     file_id,
                     sym.name,
@@ -214,7 +216,8 @@ impl Index {
                     sym.span.map(|s| s.end_column()),
                     sym.signature,
                     sym.visibility.as_str(),
-                    sym.parent_symbol_id.map(SymbolId::as_i64)
+                    sym.parent_symbol_id.map(SymbolId::as_i64),
+                    sym.is_test
                 ],
             )?;
         }
@@ -241,11 +244,12 @@ impl Index {
         signature: Option<&str>,
         visibility: Visibility,
         parent_symbol_id: Option<SymbolId>,
+        is_test: bool,
     ) -> Result<SymbolId> {
         self.conn.execute(
             "INSERT INTO symbols (file_id, name, module_path, qualified_name, kind, line, column,
-             end_line, end_column, signature, visibility, parent_symbol_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             end_line, end_column, signature, visibility, parent_symbol_id, is_test)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 file_id.as_i64(),
                 name,
@@ -258,7 +262,8 @@ impl Index {
                 span.map(|s| s.end_column()),
                 signature,
                 visibility.as_str(),
-                parent_symbol_id.map(SymbolId::as_i64)
+                parent_symbol_id.map(SymbolId::as_i64),
+                is_test
             ],
         )?;
         Ok(SymbolId::from(self.conn.last_insert_rowid()))
@@ -268,7 +273,7 @@ impl Index {
     pub fn list_symbols_in_file(&self, file_id: FileId) -> Result<Vec<Symbol>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, file_id, name, module_path, qualified_name, kind, line, column,
-             end_line, end_column, signature, visibility, parent_symbol_id
+             end_line, end_column, signature, visibility, parent_symbol_id, is_test
              FROM symbols WHERE file_id = ?1 ORDER BY line",
         )?;
 
@@ -289,7 +294,7 @@ impl Index {
 
         let mut stmt = self.conn.prepare(
             "SELECT id, file_id, name, module_path, qualified_name, kind, line, column,
-             end_line, end_column, signature, visibility, parent_symbol_id
+             end_line, end_column, signature, visibility, parent_symbol_id, is_test
              FROM symbols
              WHERE name LIKE ?1 OR qualified_name LIKE ?1
              ORDER BY
@@ -310,7 +315,7 @@ impl Index {
         trace!(symbol_id = %id, "Looking up symbol by ID");
         let mut stmt = self.conn.prepare(
             "SELECT id, file_id, name, module_path, qualified_name, kind, line, column,
-             end_line, end_column, signature, visibility, parent_symbol_id
+             end_line, end_column, signature, visibility, parent_symbol_id, is_test
              FROM symbols WHERE id = ?1",
         )?;
 
@@ -326,7 +331,7 @@ impl Index {
         trace!(qualified_name = %qualified_name, "Looking up symbol by qualified name");
         let mut stmt = self.conn.prepare(
             "SELECT id, file_id, name, module_path, qualified_name, kind, line, column,
-             end_line, end_column, signature, visibility, parent_symbol_id
+             end_line, end_column, signature, visibility, parent_symbol_id, is_test
              FROM symbols WHERE qualified_name = ?1",
         )?;
 
@@ -343,7 +348,7 @@ impl Index {
     pub fn search_symbols_by_kind(&self, kind: SymbolKind, limit: usize) -> Result<Vec<Symbol>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, file_id, name, module_path, qualified_name, kind, line, column,
-             end_line, end_column, signature, visibility, parent_symbol_id
+             end_line, end_column, signature, visibility, parent_symbol_id, is_test
              FROM symbols
              WHERE kind = ?1
              LIMIT ?2",
@@ -351,6 +356,26 @@ impl Index {
 
         let symbols = stmt
             .query_map(params![kind.as_str(), limit as i64], row_to_symbol)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(symbols)
+    }
+
+    /// Get all test symbols in the index.
+    ///
+    /// Returns all symbols where `is_test = true`, useful for test topology
+    /// analysis and "affected tests" queries.
+    pub fn get_test_symbols(&self) -> Result<Vec<Symbol>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, file_id, name, module_path, qualified_name, kind, line, column,
+             end_line, end_column, signature, visibility, parent_symbol_id, is_test
+             FROM symbols
+             WHERE is_test = 1
+             ORDER BY file_id, line",
+        )?;
+
+        let symbols = stmt
+            .query_map([], row_to_symbol)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(symbols)
@@ -386,7 +411,7 @@ impl Index {
         // Try exact name match in the specified file
         let mut stmt = self.conn.prepare(
             "SELECT id, file_id, name, module_path, qualified_name, kind, line, column,
-             end_line, end_column, signature, visibility, parent_symbol_id
+             end_line, end_column, signature, visibility, parent_symbol_id, is_test
              FROM symbols
              WHERE name = ?1 AND file_id = ?2
              LIMIT 1",
@@ -404,7 +429,7 @@ impl Index {
         // where the reference might be to the nested name
         let mut stmt = self.conn.prepare(
             "SELECT id, file_id, name, module_path, qualified_name, kind, line, column,
-             end_line, end_column, signature, visibility, parent_symbol_id
+             end_line, end_column, signature, visibility, parent_symbol_id, is_test
              FROM symbols
              WHERE qualified_name LIKE ?1 AND file_id = ?2
              LIMIT 1",
@@ -433,7 +458,7 @@ impl Index {
 
         let mut stmt = self.conn.prepare(
             "SELECT id, file_id, name, module_path, qualified_name, kind, line, column,
-             end_line, end_column, signature, visibility, parent_symbol_id
+             end_line, end_column, signature, visibility, parent_symbol_id, is_test
              FROM symbols
              WHERE qualified_name = ?1 AND file_id = ?2
              LIMIT 1",
@@ -456,7 +481,7 @@ impl Index {
 
         let mut stmt = self.conn.prepare(
             "SELECT id, file_id, name, module_path, qualified_name, kind, line, column,
-             end_line, end_column, signature, visibility, parent_symbol_id
+             end_line, end_column, signature, visibility, parent_symbol_id, is_test
              FROM symbols
              WHERE name = ?1
              LIMIT 1",
@@ -483,7 +508,7 @@ impl Index {
 
         let mut stmt = self.conn.prepare(
             "SELECT id, file_id, name, module_path, qualified_name, kind, line, column,
-             end_line, end_column, signature, visibility, parent_symbol_id
+             end_line, end_column, signature, visibility, parent_symbol_id, is_test
              FROM symbols
              WHERE file_id = ?1 AND line = ?2
              ORDER BY column ASC
@@ -1147,6 +1172,7 @@ pub(crate) fn row_to_symbol(row: &rusqlite::Row) -> rusqlite::Result<Symbol> {
         signature_details: None, // Not persisted to database; populated by parsers only
         visibility: parse_visibility(&row.get::<_, String>(11)?)?,
         parent_symbol_id: row.get::<_, Option<i64>>(12)?.map(SymbolId::from),
+        is_test: row.get(13)?,
     })
 }
 
@@ -1180,7 +1206,8 @@ CREATE TABLE IF NOT EXISTS symbols (
     end_column INTEGER,
     signature TEXT,
     visibility TEXT NOT NULL,
-    parent_symbol_id INTEGER REFERENCES symbols(id) ON DELETE CASCADE
+    parent_symbol_id INTEGER REFERENCES symbols(id) ON DELETE CASCADE,
+    is_test INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
@@ -1188,6 +1215,7 @@ CREATE INDEX IF NOT EXISTS idx_symbols_module_path ON symbols(module_path);
 CREATE INDEX IF NOT EXISTS idx_symbols_qualified ON symbols(qualified_name);
 CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file_id);
 CREATE INDEX IF NOT EXISTS idx_symbols_kind ON symbols(kind);
+CREATE INDEX IF NOT EXISTS idx_symbols_is_test ON symbols(is_test) WHERE is_test = 1;
 
 -- References (usages of symbols)
 -- symbol_id is NULL for unresolved references (to be resolved in Pass 2)
@@ -1347,6 +1375,7 @@ mod tests {
                 Some("fn foo()"),
                 Visibility::Public,
                 None,
+                false,
             )
             .unwrap();
 
@@ -1363,6 +1392,7 @@ mod tests {
                 None,
                 Visibility::Private,
                 None,
+                false,
             )
             .unwrap();
 
@@ -1394,6 +1424,7 @@ mod tests {
                 None,
                 Visibility::Public,
                 None,
+                false,
             )
             .unwrap();
 
@@ -1410,6 +1441,7 @@ mod tests {
                 None,
                 Visibility::Public,
                 None,
+                false,
             )
             .unwrap();
 
@@ -1526,6 +1558,7 @@ mod tests {
                 None,
                 Visibility::Public,
                 None,
+                false,
             )
             .unwrap();
 
@@ -1632,6 +1665,7 @@ mod tests {
                 Some("fn my_function()"),
                 Visibility::Public,
                 None,
+                false,
             )
             .expect("should insert function symbol");
 
@@ -1648,6 +1682,7 @@ mod tests {
                 None,
                 Visibility::Public,
                 None,
+                false,
             )
             .expect("should insert struct symbol");
 
@@ -1664,6 +1699,7 @@ mod tests {
                 None,
                 Visibility::Private,
                 None,
+                false,
             )
             .expect("should insert another function symbol");
 
@@ -1709,6 +1745,7 @@ mod tests {
                     None,
                     Visibility::Public,
                     None,
+                    false,
                 )
                 .expect("should insert function symbol");
         }
@@ -1749,6 +1786,7 @@ mod tests {
                 None,
                 Visibility::Public,
                 None,
+                false,
             )
             .expect("should insert function symbol");
 
@@ -1801,6 +1839,7 @@ mod tests {
                     None,
                     Visibility::Public,
                     None,
+                    false,
                 )
                 .expect("should insert symbol");
         }
@@ -1843,6 +1882,7 @@ mod tests {
                     None,
                     Visibility::Public,
                     None,
+                    false,
                 )
                 .expect("should insert function symbol");
         }
@@ -1878,6 +1918,7 @@ mod tests {
                 Some("fn my_func(x: i32) -> bool"),
                 Visibility::Private,
                 None,
+                false,
             )
             .expect("should insert symbol");
 
@@ -2380,6 +2421,7 @@ mod tests {
                 None,
                 Visibility::Public,
                 None,
+                false,
             )
             .expect("should insert symbol");
 
@@ -2437,6 +2479,7 @@ mod tests {
                 Some("fn open(&self) -> Result<()>"),
                 Visibility::Public,
                 None,
+                false,
             )
             .expect("should insert symbol");
 
@@ -2490,6 +2533,7 @@ mod tests {
                 None,
                 Visibility::Private,
                 None,
+                false,
             )
             .expect("should insert symbol");
 
@@ -2582,6 +2626,7 @@ mod tests {
                 None,
                 Visibility::Public,
                 None,
+                false,
             )
             .expect("should insert symbol");
 
@@ -2635,6 +2680,7 @@ mod tests {
                 None,
                 Visibility::Public,
                 None,
+                false,
             )
             .expect("should insert symbol in file1");
 
@@ -2651,6 +2697,7 @@ mod tests {
                 None,
                 Visibility::Public,
                 None,
+                false,
             )
             .expect("should insert symbol in file2");
 
@@ -2746,6 +2793,7 @@ mod tests {
                 None,
                 Visibility::Public,
                 None,
+                false,
             )
             .expect("should insert symbol");
 
@@ -2875,6 +2923,7 @@ mod tests {
                 None,
                 Visibility::Public,
                 None,
+                false,
             )
             .expect("should insert symbol");
 
@@ -2911,6 +2960,7 @@ mod tests {
                 None,
                 Visibility::Public,
                 None,
+                false,
             )
             .expect("should insert symbol");
 
@@ -2947,6 +2997,7 @@ mod tests {
                 None,
                 Visibility::Public,
                 None,
+                false,
             )
             .expect("should insert symbol");
 
@@ -2982,6 +3033,7 @@ mod tests {
                 None,
                 Visibility::Private,
                 None,
+                false,
             )
             .expect("should insert symbol");
 
@@ -2999,6 +3051,7 @@ mod tests {
                 None,
                 Visibility::Private,
                 None,
+                false,
             )
             .expect("should insert symbol");
 
@@ -3040,6 +3093,7 @@ mod tests {
                 None,
                 Visibility::Public,
                 None,
+                false,
             )
             .expect("should insert caller symbol");
 
@@ -3056,6 +3110,7 @@ mod tests {
                 None,
                 Visibility::Public,
                 None,
+                false,
             )
             .expect("should insert callee symbol");
 
@@ -3103,6 +3158,7 @@ mod tests {
                 None,
                 Visibility::Public,
                 None,
+                false,
             )
             .expect("should insert caller symbol");
 
@@ -3119,6 +3175,7 @@ mod tests {
                 None,
                 Visibility::Public,
                 None,
+                false,
             )
             .expect("should insert callee symbol");
 
@@ -3158,6 +3215,7 @@ mod tests {
                 None,
                 Visibility::Public,
                 None,
+                false,
             )
             .unwrap();
 
@@ -3174,6 +3232,7 @@ mod tests {
                 None,
                 Visibility::Public,
                 None,
+                false,
             )
             .unwrap();
 
@@ -3190,6 +3249,7 @@ mod tests {
                 None,
                 Visibility::Public,
                 None,
+                false,
             )
             .unwrap();
 
@@ -3233,6 +3293,7 @@ mod tests {
                 None,
                 Visibility::Public,
                 None,
+                false,
             )
             .unwrap();
         let sym2 = index
@@ -3248,6 +3309,7 @@ mod tests {
                 None,
                 Visibility::Public,
                 None,
+                false,
             )
             .unwrap();
         let sym3 = index
@@ -3263,6 +3325,7 @@ mod tests {
                 None,
                 Visibility::Public,
                 None,
+                false,
             )
             .unwrap();
 
@@ -3302,6 +3365,7 @@ mod tests {
                 None,
                 Visibility::Public,
                 None,
+                false,
             )
             .unwrap();
 
@@ -3318,6 +3382,7 @@ mod tests {
                 None,
                 Visibility::Public,
                 None,
+                false,
             )
             .unwrap();
 
@@ -3362,6 +3427,7 @@ mod tests {
                 None,
                 Visibility::Public,
                 None,
+                false,
             )
             .unwrap();
         let b = index
@@ -3377,6 +3443,7 @@ mod tests {
                 None,
                 Visibility::Public,
                 None,
+                false,
             )
             .unwrap();
         let c = index
@@ -3392,6 +3459,7 @@ mod tests {
                 None,
                 Visibility::Public,
                 None,
+                false,
             )
             .unwrap();
 

@@ -60,6 +60,9 @@ mod node_kinds {
     pub const UNSAFE: &str = "unsafe";
     pub const CONST: &str = "const";
 
+    // Attribute nodes
+    pub const ATTRIBUTE_ITEM: &str = "attribute_item";
+
     // Expression nodes (for reference extraction)
     pub const CALL_EXPRESSION: &str = "call_expression";
     pub const STRUCT_EXPRESSION: &str = "struct_expression";
@@ -781,6 +784,7 @@ fn extract_function(
     let visibility = extract_visibility(node, content);
     let signature = extract_function_signature(node, content);
     let signature_details = extract_signature_details(node, content);
+    let is_test = has_test_attribute(node, content);
 
     Some(ExtractedSymbol {
         name,
@@ -792,6 +796,7 @@ fn extract_function(
         signature_details,
         visibility,
         parent_name: parent_name.map(String::from),
+        is_test,
     })
 }
 
@@ -825,6 +830,7 @@ fn extract_simple_definition(
         signature_details: None,
         visibility,
         parent_name: None,
+        is_test: false, // Simple definitions (struct, enum, etc.) are never tests
     })
 }
 
@@ -849,6 +855,7 @@ fn extract_macro(node: &tree_sitter::Node, content: &[u8]) -> Option<ExtractedSy
         signature_details: None,
         visibility: Visibility::Public, // Default to Public; tree-sitter doesn't expose macro_export
         parent_name: None,
+        is_test: false, // Macros are never tests
     })
 }
 
@@ -889,6 +896,59 @@ fn extract_visibility(node: &tree_sitter::Node, content: &[u8]) -> Visibility {
         }
     }
     Visibility::Private
+}
+
+/// Test attribute patterns to detect.
+///
+/// These are the common test framework attributes in Rust:
+/// - `#[test]` - Standard library test
+/// - `#[tokio::test]` - Tokio async test
+/// - `#[async_std::test]` - async-std async test
+/// - `#[rstest]` - rstest parameterized test
+/// - `#[quickcheck]` - quickcheck property test
+/// - `#[proptest]` - proptest property test
+const TEST_ATTRIBUTES: &[&str] = &[
+    "test",
+    "tokio::test",
+    "async_std::test",
+    "rstest",
+    "quickcheck",
+    "proptest",
+];
+
+/// Check if a node has a test attribute.
+///
+/// In tree-sitter-rust, attributes are SIBLING nodes that precede the item they annotate,
+/// not children. For example:
+///
+/// ```text
+/// source_file
+///   attribute_item ← sibling before function_item
+///   function_item  ← the node we're checking
+/// ```
+///
+/// We look at preceding siblings for `attribute_item` nodes containing test-related attributes.
+fn has_test_attribute(node: &tree_sitter::Node, content: &[u8]) -> bool {
+    // Look at preceding siblings for attribute items
+    let mut prev = node.prev_sibling();
+    while let Some(sibling) = prev {
+        if sibling.kind() == node_kinds::ATTRIBUTE_ITEM {
+            if let Some(text) = node_text(&sibling, content) {
+                // Extract attribute name from #[...] format
+                let trimmed = text.trim_start_matches("#[").trim_end_matches(']');
+                // Handle attributes with arguments like #[tokio::test(flavor = "multi_thread")]
+                let attr_name = trimmed.split('(').next().unwrap_or(trimmed).trim();
+                if TEST_ATTRIBUTES.contains(&attr_name) {
+                    return true;
+                }
+            }
+        } else {
+            // Stop at non-attribute siblings (e.g., other functions, comments)
+            break;
+        }
+        prev = sibling.prev_sibling();
+    }
+    false
 }
 
 /// Extract function signature (just the declaration line without body).

@@ -57,6 +57,10 @@ mod node_kinds {
     pub const PRIVATE: &str = "private";
     pub const PROTECTED: &str = "protected";
     pub const INTERNAL: &str = "internal";
+
+    // Attribute nodes
+    pub const ATTRIBUTE_LIST: &str = "attribute_list";
+    pub const ATTRIBUTE: &str = "attribute";
 }
 
 /// C# language support implementation.
@@ -719,6 +723,7 @@ fn extract_type_declaration(
         signature_details: None,
         visibility,
         parent_name: None,
+        is_test: false, // Type declarations (class, struct, etc.) are never tests
     })
 }
 
@@ -745,6 +750,7 @@ fn extract_namespace(node: &tree_sitter::Node, content: &[u8]) -> Option<Extract
         signature_details: None,
         visibility: Visibility::Public, // Namespaces are implicitly public
         parent_name: None,
+        is_test: false, // Namespaces are never tests
     })
 }
 
@@ -767,6 +773,7 @@ fn extract_method(
     let visibility = extract_visibility(node, content);
     let signature = extract_method_signature(node, content);
     let signature_details = extract_signature_details(node, content);
+    let is_test = has_test_attribute(node, content);
 
     Some(ExtractedSymbol {
         name,
@@ -778,6 +785,7 @@ fn extract_method(
         signature_details,
         visibility,
         parent_name: parent_name.map(String::from),
+        is_test,
     })
 }
 
@@ -811,6 +819,7 @@ fn extract_constructor(
         signature_details,
         visibility,
         parent_name: parent_name.map(String::from),
+        is_test: false, // Constructors are never tests
     })
 }
 
@@ -859,6 +868,50 @@ fn has_modifier(node: &tree_sitter::Node, content: &[u8], modifier: &str) -> boo
             if let Some(text) = node_text(&child, content) {
                 if text == modifier {
                     return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// C# test attribute names to detect.
+///
+/// These are common test framework attributes:
+/// - `[Test]` - `NUnit`
+/// - `[TestMethod]` - `MSTest`
+/// - `[Fact]` - `xUnit`
+/// - `[Theory]` - `xUnit` parameterized test
+/// - `[TestCase]` - `NUnit` parameterized test
+const CSHARP_TEST_ATTRIBUTES: &[&str] = &["Test", "TestMethod", "Fact", "Theory", "TestCase"];
+
+/// Check if a node has a test attribute.
+///
+/// In tree-sitter-c-sharp, attributes appear as children of the method/class.
+/// We look for `attribute_list` nodes containing test-related attributes.
+fn has_test_attribute(node: &tree_sitter::Node, content: &[u8]) -> bool {
+    use node_kinds::{ATTRIBUTE, ATTRIBUTE_LIST};
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == ATTRIBUTE_LIST {
+            let mut inner_cursor = child.walk();
+            for attr_child in child.children(&mut inner_cursor) {
+                if attr_child.kind() == ATTRIBUTE {
+                    // Get the attribute name (first identifier child)
+                    if let Some(name_node) = attr_child.child_by_field_name("name") {
+                        if let Some(attr_name) = node_text(&name_node, content) {
+                            // Handle fully qualified names like "NUnit.Framework.Test"
+                            // by checking the last segment
+                            let simple_name = attr_name.rsplit('.').next().unwrap_or(&attr_name);
+                            // Also strip "Attribute" suffix if present
+                            let name_without_suffix =
+                                simple_name.strip_suffix("Attribute").unwrap_or(simple_name);
+                            if CSHARP_TEST_ATTRIBUTES.contains(&name_without_suffix) {
+                                return true;
+                            }
+                        }
+                    }
                 }
             }
         }
