@@ -6,6 +6,7 @@ pub mod callers;
 pub mod cycles;
 pub mod impact;
 pub mod index;
+pub mod reachable;
 pub mod search;
 pub mod stats;
 

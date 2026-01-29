@@ -47,7 +47,8 @@ pub use error::{Error, IndexError, IndexErrorKind, Result};
 pub use types::{
     Cycle, DatabaseStats, Dependent, FileAnalysis, FileId, FunctionSignature, Impact, Import,
     IndexOptions, IndexStats, IndexUpdate, IndexedFile, Language, Parameter, ParameterKind,
-    Reference, ReferenceKind, Span, Symbol, SymbolId, SymbolKind, UnresolvedRefForLsp, Visibility,
+    ReachabilityDirection, ReachabilityResult, ReachablePath, Reference, ReferenceKind, Span,
+    Symbol, SymbolId, SymbolKind, UnresolvedRefForLsp, Visibility,
 };
 
 use std::collections::HashMap;
@@ -2567,6 +2568,168 @@ impl Tethys {
         let path = self.file_graph.find_dependency_path(from_id, to_id)?;
 
         Ok(path.map(|p| p.into_files().into_iter().map(|f| f.path).collect()))
+    }
+
+    // === Reachability Analysis ===
+
+    /// Get forward reachable symbols: what can this symbol reach?
+    ///
+    /// Performs BFS traversal of the call graph following callees (outgoing edges).
+    /// Returns all symbols that can be reached from the source symbol within `max_depth`.
+    ///
+    /// The BFS uses fail-fast error handling: if a database error occurs while fetching
+    /// callees for any symbol, traversal stops immediately and the error is returned.
+    ///
+    /// # Arguments
+    ///
+    /// * `qualified_name` - Qualified name of the symbol to analyze (e.g., `"auth::validate"`)
+    /// * `max_depth` - Maximum depth to traverse (None uses default of 50)
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::NotFound` if no symbol matches `qualified_name`.
+    /// Returns database errors if the call graph lookup fails.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use tethys::Tethys;
+    /// use std::path::Path;
+    ///
+    /// let tethys = Tethys::new(Path::new("/path/to/workspace"))?;
+    /// let result = tethys.get_forward_reachable("main::run", Some(3))?;
+    /// println!("main::run can reach {} symbols", result.reachable_count());
+    /// # Ok::<(), tethys::Error>(())
+    /// ```
+    pub fn get_forward_reachable(
+        &self,
+        qualified_name: &str,
+        max_depth: Option<usize>,
+    ) -> Result<types::ReachabilityResult> {
+        use std::collections::{HashSet, VecDeque};
+
+        let source = self
+            .db
+            .get_symbol_by_qualified_name(qualified_name)?
+            .ok_or_else(|| Error::NotFound(format!("symbol: {qualified_name}")))?;
+
+        let max_depth = max_depth.unwrap_or(50);
+        let mut visited: HashSet<SymbolId> = HashSet::new();
+        let mut results: Vec<types::ReachablePath> = Vec::new();
+        let mut queue: VecDeque<(SymbolId, Vec<Symbol>, usize)> = VecDeque::new();
+
+        // Start BFS from the source
+        queue.push_back((source.id, vec![], 0));
+        visited.insert(source.id);
+
+        while let Some((current_id, path, depth)) = queue.pop_front() {
+            if depth >= max_depth {
+                continue;
+            }
+
+            // Get callees (outgoing edges) for forward reachability
+            for callee_info in self.symbol_graph.get_callees(current_id)? {
+                if visited.insert(callee_info.symbol.id) {
+                    let mut new_path = path.clone();
+                    new_path.push(callee_info.symbol.clone());
+
+                    results.push(types::ReachablePath {
+                        target: callee_info.symbol.clone(),
+                        path: new_path.clone(),
+                        depth: depth + 1,
+                    });
+
+                    queue.push_back((callee_info.symbol.id, new_path, depth + 1));
+                }
+            }
+        }
+
+        Ok(types::ReachabilityResult {
+            source,
+            reachable: results,
+            max_depth,
+            direction: types::ReachabilityDirection::Forward,
+        })
+    }
+
+    /// Get backward reachable symbols: who can reach this symbol?
+    ///
+    /// Performs BFS traversal of the call graph following callers (incoming edges).
+    /// Returns all symbols that can reach the analyzed symbol within `max_depth`.
+    ///
+    /// The BFS uses fail-fast error handling: if a database error occurs while fetching
+    /// callers for any symbol, traversal stops immediately and the error is returned.
+    ///
+    /// # Arguments
+    ///
+    /// * `qualified_name` - Qualified name of the symbol to analyze (e.g., `"db::query"`)
+    /// * `max_depth` - Maximum depth to traverse (None uses default of 50)
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::NotFound` if no symbol matches `qualified_name`.
+    /// Returns database errors if the call graph lookup fails.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use tethys::Tethys;
+    /// use std::path::Path;
+    ///
+    /// let tethys = Tethys::new(Path::new("/path/to/workspace"))?;
+    /// let result = tethys.get_backward_reachable("db::query", Some(3))?;
+    /// println!("{} symbols can reach db::query", result.reachable_count());
+    /// # Ok::<(), tethys::Error>(())
+    /// ```
+    pub fn get_backward_reachable(
+        &self,
+        qualified_name: &str,
+        max_depth: Option<usize>,
+    ) -> Result<types::ReachabilityResult> {
+        use std::collections::{HashSet, VecDeque};
+
+        let source = self
+            .db
+            .get_symbol_by_qualified_name(qualified_name)?
+            .ok_or_else(|| Error::NotFound(format!("symbol: {qualified_name}")))?;
+
+        let max_depth = max_depth.unwrap_or(50);
+        let mut visited: HashSet<SymbolId> = HashSet::new();
+        let mut results: Vec<types::ReachablePath> = Vec::new();
+        let mut queue: VecDeque<(SymbolId, Vec<Symbol>, usize)> = VecDeque::new();
+
+        // Start BFS from the source
+        queue.push_back((source.id, vec![], 0));
+        visited.insert(source.id);
+
+        while let Some((current_id, path, depth)) = queue.pop_front() {
+            if depth >= max_depth {
+                continue;
+            }
+
+            // Get callers (incoming edges) for backward reachability
+            for caller_info in self.symbol_graph.get_callers(current_id)? {
+                if visited.insert(caller_info.symbol.id) {
+                    let mut new_path = path.clone();
+                    new_path.push(caller_info.symbol.clone());
+
+                    results.push(types::ReachablePath {
+                        target: caller_info.symbol.clone(),
+                        path: new_path.clone(),
+                        depth: depth + 1,
+                    });
+
+                    queue.push_back((caller_info.symbol.id, new_path, depth + 1));
+                }
+            }
+        }
+
+        Ok(types::ReachabilityResult {
+            source,
+            reachable: results,
+            max_depth,
+            direction: types::ReachabilityDirection::Backward,
+        })
     }
 
     // === Database ===

@@ -832,6 +832,72 @@ pub struct Cycle {
     pub files: Vec<PathBuf>,
 }
 
+// === Reachability Analysis Types ===
+
+/// Direction for reachability analysis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReachabilityDirection {
+    /// Forward: what can this symbol reach (follows callees)
+    Forward,
+    /// Backward: who can reach this symbol (follows callers)
+    Backward,
+}
+
+/// A path from the source symbol to a reachable target.
+///
+/// Represents one reachable symbol and the call path used to reach it.
+#[derive(Debug, Clone)]
+pub struct ReachablePath {
+    /// The reachable symbol at the end of this path.
+    pub target: Symbol,
+    /// Symbols along the path from source to target (excluding source, including target).
+    pub path: Vec<Symbol>,
+    /// Depth in the BFS traversal (1 = direct callee/caller).
+    pub depth: usize,
+}
+
+/// Result of a reachability analysis query.
+///
+/// Contains all symbols reachable from a source, along with the paths used to reach them.
+/// The BFS traversal terminates when:
+/// - All reachable symbols within `max_depth` have been visited
+/// - A cycle is detected (already-visited symbols are skipped)
+/// - A database error occurs (fail-fast)
+#[derive(Debug, Clone)]
+pub struct ReachabilityResult {
+    /// The starting symbol from which reachability was computed.
+    /// For forward analysis, this is the caller; for backward, this is the callee.
+    pub source: Symbol,
+    /// All reachable symbols with their traversal paths.
+    /// Ordered by discovery (BFS order), not alphabetically.
+    pub reachable: Vec<ReachablePath>,
+    /// Maximum depth that was used for the analysis.
+    /// When `None` is passed to the query, this reflects the default (50).
+    pub max_depth: usize,
+    /// Direction of the analysis: `Forward` follows callees, `Backward` follows callers.
+    pub direction: ReachabilityDirection,
+}
+
+impl ReachabilityResult {
+    /// Get the count of unique reachable symbols.
+    #[must_use]
+    pub fn reachable_count(&self) -> usize {
+        self.reachable.len()
+    }
+
+    /// Check if any symbols are reachable.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.reachable.is_empty()
+    }
+
+    /// Get symbols at a specific depth.
+    #[must_use]
+    pub fn at_depth(&self, depth: usize) -> Vec<&ReachablePath> {
+        self.reachable.iter().filter(|r| r.depth == depth).collect()
+    }
+}
+
 /// Statistics about the index database.
 ///
 /// Returned by `Tethys::get_stats()`.

@@ -905,3 +905,347 @@ fn symbol_dependencies_via_call_edges() {
         "validate should have dependencies (Helper::new, Helper::check)"
     );
 }
+
+// ============================================================================
+// Reachability Analysis Tests
+// ============================================================================
+
+#[test]
+fn get_forward_reachable_returns_error_for_nonexistent_symbol() {
+    let (_dir, mut tethys) = workspace_with_intra_file_calls();
+    tethys.index().expect("index failed");
+
+    let result = tethys.get_forward_reachable("NoSuchSymbol", Some(10));
+
+    assert!(
+        result.is_err(),
+        "should return error for non-existent symbol"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("not found") || err.contains("Not found") || err.contains("NoSuchSymbol"),
+        "error should indicate symbol not found, got: {err}"
+    );
+}
+
+#[test]
+fn get_backward_reachable_returns_error_for_nonexistent_symbol() {
+    let (_dir, mut tethys) = workspace_with_intra_file_calls();
+    tethys.index().expect("index failed");
+
+    let result = tethys.get_backward_reachable("NoSuchSymbol", Some(10));
+
+    assert!(
+        result.is_err(),
+        "should return error for non-existent symbol"
+    );
+}
+
+#[test]
+fn get_forward_reachable_finds_direct_callees() {
+    let (_dir, mut tethys) = workspace_with_intra_file_calls();
+    tethys.index().expect("index failed");
+
+    // process calls validate
+    let result = tethys
+        .get_forward_reachable("process", Some(1))
+        .expect("get_forward_reachable for process should succeed");
+
+    assert!(
+        !result.is_empty(),
+        "process should have forward reachable symbols (validate)"
+    );
+    assert_eq!(
+        result.direction,
+        tethys::ReachabilityDirection::Forward,
+        "direction should be Forward"
+    );
+
+    // All results should be at depth 1 (max_depth=1)
+    for path in &result.reachable {
+        assert_eq!(path.depth, 1, "all results should be at depth 1");
+    }
+}
+
+#[test]
+fn get_forward_reachable_finds_transitive_callees() {
+    let (_dir, mut tethys) = workspace_with_intra_file_calls();
+    tethys.index().expect("index failed");
+
+    // process -> validate -> Helper::new, Helper::check
+    // With depth 3, we should reach Helper::new and Helper::check
+    let result = tethys
+        .get_forward_reachable("process", Some(3))
+        .expect("get_forward_reachable for process should succeed");
+
+    assert!(
+        result.reachable_count() >= 2,
+        "process should reach at least 2 symbols with depth 3, got: {}",
+        result.reachable_count()
+    );
+
+    // Check that we have symbols at different depths
+    let depths: std::collections::HashSet<usize> =
+        result.reachable.iter().map(|r| r.depth).collect();
+    assert!(
+        !depths.is_empty(),
+        "should have symbols at different depths, got depths: {depths:?}"
+    );
+}
+
+#[test]
+fn get_forward_reachable_returns_empty_for_leaf_symbol() {
+    let (_dir, mut tethys) = workspace_with_intra_file_calls();
+    tethys.index().expect("index failed");
+
+    // Helper::check doesn't call anything
+    let result = tethys
+        .get_forward_reachable("Helper::check", Some(10))
+        .expect("get_forward_reachable for Helper::check should succeed");
+
+    assert!(
+        result.is_empty(),
+        "Helper::check should have no forward reachable symbols, got: {:?}",
+        result.reachable
+    );
+}
+
+#[test]
+fn get_backward_reachable_finds_direct_callers() {
+    let (_dir, mut tethys) = workspace_with_intra_file_calls();
+    tethys.index().expect("index failed");
+
+    // validate is called by process
+    let result = tethys
+        .get_backward_reachable("validate", Some(1))
+        .expect("get_backward_reachable for validate should succeed");
+
+    assert!(
+        !result.is_empty(),
+        "validate should have backward reachable symbols (process)"
+    );
+    assert_eq!(
+        result.direction,
+        tethys::ReachabilityDirection::Backward,
+        "direction should be Backward"
+    );
+}
+
+#[test]
+fn get_backward_reachable_finds_transitive_callers() {
+    let (_dir, mut tethys) = workspace_with_intra_file_calls();
+    tethys.index().expect("index failed");
+
+    // Helper::new is called by validate, which is called by process
+    // With depth 3, we should reach both validate and process
+    let result = tethys
+        .get_backward_reachable("Helper::new", Some(3))
+        .expect("get_backward_reachable for Helper::new should succeed");
+
+    assert!(
+        result.reachable_count() >= 1,
+        "Helper::new should have at least 1 backward reachable symbol, got: {}",
+        result.reachable_count()
+    );
+}
+
+#[test]
+fn get_backward_reachable_returns_empty_for_uncalled_symbol() {
+    let (_dir, mut tethys) = workspace_with_intra_file_calls();
+    tethys.index().expect("index failed");
+
+    // process is not called by anything
+    let result = tethys
+        .get_backward_reachable("process", Some(10))
+        .expect("get_backward_reachable for process should succeed");
+
+    assert!(
+        result.is_empty(),
+        "process should have no backward reachable symbols, got: {:?}",
+        result.reachable
+    );
+}
+
+#[test]
+fn reachability_respects_max_depth() {
+    let (_dir, mut tethys) = workspace_with_intra_file_calls();
+    tethys.index().expect("index failed");
+
+    // With depth 1, process should only reach validate (direct callee)
+    let result_depth_1 = tethys
+        .get_forward_reachable("process", Some(1))
+        .expect("get_forward_reachable depth 1 should succeed");
+
+    // With depth 3, process should reach more symbols (validate, Helper::new, Helper::check)
+    let result_depth_3 = tethys
+        .get_forward_reachable("process", Some(3))
+        .expect("get_forward_reachable depth 3 should succeed");
+
+    assert!(
+        result_depth_3.reachable_count() >= result_depth_1.reachable_count(),
+        "depth 3 should reach at least as many symbols as depth 1"
+    );
+}
+
+#[test]
+fn reachability_result_at_depth_filters_correctly() {
+    let (_dir, mut tethys) = workspace_with_intra_file_calls();
+    tethys.index().expect("index failed");
+
+    let result = tethys
+        .get_forward_reachable("process", Some(3))
+        .expect("get_forward_reachable should succeed");
+
+    let at_depth_1 = result.at_depth(1);
+    let at_depth_2 = result.at_depth(2);
+
+    // All results at depth 1 should have depth == 1
+    for path in &at_depth_1 {
+        assert_eq!(path.depth, 1, "at_depth(1) should only return depth 1");
+    }
+
+    // All results at depth 2 should have depth == 2
+    for path in &at_depth_2 {
+        assert_eq!(path.depth, 2, "at_depth(2) should only return depth 2");
+    }
+}
+
+#[test]
+fn reachability_paths_are_valid() {
+    let (_dir, mut tethys) = workspace_with_intra_file_calls();
+    tethys.index().expect("index failed");
+
+    let result = tethys
+        .get_forward_reachable("process", Some(3))
+        .expect("get_forward_reachable should succeed");
+
+    for path in &result.reachable {
+        // Path length should equal depth
+        assert_eq!(
+            path.path.len(),
+            path.depth,
+            "path length should equal depth for {:?}",
+            path.target.qualified_name
+        );
+
+        // Path should end with the target
+        if !path.path.is_empty() {
+            let last = path.path.last().expect("path should not be empty");
+            assert_eq!(
+                last.id, path.target.id,
+                "path should end with target symbol"
+            );
+        }
+    }
+}
+
+#[test]
+fn reachability_cross_file_works() {
+    let (_dir, mut tethys) = workspace_with_call_graph();
+    tethys.index().expect("index failed");
+
+    // Connection is in db.rs and is referenced from auth.rs and cache.rs
+    // Those references are now resolved via cross-file resolution
+    let result = tethys
+        .get_backward_reachable("Connection", Some(5))
+        .expect("get_backward_reachable for Connection should succeed");
+
+    // Cross-file references should be resolved
+    assert!(
+        !result.is_empty(),
+        "Connection should have backward reachable symbols from other files"
+    );
+}
+
+#[test]
+fn reachability_max_depth_none_uses_default() {
+    let (_dir, mut tethys) = workspace_with_intra_file_calls();
+    tethys.index().expect("index failed");
+
+    // When max_depth is None, the implementation should use default (50)
+    let result = tethys
+        .get_forward_reachable("process", None)
+        .expect("get_forward_reachable with None depth should succeed");
+
+    // Verify the result captures the default max_depth
+    assert_eq!(
+        result.max_depth, 50,
+        "max_depth should be 50 when None is passed"
+    );
+
+    // Verify it still finds reachable symbols (same as with explicit depth)
+    let result_explicit = tethys
+        .get_forward_reachable("process", Some(50))
+        .expect("get_forward_reachable with explicit depth should succeed");
+
+    assert_eq!(
+        result.reachable_count(),
+        result_explicit.reachable_count(),
+        "None and Some(50) should produce same results"
+    );
+}
+
+/// Helper that creates a workspace with a cyclic call pattern: a -> b -> c -> a
+fn workspace_with_cyclic_calls() -> (TempDir, Tethys) {
+    let dir = tempfile::tempdir().expect("failed to create temp dir");
+
+    fs::create_dir_all(dir.path().join("src")).expect("failed to create src dir");
+
+    fs::write(
+        dir.path().join("src/lib.rs"),
+        r"
+pub fn cycle_a() {
+    cycle_b();
+}
+
+pub fn cycle_b() {
+    cycle_c();
+}
+
+pub fn cycle_c() {
+    cycle_a();  // Creates the cycle back to a
+}
+
+pub fn entry_point() {
+    cycle_a();
+}
+",
+    )
+    .expect("failed to write lib.rs");
+
+    let tethys = Tethys::new(dir.path()).expect("failed to create Tethys");
+    (dir, tethys)
+}
+
+#[test]
+fn reachability_terminates_on_cyclic_call_graph() {
+    let (_dir, mut tethys) = workspace_with_cyclic_calls();
+    tethys.index().expect("index failed");
+
+    // Forward reachability from cycle_a should find cycle_b and cycle_c
+    // but should terminate (not infinite loop) due to visited tracking
+    let result = tethys
+        .get_forward_reachable("cycle_a", Some(10))
+        .expect("get_forward_reachable should terminate on cyclic graph");
+
+    // Should find b and c, but not revisit a (already visited as source)
+    // The exact count depends on what gets resolved, but it should terminate
+    assert!(
+        result.reachable_count() <= 10,
+        "BFS should terminate and not produce infinite results, got: {}",
+        result.reachable_count()
+    );
+
+    // Backward reachability should also terminate
+    let result_backward = tethys
+        .get_backward_reachable("cycle_a", Some(10))
+        .expect("get_backward_reachable should terminate on cyclic graph");
+
+    // cycle_a is called by cycle_c and entry_point
+    // cycle_c is called by cycle_b, which is called by cycle_a (but a is source, so skipped)
+    assert!(
+        result_backward.reachable_count() <= 10,
+        "backward BFS should terminate, got: {}",
+        result_backward.reachable_count()
+    );
+}

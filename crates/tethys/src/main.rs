@@ -94,6 +94,20 @@ enum Commands {
 
     /// Show index statistics
     Stats,
+
+    /// Analyze symbol reachability (forward/backward data flow)
+    Reachable {
+        /// Qualified symbol name (e.g., "`auth::validate`")
+        symbol: String,
+
+        /// Direction: 'forward' (what can this reach) or 'backward' (who can reach this)
+        #[arg(short, long, default_value = "forward")]
+        direction: String,
+
+        /// Maximum depth for traversal
+        #[arg(short = 'n', long, default_value = "10")]
+        max_depth: usize,
+    },
 }
 
 fn main() -> ExitCode {
@@ -148,6 +162,11 @@ fn main() -> ExitCode {
         } => cli::impact::run(&workspace, &target, symbol, depth, lsp),
         Commands::Cycles => cli::cycles::run(&workspace),
         Commands::Stats => cli::stats::run(&workspace),
+        Commands::Reachable {
+            symbol,
+            direction,
+            max_depth,
+        } => cli::reachable::run(&workspace, &symbol, &direction, Some(max_depth)),
     };
 
     match result {
