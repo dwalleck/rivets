@@ -835,3 +835,73 @@ fn get_symbol_impact_cross_file_resolved() {
         "cross-file dependents should be resolved, got empty"
     );
 }
+
+// ============================================================================
+// Call Edges Tests
+// ============================================================================
+
+/// Verify that `call_edges` table is populated after indexing.
+#[test]
+fn call_edges_populated_after_indexing() {
+    let (_dir, mut tethys) = workspace_with_intra_file_calls();
+    tethys.index().expect("index failed");
+
+    // The workspace has: process() -> validate() -> Helper::new(), Helper::check()
+    // All intra-file calls should result in call_edges being populated
+
+    // validate is called by process
+    let callers = tethys
+        .get_callers("validate")
+        .expect("get_callers for validate should succeed");
+
+    assert!(
+        !callers.is_empty(),
+        "validate should have callers via call_edges"
+    );
+
+    // Verify the caller contains "process" in symbols_used
+    let all_symbols: Vec<&str> = callers
+        .iter()
+        .flat_map(|c| c.symbols_used.iter().map(String::as_str))
+        .collect();
+    assert!(
+        all_symbols.iter().any(|n| n.contains("process")),
+        "validate should be called by process, got: {all_symbols:?}"
+    );
+}
+
+/// Verify transitive callers work with `call_edges`.
+#[test]
+fn transitive_callers_via_call_edges() {
+    let (_dir, mut tethys) = workspace_with_intra_file_calls();
+    tethys.index().expect("index failed");
+
+    // Helper::check is called by validate, which is called by process
+    // So Helper::check should have process as a transitive caller
+    let impact = tethys
+        .get_symbol_impact("Helper::check")
+        .expect("get_symbol_impact for Helper::check should succeed");
+
+    let total = impact.direct_dependents.len() + impact.transitive_dependents.len();
+    assert!(
+        total >= 1,
+        "Helper::check should have at least 1 caller, got: {total}"
+    );
+}
+
+/// Verify `get_symbol_dependencies` works with `call_edges`.
+#[test]
+fn symbol_dependencies_via_call_edges() {
+    let (_dir, mut tethys) = workspace_with_intra_file_calls();
+    tethys.index().expect("index failed");
+
+    // validate calls Helper::new and Helper::check
+    let deps = tethys
+        .get_symbol_dependencies("validate")
+        .expect("get_symbol_dependencies for validate should succeed");
+
+    assert!(
+        !deps.is_empty(),
+        "validate should have dependencies (Helper::new, Helper::check)"
+    );
+}

@@ -772,10 +772,138 @@ impl Index {
         Ok(())
     }
 
+    // === Call Edge Operations ===
+
+    /// Insert or increment a call edge between two symbols.
+    ///
+    /// Records that `caller_id` calls/references `callee_id`.
+    /// Uses upsert semantics: if the edge already exists, increments the call count.
+    #[allow(dead_code)] // Public API, not yet used internally
+    #[allow(clippy::similar_names)]
+    pub fn insert_call_edge(&self, caller_id: SymbolId, callee_id: SymbolId) -> Result<()> {
+        trace!(
+            caller_id = %caller_id,
+            callee_id = %callee_id,
+            "Inserting call edge"
+        );
+        self.conn.execute(
+            "INSERT INTO call_edges (caller_symbol_id, callee_symbol_id, call_count)
+             VALUES (?1, ?2, 1)
+             ON CONFLICT(caller_symbol_id, callee_symbol_id) DO UPDATE SET call_count = call_count + 1",
+            params![caller_id.as_i64(), callee_id.as_i64()],
+        )?;
+        Ok(())
+    }
+
+    /// Get all symbols that call the given symbol (callers).
+    ///
+    /// Returns (`SymbolId`, count) pairs for efficient lookup.
+    #[allow(dead_code)] // Public API, not yet used internally
+    #[allow(clippy::similar_names)]
+    pub fn get_call_edge_callers(&self, callee_id: SymbolId) -> Result<Vec<(SymbolId, usize)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT caller_symbol_id, call_count FROM call_edges WHERE callee_symbol_id = ?1",
+        )?;
+
+        let callers = stmt
+            .query_map([callee_id.as_i64()], |row| {
+                let sym_id: i64 = row.get(0)?;
+                let count: i64 = row.get(1)?;
+                Ok((SymbolId::from(sym_id), count as usize))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(callers)
+    }
+
+    /// Get all symbols that the given symbol calls (callees).
+    ///
+    /// Returns (`SymbolId`, count) pairs for efficient lookup.
+    #[allow(dead_code)] // Public API, not yet used internally
+    #[allow(clippy::similar_names)]
+    pub fn get_call_edge_callees(&self, caller_id: SymbolId) -> Result<Vec<(SymbolId, usize)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT callee_symbol_id, call_count FROM call_edges WHERE caller_symbol_id = ?1",
+        )?;
+
+        let callees = stmt
+            .query_map([caller_id.as_i64()], |row| {
+                let sym_id: i64 = row.get(0)?;
+                let count: i64 = row.get(1)?;
+                Ok((SymbolId::from(sym_id), count as usize))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(callees)
+    }
+
+    /// Clear all call edges where the caller symbol is in the given file.
+    ///
+    /// Used during re-indexing to remove stale edges before repopulating.
+    #[allow(dead_code)] // Public API, not yet used internally
+    pub fn clear_call_edges_for_file(&self, file_id: FileId) -> Result<usize> {
+        trace!(file_id = %file_id, "Clearing call edges for file");
+        let deleted = self.conn.execute(
+            "DELETE FROM call_edges WHERE caller_symbol_id IN (SELECT id FROM symbols WHERE file_id = ?1)",
+            [file_id.as_i64()],
+        )?;
+        Ok(deleted)
+    }
+
+    /// Clear all call edges (for full rebuild).
+    pub fn clear_all_call_edges(&self) -> Result<()> {
+        trace!("Clearing all call edges");
+        self.conn.execute("DELETE FROM call_edges", [])?;
+        Ok(())
+    }
+
+    /// Populate call edges from the refs table.
+    ///
+    /// Scans all references where both `in_symbol_id` (caller) and `symbol_id` (callee)
+    /// are resolved, and populates the `call_edges` table. This should be called after
+    /// all reference resolution passes (Pass 1, Pass 2, and optionally Pass 3) are complete.
+    ///
+    /// Returns the number of edges inserted.
+    pub fn populate_call_edges(&self) -> Result<usize> {
+        trace!("Populating call edges from refs table");
+
+        // Insert aggregated edges from refs table
+        // ON CONFLICT handles duplicates by adding to call_count
+        let inserted = self.conn.execute(
+            "INSERT INTO call_edges (caller_symbol_id, callee_symbol_id, call_count)
+             SELECT in_symbol_id, symbol_id, COUNT(*) as call_count
+             FROM refs
+             WHERE in_symbol_id IS NOT NULL AND symbol_id IS NOT NULL
+             GROUP BY in_symbol_id, symbol_id
+             ON CONFLICT(caller_symbol_id, callee_symbol_id) DO UPDATE SET
+                 call_count = call_edges.call_count + excluded.call_count",
+            [],
+        )?;
+
+        trace!(edges_inserted = inserted, "Populated call edges");
+
+        Ok(inserted)
+    }
+
+    /// Get statistics about call edges.
+    #[allow(dead_code)] // Public API, not yet used internally
+    pub fn get_call_edge_stats(&self) -> Result<(usize, usize)> {
+        let edge_count: usize =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM call_edges", [], |row| row.get(0))?;
+        let total_calls: usize = self.conn.query_row(
+            "SELECT COALESCE(SUM(call_count), 0) FROM call_edges",
+            [],
+            |row| row.get(0),
+        )?;
+
+        Ok((edge_count, total_calls))
+    }
+
     /// Clear all data from the database.
     pub fn clear(&self) -> Result<()> {
         self.conn.execute_batch(
-            "DELETE FROM refs; DELETE FROM symbols; DELETE FROM file_deps; DELETE FROM imports; DELETE FROM files;",
+            "DELETE FROM call_edges; DELETE FROM refs; DELETE FROM symbols; DELETE FROM file_deps; DELETE FROM imports; DELETE FROM files;",
         )?;
         Ok(())
     }
@@ -1103,6 +1231,21 @@ CREATE TABLE IF NOT EXISTS imports (
 
 CREATE INDEX IF NOT EXISTS idx_imports_file ON imports(file_id);
 CREATE INDEX IF NOT EXISTS idx_imports_symbol ON imports(symbol_name);
+
+-- Pre-computed call graph edges (caller -> callee relationships)
+-- Populated from refs where both in_symbol_id (caller) and symbol_id (callee) are resolved.
+-- Enables efficient indexed lookups for get_callers/get_callees.
+CREATE TABLE IF NOT EXISTS call_edges (
+    caller_symbol_id INTEGER NOT NULL,
+    callee_symbol_id INTEGER NOT NULL,
+    call_count INTEGER DEFAULT 1,
+    PRIMARY KEY (caller_symbol_id, callee_symbol_id),
+    FOREIGN KEY (caller_symbol_id) REFERENCES symbols(id) ON DELETE CASCADE,
+    FOREIGN KEY (callee_symbol_id) REFERENCES symbols(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_call_edges_callee ON call_edges(callee_symbol_id);
+CREATE INDEX IF NOT EXISTS idx_call_edges_caller ON call_edges(caller_symbol_id);
 ";
 
 #[cfg(test)]
@@ -1136,6 +1279,7 @@ mod tests {
         assert!(tables.contains(&"refs".to_string()));
         assert!(tables.contains(&"file_deps".to_string()));
         assert!(tables.contains(&"imports".to_string()));
+        assert!(tables.contains(&"call_edges".to_string()));
     }
 
     #[test]
@@ -2867,5 +3011,399 @@ mod tests {
         // Should get the one with lower column due to ORDER BY column ASC
         assert_eq!(symbol.name, "first_symbol");
         assert_eq!(symbol.column, 1);
+    }
+
+    // ========================================================================
+    // Call Edges Tests
+    // ========================================================================
+
+    #[test]
+    #[allow(clippy::similar_names)] // caller_id/callee_id are semantically distinct
+    fn insert_call_edge_creates_edge() {
+        let (_dir, path) = temp_db();
+        let mut index = Index::open(&path).expect("should open database");
+
+        let file_id = index
+            .upsert_file(Path::new("src/lib.rs"), Language::Rust, 1000, 100, None)
+            .expect("should insert file");
+
+        let caller_id = index
+            .insert_symbol(
+                file_id,
+                "caller",
+                "crate",
+                "crate::caller",
+                SymbolKind::Function,
+                10,
+                1,
+                None,
+                None,
+                Visibility::Public,
+                None,
+            )
+            .expect("should insert caller symbol");
+
+        let callee_id = index
+            .insert_symbol(
+                file_id,
+                "callee",
+                "crate",
+                "crate::callee",
+                SymbolKind::Function,
+                20,
+                1,
+                None,
+                None,
+                Visibility::Public,
+                None,
+            )
+            .expect("should insert callee symbol");
+
+        index
+            .insert_call_edge(caller_id, callee_id)
+            .expect("should insert call edge");
+
+        // Verify via get_call_edge_callers
+        let callers = index
+            .get_call_edge_callers(callee_id)
+            .expect("should get callers");
+        assert_eq!(callers.len(), 1);
+        assert_eq!(callers[0].0, caller_id);
+        assert_eq!(callers[0].1, 1); // call_count
+
+        // Verify via get_call_edge_callees
+        let callees = index
+            .get_call_edge_callees(caller_id)
+            .expect("should get callees");
+        assert_eq!(callees.len(), 1);
+        assert_eq!(callees[0].0, callee_id);
+        assert_eq!(callees[0].1, 1); // call_count
+    }
+
+    #[test]
+    #[allow(clippy::similar_names)] // caller_id/callee_id are semantically distinct
+    fn insert_call_edge_increments_count_on_duplicate() {
+        let (_dir, path) = temp_db();
+        let mut index = Index::open(&path).expect("should open database");
+
+        let file_id = index
+            .upsert_file(Path::new("src/lib.rs"), Language::Rust, 1000, 100, None)
+            .expect("should insert file");
+
+        let caller_id = index
+            .insert_symbol(
+                file_id,
+                "caller",
+                "crate",
+                "crate::caller",
+                SymbolKind::Function,
+                10,
+                1,
+                None,
+                None,
+                Visibility::Public,
+                None,
+            )
+            .expect("should insert caller symbol");
+
+        let callee_id = index
+            .insert_symbol(
+                file_id,
+                "callee",
+                "crate",
+                "crate::callee",
+                SymbolKind::Function,
+                20,
+                1,
+                None,
+                None,
+                Visibility::Public,
+                None,
+            )
+            .expect("should insert callee symbol");
+
+        // Insert the same edge 3 times
+        index.insert_call_edge(caller_id, callee_id).unwrap();
+        index.insert_call_edge(caller_id, callee_id).unwrap();
+        index.insert_call_edge(caller_id, callee_id).unwrap();
+
+        let callers = index.get_call_edge_callers(callee_id).unwrap();
+        assert_eq!(callers.len(), 1, "should have single edge");
+        assert_eq!(callers[0].1, 3, "call_count should be 3");
+    }
+
+    #[test]
+    #[allow(clippy::similar_names)] // caller_id/callee_id are semantically distinct
+    fn clear_call_edges_for_file_removes_caller_edges() {
+        let (_dir, path) = temp_db();
+        let mut index = Index::open(&path).expect("should open database");
+
+        let file1_id = index
+            .upsert_file(Path::new("src/main.rs"), Language::Rust, 1000, 100, None)
+            .expect("should insert file");
+        let file2_id = index
+            .upsert_file(Path::new("src/lib.rs"), Language::Rust, 1000, 100, None)
+            .expect("should insert file");
+
+        let caller1 = index
+            .insert_symbol(
+                file1_id,
+                "main",
+                "crate",
+                "crate::main",
+                SymbolKind::Function,
+                1,
+                1,
+                None,
+                None,
+                Visibility::Public,
+                None,
+            )
+            .unwrap();
+
+        let caller2 = index
+            .insert_symbol(
+                file2_id,
+                "helper",
+                "crate",
+                "crate::helper",
+                SymbolKind::Function,
+                1,
+                1,
+                None,
+                None,
+                Visibility::Public,
+                None,
+            )
+            .unwrap();
+
+        let callee = index
+            .insert_symbol(
+                file2_id,
+                "target",
+                "crate",
+                "crate::target",
+                SymbolKind::Function,
+                10,
+                1,
+                None,
+                None,
+                Visibility::Public,
+                None,
+            )
+            .unwrap();
+
+        // Both call target
+        index.insert_call_edge(caller1, callee).unwrap();
+        index.insert_call_edge(caller2, callee).unwrap();
+
+        // Verify both edges exist
+        let callers_before = index.get_call_edge_callers(callee).unwrap();
+        assert_eq!(callers_before.len(), 2);
+
+        // Clear edges for file1 (main.rs)
+        let deleted = index.clear_call_edges_for_file(file1_id).unwrap();
+        assert_eq!(deleted, 1, "should delete 1 edge");
+
+        // Only the edge from file2 (helper) should remain
+        let callers_after = index.get_call_edge_callers(callee).unwrap();
+        assert_eq!(callers_after.len(), 1);
+        assert_eq!(callers_after[0].0, caller2);
+    }
+
+    #[test]
+    fn clear_all_call_edges_removes_everything() {
+        let (_dir, path) = temp_db();
+        let mut index = Index::open(&path).expect("should open database");
+
+        let file_id = index
+            .upsert_file(Path::new("src/lib.rs"), Language::Rust, 1000, 100, None)
+            .expect("should insert file");
+
+        let sym1 = index
+            .insert_symbol(
+                file_id,
+                "a",
+                "crate",
+                "a",
+                SymbolKind::Function,
+                1,
+                1,
+                None,
+                None,
+                Visibility::Public,
+                None,
+            )
+            .unwrap();
+        let sym2 = index
+            .insert_symbol(
+                file_id,
+                "b",
+                "crate",
+                "b",
+                SymbolKind::Function,
+                10,
+                1,
+                None,
+                None,
+                Visibility::Public,
+                None,
+            )
+            .unwrap();
+        let sym3 = index
+            .insert_symbol(
+                file_id,
+                "c",
+                "crate",
+                "c",
+                SymbolKind::Function,
+                20,
+                1,
+                None,
+                None,
+                Visibility::Public,
+                None,
+            )
+            .unwrap();
+
+        index.insert_call_edge(sym1, sym2).unwrap();
+        index.insert_call_edge(sym2, sym3).unwrap();
+        index.insert_call_edge(sym1, sym3).unwrap();
+
+        let (edge_count, _) = index.get_call_edge_stats().unwrap();
+        assert_eq!(edge_count, 3);
+
+        index.clear_all_call_edges().unwrap();
+
+        let (edge_count_after, _) = index.get_call_edge_stats().unwrap();
+        assert_eq!(edge_count_after, 0);
+    }
+
+    #[test]
+    #[allow(clippy::similar_names)] // caller/callee are semantically distinct
+    fn populate_call_edges_from_refs() {
+        let (_dir, path) = temp_db();
+        let mut index = Index::open(&path).expect("should open database");
+
+        let file_id = index
+            .upsert_file(Path::new("src/lib.rs"), Language::Rust, 1000, 100, None)
+            .expect("should insert file");
+
+        let caller = index
+            .insert_symbol(
+                file_id,
+                "caller",
+                "crate",
+                "crate::caller",
+                SymbolKind::Function,
+                1,
+                1,
+                None,
+                None,
+                Visibility::Public,
+                None,
+            )
+            .unwrap();
+
+        let callee = index
+            .insert_symbol(
+                file_id,
+                "callee",
+                "crate",
+                "crate::callee",
+                SymbolKind::Function,
+                10,
+                1,
+                None,
+                None,
+                Visibility::Public,
+                None,
+            )
+            .unwrap();
+
+        // Insert multiple references from caller to callee
+        index
+            .insert_reference(Some(callee), file_id, "call", 5, 1, Some(caller), None)
+            .unwrap();
+        index
+            .insert_reference(Some(callee), file_id, "call", 6, 1, Some(caller), None)
+            .unwrap();
+
+        // Populate call edges from refs
+        let populated = index.populate_call_edges().unwrap();
+        assert_eq!(populated, 1, "should insert 1 aggregated edge");
+
+        // Verify the edge has correct count
+        let callers = index.get_call_edge_callers(callee).unwrap();
+        assert_eq!(callers.len(), 1);
+        assert_eq!(callers[0].0, caller);
+        assert_eq!(callers[0].1, 2, "call_count should be 2 from 2 refs");
+    }
+
+    #[test]
+    fn get_call_edge_stats_returns_correct_counts() {
+        let (_dir, path) = temp_db();
+        let mut index = Index::open(&path).expect("should open database");
+
+        let file_id = index
+            .upsert_file(Path::new("src/lib.rs"), Language::Rust, 1000, 100, None)
+            .expect("should insert file");
+
+        let a = index
+            .insert_symbol(
+                file_id,
+                "a",
+                "crate",
+                "a",
+                SymbolKind::Function,
+                1,
+                1,
+                None,
+                None,
+                Visibility::Public,
+                None,
+            )
+            .unwrap();
+        let b = index
+            .insert_symbol(
+                file_id,
+                "b",
+                "crate",
+                "b",
+                SymbolKind::Function,
+                10,
+                1,
+                None,
+                None,
+                Visibility::Public,
+                None,
+            )
+            .unwrap();
+        let c = index
+            .insert_symbol(
+                file_id,
+                "c",
+                "crate",
+                "c",
+                SymbolKind::Function,
+                20,
+                1,
+                None,
+                None,
+                Visibility::Public,
+                None,
+            )
+            .unwrap();
+
+        // a -> b (called 3 times)
+        index.insert_call_edge(a, b).unwrap();
+        index.insert_call_edge(a, b).unwrap();
+        index.insert_call_edge(a, b).unwrap();
+        // b -> c (called 1 time)
+        index.insert_call_edge(b, c).unwrap();
+
+        let (edge_count, total_calls) = index.get_call_edge_stats().unwrap();
+        assert_eq!(edge_count, 2, "should have 2 unique edges");
+        assert_eq!(total_calls, 4, "should have 4 total calls (3 + 1)");
     }
 }

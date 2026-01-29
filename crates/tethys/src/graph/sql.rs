@@ -591,18 +591,16 @@ impl SymbolGraphOps for SqlSymbolGraph {
     fn get_callers(&self, symbol_id: SymbolId) -> Result<Vec<CallerInfo>> {
         let conn = self.db.lock()?;
 
-        // Find all symbols that contain references to the target symbol
+        // Use pre-computed call_edges table for efficient indexed lookup
         let mut stmt = conn.prepare(
             "SELECT
                 s.id, s.file_id, s.name, s.module_path, s.qualified_name,
                 s.kind, s.line, s.column, s.end_line, s.end_column,
                 s.signature, s.visibility, s.parent_symbol_id,
-                COUNT(*) as ref_count,
-                GROUP_CONCAT(DISTINCT r.kind) as ref_kinds
-             FROM refs r
-             JOIN symbols s ON s.id = r.in_symbol_id
-             WHERE r.symbol_id = ?1 AND r.in_symbol_id IS NOT NULL
-             GROUP BY s.id
+                ce.call_count
+             FROM call_edges ce
+             JOIN symbols s ON s.id = ce.caller_symbol_id
+             WHERE ce.callee_symbol_id = ?1
              ORDER BY s.qualified_name",
         )?;
 
@@ -610,13 +608,12 @@ impl SymbolGraphOps for SqlSymbolGraph {
             .query_map([symbol_id.as_i64()], |row| {
                 let symbol = row_to_symbol(row)?;
                 let ref_count: usize = row.get::<_, i64>(13)? as usize;
-                let ref_kinds_str: String = row.get(14)?;
-                let reference_kinds = parse_reference_kinds(&ref_kinds_str);
 
                 Ok(CallerInfo {
                     symbol,
                     reference_count: ref_count,
-                    reference_kinds,
+                    // call_edges doesn't track reference kinds; default to Call
+                    reference_kinds: vec![ReferenceKind::Call],
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -627,18 +624,16 @@ impl SymbolGraphOps for SqlSymbolGraph {
     fn get_callees(&self, symbol_id: SymbolId) -> Result<Vec<CalleeInfo>> {
         let conn = self.db.lock()?;
 
-        // Find all symbols that the given symbol references
+        // Use pre-computed call_edges table for efficient indexed lookup
         let mut stmt = conn.prepare(
             "SELECT
                 s.id, s.file_id, s.name, s.module_path, s.qualified_name,
                 s.kind, s.line, s.column, s.end_line, s.end_column,
                 s.signature, s.visibility, s.parent_symbol_id,
-                COUNT(*) as ref_count,
-                GROUP_CONCAT(DISTINCT r.kind) as ref_kinds
-             FROM refs r
-             JOIN symbols s ON s.id = r.symbol_id
-             WHERE r.in_symbol_id = ?1
-             GROUP BY s.id
+                ce.call_count
+             FROM call_edges ce
+             JOIN symbols s ON s.id = ce.callee_symbol_id
+             WHERE ce.caller_symbol_id = ?1
              ORDER BY s.qualified_name",
         )?;
 
@@ -646,13 +641,12 @@ impl SymbolGraphOps for SqlSymbolGraph {
             .query_map([symbol_id.as_i64()], |row| {
                 let symbol = row_to_symbol(row)?;
                 let ref_count: usize = row.get::<_, i64>(13)? as usize;
-                let ref_kinds_str: String = row.get(14)?;
-                let reference_kinds = parse_reference_kinds(&ref_kinds_str);
 
                 Ok(CalleeInfo {
                     symbol,
                     reference_count: ref_count,
-                    reference_kinds,
+                    // call_edges doesn't track reference kinds; default to Call
+                    reference_kinds: vec![ReferenceKind::Call],
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -672,23 +666,21 @@ impl SymbolGraphOps for SqlSymbolGraph {
 
         let conn = self.db.lock()?;
 
-        // Use recursive CTE to find all callers with their depth
+        // Use recursive CTE with call_edges table for efficient traversal
         let mut stmt = conn.prepare(
             "WITH RECURSIVE caller_tree(symbol_id, depth) AS (
-                -- Base case: direct callers
-                SELECT DISTINCT r.in_symbol_id, 1
-                FROM refs r
-                WHERE r.symbol_id = ?1
-                  AND r.in_symbol_id IS NOT NULL
+                -- Base case: direct callers from call_edges
+                SELECT caller_symbol_id, 1
+                FROM call_edges
+                WHERE callee_symbol_id = ?1
 
                 UNION
 
                 -- Recursive case: callers of callers
-                SELECT DISTINCT r.in_symbol_id, ct.depth + 1
-                FROM refs r
-                JOIN caller_tree ct ON r.symbol_id = ct.symbol_id
-                WHERE r.in_symbol_id IS NOT NULL
-                  AND ct.depth < ?2
+                SELECT ce.caller_symbol_id, ct.depth + 1
+                FROM call_edges ce
+                JOIN caller_tree ct ON ce.callee_symbol_id = ct.symbol_id
+                WHERE ct.depth < ?2
             )
             SELECT DISTINCT
                 s.id, s.file_id, s.name, s.module_path, s.qualified_name,
@@ -715,7 +707,6 @@ impl SymbolGraphOps for SqlSymbolGraph {
             let (symbol, depth) = row?;
             max_depth_reached = max_depth_reached.max(depth);
 
-            // Simplified: actual ref counts/kinds not tracked through recursive CTE
             let caller_info = CallerInfo {
                 symbol,
                 reference_count: 1,
@@ -752,7 +743,7 @@ impl SymbolGraphOps for SqlSymbolGraph {
             return Ok(Some(CallPath::single(symbol)));
         }
 
-        // BFS to find shortest path using recursive CTE
+        // BFS to find shortest path using recursive CTE with call_edges table
         // We search forward from `from` through callees (what does `from` call?)
         let max_depth = DEFAULT_MAX_DEPTH;
 
@@ -767,14 +758,13 @@ impl SymbolGraphOps for SqlSymbolGraph {
 
                     UNION
 
-                    -- Follow callees (symbols that the current symbol calls)
-                    SELECT r.symbol_id,
-                           ps.path || ',' || r.symbol_id,
+                    -- Follow callees via call_edges
+                    SELECT ce.callee_symbol_id,
+                           ps.path || ',' || ce.callee_symbol_id,
                            ps.depth + 1
-                    FROM refs r
-                    JOIN path_search ps ON r.in_symbol_id = ps.symbol_id
+                    FROM call_edges ce
+                    JOIN path_search ps ON ce.caller_symbol_id = ps.symbol_id
                     WHERE ps.depth < ?3
-                      AND r.symbol_id IS NOT NULL
                 )
                 SELECT path
                 FROM path_search
@@ -837,26 +827,6 @@ fn parse_path_ids(path_str: &str) -> Result<Vec<i64>> {
                     "failed to parse ID '{trimmed}' in path '{path_str}': {e} (possible database corruption)"
                 ))
             })
-        })
-        .collect()
-}
-
-fn parse_reference_kinds(s: &str) -> Vec<ReferenceKind> {
-    s.split(',')
-        .filter_map(|kind| {
-            let kind = kind.trim();
-            if kind.is_empty() {
-                return None; // Empty strings from split are expected
-            }
-            let parsed = ReferenceKind::parse_or_unknown(kind);
-            if parsed.is_unknown() {
-                tracing::warn!(
-                    unknown_kind = %kind,
-                    raw_input = %s,
-                    "Unknown reference kind in database, possible corruption or version mismatch"
-                );
-            }
-            Some(parsed)
         })
         .collect()
 }
@@ -1035,6 +1005,11 @@ mod tests {
                 None,
             )
             .expect("failed to insert db::query reference from cache");
+
+        // Populate call_edges table from refs
+        index
+            .populate_call_edges()
+            .expect("failed to populate call edges");
 
         (dir, db_path)
     }

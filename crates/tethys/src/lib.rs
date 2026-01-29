@@ -513,6 +513,13 @@ impl Tethys {
             0
         };
 
+        // Populate pre-computed call graph edges after all resolution passes
+        self.db.clear_all_call_edges()?;
+        let call_edges_count = self.db.populate_call_edges()?;
+        if call_edges_count > 0 {
+            tracing::debug!(call_edges = call_edges_count, "Populated call graph edges");
+        }
+
         Ok(IndexStats {
             files_indexed,
             symbols_found,
