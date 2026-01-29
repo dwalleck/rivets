@@ -1726,6 +1726,185 @@ impl Tethys {
             .collect()
     }
 
+    /// Get symbols that call/use the given symbol, with LSP refinement.
+    ///
+    /// Combines results from the tree-sitter index with references found by the
+    /// language server. This catches callers that tree-sitter couldn't resolve
+    /// during indexing (e.g., through complex type inference).
+    ///
+    /// # Design
+    ///
+    /// 1. Get callers from the database (tree-sitter indexed)
+    /// 2. Find the symbol's definition location
+    /// 3. Call LSP `find_references` at that location
+    /// 4. For each LSP reference, find its containing symbol
+    /// 5. Merge with DB callers, deduplicating by symbol ID
+    ///
+    /// # Fallback Behavior
+    ///
+    /// If LSP fails to start or returns errors, falls back to DB-only results
+    /// and logs a warning.
+    pub fn get_callers_with_lsp(&self, qualified_name: &str) -> Result<Vec<Dependent>> {
+        use std::collections::HashSet;
+
+        // Step 1: Get callers from the database
+        let symbol = self
+            .db
+            .get_symbol_by_qualified_name(qualified_name)?
+            .ok_or_else(|| Error::NotFound(format!("symbol: {qualified_name}")))?;
+
+        let db_callers = self.symbol_graph.get_callers(symbol.id)?;
+
+        // Build a set of symbol IDs we already know about
+        let mut known_symbol_ids: HashSet<SymbolId> =
+            db_callers.iter().map(|c| c.symbol.id).collect();
+
+        // Step 2: Get the symbol's definition file path
+        let symbol_file = self
+            .db
+            .get_file_by_id(symbol.file_id)?
+            .ok_or_else(|| Error::NotFound(format!("file id: {}", symbol.file_id)))?;
+        let symbol_file_path = self.workspace_root.join(&symbol_file.path);
+
+        // Step 3: Spawn LSP and call find_references
+        let provider = lsp::RustAnalyzerProvider;
+        let mut lsp_client = match lsp::LspClient::start(&provider, &self.workspace_root) {
+            Ok(client) => client,
+            Err(e) => {
+                // User explicitly requested --lsp, so log at error level
+                tracing::error!(
+                    error = %e,
+                    symbol = %qualified_name,
+                    "LSP server failed to start - returning DB-only callers. \
+                     Install rust-analyzer or remove --lsp flag."
+                );
+                return self.convert_callers_to_dependents(db_callers);
+            }
+        };
+
+        // LSP uses 0-indexed positions, our DB uses 1-indexed
+        let lsp_line = symbol.line.saturating_sub(1);
+        let lsp_col = symbol.column.saturating_sub(1);
+
+        let lsp_refs = match lsp_client.find_references(&symbol_file_path, lsp_line, lsp_col) {
+            Ok(refs) => refs,
+            Err(e) => {
+                // User explicitly requested --lsp, so log at error level
+                tracing::error!(
+                    error = %e,
+                    symbol = %qualified_name,
+                    "LSP find_references failed - returning DB-only callers"
+                );
+                if let Err(shutdown_err) = lsp_client.shutdown() {
+                    warn!(error = %shutdown_err, "LSP shutdown failed");
+                }
+                return self.convert_callers_to_dependents(db_callers);
+            }
+        };
+
+        // Graceful shutdown
+        if let Err(e) = lsp_client.shutdown() {
+            warn!(error = %e, "LSP shutdown failed");
+        }
+
+        debug!(
+            symbol = %qualified_name,
+            db_callers = db_callers.len(),
+            lsp_refs = lsp_refs.len(),
+            "Merging DB and LSP caller results"
+        );
+
+        // Step 4: For each LSP reference, find its containing symbol
+        let mut additional_callers: Vec<graph::CallerInfo> = Vec::new();
+
+        for loc in lsp_refs {
+            // Extract file path from LSP URI and convert to relative path
+            let Some(ref_path) = Self::uri_to_path(loc.uri.as_str()) else {
+                trace!(uri = loc.uri.as_str(), "Cannot parse LSP reference URI");
+                continue;
+            };
+
+            // Make the path relative to workspace root
+            let Ok(relative_ref_path) = ref_path.strip_prefix(&self.workspace_root) else {
+                trace!(
+                    ref_path = %ref_path.display(),
+                    "Reference outside workspace, skipping"
+                );
+                continue;
+            };
+
+            // Look up the file in our DB
+            let Some(ref_file_id) = self.db.get_file_id(relative_ref_path)? else {
+                trace!(
+                    ref_path = %relative_ref_path.display(),
+                    "Reference file not in index"
+                );
+                continue;
+            };
+
+            // LSP returns 0-indexed, convert to 1-indexed for DB lookup
+            let ref_line = loc.range.start.line + 1;
+
+            // Find the symbol that contains this reference location
+            let Some(containing_symbol) = self.db.find_symbol_at_line(ref_file_id, ref_line)?
+            else {
+                trace!(
+                    ref_path = %relative_ref_path.display(),
+                    ref_line = ref_line,
+                    "No symbol found at reference line"
+                );
+                continue;
+            };
+
+            // Skip if we already have this caller from the DB
+            if known_symbol_ids.contains(&containing_symbol.id) {
+                continue;
+            }
+
+            // Add this as a new caller
+            known_symbol_ids.insert(containing_symbol.id);
+            additional_callers.push(graph::CallerInfo {
+                symbol: containing_symbol,
+                reference_count: 1,
+                reference_kinds: vec![ReferenceKind::Call],
+            });
+        }
+
+        info!(
+            symbol = %qualified_name,
+            db_callers = db_callers.len(),
+            lsp_additional = additional_callers.len(),
+            "Caller merge complete"
+        );
+
+        // Step 5: Combine DB and LSP callers and convert to Dependent
+        let all_callers: Vec<graph::CallerInfo> =
+            db_callers.into_iter().chain(additional_callers).collect();
+
+        self.convert_callers_to_dependents(all_callers)
+    }
+
+    /// Convert a list of `CallerInfo` to `Dependent` for the public API.
+    fn convert_callers_to_dependents(
+        &self,
+        callers: Vec<graph::CallerInfo>,
+    ) -> Result<Vec<Dependent>> {
+        callers
+            .into_iter()
+            .map(|c| {
+                let file = self
+                    .db
+                    .get_file_by_id(c.symbol.file_id)?
+                    .ok_or_else(|| Error::NotFound(format!("file id: {}", c.symbol.file_id)))?;
+                Ok(Dependent {
+                    file: file.path,
+                    symbols_used: vec![c.symbol.qualified_name],
+                    line_count: c.reference_count,
+                })
+            })
+            .collect()
+    }
+
     /// Get symbols that the given symbol calls/uses.
     pub fn get_symbol_dependencies(&self, qualified_name: &str) -> Result<Vec<Symbol>> {
         let symbol = self

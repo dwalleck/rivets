@@ -60,15 +60,20 @@ pub fn run(
             unique_files.len()
         );
     } else {
-        // Direct callers only
-        let callers = tethys.get_callers(symbol)?;
+        // Direct callers only - use LSP if requested
+        let callers = if lsp {
+            tethys.get_callers_with_lsp(symbol)?
+        } else {
+            tethys.get_callers(symbol)?
+        };
 
         if callers.is_empty() {
             println!("No callers found for \"{}\"", symbol.cyan());
             return Ok(());
         }
 
-        println!("Callers of \"{}\":", symbol.cyan().bold());
+        let mode_suffix = if lsp { " (with LSP)" } else { "" };
+        println!("Callers of \"{}\"{}:", symbol.cyan().bold(), mode_suffix);
         println!();
 
         let unique_files: HashSet<_> = callers.iter().map(|c| &c.file).collect();
