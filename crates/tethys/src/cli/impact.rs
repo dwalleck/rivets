@@ -6,6 +6,7 @@ use colored::Colorize;
 use tethys::{Impact, Tethys};
 
 use super::display::print_dependents;
+use super::ensure_lsp_if_requested;
 
 /// Run the impact command.
 pub fn run(
@@ -13,7 +14,9 @@ pub fn run(
     target: &str,
     is_symbol: bool,
     depth: Option<u32>,
+    lsp: bool,
 ) -> Result<(), tethys::Error> {
+    ensure_lsp_if_requested(lsp)?;
     // TODO: Implement depth-limited transitive analysis
     // Currently, transitive analysis explores the full dependency graph.
     // The --depth flag would limit how many levels of indirection to follow.

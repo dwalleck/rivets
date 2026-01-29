@@ -37,6 +37,10 @@ enum Commands {
         /// Rebuild index from scratch (clears existing data)
         #[arg(long)]
         rebuild: bool,
+
+        /// Use LSP (rust-analyzer) for enhanced reference resolution
+        #[arg(long)]
+        lsp: bool,
     },
 
     /// Search for symbols by name
@@ -61,6 +65,10 @@ enum Commands {
         /// Include transitive callers (callers of callers)
         #[arg(short, long)]
         transitive: bool,
+
+        /// Use LSP (rust-analyzer) for enhanced reference resolution
+        #[arg(long)]
+        lsp: bool,
     },
 
     /// Analyze impact of changes to a file or symbol
@@ -75,6 +83,10 @@ enum Commands {
         /// Maximum depth for transitive analysis (not yet implemented)
         #[arg(short, long)]
         depth: Option<u32>,
+
+        /// Use LSP (rust-analyzer) for enhanced reference resolution
+        #[arg(long)]
+        lsp: bool,
     },
 
     /// Detect circular dependencies
@@ -119,18 +131,21 @@ fn main() -> ExitCode {
 
     // Run the appropriate command
     let result = match cli.command {
-        Commands::Index { rebuild } => cli::index::run(&workspace, rebuild),
+        Commands::Index { rebuild, lsp } => cli::index::run(&workspace, rebuild, lsp),
         Commands::Search { query, kind, limit } => {
             cli::search::run(&workspace, &query, kind.as_deref(), limit)
         }
-        Commands::Callers { symbol, transitive } => {
-            cli::callers::run(&workspace, &symbol, transitive)
-        }
+        Commands::Callers {
+            symbol,
+            transitive,
+            lsp,
+        } => cli::callers::run(&workspace, &symbol, transitive, lsp),
         Commands::Impact {
             target,
             symbol,
             depth,
-        } => cli::impact::run(&workspace, &target, symbol, depth),
+            lsp,
+        } => cli::impact::run(&workspace, &target, symbol, depth, lsp),
         Commands::Cycles => cli::cycles::run(&workspace),
         Commands::Stats => cli::stats::run(&workspace),
     };

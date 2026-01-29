@@ -5,8 +5,12 @@ use std::path::Path;
 use colored::Colorize;
 use tethys::Tethys;
 
+use super::ensure_lsp_if_requested;
+
 /// Run the index command.
-pub fn run(workspace: &Path, rebuild: bool) -> Result<(), tethys::Error> {
+pub fn run(workspace: &Path, rebuild: bool, lsp: bool) -> Result<(), tethys::Error> {
+    ensure_lsp_if_requested(lsp)?;
+
     println!("{} {}...", "Indexing".cyan().bold(), workspace.display());
 
     let mut tethys = Tethys::new(workspace)?;

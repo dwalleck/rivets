@@ -7,9 +7,17 @@ use colored::Colorize;
 use tethys::Tethys;
 
 use super::display::print_callers_by_file;
+use super::ensure_lsp_if_requested;
 
 /// Run the callers command.
-pub fn run(workspace: &Path, symbol: &str, transitive: bool) -> Result<(), tethys::Error> {
+pub fn run(
+    workspace: &Path,
+    symbol: &str,
+    transitive: bool,
+    lsp: bool,
+) -> Result<(), tethys::Error> {
+    ensure_lsp_if_requested(lsp)?;
+
     let tethys = Tethys::new(workspace)?;
 
     if transitive {
