@@ -38,6 +38,7 @@ mod error;
 mod graph;
 mod languages;
 pub mod lsp;
+mod parallel;
 mod resolver;
 mod types;
 
@@ -50,12 +51,17 @@ pub use types::{
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::time::{Instant, UNIX_EPOCH};
+
+use rayon::prelude::*;
 
 use db::{Index, SymbolData};
 use graph::{FileGraphOps, SqlFileGraph, SqlSymbolGraph, SymbolGraphOps};
 use languages::common;
 use lsp::LspProvider;
+use parallel::{OwnedSymbolData, ParsedFileData};
 use resolver::resolve_module_path;
 use tracing::{debug, info, trace, warn};
 
@@ -186,20 +192,97 @@ impl Tethys {
         let mut pending: Vec<PendingDependency> = Vec::new();
 
         // Walk the workspace and find source files
-        let files = self.discover_files(&mut directories_skipped)?;
+        let all_files = self.discover_files(&mut directories_skipped)?;
 
-        // First pass: index all files, collecting unresolved dependencies
-        for file_path in files {
-            // Check if it's a supported language
-            let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        // Filter to supported languages and count skipped files
+        let source_files: Vec<(PathBuf, Language)> = all_files
+            .into_iter()
+            .filter_map(|file_path| {
+                let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if let Some(language) = Language::from_extension(ext) {
+                    Some((file_path, language))
+                } else {
+                    files_skipped += 1;
+                    None
+                }
+            })
+            .collect();
 
-            let Some(language) = Language::from_extension(ext) else {
-                files_skipped += 1;
-                continue;
-            };
+        let total_files = source_files.len();
+        info!(total_files, "Starting parallel file parsing (Pass 1a)");
 
-            // Read and parse the file
-            match self.index_file(&file_path, language, &mut pending) {
+        // Phase 1a: Parallel parsing with rayon
+        // Use AtomicUsize for thread-safe progress tracking
+        let progress_counter = AtomicUsize::new(0);
+        let parse_errors: Mutex<Vec<IndexError>> = Mutex::new(Vec::new());
+        let workspace_root = self.workspace_root.clone();
+
+        let parsed_files: Vec<ParsedFileData> = source_files
+            .par_iter()
+            .filter_map(|(file_path, language)| {
+                let current = progress_counter.fetch_add(1, Ordering::Relaxed);
+                if current.is_multiple_of(100) {
+                    trace!(progress = current, total = total_files, "Parsing files...");
+                }
+
+                match Self::parse_file_static(&workspace_root, file_path, *language) {
+                    Ok(data) => Some(data),
+                    Err(e) => {
+                        let kind = match &e {
+                            Error::Io(_) => IndexErrorKind::IoError,
+                            Error::Database(_) => IndexErrorKind::DatabaseError,
+                            Error::Parser(_) => IndexErrorKind::ParseFailed,
+                            Error::Config(_) | Error::NotFound(_) | Error::Internal(_) => {
+                                IndexErrorKind::ParseFailed
+                            }
+                        };
+                        // Handle mutex poisoning - we still want to collect errors even if
+                        // another thread panicked. PoisonError contains the guard.
+                        match parse_errors.lock() {
+                            Ok(mut guard) => {
+                                guard.push(IndexError::new(file_path.clone(), kind, e.to_string()));
+                            }
+                            Err(poisoned) => {
+                                tracing::warn!(
+                                    file = %file_path.display(),
+                                    "Mutex poisoned during error collection, recovering"
+                                );
+                                poisoned.into_inner().push(IndexError::new(
+                                    file_path.clone(),
+                                    kind,
+                                    e.to_string(),
+                                ));
+                            }
+                        }
+                        None
+                    }
+                }
+            })
+            .collect();
+
+        // Collect parse errors, recovering from mutex poisoning if needed
+        match parse_errors.into_inner() {
+            Ok(parse_errors_vec) => {
+                errors.extend(parse_errors_vec);
+            }
+            Err(poisoned) => {
+                tracing::warn!(
+                    "Mutex was poisoned during parallel parsing, recovering collected errors"
+                );
+                errors.extend(poisoned.into_inner());
+            }
+        }
+
+        info!(
+            parsed_count = parsed_files.len(),
+            error_count = errors.len(),
+            "Parallel parsing complete (Pass 1a), starting sequential write (Pass 1b)"
+        );
+
+        // Phase 1b: Sequential database writes
+        // This must be sequential because rusqlite Connection is not Sync
+        for data in &parsed_files {
+            match self.write_parsed_file(data, &mut pending) {
                 Ok((sym_count, ref_count)) => {
                     files_indexed += 1;
                     symbols_found += sym_count;
@@ -210,15 +293,23 @@ impl Tethys {
                         Error::Io(_) => IndexErrorKind::IoError,
                         Error::Database(_) => IndexErrorKind::DatabaseError,
                         Error::Parser(_) => IndexErrorKind::ParseFailed,
-                        // Fallback for other error types
                         Error::Config(_) | Error::NotFound(_) | Error::Internal(_) => {
                             IndexErrorKind::ParseFailed
                         }
                     };
-                    errors.push(IndexError::new(file_path.clone(), kind, e.to_string()));
+                    errors.push(IndexError::new(
+                        data.relative_path.clone(),
+                        kind,
+                        e.to_string(),
+                    ));
                 }
             }
         }
+
+        info!(
+            files_indexed,
+            symbols_found, references_found, "Sequential write complete (Pass 1b)"
+        );
 
         // C# namespace resolution pass: resolve using directives via namespace map
         // This must happen after all files are indexed so we have the complete namespace map
@@ -335,7 +426,7 @@ impl Tethys {
         })
     }
 
-    /// Index a single file.
+    /// Index a single file (sequential version).
     ///
     /// Uses a database transaction to ensure atomicity - either the file and all
     /// its symbols are stored, or nothing is changed on failure.
@@ -343,6 +434,10 @@ impl Tethys {
     /// Unresolved dependencies (target file not yet indexed) are added to `pending`.
     ///
     /// Returns (`symbol_count`, `reference_count`).
+    ///
+    /// Note: This method is preserved for reference but is no longer used. The parallel
+    /// implementation uses `parse_file_static` + `write_parsed_file` instead.
+    #[allow(dead_code)]
     fn index_file(
         &mut self,
         path: &Path,
@@ -454,6 +549,173 @@ impl Tethys {
         self.compute_dependencies(path, file_id, &imports, &refs, pending)?;
 
         Ok((extracted.len(), refs_stored))
+    }
+
+    /// Parse a single file for parallel indexing (Phase 1a).
+    ///
+    /// This is a static method that can be called from parallel threads.
+    /// It reads the file, parses it with tree-sitter, and extracts symbols,
+    /// references, and imports without touching the database.
+    ///
+    /// # Arguments
+    ///
+    /// * `workspace_root` - The workspace root for computing relative paths
+    /// * `file_path` - Absolute path to the file to parse
+    /// * `language` - The detected language of the file
+    ///
+    /// # Returns
+    ///
+    /// `ParsedFileData` containing all extracted information, ready for
+    /// database insertion via `BatchWriter`.
+    fn parse_file_static(
+        workspace_root: &Path,
+        file_path: &Path,
+        language: Language,
+    ) -> Result<ParsedFileData> {
+        use std::cell::RefCell;
+
+        // Thread-local parser to avoid re-initialization overhead
+        thread_local! {
+            static PARSER: RefCell<tree_sitter::Parser> = RefCell::new(tree_sitter::Parser::new());
+        }
+
+        // Read file content
+        let content = std::fs::read(file_path)?;
+        let content_str = std::str::from_utf8(&content)
+            .map_err(|_| Error::Parser("file is not valid UTF-8".to_string()))?;
+
+        // Get language support for extraction
+        let lang_support = languages::get_language_support(language)
+            .ok_or_else(|| Error::Parser(format!("no support for language: {language:?}")))?;
+
+        // Parse with thread-local parser
+        // Using try_borrow_mut for defensive coding - while thread-local storage means
+        // each thread has its own instance, this prevents panics if code structure changes
+        let tree = PARSER.with(|parser| {
+            let mut parser = parser.try_borrow_mut().map_err(|_| {
+                Error::Parser("thread-local parser already borrowed (re-entrant call?)".to_string())
+            })?;
+            parser
+                .set_language(&lang_support.tree_sitter_language())
+                .map_err(|e| {
+                    tracing::error!(
+                        language = ?language,
+                        file = %file_path.display(),
+                        error = %e,
+                        "Failed to set parser language"
+                    );
+                    Error::Parser(format!("failed to set language {language:?}: {e}"))
+                })?;
+            parser
+                .parse(content_str, None)
+                .ok_or_else(|| Error::Parser("failed to parse file".to_string()))
+        })?;
+
+        // Extract symbols
+        let extracted = lang_support.extract_symbols(&tree, content_str.as_bytes());
+
+        // Extract imports and references
+        let imports = lang_support.extract_imports(&tree, content_str.as_bytes());
+        let references = lang_support.extract_references(&tree, content_str.as_bytes());
+
+        // Get file metadata
+        let metadata = std::fs::metadata(file_path)?;
+        #[allow(clippy::cast_possible_truncation)]
+        let mtime_ns = match metadata.modified() {
+            Ok(mtime) => match mtime.duration_since(UNIX_EPOCH) {
+                Ok(duration) => duration.as_nanos() as i64,
+                Err(_) => 0,
+            },
+            Err(_) => 0,
+        };
+        let size_bytes = metadata.len();
+
+        // Convert extracted symbols to owned versions
+        let symbols: Vec<OwnedSymbolData> = extracted
+            .iter()
+            .map(|sym| {
+                let qualified_name = if let Some(parent) = &sym.parent_name {
+                    format!("{}::{}", parent, sym.name)
+                } else {
+                    sym.name.clone()
+                };
+                OwnedSymbolData::new(
+                    sym.name.clone(),
+                    String::new(), // TODO: compute module_path
+                    qualified_name,
+                    sym.kind,
+                    sym.line,
+                    sym.column,
+                    sym.span,
+                    sym.signature.clone(),
+                    sym.visibility,
+                    None, // TODO: parent_symbol_id
+                )
+            })
+            .collect();
+
+        // Compute relative path
+        let relative_path = file_path
+            .strip_prefix(workspace_root)
+            .unwrap_or(file_path)
+            .to_path_buf();
+
+        Ok(ParsedFileData::new(
+            relative_path,
+            language,
+            mtime_ns,
+            size_bytes,
+            symbols,
+            references,
+            imports,
+        ))
+    }
+
+    /// Write a single parsed file to the database and compute its dependencies.
+    ///
+    /// This is Phase 1b of indexing - the sequential database write that must
+    /// happen after parallel parsing.
+    fn write_parsed_file(
+        &mut self,
+        data: &ParsedFileData,
+        pending: &mut Vec<PendingDependency>,
+    ) -> Result<(usize, usize)> {
+        // Convert owned symbols to borrowed for insertion
+        let symbol_data: Vec<SymbolData<'_>> =
+            data.symbols.iter().map(|s| s.as_symbol_data()).collect();
+
+        // Insert file and symbols atomically
+        let file_id = self.db.index_file_atomic(
+            &data.relative_path,
+            data.language,
+            data.mtime_ns,
+            data.size_bytes,
+            None, // TODO: content hash
+            &symbol_data,
+        )?;
+
+        // Get the inserted symbols for reference resolution
+        let stored_symbols = self.db.list_symbols_in_file(file_id)?;
+        let (name_to_id, span_to_id) = Self::build_symbol_maps(&stored_symbols);
+
+        // Store references
+        let refs_stored =
+            self.store_references(file_id, &data.references, &name_to_id, &span_to_id)?;
+
+        // Store imports
+        self.store_imports(file_id, &data.imports, data.language)?;
+
+        // Compute and store file dependencies
+        let full_path = self.workspace_root.join(&data.relative_path);
+        self.compute_dependencies(
+            &full_path,
+            file_id,
+            &data.imports,
+            &data.references,
+            pending,
+        )?;
+
+        Ok((data.symbols.len(), refs_stored))
     }
 
     /// Build lookup maps from symbols for reference resolution.

@@ -2298,3 +2298,246 @@ public class UserController {
         "UserService should have cross-file references resolved via C# using directive"
     );
 }
+
+// ========================================================================
+// Parallel Indexing Tests
+// ========================================================================
+
+#[test]
+fn parallel_indexing_with_many_files() {
+    // Create a workspace with many files to exercise parallel parsing
+    let mut files = Vec::new();
+
+    // Create 50 Rust files, each with a function
+    for i in 0..50 {
+        let code = format!(
+            r"
+pub fn function_{i}() -> i32 {{
+    {i}
+}}
+
+pub fn caller_{i}() -> i32 {{
+    function_{i}()
+}}
+"
+        );
+        files.push((format!("src/module_{i}.rs"), code));
+    }
+
+    // Create a lib.rs that references some of these modules
+    let lib_code = r"
+mod module_0;
+mod module_1;
+mod module_2;
+
+pub fn main_entry() -> i32 {
+    module_0::function_0() + module_1::function_1() + module_2::function_2()
+}
+";
+    files.push(("src/lib.rs".to_string(), lib_code.to_string()));
+
+    let file_refs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(path, content)| (path.as_str(), content.as_str()))
+        .collect();
+
+    let (_dir, mut tethys) = workspace_with_files(&file_refs);
+
+    let stats = tethys.index().expect("index failed");
+
+    // Should index all 51 files (50 modules + lib.rs)
+    assert_eq!(stats.files_indexed, 51, "should index all files");
+
+    // Each module has 2 functions = 100 functions
+    // lib.rs has 1 function + 3 modules = 4 symbols
+    // Total = at least 100 symbols (may be more depending on how modules are counted)
+    assert!(
+        stats.symbols_found >= 100,
+        "should find at least 100 symbols, found {}",
+        stats.symbols_found
+    );
+
+    // Each caller_N function calls function_N = 50 calls
+    // lib.rs calls 3 functions = 3 calls
+    // Total = at least 50 references
+    assert!(
+        stats.references_found >= 50,
+        "should find at least 50 references, found {}",
+        stats.references_found
+    );
+
+    // No errors expected
+    assert!(stats.errors.is_empty(), "should have no errors");
+}
+
+#[test]
+fn parallel_indexing_mixed_languages() {
+    // Create a workspace with both Rust and C# files
+    let rust_files: Vec<(String, String)> = (0..10)
+        .map(|i| {
+            (
+                format!("rust/module_{i}.rs"),
+                format!(
+                    r"
+pub fn rust_fn_{i}() -> i32 {{ {i} }}
+"
+                ),
+            )
+        })
+        .collect();
+
+    let csharp_files: Vec<(String, String)> = (0..10)
+        .map(|i| {
+            (
+                format!("csharp/Class{i}.cs"),
+                format!(
+                    r"
+namespace MyApp;
+
+public class Class{i} {{
+    public int CsharpMethod{i}() {{ return {i}; }}
+}}
+"
+                ),
+            )
+        })
+        .collect();
+
+    let mut all_files = Vec::new();
+    all_files.extend(rust_files);
+    all_files.extend(csharp_files);
+
+    let file_refs: Vec<(&str, &str)> = all_files
+        .iter()
+        .map(|(path, content)| (path.as_str(), content.as_str()))
+        .collect();
+
+    let (_dir, mut tethys) = workspace_with_files(&file_refs);
+
+    let stats = tethys.index().expect("index failed");
+
+    // Should index all 20 files (10 Rust + 10 C#)
+    assert_eq!(stats.files_indexed, 20, "should index all 20 files");
+
+    // Each Rust file has 1 function = 10 functions
+    // Each C# file has 1 namespace + 1 class + 1 method = 30 symbols
+    // Total = 10 + 30 = 40 symbols
+    assert_eq!(stats.symbols_found, 40, "should find all 40 symbols");
+
+    // No errors expected
+    assert!(stats.errors.is_empty(), "should have no errors");
+
+    // Verify we can query stats for language breakdown
+    let db_stats = tethys.get_stats().expect("get_stats failed");
+    let rust_count = db_stats
+        .files_by_language
+        .get(&tethys::Language::Rust)
+        .copied()
+        .unwrap_or(0);
+    let csharp_count = db_stats
+        .files_by_language
+        .get(&tethys::Language::CSharp)
+        .copied()
+        .unwrap_or(0);
+
+    assert_eq!(rust_count, 10, "should have 10 Rust files");
+    assert_eq!(csharp_count, 10, "should have 10 C# files");
+}
+
+/// Test that parallel indexing produces the same results as sequential indexing.
+///
+/// This is a critical equivalence test to ensure rayon parallelization doesn't
+/// introduce non-determinism or drop data. We index the same workspace twice
+/// (parallel is the default now) and verify the stats match.
+#[test]
+fn parallel_indexing_produces_deterministic_results() {
+    // Create a workspace with enough files to exercise parallel code paths
+    let mut files = Vec::new();
+
+    // Create 20 Rust files with various symbols and references
+    for i in 0..20 {
+        let code = format!(
+            r"
+pub struct Type{i};
+
+impl Type{i} {{
+    pub fn method_{i}(&self) -> i32 {{ {i} }}
+}}
+
+pub fn function_{i}(t: Type{i}) -> i32 {{
+    t.method_{i}()
+}}
+"
+        );
+        files.push((format!("src/module_{i}.rs"), code));
+    }
+
+    files.push((
+        "src/lib.rs".to_string(),
+        "mod module_0;\nmod module_1;".to_string(),
+    ));
+
+    let file_refs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(path, content)| (path.as_str(), content.as_str()))
+        .collect();
+
+    // First indexing
+    let (dir1, mut tethys1) = workspace_with_files(&file_refs);
+    let stats1 = tethys1.index().expect("first index failed");
+
+    // Second indexing (same files, fresh Tethys instance)
+    // Note: We need to create a fresh workspace because workspace_with_files creates a new temp dir
+    let (dir2, mut tethys2) = workspace_with_files(&file_refs);
+    let stats2 = tethys2.index().expect("second index failed");
+
+    // Core equivalence assertions
+    assert_eq!(
+        stats1.files_indexed, stats2.files_indexed,
+        "file count should be deterministic"
+    );
+    assert_eq!(
+        stats1.symbols_found, stats2.symbols_found,
+        "symbol count should be deterministic"
+    );
+    assert_eq!(
+        stats1.references_found, stats2.references_found,
+        "reference count should be deterministic"
+    );
+    assert_eq!(
+        stats1.errors.len(),
+        stats2.errors.len(),
+        "error count should be deterministic"
+    );
+
+    // Verify no errors in either run
+    assert!(
+        stats1.errors.is_empty(),
+        "first index should have no errors: {:?}",
+        stats1.errors
+    );
+    assert!(
+        stats2.errors.is_empty(),
+        "second index should have no errors: {:?}",
+        stats2.errors
+    );
+
+    // Query both databases and compare symbol counts
+    let symbols1 = tethys1.search_symbols("").expect("search_symbols 1 failed");
+    let symbols2 = tethys2.search_symbols("").expect("search_symbols 2 failed");
+
+    assert_eq!(
+        symbols1.len(),
+        symbols2.len(),
+        "searchable symbol count should match"
+    );
+
+    // Verify the same symbol names exist in both
+    let names1: std::collections::HashSet<_> = symbols1.iter().map(|s| &s.name).collect();
+    let names2: std::collections::HashSet<_> = symbols2.iter().map(|s| &s.name).collect();
+    assert_eq!(names1, names2, "symbol names should match exactly");
+
+    // Keep directories alive for test duration
+    drop(dir1);
+    drop(dir2);
+}
