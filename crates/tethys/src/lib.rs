@@ -61,7 +61,7 @@ use rayon::prelude::*;
 
 use batch_writer::BatchWriter;
 use db::{Index, SymbolData};
-use graph::{FileGraphOps, SqlFileGraph, SqlSymbolGraph, SymbolGraphOps};
+use graph::{FileGraphOps, SymbolGraphOps};
 use languages::common;
 use lsp::LspProvider;
 use parallel::{OwnedSymbolData, ParsedFileData};
@@ -90,8 +90,6 @@ pub struct Tethys {
     db_path: PathBuf,
     db: Index,
     parser: tree_sitter::Parser,
-    symbol_graph: Box<dyn SymbolGraphOps>,
-    file_graph: Box<dyn FileGraphOps>,
 }
 
 // Note: `# Errors` docs deferred to avoid documentation churn during active development.
@@ -120,17 +118,11 @@ impl Tethys {
 
         let parser = tree_sitter::Parser::new();
 
-        // Initialize graph operations with their own DB connections
-        let symbol_graph: Box<dyn SymbolGraphOps> = Box::new(SqlSymbolGraph::new(&db_path)?);
-        let file_graph: Box<dyn FileGraphOps> = Box::new(SqlFileGraph::new(&db_path)?);
-
         Ok(Self {
             workspace_root,
             db_path,
             db,
             parser,
-            symbol_graph,
-            file_graph,
         })
     }
 
@@ -2251,9 +2243,7 @@ impl Tethys {
             .get_file_id(self.relative_path(path))?
             .ok_or_else(|| Error::NotFound(format!("file: {}", path.display())))?;
 
-        let file_impact = self
-            .file_graph
-            .get_transitive_dependents(file_id, Some(50))?;
+        let file_impact = self.db.get_transitive_dependents(file_id, Some(50))?;
 
         // Convert FileImpact to public Impact type
         Ok(Impact {
@@ -2286,7 +2276,7 @@ impl Tethys {
             .get_symbol_by_qualified_name(qualified_name)?
             .ok_or_else(|| Error::NotFound(format!("symbol: {qualified_name}")))?;
 
-        let callers = self.symbol_graph.get_callers(symbol.id)?;
+        let callers = self.db.get_callers(symbol.id)?;
 
         // Convert CallerInfo to Dependent
         callers
@@ -2333,7 +2323,7 @@ impl Tethys {
             .get_symbol_by_qualified_name(qualified_name)?
             .ok_or_else(|| Error::NotFound(format!("symbol: {qualified_name}")))?;
 
-        let db_callers = self.symbol_graph.get_callers(symbol.id)?;
+        let db_callers = self.db.get_callers(symbol.id)?;
 
         // Build a set of symbol IDs we already know about
         let mut known_symbol_ids: HashSet<SymbolId> =
@@ -2496,7 +2486,7 @@ impl Tethys {
             .get_symbol_by_qualified_name(qualified_name)?
             .ok_or_else(|| Error::NotFound(format!("symbol: {qualified_name}")))?;
 
-        let callees = self.symbol_graph.get_callees(symbol.id)?;
+        let callees = self.db.get_callees(symbol.id)?;
 
         Ok(callees.into_iter().map(|c| c.symbol).collect())
     }
@@ -2508,9 +2498,7 @@ impl Tethys {
             .get_symbol_by_qualified_name(qualified_name)?
             .ok_or_else(|| Error::NotFound(format!("symbol: {qualified_name}")))?;
 
-        let impact = self
-            .symbol_graph
-            .get_transitive_callers(symbol.id, Some(50))?;
+        let impact = self.db.get_transitive_callers(symbol.id, Some(50))?;
 
         // Convert CallerInfo to Dependent
         let caller_to_dependent = |caller: graph::CallerInfo| -> Result<Dependent> {
@@ -2553,7 +2541,7 @@ impl Tethys {
 
     /// Detect circular dependencies in the codebase.
     pub fn detect_cycles(&self) -> Result<Vec<Cycle>> {
-        self.file_graph.detect_cycles()
+        self.db.detect_cycles()
     }
 
     /// Get the shortest dependency path between two files.
@@ -2567,7 +2555,7 @@ impl Tethys {
             .get_file_id(self.relative_path(to))?
             .ok_or_else(|| Error::NotFound(format!("file: {}", to.display())))?;
 
-        let path = self.file_graph.find_dependency_path(from_id, to_id)?;
+        let path = self.db.find_dependency_path(from_id, to_id)?;
 
         Ok(path.map(|p| p.into_files().into_iter().map(|f| f.path).collect()))
     }
@@ -2630,7 +2618,7 @@ impl Tethys {
             }
 
             // Get callees (outgoing edges) for forward reachability
-            for callee_info in self.symbol_graph.get_callees(current_id)? {
+            for callee_info in self.db.get_callees(current_id)? {
                 if visited.insert(callee_info.symbol.id) {
                     let mut new_path = path.clone();
                     new_path.push(callee_info.symbol.clone());
@@ -2710,7 +2698,7 @@ impl Tethys {
             }
 
             // Get callers (incoming edges) for backward reachability
-            for caller_info in self.symbol_graph.get_callers(current_id)? {
+            for caller_info in self.db.get_callers(current_id)? {
                 if visited.insert(caller_info.symbol.id) {
                     let mut new_path = path.clone();
                     new_path.push(caller_info.symbol.clone());
@@ -2833,7 +2821,7 @@ impl Tethys {
 
         // For each changed file, get all transitive dependents using the graph infrastructure
         for &file_id in &changed_file_ids {
-            match self.file_graph.get_transitive_dependents(file_id, None) {
+            match self.db.get_transitive_dependents(file_id, None) {
                 Ok(impact) => {
                     // Add direct dependents
                     for dep in &impact.direct_dependents {

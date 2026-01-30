@@ -25,8 +25,6 @@ pub use types::{
 
 mod sql;
 
-pub use sql::{SqlFileGraph, SqlSymbolGraph};
-
 use crate::error::Result;
 use crate::types::{Cycle, FileId, SymbolId};
 
