@@ -513,6 +513,16 @@ impl Tethys {
             tracing::debug!(call_edges = call_edges_count, "Populated call graph edges");
         }
 
+        // Derive file-level dependencies from call edges
+        // This captures actual function calls, not just explicit imports
+        let file_deps_from_calls = self.db.populate_file_deps_from_call_edges()?;
+        if file_deps_from_calls > 0 {
+            tracing::debug!(
+                file_deps = file_deps_from_calls,
+                "Derived file deps from call edges"
+            );
+        }
+
         Ok(IndexStats {
             files_indexed,
             symbols_found,
