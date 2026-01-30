@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "Code intelligence cache and query interface"
+repository = "https://github.com/dwalleck/rivets"
+keywords = ["code-intelligence", "static-analysis", "tree-sitter", "cli"]
+categories = ["development-tools", "command-line-utilities"]
+readme = "README.md"
 
 [dependencies]
 # Parsing
