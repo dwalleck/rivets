@@ -41,6 +41,10 @@ enum Commands {
         /// Use LSP (rust-analyzer) for enhanced reference resolution
         #[arg(long)]
         lsp: bool,
+
+        /// Timeout in seconds for LSP solution loading (default: 60, env: `TETHYS_LSP_TIMEOUT`)
+        #[arg(long)]
+        lsp_timeout: Option<u64>,
     },
 
     /// Search for symbols by name
@@ -118,6 +122,21 @@ enum Commands {
         #[arg(long)]
         names_only: bool,
     },
+
+    /// Find potential panic points (`.unwrap()` and `.expect()` calls)
+    PanicPoints {
+        /// Include panic points in test code
+        #[arg(long)]
+        include_tests: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Filter to specific file (path relative to workspace root)
+        #[arg(long)]
+        file: Option<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -155,7 +174,11 @@ fn main() -> ExitCode {
 
     // Run the appropriate command
     let result = match cli.command {
-        Commands::Index { rebuild, lsp } => cli::index::run(&workspace, rebuild, lsp),
+        Commands::Index {
+            rebuild,
+            lsp,
+            lsp_timeout,
+        } => cli::index::run(&workspace, rebuild, lsp, lsp_timeout),
         Commands::Search { query, kind, limit } => {
             cli::search::run(&workspace, &query, kind.as_deref(), limit)
         }
@@ -180,6 +203,11 @@ fn main() -> ExitCode {
         Commands::AffectedTests { files, names_only } => {
             cli::affected_tests::run(&workspace, &files, names_only)
         }
+        Commands::PanicPoints {
+            include_tests,
+            json,
+            file,
+        } => cli::panic_points::run(&workspace, include_tests, json, file.as_deref()),
     };
 
     match result {

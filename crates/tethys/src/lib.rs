@@ -46,12 +46,12 @@ mod types;
 pub use error::{Error, IndexError, IndexErrorKind, Result};
 pub use types::{
     Cycle, DatabaseStats, Dependent, FileAnalysis, FileId, FunctionSignature, Impact, Import,
-    IndexOptions, IndexStats, IndexUpdate, IndexedFile, Language, Parameter, ParameterKind,
-    ReachabilityDirection, ReachabilityResult, ReachablePath, Reference, ReferenceKind, Span,
-    Symbol, SymbolId, SymbolKind, UnresolvedRefForLsp, Visibility,
+    IndexOptions, IndexStats, IndexUpdate, IndexedFile, Language, PanicKind, PanicPoint, Parameter,
+    ParameterKind, ReachabilityDirection, ReachabilityResult, ReachablePath, Reference,
+    ReferenceKind, Span, Symbol, SymbolId, SymbolKind, UnresolvedRefForLsp, Visibility,
 };
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -479,7 +479,8 @@ impl Tethys {
 
             // Resolve Rust files with rust-analyzer
             let rust_provider = lsp::AnyProvider::for_language(Language::Rust);
-            let rust_count = self.resolve_via_lsp(&rust_provider, Language::Rust)?;
+            let rust_count =
+                self.resolve_via_lsp(&rust_provider, Language::Rust, options.lsp_timeout_secs())?;
             if rust_count > 0 {
                 tracing::info!(
                     language = "rust",
@@ -491,7 +492,11 @@ impl Tethys {
 
             // Resolve C# files with csharp-ls
             let csharp_provider = lsp::AnyProvider::for_language(Language::CSharp);
-            let csharp_count = self.resolve_via_lsp(&csharp_provider, Language::CSharp)?;
+            let csharp_count = self.resolve_via_lsp(
+                &csharp_provider,
+                Language::CSharp,
+                options.lsp_timeout_secs(),
+            )?;
             if csharp_count > 0 {
                 tracing::info!(
                     language = "csharp",
@@ -1766,6 +1771,7 @@ impl Tethys {
         &self,
         provider: &dyn lsp::LspProvider,
         language: Language,
+        lsp_timeout_secs: u64,
     ) -> Result<usize> {
         // Get unresolved references with file path information, filtered by language
         let all_unresolved = self.db.get_unresolved_references_for_lsp()?;
@@ -1812,9 +1818,78 @@ impl Tethys {
 
         let mut resolved_count = 0;
         let mut lsp_errors = 0;
+        let mut opened_files: HashSet<PathBuf> = HashSet::new();
+
+        // Language::as_str() returns the LSP language identifier ("rust", "csharp")
+        let language_id = language.as_str();
+
+        // Pre-open all unique files for servers like csharp-ls that need time to process
+        let unique_files: HashSet<_> = unresolved
+            .iter()
+            .map(|r| self.workspace_root.join(&r.file_path))
+            .collect();
+
+        debug!(
+            language = ?language,
+            file_count = unique_files.len(),
+            "Pre-opening files for LSP"
+        );
+
+        for file_path in &unique_files {
+            match std::fs::read_to_string(file_path) {
+                Ok(content) => {
+                    if client.did_open(file_path, &content, language_id).is_ok() {
+                        opened_files.insert(file_path.clone());
+                    } else {
+                        trace!(
+                            file = %file_path.display(),
+                            "Failed to send didOpen notification"
+                        );
+                    }
+                }
+                Err(e) => {
+                    trace!(
+                        file = %file_path.display(),
+                        error = %e,
+                        "Failed to read file for LSP pre-opening"
+                    );
+                }
+            }
+        }
+
+        // For servers like csharp-ls that load solutions asynchronously, wait for
+        // solution loading to complete by monitoring $/progress notifications.
+        // rust-analyzer indexes on startup and responds immediately, so no wait needed.
+        if language == Language::CSharp {
+            let timeout = std::time::Duration::from_secs(lsp_timeout_secs);
+            match client.wait_for_solution_load(timeout) {
+                Ok(true) => {
+                    debug!(language = ?language, "Solution loading completed");
+                }
+                Ok(false) => {
+                    warn!(
+                        language = ?language,
+                        "Solution loading not detected or timed out, queries may fail"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        language = ?language,
+                        error = %e,
+                        "Error while waiting for solution load"
+                    );
+                }
+            }
+        }
 
         for unresolved_ref in &unresolved {
-            match self.resolve_single_ref_via_lsp(&mut client, unresolved_ref, &mut lsp_errors) {
+            match self.resolve_single_ref_via_lsp(
+                &mut client,
+                unresolved_ref,
+                &mut lsp_errors,
+                &mut opened_files,
+                language_id,
+            ) {
                 Ok(true) => resolved_count += 1,
                 Ok(false) => {}
                 Err(e) => {
@@ -1859,15 +1934,45 @@ impl Tethys {
         client: &mut lsp::LspClient,
         unresolved_ref: &UnresolvedRefForLsp,
         lsp_errors: &mut usize,
+        opened_files: &mut HashSet<PathBuf>,
+        language_id: &str,
     ) -> Result<bool> {
         // Construct absolute file path for LSP
         let file_path = self.workspace_root.join(&unresolved_ref.file_path);
+
+        // Ensure the file is opened in the LSP server (required by some servers like csharp-ls)
+        if !opened_files.contains(&file_path) {
+            // Read file content
+            let content = match std::fs::read_to_string(&file_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    trace!(
+                        file = %file_path.display(),
+                        error = %e,
+                        "Failed to read file for LSP didOpen"
+                    );
+                    return Ok(false);
+                }
+            };
+
+            // Send didOpen notification
+            if let Err(e) = client.did_open(&file_path, &content, language_id) {
+                trace!(
+                    file = %file_path.display(),
+                    error = %e,
+                    "Failed to send didOpen notification"
+                );
+                // Continue anyway - some servers might work without it
+            }
+            opened_files.insert(file_path.clone());
+        }
 
         // LSP uses 0-indexed positions, our DB uses 1-indexed
         let lsp_line = unresolved_ref.line.saturating_sub(1);
         let lsp_col = unresolved_ref.column.saturating_sub(1);
 
-        // Call goto_definition
+        // Call goto_definition - we wait once after initialization for solution loading,
+        // so no per-query retries needed here
         let definition = match client.goto_definition(&file_path, lsp_line, lsp_col) {
             Ok(Some(loc)) => loc,
             Ok(None) => {
@@ -2874,6 +2979,70 @@ impl Tethys {
         );
 
         Ok(affected_tests)
+    }
+
+    // === Panic Points Analysis ===
+
+    /// Get all panic points in the codebase.
+    ///
+    /// Panic points are `.unwrap()` and `.expect()` calls that could panic at runtime.
+    /// Only calls within functions and methods are included.
+    ///
+    /// # Arguments
+    ///
+    /// * `include_tests` - If true, include panic points in test code
+    /// * `file_filter` - If provided, only return panic points in the specified file
+    ///   (path should be relative to workspace root)
+    ///
+    /// # Returns
+    ///
+    /// A vector of `PanicPoint` structs, ordered by file path and line number.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use tethys::Tethys;
+    /// use std::path::Path;
+    ///
+    /// let tethys = Tethys::new(Path::new("/path/to/workspace"))?;
+    ///
+    /// // Get all production panic points
+    /// let prod_panics = tethys.get_panic_points(false, None)?;
+    /// println!("Found {} panic points in production code", prod_panics.len());
+    ///
+    /// // Get panic points in a specific file, including tests
+    /// let file_panics = tethys.get_panic_points(true, Some("src/lib.rs"))?;
+    /// # Ok::<(), tethys::Error>(())
+    /// ```
+    pub fn get_panic_points(
+        &self,
+        include_tests: bool,
+        file_filter: Option<&str>,
+    ) -> Result<Vec<types::PanicPoint>> {
+        self.db.get_panic_points(include_tests, file_filter)
+    }
+
+    /// Count panic points grouped by test/production code.
+    ///
+    /// This is useful for summary statistics without retrieving all the details.
+    ///
+    /// # Returns
+    ///
+    /// Returns `(production_count, test_count)`.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use tethys::Tethys;
+    /// use std::path::Path;
+    ///
+    /// let tethys = Tethys::new(Path::new("/path/to/workspace"))?;
+    /// let (prod, test) = tethys.count_panic_points()?;
+    /// println!("Production: {prod}, Test: {test}");
+    /// # Ok::<(), tethys::Error>(())
+    /// ```
+    pub fn count_panic_points(&self) -> Result<(usize, usize)> {
+        self.db.count_panic_points()
     }
 }
 

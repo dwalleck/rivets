@@ -3,12 +3,15 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use lsp_types::{
+    notification::{DidOpenTextDocument, Notification},
     request::{GotoDefinition, Initialize, References, Shutdown},
-    ClientCapabilities, GotoDefinitionParams, GotoDefinitionResponse, InitializeParams,
-    InitializeResult, Location, PartialResultParams, Position, ReferenceContext, ReferenceParams,
-    TextDocumentIdentifier, TextDocumentPositionParams, Uri, WorkDoneProgressParams,
+    ClientCapabilities, DidOpenTextDocumentParams, GotoDefinitionParams, GotoDefinitionResponse,
+    InitializeParams, InitializeResult, Location, PartialResultParams, Position, ReferenceContext,
+    ReferenceParams, TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams, Uri,
+    WindowClientCapabilities, WorkDoneProgressParams,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
@@ -96,9 +99,21 @@ impl LspClient {
     fn initialize(&mut self, workspace_path: &Path, init_options: Option<Value>) -> Result<()> {
         let workspace_uri = path_to_uri(workspace_path)?;
 
+        // Set up client capabilities
+        // - window.workDoneProgress: We handle server->client requests with null responses,
+        //   which satisfies the progress protocol. This prevents servers like csharp-ls from
+        //   having issues when they try to report progress.
+        let capabilities = ClientCapabilities {
+            window: Some(WindowClientCapabilities {
+                work_done_progress: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
         let params = InitializeParams {
             root_uri: Some(workspace_uri),
-            capabilities: ClientCapabilities::default(),
+            capabilities,
             initialization_options: init_options,
             ..Default::default()
         };
@@ -174,43 +189,69 @@ impl LspClient {
     }
 
     /// Read a JSON-RPC response from the server.
+    ///
+    /// LSP servers may send various message types interleaved with responses:
+    /// - Notifications (have `method` but no `id`) - skipped
+    /// - Server requests (have both `method` AND `id`) - acknowledged with null result
+    /// - Responses (have `id` but no `method`) - returned to caller
     fn read_response<T: DeserializeOwned>(&mut self, expected_id: i64) -> Result<T> {
-        // Read Content-Length header
-        let content_length = self.read_content_length()?;
+        loop {
+            // Read Content-Length header
+            let content_length = self.read_content_length()?;
 
-        // Read the JSON body
-        let mut body = vec![0u8; content_length];
-        self.stdout.read_exact(&mut body)?;
+            // Read the JSON body
+            let mut body = vec![0u8; content_length];
+            self.stdout.read_exact(&mut body)?;
 
-        let response: Value = serde_json::from_slice(&body).map_err(LspError::Deserialize)?;
+            let message: Value = serde_json::from_slice(&body).map_err(LspError::Deserialize)?;
 
-        trace!(response = %response, "Received LSP response");
+            // Check if this message has a method field (notification or server request)
+            if let Some(method) = message.get("method").and_then(Value::as_str) {
+                // If it also has an id, it's a server->client request that needs a response
+                if let Some(request_id) = message.get("id") {
+                    trace!(method = method, "Acknowledging server request");
+                    // Send a null response to acknowledge the request
+                    let response = json!({
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "result": null,
+                    });
+                    self.write_message(&response)?;
+                } else {
+                    trace!(method = method, "Skipping LSP notification");
+                }
+                continue;
+            }
 
-        // Check for error response
-        if let Some(error) = response.get("error") {
-            let code = error["code"].as_i64().unwrap_or(-1);
-            let message = error["message"].as_str().unwrap_or("unknown error");
-            return Err(LspError::server_error(code, message));
+            // No method field means this is a response
+            trace!(response = %message, "Received LSP response");
+
+            // Check for error response
+            if let Some(error) = message.get("error") {
+                let code = error["code"].as_i64().unwrap_or(-1);
+                let message = error["message"].as_str().unwrap_or("unknown error");
+                return Err(LspError::server_error(code, message));
+            }
+
+            // Verify response ID matches
+            let actual_id = message["id"].as_i64().ok_or_else(|| {
+                LspError::InvalidHeader("response missing 'id' field".to_string())
+            })?;
+
+            if actual_id != expected_id {
+                return Err(LspError::IdMismatch {
+                    expected: expected_id,
+                    actual: actual_id,
+                });
+            }
+
+            // Deserialize the result
+            let result = message.get("result").ok_or_else(|| {
+                LspError::InvalidHeader("response missing 'result' field".to_string())
+            })?;
+
+            return serde_json::from_value(result.clone()).map_err(LspError::Deserialize);
         }
-
-        // Verify response ID matches
-        let actual_id = response["id"]
-            .as_i64()
-            .ok_or_else(|| LspError::InvalidHeader("response missing 'id' field".to_string()))?;
-
-        if actual_id != expected_id {
-            return Err(LspError::IdMismatch {
-                expected: expected_id,
-                actual: actual_id,
-            });
-        }
-
-        // Deserialize the result
-        let result = response.get("result").ok_or_else(|| {
-            LspError::InvalidHeader("response missing 'result' field".to_string())
-        })?;
-
-        serde_json::from_value(result.clone()).map_err(LspError::Deserialize)
     }
 
     /// Read the Content-Length header from the response.
@@ -284,6 +325,178 @@ impl LspClient {
             self.send_request::<GotoDefinition>(params)?;
 
         Ok(response.and_then(Self::extract_first_location))
+    }
+
+    /// Notify the server that a document has been opened.
+    ///
+    /// Many LSP servers (like csharp-ls) require documents to be explicitly opened
+    /// before they can answer queries about them. This sends a `textDocument/didOpen`
+    /// notification with the file contents.
+    ///
+    /// # Arguments
+    ///
+    /// * `file` - Path to the source file
+    /// * `content` - The file's text content
+    /// * `language_id` - Language identifier (e.g., "csharp", "rust")
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file path is invalid or communication fails.
+    pub fn did_open(&mut self, file: &Path, content: &str, language_id: &str) -> Result<()> {
+        let uri = path_to_uri(file)?;
+
+        let params = DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri,
+                language_id: language_id.to_string(),
+                version: 1,
+                text: content.to_string(),
+            },
+        };
+
+        let params_value = serde_json::to_value(params).map_err(LspError::Serialize)?;
+        self.send_notification(DidOpenTextDocument::METHOD, &params_value)?;
+        trace!(file = %file.display(), "Sent didOpen notification");
+        Ok(())
+    }
+
+    /// Wait for the LSP server to finish loading the solution/workspace.
+    ///
+    /// Some LSP servers (like csharp-ls) load the solution asynchronously after initialization.
+    /// This method monitors `$/progress` notifications to detect when loading completes:
+    ///
+    /// 1. Watches for a progress "begin" with title starting with "Loading workspace"
+    /// 2. Waits until the corresponding "end" notification is received
+    /// 3. Returns once the solution is loaded
+    ///
+    /// # Arguments
+    ///
+    /// * `timeout` - Maximum time to wait for solution loading
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(true)` if solution loading was detected and completed,
+    /// `Ok(false)` if timeout was reached without detecting solution loading,
+    /// or `Err` if a communication error occurred.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if communication with the LSP server fails (I/O error,
+    /// JSON parsing error, or server exit).
+    pub fn wait_for_solution_load(&mut self, timeout: Duration) -> Result<bool> {
+        let start = Instant::now();
+        let mut loading_token: Option<String> = None;
+
+        debug!(
+            timeout_secs = timeout.as_secs(),
+            "Waiting for solution to load..."
+        );
+
+        loop {
+            // Check timeout
+            if start.elapsed() > timeout {
+                if loading_token.is_some() {
+                    warn!("Timeout waiting for solution load to complete");
+                } else {
+                    debug!("Timeout reached without detecting solution loading progress");
+                }
+                return Ok(false);
+            }
+
+            // Read next message
+            let content_length = self.read_content_length()?;
+            let mut body = vec![0u8; content_length];
+            self.stdout.read_exact(&mut body)?;
+
+            let message: Value = serde_json::from_slice(&body).map_err(LspError::Deserialize)?;
+
+            // Check if this is a notification or server request
+            if let Some(method) = message.get("method").and_then(Value::as_str) {
+                // Handle server->client requests (acknowledge with null)
+                if let Some(request_id) = message.get("id") {
+                    trace!(
+                        method = method,
+                        "Acknowledging server request during solution load"
+                    );
+                    let response = json!({
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "result": null,
+                    });
+                    self.write_message(&response)?;
+                }
+
+                // Check for $/progress notifications
+                if method == "$/progress" {
+                    if let Some(params) = message.get("params") {
+                        let token = params.get("token").and_then(|t| {
+                            // Token can be string or number
+                            t.as_str()
+                                .map(String::from)
+                                .or_else(|| t.as_i64().map(|n| n.to_string()))
+                        });
+
+                        if let Some(value) = params.get("value") {
+                            let kind = value.get("kind").and_then(Value::as_str);
+
+                            match kind {
+                                Some("begin") => {
+                                    // Check if this is the workspace loading progress
+                                    if let Some(title) = value.get("title").and_then(Value::as_str)
+                                    {
+                                        if title.starts_with("Loading workspace") {
+                                            if let Some(ref tok) = token {
+                                                debug!(
+                                                    token = tok,
+                                                    title = title,
+                                                    "Detected solution loading started"
+                                                );
+                                                loading_token = token;
+                                            }
+                                        }
+                                    }
+                                }
+                                Some("report") => {
+                                    // Log progress updates if we're tracking this token
+                                    if loading_token.is_some() && token == loading_token {
+                                        if let Some(msg) =
+                                            value.get("message").and_then(Value::as_str)
+                                        {
+                                            trace!(message = msg, "Solution loading progress");
+                                        }
+                                    }
+                                }
+                                Some("end") => {
+                                    // Check if this is the end of our tracked loading
+                                    if loading_token.is_some() && token == loading_token {
+                                        let msg = value
+                                            .get("message")
+                                            .and_then(Value::as_str)
+                                            .unwrap_or("completed");
+                                        #[allow(clippy::cast_possible_truncation)]
+                                        let elapsed_ms = start.elapsed().as_millis() as u64;
+                                        debug!(
+                                            message = msg,
+                                            elapsed_ms, "Solution loading completed"
+                                        );
+                                        return Ok(true);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+
+                continue;
+            }
+
+            // If we receive a response (has id but no method), something unexpected happened
+            // This shouldn't occur since we haven't sent any requests, but log it
+            if message.get("id").is_some() {
+                trace!("Received unexpected response during solution load wait");
+            }
+        }
     }
 
     /// Find all references to a symbol at the given position.

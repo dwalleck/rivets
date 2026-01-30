@@ -28,6 +28,7 @@ mod files;
 mod graph;
 mod helpers;
 mod imports;
+mod panic_points;
 mod references;
 mod schema;
 mod symbols;

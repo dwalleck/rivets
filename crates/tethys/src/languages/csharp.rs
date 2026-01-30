@@ -584,7 +584,7 @@ fn extract_symbols_recursive(
 
     match node.kind() {
         CLASS_DECLARATION => {
-            if let Some(sym) = extract_type_declaration(node, content, SymbolKind::Class) {
+            if let Some(sym) = extract_type_declaration(node, content, SymbolKind::Class, None) {
                 let class_name = sym.name.clone();
                 symbols.push(sym);
                 // Recurse into class body for methods
@@ -592,27 +592,28 @@ fn extract_symbols_recursive(
             }
         }
         STRUCT_DECLARATION => {
-            if let Some(sym) = extract_type_declaration(node, content, SymbolKind::Struct) {
+            if let Some(sym) = extract_type_declaration(node, content, SymbolKind::Struct, None) {
                 let struct_name = sym.name.clone();
                 symbols.push(sym);
                 extract_class_members(node, content, symbols, &struct_name);
             }
         }
         INTERFACE_DECLARATION => {
-            if let Some(sym) = extract_type_declaration(node, content, SymbolKind::Interface) {
+            if let Some(sym) = extract_type_declaration(node, content, SymbolKind::Interface, None)
+            {
                 let interface_name = sym.name.clone();
                 symbols.push(sym);
                 extract_class_members(node, content, symbols, &interface_name);
             }
         }
         ENUM_DECLARATION => {
-            if let Some(sym) = extract_type_declaration(node, content, SymbolKind::Enum) {
+            if let Some(sym) = extract_type_declaration(node, content, SymbolKind::Enum, None) {
                 symbols.push(sym);
             }
         }
         RECORD_DECLARATION => {
             // Map to SymbolKind::Class since our type system lacks a Record kind
-            if let Some(sym) = extract_type_declaration(node, content, SymbolKind::Class) {
+            if let Some(sym) = extract_type_declaration(node, content, SymbolKind::Class, None) {
                 let record_name = sym.name.clone();
                 symbols.push(sym);
                 extract_class_members(node, content, symbols, &record_name);
@@ -659,14 +660,17 @@ fn extract_symbols_recursive(
     }
 }
 
-/// Extract members (methods, constructors) from a class/struct/interface body.
+/// Extract members (methods, constructors, nested types) from a class/struct/interface body.
 fn extract_class_members(
     node: &tree_sitter::Node,
     content: &[u8],
     symbols: &mut Vec<ExtractedSymbol>,
     parent_name: &str,
 ) {
-    use node_kinds::{CONSTRUCTOR_DECLARATION, DECLARATION_LIST, METHOD_DECLARATION};
+    use node_kinds::{
+        CLASS_DECLARATION, CONSTRUCTOR_DECLARATION, DECLARATION_LIST, ENUM_DECLARATION,
+        INTERFACE_DECLARATION, METHOD_DECLARATION, RECORD_DECLARATION, STRUCT_DECLARATION,
+    };
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -688,6 +692,54 @@ fn extract_class_members(
                             symbols.push(sym);
                         }
                     }
+                    // Nested type declarations - pass parent_name for qualified names
+                    // Records map to Class since our type system lacks a Record kind
+                    CLASS_DECLARATION | RECORD_DECLARATION => {
+                        if let Some(sym) = extract_type_declaration(
+                            &item,
+                            content,
+                            SymbolKind::Class,
+                            Some(parent_name),
+                        ) {
+                            let nested_name = sym.name.clone();
+                            symbols.push(sym);
+                            extract_class_members(&item, content, symbols, &nested_name);
+                        }
+                    }
+                    STRUCT_DECLARATION => {
+                        if let Some(sym) = extract_type_declaration(
+                            &item,
+                            content,
+                            SymbolKind::Struct,
+                            Some(parent_name),
+                        ) {
+                            let nested_name = sym.name.clone();
+                            symbols.push(sym);
+                            extract_class_members(&item, content, symbols, &nested_name);
+                        }
+                    }
+                    INTERFACE_DECLARATION => {
+                        if let Some(sym) = extract_type_declaration(
+                            &item,
+                            content,
+                            SymbolKind::Interface,
+                            Some(parent_name),
+                        ) {
+                            let nested_name = sym.name.clone();
+                            symbols.push(sym);
+                            extract_class_members(&item, content, symbols, &nested_name);
+                        }
+                    }
+                    ENUM_DECLARATION => {
+                        if let Some(sym) = extract_type_declaration(
+                            &item,
+                            content,
+                            SymbolKind::Enum,
+                            Some(parent_name),
+                        ) {
+                            symbols.push(sym);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -696,10 +748,13 @@ fn extract_class_members(
 }
 
 /// Extract a type declaration (class, struct, interface, enum).
+///
+/// The `parent_name` is used for nested types to build qualified names like `Outer::Inner`.
 fn extract_type_declaration(
     node: &tree_sitter::Node,
     content: &[u8],
     kind: SymbolKind,
+    parent_name: Option<&str>,
 ) -> Option<ExtractedSymbol> {
     let name_node = node.child_by_field_name("name")?;
     let Some(name) = node_text(&name_node, content) else {
@@ -722,7 +777,7 @@ fn extract_type_declaration(
         signature: None,
         signature_details: None,
         visibility,
-        parent_name: None,
+        parent_name: parent_name.map(String::from),
         is_test: false, // Type declarations (class, struct, etc.) are never tests
     })
 }
@@ -1217,6 +1272,87 @@ public class UserService { }
         // Records are mapped to Class since SymbolKind lacks a Record variant
         assert_eq!(symbols[0].kind, SymbolKind::Class);
         assert_eq!(symbols[0].visibility, Visibility::Public);
+    }
+
+    #[test]
+    fn extracts_nested_types() {
+        let code = r"
+public abstract record Distribution
+{
+    public sealed record Percentage : Distribution
+    {
+        public decimal Value { get; init; }
+    }
+
+    public sealed record FixedAmount : Distribution
+    {
+        public decimal Amount { get; init; }
+    }
+}
+";
+        let tree = parse_csharp(code);
+        let symbols = extract_symbols(&tree, code.as_bytes());
+
+        // Should extract: Distribution, Percentage, FixedAmount
+        let names: Vec<_> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.contains(&"Distribution"),
+            "should extract outer type, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"Percentage"),
+            "should extract nested Percentage type, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"FixedAmount"),
+            "should extract nested FixedAmount type, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn extracts_nested_types_with_file_scoped_namespace() {
+        // Matches the actual Distribution.cs file structure
+        let code = r"
+namespace MyApp.ValueObjects;
+
+public abstract record Distribution
+{
+    public sealed record Percentage : Distribution
+    {
+        public decimal Value { get; init; }
+
+        public Percentage(decimal value)
+        {
+            Value = value;
+        }
+    }
+
+    public sealed record FixedAmount : Distribution
+    {
+        public decimal Amount { get; init; }
+    }
+}
+";
+        let tree = parse_csharp(code);
+        let symbols = extract_symbols(&tree, code.as_bytes());
+
+        let names: Vec<_> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.contains(&"MyApp.ValueObjects"),
+            "should extract namespace, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"Distribution"),
+            "should extract outer type, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"Percentage"),
+            "should extract nested Percentage type, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"FixedAmount"),
+            "should extract nested FixedAmount type, got: {names:?}"
+        );
     }
 
     #[test]

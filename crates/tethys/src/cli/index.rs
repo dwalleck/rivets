@@ -8,15 +8,26 @@ use tethys::{IndexOptions, Tethys};
 use super::ensure_lsp_if_requested;
 
 /// Run the index command.
-pub fn run(workspace: &Path, rebuild: bool, lsp: bool) -> Result<(), tethys::Error> {
+pub fn run(
+    workspace: &Path,
+    rebuild: bool,
+    lsp: bool,
+    lsp_timeout: Option<u64>,
+) -> Result<(), tethys::Error> {
     ensure_lsp_if_requested(lsp)?;
 
     println!("{} {}...", "Indexing".cyan().bold(), workspace.display());
 
     let mut tethys = Tethys::new(workspace)?;
 
+    // Build options - with_lsp() reads TETHYS_LSP_TIMEOUT env var by default,
+    // but CLI arg takes precedence if provided
     let options = if lsp {
-        IndexOptions::with_lsp()
+        let mut opts = IndexOptions::with_lsp();
+        if let Some(timeout) = lsp_timeout {
+            opts = opts.lsp_timeout(timeout);
+        }
+        opts
     } else {
         IndexOptions::default()
     };

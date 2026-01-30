@@ -668,6 +668,9 @@ pub struct FileAnalysis {
     pub references: Vec<Reference>,
 }
 
+/// Default timeout for LSP solution loading (in seconds).
+pub const DEFAULT_LSP_TIMEOUT_SECS: u64 = 60;
+
 /// Options for configuring the indexing process.
 #[derive(Debug, Clone, Copy)]
 pub struct IndexOptions {
@@ -677,6 +680,17 @@ pub struct IndexOptions {
     /// appropriate language server and use `goto_definition` to resolve remaining
     /// unresolved references.
     use_lsp: bool,
+
+    /// Timeout in seconds for LSP solution loading.
+    ///
+    /// Some language servers (like csharp-ls) load solutions asynchronously after
+    /// initialization. This timeout controls how long to wait for loading to complete
+    /// before proceeding with queries.
+    ///
+    /// Can be configured via the `TETHYS_LSP_TIMEOUT` environment variable.
+    ///
+    /// Default: 60 seconds
+    lsp_timeout_secs: u64,
 
     /// Enable streaming writes during indexing.
     ///
@@ -698,10 +712,19 @@ pub struct IndexOptions {
 
 impl IndexOptions {
     /// Create options with LSP resolution enabled.
+    ///
+    /// Checks the `TETHYS_LSP_TIMEOUT` environment variable for a custom timeout,
+    /// defaulting to 60 seconds.
     #[must_use]
     pub fn with_lsp() -> Self {
+        let timeout = std::env::var("TETHYS_LSP_TIMEOUT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_LSP_TIMEOUT_SECS);
+
         Self {
             use_lsp: true,
+            lsp_timeout_secs: timeout,
             use_streaming: false,
             streaming_batch_size: 100,
         }
@@ -712,6 +735,7 @@ impl IndexOptions {
     pub fn with_streaming() -> Self {
         Self {
             use_lsp: false,
+            lsp_timeout_secs: DEFAULT_LSP_TIMEOUT_SECS,
             use_streaming: true,
             streaming_batch_size: 100,
         }
@@ -722,6 +746,7 @@ impl IndexOptions {
     pub fn with_streaming_batch_size(batch_size: usize) -> Self {
         Self {
             use_lsp: false,
+            lsp_timeout_secs: DEFAULT_LSP_TIMEOUT_SECS,
             use_streaming: true,
             streaming_batch_size: batch_size,
         }
@@ -734,10 +759,23 @@ impl IndexOptions {
         self
     }
 
+    /// Set a custom LSP timeout (in seconds).
+    #[must_use]
+    pub fn lsp_timeout(mut self, seconds: u64) -> Self {
+        self.lsp_timeout_secs = seconds;
+        self
+    }
+
     /// Check if LSP-based resolution is enabled.
     #[must_use]
     pub fn use_lsp(&self) -> bool {
         self.use_lsp
+    }
+
+    /// Get the LSP solution loading timeout in seconds.
+    #[must_use]
+    pub fn lsp_timeout_secs(&self) -> u64 {
+        self.lsp_timeout_secs
     }
 
     /// Check if streaming writes are enabled.
@@ -757,6 +795,7 @@ impl Default for IndexOptions {
     fn default() -> Self {
         Self {
             use_lsp: false,
+            lsp_timeout_secs: DEFAULT_LSP_TIMEOUT_SECS,
             use_streaming: false,
             streaming_batch_size: 100,
         }
@@ -901,6 +940,101 @@ impl ReachabilityResult {
     #[must_use]
     pub fn at_depth(&self, depth: usize) -> Vec<&ReachablePath> {
         self.reachable.iter().filter(|r| r.depth == depth).collect()
+    }
+}
+
+// === Panic Point Analysis Types ===
+
+/// The type of panic-inducing call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PanicKind {
+    /// `.unwrap()` call
+    Unwrap,
+    /// `.expect()` call
+    Expect,
+}
+
+impl PanicKind {
+    /// Convert to database/display string representation.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unwrap => "unwrap",
+            Self::Expect => "expect",
+        }
+    }
+
+    /// Parse from string representation.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "unwrap" => Some(Self::Unwrap),
+            "expect" => Some(Self::Expect),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for PanicKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, ".{}()", self.as_str())
+    }
+}
+
+/// A potential panic point in the codebase.
+///
+/// Represents a call to `.unwrap()` or `.expect()` that could panic at runtime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[must_use]
+pub struct PanicPoint {
+    /// Path to the file (relative to workspace root)
+    pub path: PathBuf,
+    /// Line number where the panic point occurs (1-indexed)
+    pub line: u32,
+    /// The type of panic call (unwrap or expect)
+    pub kind: PanicKind,
+    /// Name of the containing function/method
+    pub containing_symbol: String,
+    /// Whether this panic point is in test code
+    pub is_test: bool,
+}
+
+impl PanicPoint {
+    /// Create a new panic point with validation.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the file (relative to workspace root)
+    /// * `line` - Line number (1-indexed, must be >= 1)
+    /// * `kind` - The type of panic call
+    /// * `containing_symbol` - Name of the containing function/method (must be non-empty)
+    /// * `is_test` - Whether this panic point is in test code
+    ///
+    /// # Panics
+    ///
+    /// Panics if `line` is 0 or `containing_symbol` is empty. These represent
+    /// invalid state that should never occur from database queries.
+    pub fn new(
+        path: PathBuf,
+        line: u32,
+        kind: PanicKind,
+        containing_symbol: String,
+        is_test: bool,
+    ) -> Self {
+        debug_assert!(line >= 1, "line must be 1-indexed (got {line})");
+        debug_assert!(
+            !containing_symbol.is_empty(),
+            "containing_symbol must be non-empty"
+        );
+
+        Self {
+            path,
+            line,
+            kind,
+            containing_symbol,
+            is_test,
+        }
     }
 }
 
@@ -1466,5 +1600,39 @@ mod tests {
                 "roundtrip failed for {lang:?}"
             );
         }
+    }
+
+    // === PanicKind tests ===
+
+    #[test]
+    fn panic_kind_parse_unwrap() {
+        assert_eq!(PanicKind::parse("unwrap"), Some(PanicKind::Unwrap));
+    }
+
+    #[test]
+    fn panic_kind_parse_expect() {
+        assert_eq!(PanicKind::parse("expect"), Some(PanicKind::Expect));
+    }
+
+    #[test]
+    fn panic_kind_parse_unknown_returns_none() {
+        assert_eq!(PanicKind::parse("panic"), None);
+        assert_eq!(PanicKind::parse(""), None);
+    }
+
+    #[test]
+    fn panic_kind_roundtrip() {
+        let variants = [PanicKind::Unwrap, PanicKind::Expect];
+        for kind in variants {
+            let str_repr = kind.as_str();
+            let parsed = PanicKind::parse(str_repr);
+            assert_eq!(parsed, Some(kind), "roundtrip failed for {kind:?}");
+        }
+    }
+
+    #[test]
+    fn panic_kind_display() {
+        assert_eq!(format!("{}", PanicKind::Unwrap), ".unwrap()");
+        assert_eq!(format!("{}", PanicKind::Expect), ".expect()");
     }
 }
