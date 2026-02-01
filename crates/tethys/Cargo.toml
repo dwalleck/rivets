@@ -39,6 +39,9 @@ tracing.workspace = true
 lsp-types = "0.97"
 percent-encoding = "2.3"
 
+# Cargo manifest parsing
+cargo_toml = "0.20"
+
 # CLI (for binary)
 clap.workspace = true
 tracing-subscriber.workspace = true
