@@ -26,3 +26,6 @@
 
 # OS files
 Thumbs.db
+
+# Git worktrees
+.worktrees/
