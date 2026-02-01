@@ -45,9 +45,9 @@ mod types;
 
 pub use error::{Error, IndexError, IndexErrorKind, Result};
 pub use types::{
-    Cycle, DatabaseStats, Dependent, FileAnalysis, FileId, FunctionSignature, Impact, Import,
-    IndexOptions, IndexStats, IndexUpdate, IndexedFile, Language, PanicKind, PanicPoint, Parameter,
-    ParameterKind, ReachabilityDirection, ReachabilityResult, ReachablePath, Reference,
+    CrateInfo, Cycle, DatabaseStats, Dependent, FileAnalysis, FileId, FunctionSignature, Impact,
+    Import, IndexOptions, IndexStats, IndexUpdate, IndexedFile, Language, PanicKind, PanicPoint,
+    Parameter, ParameterKind, ReachabilityDirection, ReachabilityResult, ReachablePath, Reference,
     ReferenceKind, Span, Symbol, SymbolId, SymbolKind, UnresolvedRefForLsp, Visibility,
 };
 

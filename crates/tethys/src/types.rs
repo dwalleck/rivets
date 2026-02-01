@@ -153,6 +153,21 @@ impl Language {
     }
 }
 
+/// Information about a Rust crate discovered from Cargo.toml.
+///
+/// Used to determine crate roots for module path resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrateInfo {
+    /// Crate name from `[package].name`
+    pub name: String,
+    /// Path to the crate directory (contains Cargo.toml)
+    pub path: PathBuf,
+    /// Library entry point relative to crate path (e.g., `src/lib.rs`)
+    pub lib_path: Option<PathBuf>,
+    /// Binary entry points: (name, path relative to crate)
+    pub bin_paths: Vec<(String, PathBuf)>,
+}
+
 /// Symbol kinds tracked by Tethys.
 ///
 /// These are normalized across languages. Not all languages have all kinds
@@ -1634,5 +1649,19 @@ mod tests {
     fn panic_kind_display() {
         assert_eq!(format!("{}", PanicKind::Unwrap), ".unwrap()");
         assert_eq!(format!("{}", PanicKind::Expect), ".expect()");
+    }
+
+    // === CrateInfo tests ===
+
+    #[test]
+    fn crate_info_default_lib_path() {
+        let info = CrateInfo {
+            name: "my_crate".to_string(),
+            path: PathBuf::from("/workspace/crates/my_crate"),
+            lib_path: None,
+            bin_paths: vec![],
+        };
+        assert_eq!(info.name, "my_crate");
+        assert!(info.lib_path.is_none());
     }
 }
