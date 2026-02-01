@@ -204,6 +204,7 @@ fn parse_crate_from_manifest(crate_path: &Path, manifest: &Manifest) -> Option<C
 /// | `src/db/query.rs` | `crate::db::query` |
 /// | `src/bin/cli/main.rs` | `cli` |
 /// | `examples/demo.rs` | `None` |
+#[must_use]
 pub fn compute_module_path(file_path: &Path, crate_info: &CrateInfo) -> Option<String> {
     // Determine if this file belongs to the library or a binary
     let (entry_dir, prefix) = determine_entry_point(file_path, crate_info)?;

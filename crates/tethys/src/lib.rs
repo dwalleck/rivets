@@ -34,7 +34,7 @@
 //! ```
 
 mod batch_writer;
-mod cargo;
+pub mod cargo;
 mod db;
 mod error;
 mod graph;
@@ -820,9 +820,28 @@ impl Tethys {
         data: &ParsedFileData,
         pending: &mut Vec<PendingDependency>,
     ) -> Result<(usize, usize)> {
-        // Convert owned symbols to borrowed for insertion
-        let symbol_data: Vec<SymbolData<'_>> =
-            data.symbols.iter().map(|s| s.as_symbol_data()).collect();
+        // Compute module path for all symbols in this file
+        let full_path = self.workspace_root.join(&data.relative_path);
+        let module_path = self.compute_module_path_for_file(&full_path);
+
+        // Convert owned symbols to borrowed for insertion, using computed module_path
+        let symbol_data: Vec<SymbolData<'_>> = data
+            .symbols
+            .iter()
+            .map(|s| SymbolData {
+                name: &s.name,
+                module_path: &module_path,
+                qualified_name: &s.qualified_name,
+                kind: s.kind,
+                line: s.line,
+                column: s.column,
+                span: s.span,
+                signature: s.signature.as_deref(),
+                visibility: s.visibility,
+                parent_symbol_id: s.parent_symbol_id,
+                is_test: s.is_test,
+            })
+            .collect();
 
         // Insert file and symbols atomically
         let file_id = self.db.index_file_atomic(
@@ -845,8 +864,7 @@ impl Tethys {
         // Store imports
         self.store_imports(file_id, &data.imports, data.language)?;
 
-        // Compute and store file dependencies
-        let full_path = self.workspace_root.join(&data.relative_path);
+        // Compute and store file dependencies (reusing full_path from above)
         self.compute_dependencies(
             &full_path,
             file_id,
