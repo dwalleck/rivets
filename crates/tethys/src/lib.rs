@@ -34,6 +34,7 @@
 //! ```
 
 mod batch_writer;
+mod cargo;
 mod db;
 mod error;
 mod graph;
@@ -43,6 +44,7 @@ mod parallel;
 mod resolver;
 mod types;
 
+pub use cargo::discover_crates;
 pub use error::{Error, IndexError, IndexErrorKind, Result};
 pub use types::{
     CrateInfo, Cycle, DatabaseStats, Dependent, FileAnalysis, FileId, FunctionSignature, Impact,
