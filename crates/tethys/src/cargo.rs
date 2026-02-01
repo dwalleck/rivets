@@ -109,13 +109,27 @@ fn parse_crate(crate_path: &Path) -> Option<CrateInfo> {
 
 /// Extract `CrateInfo` from a parsed manifest.
 fn parse_crate_from_manifest(crate_path: &Path, manifest: &Manifest) -> Option<CrateInfo> {
-    let package = manifest.package.as_ref()?;
+    let Some(package) = manifest.package.as_ref() else {
+        debug!(
+            path = %crate_path.display(),
+            "Manifest has no [package] section, skipping (likely virtual workspace root)"
+        );
+        return None;
+    };
 
-    // Determine library path
+    // Canonicalize crate path for consistent matching in get_crate_for_file()
+    let crate_path = crate_path.canonicalize().unwrap_or_else(|e| {
+        debug!(
+            path = %crate_path.display(),
+            error = %e,
+            "Failed to canonicalize crate path, using original"
+        );
+        crate_path.to_path_buf()
+    });
+
     let lib_path = if let Some(lib) = &manifest.lib {
         lib.path.as_ref().map(PathBuf::from)
     } else {
-        // Check for default lib.rs location
         let default_lib = crate_path.join("src/lib.rs");
         if default_lib.exists() {
             Some(PathBuf::from("src/lib.rs"))
@@ -124,21 +138,30 @@ fn parse_crate_from_manifest(crate_path: &Path, manifest: &Manifest) -> Option<C
         }
     };
 
-    // Determine binary paths
     let mut bin_paths = Vec::new();
 
-    // Explicit [[bin]] entries - falls back to Cargo's default path convention
-    // if path is not specified: src/bin/{name}.rs
+    // Explicit [[bin]] entries. When path is unset, uses Cargo's convention: src/bin/{name}.rs.
+    // When name is also unset, defaults to the package name.
     for bin in &manifest.bin {
         let name = bin.name.clone().unwrap_or_else(|| package.name.clone());
-        let path = bin.path.as_ref().map_or_else(
-            || PathBuf::from(format!("src/bin/{name}.rs")),
-            PathBuf::from,
-        );
+        let path = if let Some(explicit_path) = bin.path.as_ref() {
+            PathBuf::from(explicit_path)
+        } else {
+            let inferred = PathBuf::from(format!("src/bin/{name}.rs"));
+            let full_path = crate_path.join(&inferred);
+            if !full_path.exists() {
+                debug!(
+                    crate_path = %crate_path.display(),
+                    bin_name = %name,
+                    inferred_path = %inferred.display(),
+                    "[[bin]] entry has no path and inferred location doesn't exist"
+                );
+            }
+            inferred
+        };
         bin_paths.push((name, path));
     }
 
-    // Default main.rs if no explicit bins and file exists
     if bin_paths.is_empty() {
         let default_main = crate_path.join("src/main.rs");
         if default_main.exists() {
@@ -148,7 +171,7 @@ fn parse_crate_from_manifest(crate_path: &Path, manifest: &Manifest) -> Option<C
 
     Some(CrateInfo {
         name: package.name.clone(),
-        path: crate_path.to_path_buf(),
+        path: crate_path,
         lib_path,
         bin_paths,
     })
@@ -156,33 +179,43 @@ fn parse_crate_from_manifest(crate_path: &Path, manifest: &Manifest) -> Option<C
 
 /// Expand a simple glob pattern to matching directories.
 ///
-/// Only supports the `prefix/*` pattern (e.g., `"crates/*"`). More complex
-/// glob patterns like `crates/**` or `{foo,bar}/*` are not supported and
-/// will result in a warning log and empty results.
+/// Only supports `prefix/*` patterns (e.g., `"crates/*"`). Full glob support
+/// (via the `glob` crate) could be added if needed, but workspace member
+/// patterns in practice are typically simple.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The pattern is not in `prefix/*` format (unsupported pattern)
+/// - Directory enumeration fails (I/O error)
 fn glob_member(workspace_root: &Path, pattern: &str) -> std::io::Result<Vec<PathBuf>> {
     let mut results = Vec::new();
 
-    if let Some(prefix) = pattern.strip_suffix("/*") {
-        let search_dir = workspace_root.join(prefix);
-        if search_dir.is_dir() {
-            for entry in std::fs::read_dir(&search_dir)? {
-                let entry = entry?;
-                let path = entry.path();
-                if path.is_dir() && path.join("Cargo.toml").exists() {
-                    results.push(path);
-                }
-            }
-        } else {
-            debug!(
-                search_dir = %search_dir.display(),
-                pattern = pattern,
-                "Glob pattern search directory does not exist"
-            );
-        }
-    } else {
+    let prefix = pattern.strip_suffix("/*").ok_or_else(|| {
         warn!(
             pattern = pattern,
             "Unsupported glob pattern, only 'prefix/*' supported"
+        );
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("Unsupported glob pattern: {pattern}"),
+        )
+    })?;
+
+    let search_dir = workspace_root.join(prefix);
+    if search_dir.is_dir() {
+        for entry in std::fs::read_dir(&search_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() && path.join("Cargo.toml").exists() {
+                results.push(path);
+            }
+        }
+    } else {
+        debug!(
+            search_dir = %search_dir.display(),
+            pattern = pattern,
+            "Glob pattern search directory does not exist"
         );
     }
 

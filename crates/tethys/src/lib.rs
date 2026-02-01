@@ -92,6 +92,7 @@ pub struct Tethys {
     db_path: PathBuf,
     db: Index,
     parser: tree_sitter::Parser,
+    crates: Vec<CrateInfo>,
 }
 
 // Note: `# Errors` docs deferred to avoid documentation churn during active development.
@@ -119,12 +120,14 @@ impl Tethys {
         let db = Index::open(&db_path)?;
 
         let parser = tree_sitter::Parser::new();
+        let crates = cargo::discover_crates(&workspace_root);
 
         Ok(Self {
             workspace_root,
             db_path,
             db,
             parser,
+            crates,
         })
     }
 
@@ -2837,6 +2840,49 @@ impl Tethys {
             max_depth,
             direction: types::ReachabilityDirection::Backward,
         })
+    }
+
+    // === Crate Resolution ===
+
+    /// Get all discovered crates in this workspace.
+    pub fn crates(&self) -> &[CrateInfo] {
+        &self.crates
+    }
+
+    /// Find the crate that contains a given file path.
+    ///
+    /// Returns the crate whose `path` is a prefix of the given file path.
+    /// For workspaces with multiple crates, this finds the most specific match
+    /// (longest path). This handles nested crate structures where a file could
+    /// technically be under multiple crate directories.
+    ///
+    /// Returns `None` if the file path cannot be canonicalized or is not under
+    /// any discovered crate.
+    pub fn get_crate_for_file(&self, file_path: &Path) -> Option<&CrateInfo> {
+        let file_path = match file_path.canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                debug!(
+                    path = %file_path.display(),
+                    error = %e,
+                    "Failed to canonicalize path for crate lookup"
+                );
+                return None;
+            }
+        };
+
+        self.crates
+            .iter()
+            .filter(|c| file_path.starts_with(&c.path))
+            .max_by_key(|c| c.path.components().count())
+    }
+
+    /// Get the crate root directory for a given file path.
+    ///
+    /// This is a convenience method that returns just the path component
+    /// of the containing crate.
+    pub fn get_crate_root_for_file(&self, file_path: &Path) -> Option<&Path> {
+        self.get_crate_for_file(file_path).map(|c| c.path.as_path())
     }
 
     // === Database ===

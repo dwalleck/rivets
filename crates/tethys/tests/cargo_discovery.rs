@@ -328,7 +328,7 @@ edition = "2021"
 }
 
 #[test]
-fn discover_ignores_unsupported_glob_patterns() {
+fn discover_handles_unsupported_glob_patterns_gracefully() {
     let dir = TempDir::new().expect("create temp dir");
 
     fs::write(
@@ -336,14 +336,18 @@ fn discover_ignores_unsupported_glob_patterns() {
         r#"
 [workspace]
 members = ["crates/**/*"]
-"#, // Unsupported double-star pattern
+"#,
     )
     .expect("write Cargo.toml");
 
     let crates = tethys::discover_crates(dir.path());
 
-    // Should gracefully return empty (or whatever exists), not panic
-    assert!(crates.is_empty());
+    // Unsupported patterns return an error which is logged and skipped,
+    // resulting in empty crates (no panic, no false positives)
+    assert!(
+        crates.is_empty(),
+        "unsupported glob pattern should be skipped gracefully"
+    );
 }
 
 // === Integration Tests with Real Workspace ===
@@ -387,4 +391,255 @@ fn discover_rivets_workspace() {
         .find(|c| c.name == "tethys")
         .expect("tethys crate should exist");
     assert_eq!(tethys_crate.lib_path, Some(PathBuf::from("src/lib.rs")));
+}
+
+// === Tethys Integration Tests ===
+
+#[test]
+fn tethys_crates_accessor_returns_discovered_crates() {
+    let dir = TempDir::new().expect("create temp dir");
+
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        r#"
+[package]
+name = "test_crate"
+version = "0.1.0"
+edition = "2021"
+"#,
+    )
+    .expect("write Cargo.toml");
+
+    fs::create_dir_all(dir.path().join("src")).expect("create src dir");
+    fs::write(dir.path().join("src/lib.rs"), "// lib").expect("write lib.rs");
+
+    // Create .rivets/index directory for Tethys database
+    fs::create_dir_all(dir.path().join(".rivets/index")).expect("create .rivets/index");
+
+    let tethys = tethys::Tethys::new(dir.path()).expect("create Tethys instance");
+    let crates = tethys.crates();
+
+    assert_eq!(crates.len(), 1, "should discover one crate");
+    assert_eq!(crates[0].name, "test_crate");
+}
+
+#[test]
+fn get_crate_for_file_finds_correct_crate() {
+    let dir = TempDir::new().expect("create temp dir");
+
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        r#"
+[package]
+name = "my_crate"
+version = "0.1.0"
+edition = "2021"
+"#,
+    )
+    .expect("write Cargo.toml");
+
+    fs::create_dir_all(dir.path().join("src")).expect("create src dir");
+    fs::write(dir.path().join("src/lib.rs"), "// lib").expect("write lib.rs");
+    fs::create_dir_all(dir.path().join(".rivets/index")).expect("create .rivets/index");
+
+    let tethys = tethys::Tethys::new(dir.path()).expect("create Tethys instance");
+
+    let lib_file = dir.path().join("src/lib.rs");
+    let found_crate = tethys
+        .get_crate_for_file(&lib_file)
+        .expect("should find crate for lib.rs");
+
+    assert_eq!(found_crate.name, "my_crate");
+}
+
+#[test]
+fn get_crate_for_file_returns_none_for_file_outside_workspace() {
+    let dir = TempDir::new().expect("create temp dir");
+
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        r#"
+[package]
+name = "my_crate"
+version = "0.1.0"
+edition = "2021"
+"#,
+    )
+    .expect("write Cargo.toml");
+
+    fs::create_dir_all(dir.path().join("src")).expect("create src dir");
+    fs::write(dir.path().join("src/lib.rs"), "// lib").expect("write lib.rs");
+    fs::create_dir_all(dir.path().join(".rivets/index")).expect("create .rivets/index");
+
+    let tethys = tethys::Tethys::new(dir.path()).expect("create Tethys instance");
+
+    // Use a file path outside the workspace
+    let outside_file = PathBuf::from("/tmp/some_random_file.rs");
+    let result = tethys.get_crate_for_file(&outside_file);
+
+    assert!(
+        result.is_none(),
+        "should return None for file outside workspace"
+    );
+}
+
+#[test]
+fn get_crate_for_file_prefers_most_specific_match() {
+    let dir = TempDir::new().expect("create temp dir");
+
+    // Create workspace with nested crates
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        r#"
+[workspace]
+members = ["outer", "outer/inner"]
+"#,
+    )
+    .expect("write workspace Cargo.toml");
+
+    // Outer crate
+    let outer = dir.path().join("outer");
+    fs::create_dir_all(outer.join("src")).expect("create outer src");
+    fs::write(
+        outer.join("Cargo.toml"),
+        r#"
+[package]
+name = "outer"
+version = "0.1.0"
+edition = "2021"
+"#,
+    )
+    .expect("write outer Cargo.toml");
+    fs::write(outer.join("src/lib.rs"), "// outer lib").expect("write outer lib.rs");
+
+    // Inner crate (nested inside outer)
+    let inner = outer.join("inner");
+    fs::create_dir_all(inner.join("src")).expect("create inner src");
+    fs::write(
+        inner.join("Cargo.toml"),
+        r#"
+[package]
+name = "inner"
+version = "0.1.0"
+edition = "2021"
+"#,
+    )
+    .expect("write inner Cargo.toml");
+    fs::write(inner.join("src/lib.rs"), "// inner lib").expect("write inner lib.rs");
+
+    fs::create_dir_all(dir.path().join(".rivets/index")).expect("create .rivets/index");
+
+    let tethys = tethys::Tethys::new(dir.path()).expect("create Tethys instance");
+
+    // File in inner crate should match inner, not outer
+    let inner_file = inner.join("src/lib.rs");
+    let found_crate = tethys
+        .get_crate_for_file(&inner_file)
+        .expect("should find crate for inner lib.rs");
+
+    assert_eq!(
+        found_crate.name, "inner",
+        "should prefer more specific (inner) crate over outer"
+    );
+}
+
+#[test]
+fn get_crate_root_for_file_returns_crate_path() {
+    let dir = TempDir::new().expect("create temp dir");
+
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        r#"
+[package]
+name = "my_crate"
+version = "0.1.0"
+edition = "2021"
+"#,
+    )
+    .expect("write Cargo.toml");
+
+    fs::create_dir_all(dir.path().join("src")).expect("create src dir");
+    fs::write(dir.path().join("src/lib.rs"), "// lib").expect("write lib.rs");
+    fs::create_dir_all(dir.path().join(".rivets/index")).expect("create .rivets/index");
+
+    let tethys = tethys::Tethys::new(dir.path()).expect("create Tethys instance");
+
+    let lib_file = dir.path().join("src/lib.rs");
+    let crate_root = tethys
+        .get_crate_root_for_file(&lib_file)
+        .expect("should find crate root");
+
+    // The crate root should be the canonical path of the temp dir
+    let expected_root = dir.path().canonicalize().expect("canonicalize temp dir");
+    assert_eq!(crate_root, expected_root);
+}
+
+#[test]
+fn discover_crate_with_bin_without_explicit_path() {
+    let dir = TempDir::new().expect("create temp dir");
+
+    // [[bin]] with name but no path - should use src/bin/{name}.rs convention
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        r#"
+[package]
+name = "my_cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "my_tool"
+"#,
+    )
+    .expect("write Cargo.toml");
+
+    // Create the conventional binary location
+    fs::create_dir_all(dir.path().join("src/bin")).expect("create src/bin");
+    fs::write(dir.path().join("src/bin/my_tool.rs"), "fn main() {}").expect("write my_tool.rs");
+
+    let crates = tethys::discover_crates(dir.path());
+
+    assert_eq!(crates.len(), 1, "should discover one crate");
+    assert_eq!(crates[0].bin_paths.len(), 1, "should have one binary");
+    assert_eq!(
+        crates[0].bin_paths[0].0, "my_tool",
+        "binary name should be my_tool"
+    );
+    assert_eq!(
+        crates[0].bin_paths[0].1,
+        PathBuf::from("src/bin/my_tool.rs"),
+        "binary path should use default convention"
+    );
+}
+
+#[test]
+fn discover_crate_with_bin_name_defaults_to_package_name() {
+    let dir = TempDir::new().expect("create temp dir");
+
+    // [[bin]] with neither name nor path - should use package name
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        r#"
+[package]
+name = "my_app"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+path = "src/main.rs"
+"#,
+    )
+    .expect("write Cargo.toml");
+
+    fs::create_dir_all(dir.path().join("src")).expect("create src");
+    fs::write(dir.path().join("src/main.rs"), "fn main() {}").expect("write main.rs");
+
+    let crates = tethys::discover_crates(dir.path());
+
+    assert_eq!(crates.len(), 1, "should discover one crate");
+    assert_eq!(crates[0].bin_paths.len(), 1, "should have one binary");
+    assert_eq!(
+        crates[0].bin_paths[0].0, "my_app",
+        "binary name should default to package name"
+    );
 }
