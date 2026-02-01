@@ -177,6 +177,138 @@ fn parse_crate_from_manifest(crate_path: &Path, manifest: &Manifest) -> Option<C
     })
 }
 
+/// Compute the Rust module path for a file within a crate.
+///
+/// Given a file path and crate info, computes the module path that would be used
+/// to reference items in that file (e.g., `crate::db::query` for `src/db/query.rs`).
+///
+/// Returns `None` if the file is not within the crate's module tree
+/// (e.g., examples, benches, tests, or files outside the src directory).
+///
+/// # Module Path Rules
+///
+/// - Library files use `crate` as the root prefix
+/// - Binary files use the binary name (with hyphens converted to underscores)
+/// - `lib.rs` and `main.rs` map to just the prefix (no additional segments)
+/// - `mod.rs` files use the parent directory name as their module
+/// - Regular `.rs` files use their file stem as the module name
+///
+/// # Examples
+///
+/// | File Path | Module Path |
+/// |-----------|-------------|
+/// | `src/lib.rs` | `crate` |
+/// | `src/main.rs` | `{crate_name}` |
+/// | `src/db.rs` | `crate::db` |
+/// | `src/db/mod.rs` | `crate::db` |
+/// | `src/db/query.rs` | `crate::db::query` |
+/// | `src/bin/cli/main.rs` | `cli` |
+/// | `examples/demo.rs` | `None` |
+pub fn compute_module_path(file_path: &Path, crate_info: &CrateInfo) -> Option<String> {
+    // Determine if this file belongs to the library or a binary
+    let (entry_dir, prefix) = determine_entry_point(file_path, crate_info)?;
+
+    // Get path relative to the entry directory (e.g., src/)
+    let relative = file_path.strip_prefix(&entry_dir).ok()?;
+
+    // Build module segments starting with the prefix
+    let mut segments = vec![prefix];
+
+    // Add directory components (the path between src/ and the file)
+    if let Some(parent) = relative.parent() {
+        for component in parent.components() {
+            if let std::path::Component::Normal(name) = component {
+                segments.push(name.to_str()?.to_string());
+            }
+        }
+    }
+
+    // Handle the file name based on module style
+    let file_stem = file_path.file_stem()?.to_str()?;
+    match file_stem {
+        // Entry points don't add a segment - they ARE the module
+        "mod" | "lib" | "main" => {}
+        // Regular files add their stem as a module segment
+        _ => segments.push(file_stem.to_string()),
+    }
+
+    Some(segments.join("::"))
+}
+
+/// Determine the entry point directory and module prefix for a file.
+///
+/// Returns `(entry_directory, prefix)` where:
+/// - `entry_directory` is the parent of lib.rs/main.rs (typically `src/`)
+/// - `prefix` is `"crate"` for libraries or the binary name for binaries
+///
+/// Returns `None` if the file is not under any recognized entry point.
+///
+/// Priority logic:
+/// 1. If file IS a binary entry point (exact match), use that binary
+/// 2. If file is under a binary's unique directory (not shared with lib), use that binary
+/// 3. Otherwise, use the library if available
+fn determine_entry_point(file_path: &Path, crate_info: &CrateInfo) -> Option<(PathBuf, String)> {
+    let lib_entry_dir = crate_info.lib_path.as_ref().and_then(|lib_path| {
+        let lib_full = crate_info.path.join(lib_path);
+        lib_full.parent().map(Path::to_path_buf)
+    });
+
+    // Check each binary
+    for (bin_name, bin_path) in &crate_info.bin_paths {
+        let bin_full = crate_info.path.join(bin_path);
+        let bin_entry_dir = bin_full.parent()?;
+
+        // Case 1: File is exactly the binary entry point
+        if file_path == bin_full {
+            let prefix = bin_name.replace('-', "_");
+            return Some((bin_entry_dir.to_path_buf(), prefix));
+        }
+
+        // Case 2: File is under a binary-specific directory (different from lib)
+        // This handles src/bin/cli/ structure
+        if file_path.starts_with(bin_entry_dir) {
+            // Only use binary if its entry dir is more specific than lib's
+            let bin_is_more_specific = lib_entry_dir.as_ref().is_none_or(|lib_dir| {
+                bin_entry_dir.components().count() > lib_dir.components().count()
+            });
+
+            if bin_is_more_specific {
+                let prefix = bin_name.replace('-', "_");
+                return Some((bin_entry_dir.to_path_buf(), prefix));
+            }
+        }
+    }
+
+    // Fall back to library
+    if let Some(lib_dir) = lib_entry_dir {
+        if file_path.starts_with(&lib_dir) {
+            return Some((lib_dir, "crate".to_string()));
+        }
+    }
+
+    // Check binaries with same depth as lib (e.g., src/main.rs when lib is src/lib.rs)
+    // These are only used for files NOT already matched by library
+    for (bin_name, bin_path) in &crate_info.bin_paths {
+        let bin_full = crate_info.path.join(bin_path);
+        let bin_entry_dir = bin_full.parent()?;
+        if file_path.starts_with(bin_entry_dir) {
+            let prefix = bin_name.replace('-', "_");
+            return Some((bin_entry_dir.to_path_buf(), prefix));
+        }
+    }
+
+    None
+}
+
+/// Find which crate a file belongs to.
+///
+/// Returns a reference to the `CrateInfo` whose path is a prefix of the file path.
+/// Returns `None` if the file is not within any known crate.
+#[must_use]
+pub fn get_crate_for_file<'a>(file_path: &Path, crates: &'a [CrateInfo]) -> Option<&'a CrateInfo> {
+    crates.iter().find(|c| file_path.starts_with(&c.path))
+}
+
 /// Expand a simple glob pattern to matching directories.
 ///
 /// Only supports `prefix/*` patterns (e.g., `"crates/*"`). Full glob support
@@ -225,6 +357,7 @@ fn glob_member(workspace_root: &Path, pattern: &str) -> std::io::Result<Vec<Path
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     #[test]
     fn glob_member_expands_simple_pattern() {
@@ -240,5 +373,138 @@ mod tests {
         // Should find at least tethys
         assert!(!results.is_empty());
         assert!(results.iter().any(|p| p.ends_with("tethys")));
+    }
+
+    // Helper to create CrateInfo for tests
+    fn make_crate_info(name: &str, path: PathBuf, lib_path: Option<&str>) -> CrateInfo {
+        CrateInfo {
+            name: name.to_string(),
+            path,
+            lib_path: lib_path.map(PathBuf::from),
+            bin_paths: Vec::new(),
+        }
+    }
+
+    fn make_crate_info_with_bins(
+        name: &str,
+        path: PathBuf,
+        lib_path: Option<&str>,
+        bin_paths: Vec<(&str, &str)>,
+    ) -> CrateInfo {
+        CrateInfo {
+            name: name.to_string(),
+            path,
+            lib_path: lib_path.map(PathBuf::from),
+            bin_paths: bin_paths
+                .into_iter()
+                .map(|(n, p)| (n.to_string(), PathBuf::from(p)))
+                .collect(),
+        }
+    }
+
+    #[rstest]
+    #[case::lib_rs("/workspace/my-crate/src/lib.rs", "crate")]
+    #[case::main_rs("/workspace/my-crate/src/main.rs", "my_crate")]
+    #[case::nested_module("/workspace/my-crate/src/db/query.rs", "crate::db::query")]
+    #[case::mod_rs_style("/workspace/my-crate/src/db/mod.rs", "crate::db")]
+    #[case::deeply_nested("/workspace/my-crate/src/a/b/c/d.rs", "crate::a::b::c::d")]
+    fn compute_module_path_lib_crate(#[case] file_path: &str, #[case] expected: &str) {
+        let crate_info = make_crate_info_with_bins(
+            "my-crate",
+            PathBuf::from("/workspace/my-crate"),
+            Some("src/lib.rs"),
+            vec![("my-crate", "src/main.rs")],
+        );
+
+        let result = compute_module_path(Path::new(file_path), &crate_info);
+        assert_eq!(result, Some(expected.to_string()));
+    }
+
+    #[rstest]
+    #[case::bin_main("/workspace/my-crate/src/bin/cli/main.rs", "cli", "cli")]
+    #[case::bin_submodule("/workspace/my-crate/src/bin/cli/commands.rs", "cli", "cli::commands")]
+    #[case::bin_nested("/workspace/my-crate/src/bin/cli/cmd/list.rs", "cli", "cli::cmd::list")]
+    fn compute_module_path_binary(
+        #[case] file_path: &str,
+        #[case] bin_name: &str,
+        #[case] expected: &str,
+    ) {
+        let crate_info = make_crate_info_with_bins(
+            "my-crate",
+            PathBuf::from("/workspace/my-crate"),
+            Some("src/lib.rs"),
+            vec![(bin_name, &format!("src/bin/{bin_name}/main.rs"))],
+        );
+
+        let result = compute_module_path(Path::new(file_path), &crate_info);
+        assert_eq!(result, Some(expected.to_string()));
+    }
+
+    #[test]
+    fn compute_module_path_hyphenated_crate_name() {
+        // Hyphens in crate names become underscores in module paths
+        let crate_info = make_crate_info_with_bins(
+            "my-cool-crate",
+            PathBuf::from("/workspace/my-cool-crate"),
+            None,
+            vec![("my-cool-crate", "src/main.rs")],
+        );
+
+        let result = compute_module_path(
+            Path::new("/workspace/my-cool-crate/src/main.rs"),
+            &crate_info,
+        );
+        assert_eq!(result, Some("my_cool_crate".to_string()));
+    }
+
+    #[rstest]
+    #[case::examples("/workspace/my-crate/examples/demo.rs")]
+    #[case::benches("/workspace/my-crate/benches/perf.rs")]
+    #[case::tests("/workspace/my-crate/tests/integration.rs")]
+    #[case::outside_src("/workspace/my-crate/build.rs")]
+    fn compute_module_path_returns_none_outside_module_tree(#[case] file_path: &str) {
+        let crate_info = make_crate_info(
+            "my-crate",
+            PathBuf::from("/workspace/my-crate"),
+            Some("src/lib.rs"),
+        );
+
+        let result = compute_module_path(Path::new(file_path), &crate_info);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn get_crate_for_file_finds_matching_crate() {
+        let crates = vec![
+            CrateInfo {
+                name: "crate_a".to_string(),
+                path: PathBuf::from("/workspace/crates/a"),
+                lib_path: Some(PathBuf::from("src/lib.rs")),
+                bin_paths: vec![],
+            },
+            CrateInfo {
+                name: "crate_b".to_string(),
+                path: PathBuf::from("/workspace/crates/b"),
+                lib_path: Some(PathBuf::from("src/lib.rs")),
+                bin_paths: vec![],
+            },
+        ];
+
+        let result = get_crate_for_file(Path::new("/workspace/crates/b/src/lib.rs"), &crates);
+        assert!(result.is_some(), "should find matching crate");
+        assert_eq!(result.expect("already checked").name, "crate_b");
+    }
+
+    #[test]
+    fn get_crate_for_file_returns_none_for_no_match() {
+        let crates = vec![CrateInfo {
+            name: "my_crate".to_string(),
+            path: PathBuf::from("/workspace/my_crate"),
+            lib_path: Some(PathBuf::from("src/lib.rs")),
+            bin_paths: vec![],
+        }];
+
+        let result = get_crate_for_file(Path::new("/other/path/file.rs"), &crates);
+        assert!(result.is_none(), "should not find crate for unrelated path");
     }
 }

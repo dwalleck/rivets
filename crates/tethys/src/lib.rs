@@ -146,6 +146,21 @@ impl Tethys {
         Self::new(workspace_root)
     }
 
+    /// Compute the module path for a file in this workspace.
+    ///
+    /// Returns an empty string if the file is not part of any crate's module tree
+    /// (e.g., files in `examples/`, `benches/`, or outside any crate).
+    fn compute_module_path_for_file(&self, file_path: &Path) -> String {
+        // Canonicalize for consistent matching (CrateInfo paths are canonicalized)
+        let canonical = file_path
+            .canonicalize()
+            .unwrap_or_else(|_| file_path.to_path_buf());
+
+        cargo::get_crate_for_file(&canonical, &self.crates)
+            .and_then(|crate_info| cargo::compute_module_path(&canonical, crate_info))
+            .unwrap_or_default()
+    }
+
     // === Indexing ===
 
     /// Index all source files in the workspace.
@@ -628,12 +643,15 @@ impl Tethys {
             })
             .collect();
 
+        // Compute module path once for all symbols in this file
+        let module_path = self.compute_module_path_for_file(path);
+
         let symbol_data: Vec<SymbolData> = extracted
             .iter()
             .zip(qualified_names.iter())
             .map(|(sym, qn)| SymbolData {
                 name: &sym.name,
-                module_path: "", // TODO: compute module_path
+                module_path: &module_path,
                 qualified_name: qn,
                 kind: sym.kind,
                 line: sym.line,
