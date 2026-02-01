@@ -151,14 +151,43 @@ impl Tethys {
     /// Returns an empty string if the file is not part of any crate's module tree
     /// (e.g., files in `examples/`, `benches/`, or outside any crate).
     fn compute_module_path_for_file(&self, file_path: &Path) -> String {
-        // Canonicalize for consistent matching (CrateInfo paths are canonicalized)
-        let canonical = file_path
-            .canonicalize()
-            .unwrap_or_else(|_| file_path.to_path_buf());
+        let canonical = match file_path.canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                debug!(
+                    file = %file_path.display(),
+                    error = %e,
+                    "Failed to canonicalize path for module path computation, using original"
+                );
+                file_path.to_path_buf()
+            }
+        };
 
-        cargo::get_crate_for_file(&canonical, &self.crates)
-            .and_then(|crate_info| cargo::compute_module_path(&canonical, crate_info))
-            .unwrap_or_default()
+        let Some(crate_info) = cargo::get_crate_for_file(&canonical, &self.crates) else {
+            debug!(
+                file = %canonical.display(),
+                crate_count = self.crates.len(),
+                "File not within any known crate"
+            );
+            return String::new();
+        };
+
+        if let Some(module_path) = cargo::compute_module_path(&canonical, crate_info) {
+            trace!(
+                file = %canonical.display(),
+                crate_name = %crate_info.name,
+                module_path = %module_path,
+                "Computed module path"
+            );
+            module_path
+        } else {
+            debug!(
+                file = %canonical.display(),
+                crate_name = %crate_info.name,
+                "File is within crate but not in module tree (examples/benches/tests?)"
+            );
+            String::new()
+        }
     }
 
     // === Indexing ===
@@ -778,9 +807,13 @@ impl Tethys {
                 } else {
                     sym.name.clone()
                 };
+                // NOTE: module_path is left empty here because parse_file_static runs in
+                // parallel threads without access to the crate list. The module_path is
+                // computed later during write_parsed_file (batch mode) or post-indexing
+                // for streaming mode. Streaming mode currently does not populate module_path.
                 OwnedSymbolData::new(
                     sym.name.clone(),
-                    String::new(), // TODO: compute module_path
+                    String::new(),
                     qualified_name,
                     sym.kind,
                     sym.line,

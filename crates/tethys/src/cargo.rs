@@ -206,31 +206,43 @@ fn parse_crate_from_manifest(crate_path: &Path, manifest: &Manifest) -> Option<C
 /// | `examples/demo.rs` | `None` |
 #[must_use]
 pub fn compute_module_path(file_path: &Path, crate_info: &CrateInfo) -> Option<String> {
-    // Determine if this file belongs to the library or a binary
     let (entry_dir, prefix) = determine_entry_point(file_path, crate_info)?;
-
-    // Get path relative to the entry directory (e.g., src/)
     let relative = file_path.strip_prefix(&entry_dir).ok()?;
 
-    // Build module segments starting with the prefix
     let mut segments = vec![prefix];
 
-    // Add directory components (the path between src/ and the file)
     if let Some(parent) = relative.parent() {
         for component in parent.components() {
             if let std::path::Component::Normal(name) = component {
-                segments.push(name.to_str()?.to_string());
+                let Some(name_str) = name.to_str() else {
+                    debug!(
+                        file = %file_path.display(),
+                        component = ?name,
+                        "Path component is not valid UTF-8, cannot compute module path"
+                    );
+                    return None;
+                };
+                segments.push(name_str.to_string());
             }
         }
     }
 
-    // Handle the file name based on module style
-    let file_stem = file_path.file_stem()?.to_str()?;
-    match file_stem {
-        // Entry points don't add a segment - they ARE the module
+    let Some(file_stem) = file_path.file_stem() else {
+        debug!(file = %file_path.display(), "File has no stem");
+        return None;
+    };
+    let Some(file_stem_str) = file_stem.to_str() else {
+        debug!(
+            file = %file_path.display(),
+            stem = ?file_stem,
+            "File stem is not valid UTF-8"
+        );
+        return None;
+    };
+
+    match file_stem_str {
         "mod" | "lib" | "main" => {}
-        // Regular files add their stem as a module segment
-        _ => segments.push(file_stem.to_string()),
+        _ => segments.push(file_stem_str.to_string()),
     }
 
     Some(segments.join("::"))
@@ -244,31 +256,38 @@ pub fn compute_module_path(file_path: &Path, crate_info: &CrateInfo) -> Option<S
 ///
 /// Returns `None` if the file is not under any recognized entry point.
 ///
-/// Priority logic:
+/// ## Priority Logic
+///
 /// 1. If file IS a binary entry point (exact match), use that binary
-/// 2. If file is under a binary's unique directory (not shared with lib), use that binary
-/// 3. Otherwise, use the library if available
+/// 2. If file is under a binary's unique directory (deeper than lib's src/), use that binary
+/// 3. If file is under the library's src/ directory, use the library (`crate` prefix)
+/// 4. Fall back to any binary whose entry directory contains the file
+///
+/// This means for a crate with both `src/lib.rs` and `src/main.rs`, files in `src/`
+/// (other than `main.rs` itself) will use the library's `crate::` prefix.
 fn determine_entry_point(file_path: &Path, crate_info: &CrateInfo) -> Option<(PathBuf, String)> {
     let lib_entry_dir = crate_info.lib_path.as_ref().and_then(|lib_path| {
         let lib_full = crate_info.path.join(lib_path);
         lib_full.parent().map(Path::to_path_buf)
     });
 
-    // Check each binary
     for (bin_name, bin_path) in &crate_info.bin_paths {
         let bin_full = crate_info.path.join(bin_path);
-        let bin_entry_dir = bin_full.parent()?;
+        let Some(bin_entry_dir) = bin_full.parent() else {
+            debug!(
+                bin_name = %bin_name,
+                bin_path = %bin_path.display(),
+                "Binary path has no parent directory, skipping"
+            );
+            continue;
+        };
 
-        // Case 1: File is exactly the binary entry point
         if file_path == bin_full {
             let prefix = bin_name.replace('-', "_");
             return Some((bin_entry_dir.to_path_buf(), prefix));
         }
 
-        // Case 2: File is under a binary-specific directory (different from lib)
-        // This handles src/bin/cli/ structure
         if file_path.starts_with(bin_entry_dir) {
-            // Only use binary if its entry dir is more specific than lib's
             let bin_is_more_specific = lib_entry_dir.as_ref().is_none_or(|lib_dir| {
                 bin_entry_dir.components().count() > lib_dir.components().count()
             });
@@ -280,18 +299,17 @@ fn determine_entry_point(file_path: &Path, crate_info: &CrateInfo) -> Option<(Pa
         }
     }
 
-    // Fall back to library
     if let Some(lib_dir) = lib_entry_dir {
         if file_path.starts_with(&lib_dir) {
             return Some((lib_dir, "crate".to_string()));
         }
     }
 
-    // Check binaries with same depth as lib (e.g., src/main.rs when lib is src/lib.rs)
-    // These are only used for files NOT already matched by library
     for (bin_name, bin_path) in &crate_info.bin_paths {
         let bin_full = crate_info.path.join(bin_path);
-        let bin_entry_dir = bin_full.parent()?;
+        let Some(bin_entry_dir) = bin_full.parent() else {
+            continue;
+        };
         if file_path.starts_with(bin_entry_dir) {
             let prefix = bin_name.replace('-', "_");
             return Some((bin_entry_dir.to_path_buf(), prefix));
@@ -303,11 +321,15 @@ fn determine_entry_point(file_path: &Path, crate_info: &CrateInfo) -> Option<(Pa
 
 /// Find which crate a file belongs to.
 ///
-/// Returns a reference to the `CrateInfo` whose path is a prefix of the file path.
+/// Returns a reference to the `CrateInfo` whose path is the longest prefix of the file path.
+/// This handles overlapping crate paths correctly (e.g., `/workspace/crate` vs `/workspace/crate-utils`).
 /// Returns `None` if the file is not within any known crate.
 #[must_use]
 pub fn get_crate_for_file<'a>(file_path: &Path, crates: &'a [CrateInfo]) -> Option<&'a CrateInfo> {
-    crates.iter().find(|c| file_path.starts_with(&c.path))
+    crates
+        .iter()
+        .filter(|c| file_path.starts_with(&c.path))
+        .max_by_key(|c| c.path.components().count())
 }
 
 /// Expand a simple glob pattern to matching directories.
@@ -507,5 +529,85 @@ mod tests {
 
         let result = get_crate_for_file(Path::new("/other/path/file.rs"), &crates);
         assert!(result.is_none(), "should not find crate for unrelated path");
+    }
+
+    #[test]
+    fn get_crate_for_file_prefers_longest_prefix_match() {
+        let crates = vec![
+            CrateInfo {
+                name: "crate".to_string(),
+                path: PathBuf::from("/workspace/crate"),
+                lib_path: Some(PathBuf::from("src/lib.rs")),
+                bin_paths: vec![],
+            },
+            CrateInfo {
+                name: "crate-utils".to_string(),
+                path: PathBuf::from("/workspace/crate-utils"),
+                lib_path: Some(PathBuf::from("src/lib.rs")),
+                bin_paths: vec![],
+            },
+        ];
+
+        // File in crate-utils should match crate-utils, not crate
+        let result = get_crate_for_file(Path::new("/workspace/crate-utils/src/lib.rs"), &crates);
+        assert!(result.is_some(), "should find matching crate");
+        assert_eq!(
+            result.expect("already checked").name,
+            "crate-utils",
+            "should prefer longer path prefix"
+        );
+
+        // File in crate should still match crate
+        let result = get_crate_for_file(Path::new("/workspace/crate/src/lib.rs"), &crates);
+        assert!(result.is_some(), "should find matching crate");
+        assert_eq!(
+            result.expect("already checked").name,
+            "crate",
+            "should match exact prefix"
+        );
+    }
+
+    #[rstest]
+    #[case::shared_lib_rs("/workspace/my-crate/src/lib.rs", "crate")]
+    #[case::shared_main_rs("/workspace/my-crate/src/main.rs", "my_crate")]
+    #[case::shared_nested_from_lib("/workspace/my-crate/src/db.rs", "crate::db")]
+    #[case::shared_deeply_nested("/workspace/my-crate/src/db/query.rs", "crate::db::query")]
+    fn compute_module_path_shared_src_directory(#[case] file_path: &str, #[case] expected: &str) {
+        // Crate with both lib.rs and main.rs in src/ - lib takes priority for shared files
+        let crate_info = make_crate_info_with_bins(
+            "my-crate",
+            PathBuf::from("/workspace/my-crate"),
+            Some("src/lib.rs"),
+            vec![("my-crate", "src/main.rs")],
+        );
+
+        let result = compute_module_path(Path::new(file_path), &crate_info);
+        assert_eq!(
+            result,
+            Some(expected.to_string()),
+            "lib.rs should take priority for shared src/ directory files"
+        );
+    }
+
+    #[rstest]
+    #[case::bin_only_main("/workspace/my-bin/src/main.rs", "my_bin")]
+    #[case::bin_only_nested("/workspace/my-bin/src/commands.rs", "my_bin::commands")]
+    #[case::bin_only_deeply_nested("/workspace/my-bin/src/cli/args.rs", "my_bin::cli::args")]
+    #[case::bin_only_mod_rs("/workspace/my-bin/src/cli/mod.rs", "my_bin::cli")]
+    fn compute_module_path_binary_only_crate(#[case] file_path: &str, #[case] expected: &str) {
+        // Binary-only crate (no lib.rs)
+        let crate_info = make_crate_info_with_bins(
+            "my-bin",
+            PathBuf::from("/workspace/my-bin"),
+            None,
+            vec![("my-bin", "src/main.rs")],
+        );
+
+        let result = compute_module_path(Path::new(file_path), &crate_info);
+        assert_eq!(
+            result,
+            Some(expected.to_string()),
+            "binary-only crate should use binary name as module root"
+        );
     }
 }
