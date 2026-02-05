@@ -9,11 +9,11 @@
 //! ## Design
 //!
 //! - Traits define the operations (`SymbolGraphOps`, `FileGraphOps`)
-//! - SQL implementations use recursive CTEs for traversal
+//! - Implementations live on `db::Index` (see `db/graph.rs`) using recursive CTEs
 //! - Petgraph can be swapped in later for specific algorithms
 //!
-//! Some trait methods are intentionally kept for API completeness and future use,
-//! even if not currently consumed by the public Tethys API.
+//! Some trait methods are kept for API completeness even if not yet
+//! consumed by the public Tethys API.
 
 #![allow(dead_code)]
 
@@ -22,8 +22,6 @@ mod types;
 pub use types::{
     CallPath, CalleeInfo, CallerInfo, FileDepInfo, FileImpact, FilePath, SymbolImpact,
 };
-
-mod sql;
 
 use crate::error::Result;
 use crate::types::{Cycle, FileId, SymbolId};

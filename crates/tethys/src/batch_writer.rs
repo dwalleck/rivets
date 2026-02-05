@@ -46,8 +46,9 @@ use tracing::{debug, error, trace, warn};
 use crate::db::{Index, SymbolData};
 use crate::error::{Error, Result};
 use crate::languages::common::{ExtractedReference, ImportStatement};
+use crate::parallel::OwnedSymbolData;
 use crate::parallel::ParsedFileData;
-use crate::types::{FileId, Language, Span, Symbol, SymbolId};
+use crate::types::{FileId, Language, Span, SymbolId};
 
 /// Statistics about the batch writing process.
 #[derive(Debug, Default, Clone)]
@@ -229,8 +230,8 @@ impl BatchWriter {
         let symbol_data: Vec<SymbolData<'_>> =
             data.symbols.iter().map(|s| s.as_symbol_data()).collect();
 
-        // Insert file and symbols atomically
-        let file_id = db.index_file_atomic(
+        // Insert file and symbols atomically, capturing generated symbol IDs
+        let (file_id, symbol_ids) = db.index_file_atomic(
             &data.relative_path,
             data.language,
             data.mtime_ns,
@@ -239,9 +240,8 @@ impl BatchWriter {
             &symbol_data,
         )?;
 
-        // Get the inserted symbols for reference resolution
-        let stored_symbols = db.list_symbols_in_file(file_id)?;
-        let (name_to_id, span_to_id) = build_symbol_maps(&stored_symbols);
+        // Build lookup maps directly from input data + generated IDs
+        let (name_to_id, span_to_id) = build_symbol_maps_from_insert(&data.symbols, &symbol_ids);
 
         // Store references
         let refs_stored =
@@ -257,22 +257,28 @@ impl BatchWriter {
 // === Helper functions for write_single_file ===
 // These mirror the Tethys methods but operate on raw Index
 
-/// Build lookup maps from symbols for reference resolution.
-fn build_symbol_maps(symbols: &[Symbol]) -> (HashMap<String, SymbolId>, HashMap<Span, SymbolId>) {
+/// Build lookup maps from inserted symbols and their generated IDs.
+///
+/// Pairs each `OwnedSymbolData` with its corresponding `SymbolId` from the
+/// database insert, avoiding a round-trip query to read symbols back.
+fn build_symbol_maps_from_insert(
+    symbols: &[OwnedSymbolData],
+    symbol_ids: &[SymbolId],
+) -> (HashMap<String, SymbolId>, HashMap<Span, SymbolId>) {
     let mut name_to_id: HashMap<String, SymbolId> = HashMap::new();
     let mut span_to_id: HashMap<Span, SymbolId> = HashMap::new();
 
-    for sym in symbols {
-        if let Some(_prev_id) = name_to_id.insert(sym.name.clone(), sym.id) {
+    for (sym, &id) in symbols.iter().zip(symbol_ids) {
+        if let Some(_prev_id) = name_to_id.insert(sym.name.clone(), id) {
             trace!(
                 name = %sym.name,
-                id = %sym.id,
+                id = %id,
                 "Duplicate symbol name in file, using newer"
             );
         }
 
         if let Some(span) = sym.span {
-            span_to_id.insert(span, sym.id);
+            span_to_id.insert(span, id);
         }
     }
 

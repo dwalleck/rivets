@@ -694,7 +694,7 @@ impl Tethys {
             .collect();
 
         // Store in database atomically
-        let file_id = self.db.index_file_atomic(
+        let (file_id, symbol_ids) = self.db.index_file_atomic(
             self.relative_path(path),
             language,
             mtime_ns,
@@ -703,9 +703,8 @@ impl Tethys {
             &symbol_data,
         )?;
 
-        // Build lookup maps for reference insertion
-        let stored_symbols = self.db.list_symbols_in_file(file_id)?;
-        let (name_to_id, span_to_id) = Self::build_symbol_maps(&stored_symbols);
+        // Build lookup maps from inserted data + generated IDs (no DB round-trip)
+        let (name_to_id, span_to_id) = Self::build_symbol_maps_from_data(&symbol_data, &symbol_ids);
 
         // Store references for resolvable symbols
         let refs_stored = self.store_references(file_id, &refs, &name_to_id, &span_to_id)?;
@@ -877,7 +876,7 @@ impl Tethys {
             .collect();
 
         // Insert file and symbols atomically
-        let file_id = self.db.index_file_atomic(
+        let (file_id, symbol_ids) = self.db.index_file_atomic(
             &data.relative_path,
             data.language,
             data.mtime_ns,
@@ -886,9 +885,8 @@ impl Tethys {
             &symbol_data,
         )?;
 
-        // Get the inserted symbols for reference resolution
-        let stored_symbols = self.db.list_symbols_in_file(file_id)?;
-        let (name_to_id, span_to_id) = Self::build_symbol_maps(&stored_symbols);
+        // Build lookup maps from inserted data + generated IDs (no DB round-trip)
+        let (name_to_id, span_to_id) = Self::build_symbol_maps_from_data(&symbol_data, &symbol_ids);
 
         // Store references
         let refs_stored =
@@ -909,29 +907,29 @@ impl Tethys {
         Ok((data.symbols.len(), refs_stored))
     }
 
-    /// Build lookup maps from symbols for reference resolution.
+    /// Build lookup maps from inserted symbol data and their generated IDs.
     ///
-    /// Returns (`name -> id`, `span -> id`) maps.
-    fn build_symbol_maps(
-        symbols: &[Symbol],
+    /// Pairs each `SymbolData` with its corresponding `SymbolId` returned by
+    /// `index_file_atomic`, avoiding a round-trip query to read symbols back.
+    fn build_symbol_maps_from_data(
+        symbols: &[SymbolData<'_>],
+        symbol_ids: &[SymbolId],
     ) -> (HashMap<String, SymbolId>, HashMap<Span, SymbolId>) {
         let mut name_to_id: HashMap<String, SymbolId> = HashMap::new();
         let mut span_to_id: HashMap<Span, SymbolId> = HashMap::new();
 
-        for sym in symbols {
-            // Map name to ID (log if duplicate, last one wins)
-            if let Some(prev_id) = name_to_id.insert(sym.name.clone(), sym.id) {
+        for (sym, &id) in symbols.iter().zip(symbol_ids) {
+            if let Some(prev_id) = name_to_id.insert(sym.name.to_string(), id) {
                 trace!(
                     name = %sym.name,
-                    new_id = %sym.id,
+                    new_id = %id,
                     prev_id = %prev_id,
                     "Duplicate symbol name in file, using newer"
                 );
             }
 
-            // Map span to ID for containing symbol resolution
             if let Some(span) = sym.span {
-                span_to_id.insert(span, sym.id);
+                span_to_id.insert(span, id);
             }
         }
 

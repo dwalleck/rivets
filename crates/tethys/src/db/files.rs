@@ -22,7 +22,9 @@ impl Index {
         size_bytes: u64,
         content_hash: Option<u64>,
     ) -> Result<FileId> {
-        self.index_file_atomic(path, language, mtime_ns, size_bytes, content_hash, &[])
+        let (file_id, _symbol_ids) =
+            self.index_file_atomic(path, language, mtime_ns, size_bytes, content_hash, &[])?;
+        Ok(file_id)
     }
 
     /// Get a file by path.
@@ -66,6 +68,10 @@ impl Index {
 
     /// Atomically index a file with all its symbols in a transaction.
     ///
+    /// Returns the file ID and the generated `SymbolId` for each inserted symbol,
+    /// in the same order as the input `symbols` slice. This avoids a separate
+    /// query to retrieve symbol IDs after insertion.
+    ///
     /// This ensures that either the file and all symbols are stored, or nothing is.
     /// If any operation fails, the entire transaction is rolled back.
     pub fn index_file_atomic(
@@ -76,7 +82,7 @@ impl Index {
         size_bytes: u64,
         content_hash: Option<u64>,
         symbols: &[SymbolData],
-    ) -> Result<FileId> {
+    ) -> Result<(FileId, Vec<SymbolId>)> {
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
 
@@ -126,7 +132,8 @@ impl Index {
             tx.last_insert_rowid()
         };
 
-        // Insert all symbols
+        // Insert all symbols, capturing generated IDs
+        let mut symbol_ids = Vec::with_capacity(symbols.len());
         for sym in symbols {
             tx.execute(
                 "INSERT INTO symbols (file_id, name, module_path, qualified_name, kind, line, column,
@@ -148,10 +155,11 @@ impl Index {
                     sym.is_test
                 ],
             )?;
+            symbol_ids.push(SymbolId::from(tx.last_insert_rowid()));
         }
 
         tx.commit()?;
-        Ok(FileId::from(file_id))
+        Ok((FileId::from(file_id), symbol_ids))
     }
 
     /// Get all files of a specific language.
