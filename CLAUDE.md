@@ -2,8 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**BEFORE ANYTHING ELSE: run 'bd onboard' and follow the instructions**
-**✓ bd is ready! Use 'bd ready' to see available work.**
+**Use `rivets ready` to see available work, `rivets list` to see all issues.**
 
 ## Project Overview
 
@@ -11,12 +10,63 @@ Rivets is a Rust implementation of the Beads project tracking system. This is a 
 
 ## Work Tracking
 
-This project uses Beads (bd) for issue tracking instead of Markdown or external tools. The MCP beads server is available and should be used for all task management.
+This project uses rivets for issue tracking (dogfooding our own tool). Issues are stored in `.rivets/issues.jsonl`.
 
-- Use the beads MCP tools to list, create, update, and manage issues
-- Before any write operations with beads tools, call `set_context` with the workspace root
-- Check `beads://quickstart` resource for detailed usage instructions
-- The main tracking issue is `rivets-cr9` which outlines the conversion from beads (original) to rivets (Rust implementation)
+### Quick Reference
+
+```bash
+rivets ready              # Show issues ready to work on (no blockers)
+rivets list               # List all open issues
+rivets list --status closed --limit 10  # Recent closed issues
+rivets show <id>          # Full issue details with dependencies
+rivets stats              # Project statistics
+rivets blocked            # Show issues blocked by dependencies
+```
+
+### Working on Issues
+
+```bash
+# 1. Find work
+rivets ready --limit 5
+
+# 2. View issue details
+rivets show rivets-xyz
+
+# 3. Update status when starting
+rivets update rivets-xyz --status in_progress
+
+# 4. Close when done
+rivets close rivets-xyz --reason "Implemented in commit abc123"
+```
+
+### Creating Issues
+
+```bash
+# Basic issue
+rivets create --title "Fix the bug" --type bug --priority 2
+
+# Full issue with design notes
+rivets create \
+  --title "Add new feature" \
+  --type feature \
+  --priority 2 \
+  --description "Detailed description here" \
+  --design "Implementation approach" \
+  --acceptance "- [ ] Criterion 1\n- [ ] Criterion 2"
+```
+
+### Managing Dependencies
+
+```bash
+# Add dependency (issue-a blocks issue-b)
+rivets dep add issue-a issue-b --type blocks
+
+# View dependency tree
+rivets dep tree issue-id
+
+# See what's blocking an issue
+rivets show issue-id  # Shows dependencies section
+```
 
 ## Development Commands
 
@@ -76,7 +126,7 @@ refactor(mcp): simplify tool registration
 
 > **Note**: This section will be populated as the codebase architecture is designed and implemented.
 
-The project is currently in the research and planning phase. Architectural decisions should be tracked as beads issues with design notes and acceptance criteria.
+The project is currently in the research and planning phase. Architectural decisions should be tracked as rivets issues with design notes and acceptance criteria.
 
 ## Extended Guidelines (from GitHub Awesome Copilot)
 
