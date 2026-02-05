@@ -1,0 +1,4 @@
+issue-prefix: rivets
+storage:
+  backend: jsonl
+  data_file: .rivets/issues.jsonl
