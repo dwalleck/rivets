@@ -656,18 +656,43 @@ fn build_dependencies_l2(
 
 For ambiguous cases that tree-sitter can't resolve, Tethys queries the LSP server (rust-analyzer, OmniSharp, etc.) that already has a complete semantic model. This is delegation, not reimplementation.
 
+#### Related Work: Serena/multilspy
+
+[Serena](https://github.com/oraios/serena) is a coding agent toolkit that provides similar semantic code tools. It uses [multilspy](https://github.com/microsoft/multilspy) (Microsoft's Python LSP wrapper) for all semantic queries. Key differences:
+
+| Aspect | Tethys | Serena |
+|--------|--------|--------|
+| **When to call LSP** | Only ambiguous cases | Every semantic query |
+| **Caching** | SQLite persistence | None |
+| **Speed** | Fast (tree-sitter first) | Slower (LSP always) |
+| **Offline support** | Yes (L1+L2) | No |
+
+Tethys's selective refinement approach provides better performance while achieving comparable accuracy for most queries.
+
+#### Ambiguous Reference Detection
+
 ```rust
 /// Cases where tree-sitter can't determine the dependency
 #[derive(Debug)]
 enum AmbiguousRef {
     /// Method call on unknown type: `x.foo()`
-    MethodCall { receiver: String, method: String, line: u32 },
+    MethodCall { receiver: String, method: String, line: u32, column: u32 },
 
     /// Trait method could come from multiple traits
-    TraitMethod { method: String, line: u32 },
+    TraitMethod { method: String, line: u32, column: u32 },
 
     /// Fully qualified path without use statement
-    QualifiedPath { path: String, line: u32 },
+    QualifiedPath { path: String, line: u32, column: u32 },
+}
+
+impl AmbiguousRef {
+    fn position(&self) -> (u32, u32) {
+        match self {
+            Self::MethodCall { line, column, .. } => (*line, *column),
+            Self::TraitMethod { line, column, .. } => (*line, *column),
+            Self::QualifiedPath { line, column, .. } => (*line, *column),
+        }
+    }
 }
 
 /// Identify references that need LSP to resolve
@@ -677,51 +702,320 @@ fn find_ambiguous_refs(
     content: &[u8],
     origin_map: &SymbolOriginMap,
 ) -> Vec<AmbiguousRef>;
+```
 
-/// Minimal LSP client for dependency resolution
+#### LSP Client Implementation
+
+Uses the `lsp-types` crate for protocol types - no hand-rolling LSP structs.
+
+```rust
+use lsp_types::{
+    // Initialization
+    InitializeParams, InitializeResult, InitializedParams,
+    ClientCapabilities, ServerCapabilities, WorkspaceFolder,
+    // Requests
+    GotoDefinitionParams, GotoDefinitionResponse,
+    ReferenceParams, ReferenceContext,
+    TextDocumentIdentifier, TextDocumentPositionParams, Position,
+    // Responses
+    Location, LocationLink, Url,
+    // Request traits
+    request::{GotoDefinition, References, Initialize},
+};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::io::{BufRead, BufReader, Write};
+
+/// Minimal LSP client for dependency resolution.
+///
+/// Communicates via JSON-RPC 2.0 over stdio. Uses `lsp-types` for
+/// protocol types to ensure compatibility with any LSP server.
 pub struct LspClient {
     process: Child,
-    request_id: u64,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    request_id: i64,
+    workspace_root: PathBuf,
+    server_capabilities: Option<ServerCapabilities>,
+}
+```
+
+#### JSON-RPC Transport
+
+LSP uses JSON-RPC 2.0 over stdio with a simple header format:
+
+```
+Content-Length: <length>\r\n
+\r\n
+<JSON payload>
+```
+
+```rust
+impl LspClient {
+    /// Send a JSON-RPC request and wait for response.
+    fn send_request<R: lsp_types::request::Request>(
+        &mut self,
+        params: R::Params,
+    ) -> Result<R::Result>
+    where
+        R::Params: serde::Serialize,
+        R::Result: serde::de::DeserializeOwned,
+    {
+        self.request_id += 1;
+
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": self.request_id,
+            "method": R::METHOD,
+            "params": params,
+        });
+
+        let body = serde_json::to_string(&request)?;
+        let header = format!("Content-Length: {}\r\n\r\n", body.len());
+
+        self.stdin.write_all(header.as_bytes())?;
+        self.stdin.write_all(body.as_bytes())?;
+        self.stdin.flush()?;
+
+        self.read_response()
+    }
+
+    /// Read a JSON-RPC response, handling Content-Length header.
+    fn read_response<T: serde::de::DeserializeOwned>(&mut self) -> Result<T> {
+        // Read headers until empty line
+        let mut content_length: Option<usize> = None;
+        loop {
+            let mut line = String::new();
+            self.stdout.read_line(&mut line)?;
+            let line = line.trim();
+
+            if line.is_empty() {
+                break;
+            }
+
+            if let Some(len_str) = line.strip_prefix("Content-Length: ") {
+                content_length = Some(len_str.parse()?);
+            }
+        }
+
+        // Read body
+        let length = content_length.ok_or_else(|| Error::Protocol("missing Content-Length"))?;
+        let mut body = vec![0u8; length];
+        self.stdout.read_exact(&mut body)?;
+
+        let response: JsonRpcResponse<T> = serde_json::from_slice(&body)?;
+        response.result.ok_or_else(|| {
+            Error::Lsp(response.error.map(|e| e.message).unwrap_or_default())
+        })
+    }
+
+    /// Send a notification (no response expected).
+    fn send_notification<N: lsp_types::notification::Notification>(
+        &mut self,
+        params: N::Params,
+    ) -> Result<()>
+    where
+        N::Params: serde::Serialize,
+    {
+        let notification = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": N::METHOD,
+            "params": params,
+        });
+
+        let body = serde_json::to_string(&notification)?;
+        let header = format!("Content-Length: {}\r\n\r\n", body.len());
+
+        self.stdin.write_all(header.as_bytes())?;
+        self.stdin.write_all(body.as_bytes())?;
+        self.stdin.flush()?;
+
+        Ok(())
+    }
 }
 
-impl LspClient {
-    pub async fn start(command: &str, workspace: &Path) -> Result<Self>;
+#[derive(serde::Deserialize)]
+struct JsonRpcResponse<T> {
+    result: Option<T>,
+    error: Option<JsonRpcError>,
+}
 
+#[derive(serde::Deserialize)]
+struct JsonRpcError {
+    code: i64,
+    message: String,
+}
+```
+
+#### Initialization Sequence
+
+LSP requires a specific handshake before requests can be made:
+
+```rust
+impl LspClient {
+    /// Start an LSP server and perform initialization handshake.
+    pub async fn start(command: &str, workspace: &Path) -> Result<Self> {
+        let mut process = Command::new(command)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+
+        let stdin = process.stdin.take().expect("stdin");
+        let stdout = BufReader::new(process.stdout.take().expect("stdout"));
+
+        let mut client = Self {
+            process,
+            stdin,
+            stdout,
+            request_id: 0,
+            workspace_root: workspace.to_path_buf(),
+            server_capabilities: None,
+        };
+
+        // Step 1: Send initialize request
+        let init_params = InitializeParams {
+            process_id: Some(std::process::id()),
+            root_uri: Some(Url::from_file_path(workspace).unwrap()),
+            workspace_folders: Some(vec![WorkspaceFolder {
+                uri: Url::from_file_path(workspace).unwrap(),
+                name: workspace.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("workspace")
+                    .to_string(),
+            }]),
+            capabilities: ClientCapabilities::default(),
+            ..Default::default()
+        };
+
+        let init_result: InitializeResult = client.send_request::<Initialize>(init_params)?;
+        client.server_capabilities = Some(init_result.capabilities);
+
+        // Step 2: Send initialized notification
+        client.send_notification::<lsp_types::notification::Initialized>(InitializedParams {})?;
+
+        // Server is now ready for requests
+        Ok(client)
+    }
+
+    /// Gracefully shut down the LSP server.
+    pub fn shutdown(&mut self) -> Result<()> {
+        // Send shutdown request
+        let _: () = self.send_request::<lsp_types::request::Shutdown>(())?;
+
+        // Send exit notification
+        self.send_notification::<lsp_types::notification::Exit>(())?;
+
+        // Wait for process to exit
+        self.process.wait()?;
+        Ok(())
+    }
+}
+```
+
+#### Core Query Methods
+
+```rust
+impl LspClient {
     /// Ask LSP: "What is the definition of the symbol at this position?"
-    pub async fn goto_definition(&mut self, file: &Path, line: u32, col: u32)
-        -> Result<Option<Location>>;
+    pub fn goto_definition(
+        &mut self,
+        file: &Path,
+        line: u32,
+        column: u32,
+    ) -> Result<Option<Location>> {
+        let params = GotoDefinitionParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier {
+                    uri: Url::from_file_path(file).map_err(|_| Error::InvalidPath)?,
+                },
+                position: Position {
+                    line,       // 0-indexed
+                    character: column,
+                },
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+
+        let response: Option<GotoDefinitionResponse> =
+            self.send_request::<GotoDefinition>(params)?;
+
+        Ok(response.and_then(|r| match r {
+            GotoDefinitionResponse::Scalar(loc) => Some(loc),
+            GotoDefinitionResponse::Array(locs) => locs.into_iter().next(),
+            GotoDefinitionResponse::Link(links) => links.into_iter().next().map(|l| Location {
+                uri: l.target_uri,
+                range: l.target_selection_range,
+            }),
+        }))
+    }
 
     /// Ask LSP: "What references this symbol?"
-    pub async fn find_references(&mut self, file: &Path, line: u32, col: u32)
-        -> Result<Vec<Location>>;
-}
+    pub fn find_references(
+        &mut self,
+        file: &Path,
+        line: u32,
+        column: u32,
+        include_declaration: bool,
+    ) -> Result<Vec<Location>> {
+        let params = ReferenceParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier {
+                    uri: Url::from_file_path(file).map_err(|_| Error::InvalidPath)?,
+                },
+                position: Position { line, character: column },
+            },
+            context: ReferenceContext {
+                include_declaration,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
 
+        let response: Option<Vec<Location>> = self.send_request::<References>(params)?;
+        Ok(response.unwrap_or_default())
+    }
+
+    /// Convert LSP Location to file path.
+    pub fn location_to_path(location: &Location) -> Option<PathBuf> {
+        location.uri.to_file_path().ok()
+    }
+}
+```
+
+#### Resolve Ambiguous References
+
+```rust
 /// Resolve ambiguous references using LSP
-async fn refine_with_lsp(
+fn refine_with_lsp(
     lsp: &mut LspClient,
     ambiguous: &[AmbiguousRef],
     file: &Path,
-) -> Vec<Dependency> {
+) -> Result<Vec<Dependency>> {
     let mut refined = Vec::new();
 
     for amb in ambiguous {
         let (line, col) = amb.position();
-        if let Ok(Some(location)) = lsp.goto_definition(file, line, col).await {
-            refined.push(Dependency {
-                from_file: file.to_path_buf(),
-                to_file: uri_to_path(&location.uri),
-                symbol: extract_symbol_at(&location),
-                kind: DependencyKind::Call,
-                line,
-            });
+
+        // LSP uses 0-indexed lines, tree-sitter uses 0-indexed too
+        if let Ok(Some(location)) = lsp.goto_definition(file, line, col) {
+            if let Some(target_path) = LspClient::location_to_path(&location) {
+                refined.push(Dependency {
+                    from_file: file.to_path_buf(),
+                    to_file: target_path,
+                    symbol: amb.symbol_name().to_string(),
+                    kind: DependencyKind::Call,
+                    line,
+                });
+            }
         }
     }
 
-    refined
+    Ok(refined)
 }
 ```
 
-**When to use LSP:**
+#### When to Use LSP
 
 | Scenario | Tree-sitter | LSP |
 |----------|-------------|-----|
@@ -731,12 +1025,25 @@ async fn refine_with_lsp(
 | `impl Trait for Foo` | Partial | ✅ |
 | Method chaining `a.b().c()` | ❌ | ✅ |
 
-**Performance trade-off:**
+#### Performance Trade-off
 
 ```
 L1+L2 only:  ~30 seconds / 10K files
 L1+L2+L3:    ~2-5 minutes / 10K files (LSP startup + queries)
 ```
+
+The LSP startup cost is paid once per session. Subsequent queries are fast (~10-50ms each). For batch operations, keep the LSP running and reuse the connection.
+
+#### Connection Strategy
+
+Two options for LSP connectivity:
+
+| Strategy | Pros | Cons |
+|----------|------|------|
+| **Spawn on demand** | Self-contained, no external deps | Startup cost each time |
+| **Connect to running** | Instant queries, shared with editor | Requires user to run LSP |
+
+Recommendation: Try to connect to a running LSP (e.g., via socket), fall back to spawning if unavailable.
 
 ### Recommended Implementation
 
@@ -754,7 +1061,7 @@ impl Tethys {
         let deps = if let Some(lsp) = &mut self.lsp {
             let ambiguous = find_ambiguous_refs(file, &tree, &content, &origin_map);
             if !ambiguous.is_empty() {
-                let refined = refine_with_lsp(lsp, &ambiguous, file).await;
+                let refined = refine_with_lsp(lsp, &ambiguous, file)?;
                 merge_dependencies(deps, refined)
             } else {
                 deps
@@ -763,7 +1070,7 @@ impl Tethys {
             deps
         };
 
-        Ok(FileAnalysis { path: file.to_path_buf(), symbols, dependencies: deps, ... })
+        Ok(FileAnalysis { path: file.to_path_buf(), symbols, dependencies: deps, .. })
     }
 }
 ```
@@ -1105,11 +1412,62 @@ async fn handle_get_callers(params: GetCallersParams, tethys: &Tethys) -> McpRes
 - [ ] `get_dependents()`, `get_dependencies()`
 
 ### Phase 3: Graph Operations
-- [ ] petgraph integration for graph algorithms
-- [ ] SQLite → petgraph loading for subgraphs
-- [ ] `get_impact()` with BFS
-- [ ] `get_callers()` for symbol-level queries
-- [ ] `detect_cycles()` with Tarjan's SCC
+
+#### Architecture
+
+Phase 3 introduces graph operations through two trait abstractions, allowing SQL-driven implementation initially with the option to swap in petgraph later:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                         Tethys                              │
+│                    (public API holder)                      │
+└─────────────────────────┬───────────────────────────────────┘
+                          │ delegates to
+          ┌───────────────┴───────────────┐
+          ▼                               ▼
+┌─────────────────────┐       ┌─────────────────────┐
+│   SymbolGraphOps    │       │    FileGraphOps     │
+│      (trait)        │       │      (trait)        │
+├─────────────────────┤       ├─────────────────────┤
+│ • get_callers()     │       │ • get_impact()      │
+│ • get_callees()     │       │ • detect_cycles()   │
+│ • get_impact()      │       │ • find_path()       │
+│ • find_path()       │       └──────────┬──────────┘
+└──────────┬──────────┘                  │
+           │                             │
+           ▼                             ▼
+┌─────────────────────┐       ┌─────────────────────┐
+│  SqlSymbolGraph     │       │  SqlFileGraph       │
+│  (SQL + recursive   │       │  (initial impl)     │
+│   CTEs)             │       │                     │
+└─────────────────────┘       └─────────────────────┘
+                                         │
+                              ┌──────────┴──────────┐
+                              │  PetgraphFileGraph  │
+                              │  (future: cycles)   │
+                              └─────────────────────┘
+```
+
+**Design decisions:**
+- Traits live in `graph.rs`, implementations in `graph/sql.rs` (and later `graph/petgraph.rs`)
+- `Tethys` holds a `Box<dyn SymbolGraphOps>` and `Box<dyn FileGraphOps>`
+- Default construction uses SQL implementations
+- Implementations receive a reference to `Index` (the DB wrapper)
+- Symbol-level operations prioritized (impact analysis, path finding)
+- File-level cycle detection deferred (can add petgraph impl later)
+
+#### Checklist
+
+- [ ] Define `SymbolGraphOps` trait
+- [ ] Define `FileGraphOps` trait
+- [ ] Implement `SqlSymbolGraph` with recursive CTEs
+- [ ] Implement `SqlFileGraph` for file-level operations
+- [ ] Integrate traits into `Tethys` struct
+- [ ] Implement `get_callers()` for symbol-level queries
+- [ ] Implement `get_symbol_impact()` with BFS via SQL
+- [ ] Implement `find_path()` for symbol-level path finding
+- [ ] Implement `get_impact()` for file-level analysis
+- [ ] Add `detect_cycles()` stub (defer full implementation)
 
 ### Phase 4: CLI
 - [ ] `tethys index` / `tethys index --rebuild`
@@ -1151,17 +1509,26 @@ serde_json = "1.0"
 thiserror = "2.0"
 tracing = "0.1"
 
+# LSP integration (Phase 6)
+lsp-types = "0.97"              # LSP protocol types (GotoDefinition, References, etc.)
+
 [dev-dependencies]
 tempfile = "3"
 rstest = "0.23"
 ```
 
-**Note:** `rusqlite` with `bundled` feature compiles SQLite from source, ensuring consistent behavior across platforms. `petgraph` 0.8 is actively maintained (releases in 2025).
+**Notes:**
+- `rusqlite` with `bundled` feature compiles SQLite from source, ensuring consistent behavior across platforms
+- `petgraph` 0.8 is actively maintained (releases in 2025)
+- `lsp-types` provides all LSP protocol types - no need to hand-roll `Location`, `Position`, etc.
 
 ## References
 
 - [tree-sitter](https://tree-sitter.github.io/) - Incremental parsing library
 - [petgraph](https://docs.rs/petgraph/) - Graph data structure library
 - [LSP Specification](https://microsoft.github.io/language-server-protocol/) - Language Server Protocol
+- [lsp-types](https://docs.rs/lsp-types/) - Rust crate providing LSP protocol types
 - [rust-analyzer](https://rust-analyzer.github.io/) - Rust LSP server
 - [ra_ap_ide](https://docs.rs/ra_ap_ide/) - rust-analyzer as a library
+- [Serena](https://github.com/oraios/serena) - Coding agent toolkit with LSP-based semantic tools
+- [multilspy](https://github.com/microsoft/multilspy) - Microsoft's Python LSP wrapper (used by Serena)

@@ -2,8 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**BEFORE ANYTHING ELSE: run 'bd onboard' and follow the instructions**
-**✓ bd is ready! Use 'bd ready' to see available work.**
+**Use `rivets ready` to see available work, `rivets list` to see all issues.**
 
 ## Project Overview
 
@@ -11,12 +10,63 @@ Rivets is a Rust implementation of the Beads project tracking system. This is a 
 
 ## Work Tracking
 
-This project uses Beads (bd) for issue tracking instead of Markdown or external tools. The MCP beads server is available and should be used for all task management.
+This project uses rivets for issue tracking (dogfooding our own tool). Issues are stored in `.rivets/issues.jsonl`.
 
-- Use the beads MCP tools to list, create, update, and manage issues
-- Before any write operations with beads tools, call `set_context` with the workspace root
-- Check `beads://quickstart` resource for detailed usage instructions
-- The main tracking issue is `rivets-cr9` which outlines the conversion from beads (original) to rivets (Rust implementation)
+### Quick Reference
+
+```bash
+rivets ready              # Show issues ready to work on (no blockers)
+rivets list               # List all open issues
+rivets list --status closed --limit 10  # Recent closed issues
+rivets show <id>          # Full issue details with dependencies
+rivets stats              # Project statistics
+rivets blocked            # Show issues blocked by dependencies
+```
+
+### Working on Issues
+
+```bash
+# 1. Find work
+rivets ready --limit 5
+
+# 2. View issue details
+rivets show rivets-xyz
+
+# 3. Update status when starting
+rivets update rivets-xyz --status in_progress
+
+# 4. Close when done
+rivets close rivets-xyz --reason "Implemented in commit abc123"
+```
+
+### Creating Issues
+
+```bash
+# Basic issue
+rivets create --title "Fix the bug" --type bug --priority 2
+
+# Full issue with design notes
+rivets create \
+  --title "Add new feature" \
+  --type feature \
+  --priority 2 \
+  --description "Detailed description here" \
+  --design "Implementation approach" \
+  --acceptance "- [ ] Criterion 1\n- [ ] Criterion 2"
+```
+
+### Managing Dependencies
+
+```bash
+# Add dependency (issue-a blocks issue-b)
+rivets dep add issue-a issue-b --type blocks
+
+# View dependency tree
+rivets dep tree issue-id
+
+# See what's blocking an issue
+rivets show issue-id  # Shows dependencies section
+```
 
 ## Development Commands
 
@@ -76,7 +126,7 @@ refactor(mcp): simplify tool registration
 
 > **Note**: This section will be populated as the codebase architecture is designed and implemented.
 
-The project is currently in the research and planning phase. Architectural decisions should be tracked as beads issues with design notes and acceptance criteria.
+The project is currently in the research and planning phase. Architectural decisions should be tracked as rivets issues with design notes and acceptance criteria.
 
 ## Extended Guidelines (from GitHub Awesome Copilot)
 
@@ -158,6 +208,28 @@ The project is currently in the research and planning phase. Architectural decis
 - Use `&str` instead of `String` for function parameters when ownership isn't needed
 - Favor borrowing and zero-copy operations
 
+### Rust Best Practices Skill
+
+**For detailed Rust patterns and code review, load the `rust-best-practices` skill.**
+
+This skill provides 28 rules covering:
+- Error handling (Option/Result patterns, expect vs unwrap)
+- File I/O safety (atomic writes, TOCTOU avoidance)
+- Type safety (enums, newtypes, validation)
+- Performance (loop optimization, zero-copy limits)
+- CLI development (clap, exit codes, signal handling, config files)
+- Common footguns (borrow checker, Path edge cases)
+
+**When reviewing Rust code**, apply these patterns in addition to project-specific rules above.
+
+**Deep-dive files** (load when encountering specific issues):
+- `error-handling.md` - Option patterns, Path footguns
+- `file-io.md` - Atomic writes, tempfile testing
+- `type-safety.md` - Constants, enums, newtypes
+- `performance.md` - Loop optimization
+- `cli-development.md` - clap, signals, config
+- `common-footguns.md` - TOCTOU, borrow checker
+
 ### Testing with rstest
 
 This project uses [rstest](https://docs.rs/rstest) for parameterized testing. Use rstest when you have multiple test cases that share the same test logic.
@@ -208,6 +280,71 @@ fn test_valid_priority(#[values(1, 2, 3, 4, 5)] priority: u8) {
 - Prefer `#[values]` when testing the same assertion across a range
 - Don't force rstest on tests that don't benefit from parameterization
 - Works with `#[tokio::test]` for async tests (place `#[rstest]` before `#[tokio::test]`)
+
+### Test Design Patterns
+
+Beyond parameterization with rstest, follow these patterns for robust test coverage:
+
+**Roundtrip Tests (Parse/Serialize Symmetry)**
+
+When a type has both serialization (`as_str()`, `to_string()`) and deserialization (`parse()`, `from_str()`), verify they're inverses:
+
+```rust
+#[test]
+fn reference_kind_roundtrip() {
+    let variants = [
+        ReferenceKind::Import,
+        ReferenceKind::Call,
+        ReferenceKind::Type,
+    ];
+    for kind in variants {
+        assert_eq!(
+            ReferenceKind::parse(kind.as_str()),
+            Some(kind),
+            "roundtrip failed for {kind:?}"
+        );
+    }
+}
+```
+
+**Invariant Tests (Contract Verification)**
+
+When documentation or API design promises invariants, write tests that verify them:
+
+```rust
+#[test]
+fn file_count_equals_language_sum() {
+    // Invariant: file_count == sum(files_by_language) + skipped_unknown
+    let stats = tethys.get_stats().expect("get_stats failed");
+    let language_sum: usize = stats.files_by_language.values().sum();
+    assert_eq!(
+        stats.file_count,
+        language_sum + stats.skipped_unknown_languages,
+        "file_count should equal sum of language counts + skipped"
+    );
+}
+```
+
+**Descriptive Assertions in Tests**
+
+Use `.expect("descriptive message")` instead of `.unwrap()` in tests for clearer failure output:
+
+```rust
+// Good - failure message explains context
+let result = parser.parse(input).expect("parser should handle valid input");
+let file = tethys.get_file_by_path(&path).expect("file should exist after indexing");
+
+// Avoid - failures give no context
+let result = parser.parse(input).unwrap();
+```
+
+**Test Categories to Consider:**
+
+- **Roundtrip**: `parse(serialize(x)) == x` for all serializable types
+- **Invariant**: Document promises hold under all conditions
+- **Boundary**: Edge cases (empty, max, special characters)
+- **Error paths**: Invalid inputs return appropriate errors
+- **State transitions**: Operations produce expected state changes
 
 ### Structured Logging with tracing
 

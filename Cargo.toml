@@ -4,6 +4,7 @@ members = [
     "crates/rivets-jsonl",
     "crates/rivets",
     "crates/rivets-mcp",
+    "crates/tethys",
 ]
 
 [workspace.package]
