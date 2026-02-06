@@ -204,6 +204,18 @@ impl Index {
         Ok(stats)
     }
 
+    /// Update `SQLite` query planner statistics.
+    ///
+    /// Should be called after bulk data changes (full re-index) so the query
+    /// planner can make better index-selection decisions. Not needed after
+    /// small incremental updates.
+    pub fn analyze(&self) -> Result<()> {
+        let conn = self.connection()?;
+
+        conn.execute_batch("ANALYZE")?;
+        Ok(())
+    }
+
     /// Vacuum the database.
     pub fn vacuum(&self) -> Result<()> {
         let conn = self.connection()?;

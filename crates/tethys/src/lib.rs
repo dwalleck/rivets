@@ -574,6 +574,9 @@ impl Tethys {
             );
         }
 
+        // Update query planner statistics after bulk writes
+        self.db.analyze()?;
+
         Ok(IndexStats {
             files_indexed,
             symbols_found,
