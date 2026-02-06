@@ -1428,12 +1428,24 @@ fn run_rivets_with_env(
     env_val: &str,
 ) -> std::process::Output {
     let binary = get_rivets_binary();
-    Command::new(&binary)
+    match Command::new(&binary)
         .args(args)
         .current_dir(dir)
         .env(env_key, env_val)
         .output()
-        .expect("Failed to execute rivets binary")
+    {
+        Ok(output) => output,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            Command::new(&binary)
+                .args(args)
+                .current_dir(dir)
+                .env(env_key, env_val)
+                .output()
+                .expect("Failed to execute rivets binary after retry")
+        }
+        Err(e) => panic!("Failed to execute rivets binary: {e}"),
+    }
 }
 
 /// Returns true if the string contains any ANSI escape sequences.

@@ -14,15 +14,26 @@ pub fn get_rivets_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_rivets"))
 }
 
-/// Run the rivets binary directly in the specified directory
+/// Run the rivets binary directly in the specified directory.
+///
+/// Retries once on `NotFound` errors to handle transient macOS CI
+/// issues where Gatekeeper checks on unsigned binaries can briefly
+/// make the file unavailable when many parallel tests spawn it.
 pub fn run_rivets_in_dir(dir: &Path, args: &[&str]) -> Output {
     let binary = get_rivets_binary();
 
-    Command::new(&binary)
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .expect("Failed to execute rivets binary")
+    match Command::new(&binary).args(args).current_dir(dir).output() {
+        Ok(output) => output,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            Command::new(&binary)
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .expect("Failed to execute rivets binary after retry")
+        }
+        Err(e) => panic!("Failed to execute rivets binary: {e}"),
+    }
 }
 
 #[allow(dead_code)] // Used by cli_tests but not init_integration
