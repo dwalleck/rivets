@@ -608,16 +608,13 @@ impl Tethys {
         let content_str = std::str::from_utf8(&content)
             .map_err(|_| Error::Parser("file is not valid UTF-8".to_string()))?;
 
-        // Get language support for extraction
         let lang_support = languages::get_language_support(language)
             .ok_or_else(|| Error::Parser(format!("no support for language: {language:?}")))?;
 
-        // Set parser to the correct tree-sitter language
         self.parser
             .set_language(&lang_support.tree_sitter_language())
             .map_err(|e| Error::Parser(e.to_string()))?;
 
-        // Get file metadata
         let metadata = std::fs::metadata(path)?;
         #[allow(clippy::cast_possible_truncation)] // Nanoseconds fit in i64 for centuries
         let mtime_ns = match metadata.modified() {
@@ -747,13 +744,10 @@ impl Tethys {
         let content_str = std::str::from_utf8(&content)
             .map_err(|_| Error::Parser("file is not valid UTF-8".to_string()))?;
 
-        // Get language support for extraction
         let lang_support = languages::get_language_support(language)
             .ok_or_else(|| Error::Parser(format!("no support for language: {language:?}")))?;
 
-        // Parse with thread-local parser
-        // Using try_borrow_mut for defensive coding - while thread-local storage means
-        // each thread has its own instance, this prevents panics if code structure changes
+        // try_borrow_mut prevents panics if code structure changes to allow re-entrant calls
         let tree = PARSER.with(|parser| {
             let mut parser = parser.try_borrow_mut().map_err(|_| {
                 Error::Parser("thread-local parser already borrowed (re-entrant call?)".to_string())
@@ -774,14 +768,10 @@ impl Tethys {
                 .ok_or_else(|| Error::Parser("failed to parse file".to_string()))
         })?;
 
-        // Extract symbols
         let extracted = lang_support.extract_symbols(&tree, content_str.as_bytes());
-
-        // Extract imports and references
         let imports = lang_support.extract_imports(&tree, content_str.as_bytes());
         let references = lang_support.extract_references(&tree, content_str.as_bytes());
 
-        // Get file metadata
         let metadata = std::fs::metadata(file_path)?;
         #[allow(clippy::cast_possible_truncation)]
         let mtime_ns = match metadata.modified() {

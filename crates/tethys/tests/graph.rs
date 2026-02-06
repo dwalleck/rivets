@@ -25,7 +25,7 @@ fn workspace_with_call_graph() -> (TempDir, Tethys) {
     let dir = tempfile::tempdir().expect("failed to create temp dir");
 
     // Create src directory
-    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::create_dir_all(dir.path().join("src")).expect("create src dir");
 
     // main.rs uses auth::User and cache::Cache
     fs::write(
@@ -40,7 +40,7 @@ fn main() {
 }
 ",
     )
-    .unwrap();
+    .expect("write main.rs");
 
     // auth.rs uses db::Connection
     fs::write(
@@ -57,7 +57,7 @@ impl User {
 }
 ",
     )
-    .unwrap();
+    .expect("write auth.rs");
 
     // cache.rs uses db::Connection
     fs::write(
@@ -74,7 +74,7 @@ impl Cache {
 }
 ",
     )
-    .unwrap();
+    .expect("write cache.rs");
 
     // db.rs is the leaf - exports Connection
     fs::write(
@@ -83,7 +83,7 @@ impl Cache {
 pub struct Connection;
 ",
     )
-    .unwrap();
+    .expect("write db.rs");
 
     // lib.rs declares all modules
     fs::write(
@@ -94,7 +94,7 @@ mod cache;
 mod db;
 ",
     )
-    .unwrap();
+    .expect("write lib.rs");
 
     let tethys = Tethys::new(dir.path()).expect("failed to create Tethys");
     (dir, tethys)
@@ -172,7 +172,7 @@ fn get_dependency_chain_finds_path() {
         .expect("get_dependency_chain failed");
 
     assert!(chain.is_some(), "should find path from auth.rs to db.rs");
-    let chain = chain.unwrap();
+    let chain = chain.expect("chain should exist");
     assert!(chain.len() >= 2, "path should have at least 2 files");
 }
 
@@ -260,7 +260,7 @@ fn detect_cycles_returns_empty_for_acyclic_workspace() {
 #[test]
 fn cyclic_dependencies_are_detected() {
     let dir = tempfile::tempdir().expect("failed to create temp dir");
-    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::create_dir_all(dir.path().join("src")).expect("create src dir");
 
     // Create a simple A -> B -> A cycle
     fs::write(
@@ -270,7 +270,7 @@ mod a;
 mod b;
 ",
     )
-    .unwrap();
+    .expect("write lib.rs");
 
     fs::write(
         dir.path().join("src/a.rs"),
@@ -284,7 +284,7 @@ impl A {
 }
 ",
     )
-    .unwrap();
+    .expect("write a.rs");
 
     fs::write(
         dir.path().join("src/b.rs"),
@@ -298,7 +298,7 @@ impl B {
 }
 ",
     )
-    .unwrap();
+    .expect("write b.rs");
 
     let mut tethys = Tethys::new(dir.path()).expect("failed to create Tethys");
     tethys.index().expect("index failed");
@@ -347,10 +347,10 @@ impl B {
 #[test]
 fn three_file_cycle_dependencies_are_detected() {
     let dir = tempfile::tempdir().expect("failed to create temp dir");
-    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::create_dir_all(dir.path().join("src")).expect("create src dir");
 
     // Create A -> B -> C -> A cycle
-    fs::write(dir.path().join("src/lib.rs"), "mod a;\nmod b;\nmod c;").unwrap();
+    fs::write(dir.path().join("src/lib.rs"), "mod a;\nmod b;\nmod c;").expect("write lib.rs");
 
     fs::write(
         dir.path().join("src/a.rs"),
@@ -364,7 +364,7 @@ impl A {
 }
 ",
     )
-    .unwrap();
+    .expect("write a.rs");
 
     fs::write(
         dir.path().join("src/b.rs"),
@@ -378,7 +378,7 @@ impl B {
 }
 ",
     )
-    .unwrap();
+    .expect("write b.rs");
 
     fs::write(
         dir.path().join("src/c.rs"),
@@ -392,7 +392,7 @@ impl C {
 }
 ",
     )
-    .unwrap();
+    .expect("write c.rs");
 
     let mut tethys = Tethys::new(dir.path()).expect("failed to create Tethys");
     tethys.index().expect("index failed");
@@ -547,8 +547,8 @@ fn empty_workspace_detect_cycles_returns_empty() {
 #[test]
 fn single_file_workspace_detect_cycles_returns_empty() {
     let dir = tempfile::tempdir().expect("failed to create temp dir");
-    fs::create_dir_all(dir.path().join("src")).unwrap();
-    fs::write(dir.path().join("src/lib.rs"), "pub fn hello() {}").unwrap();
+    fs::create_dir_all(dir.path().join("src")).expect("create src dir");
+    fs::write(dir.path().join("src/lib.rs"), "pub fn hello() {}").expect("write lib.rs");
 
     let mut tethys = Tethys::new(dir.path()).expect("failed to create Tethys");
     tethys.index().expect("index failed");

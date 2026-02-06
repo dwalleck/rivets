@@ -353,7 +353,6 @@ fn store_imports(
     imports: &[ImportStatement],
     language: Language,
 ) -> Result<()> {
-    // Clear old imports for this file (for re-indexing)
     db.clear_imports_for_file(file_id)?;
 
     // Determine path separator based on language
