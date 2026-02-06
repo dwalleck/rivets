@@ -528,7 +528,7 @@ pub struct IndexedFile {
     pub mtime_ns: i64,
     /// File size in bytes
     pub size_bytes: u64,
-    /// Content hash for change detection (algorithm TBD, not yet implemented)
+    /// xxhash64 content hash for change detection
     pub content_hash: Option<u64>,
     /// When this file was last indexed (unix timestamp)
     pub indexed_at: i64,

@@ -72,6 +72,14 @@ use parallel::{OwnedSymbolData, ParsedFileData};
 use resolver::resolve_module_path;
 use tracing::{debug, info, trace, warn};
 
+/// Compute an xxhash64 content hash for change detection.
+///
+/// Returns a stable 64-bit hash suitable for storing in `SQLite`'s INTEGER column.
+/// Used to skip re-indexing files whose content hasn't changed.
+fn compute_content_hash(content: &[u8]) -> u64 {
+    xxhash_rust::xxh64::xxh64(content, 0)
+}
+
 /// A dependency that couldn't be resolved because the target file wasn't indexed yet.
 ///
 /// These are collected during the first indexing pass and resolved in subsequent passes.
@@ -694,7 +702,7 @@ impl Tethys {
             language,
             mtime_ns,
             size_bytes,
-            None, // TODO: compute content hash
+            Some(compute_content_hash(&content)),
             &symbol_data,
         )?;
 
@@ -831,6 +839,7 @@ impl Tethys {
             language,
             mtime_ns,
             size_bytes,
+            Some(compute_content_hash(&content)),
             symbols,
             references,
             imports,
@@ -875,7 +884,7 @@ impl Tethys {
             data.language,
             data.mtime_ns,
             data.size_bytes,
-            None, // TODO: content hash
+            data.content_hash,
             &symbol_data,
         )?;
 
