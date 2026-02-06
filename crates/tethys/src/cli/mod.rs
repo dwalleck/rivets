@@ -12,7 +12,7 @@ pub mod reachable;
 pub mod search;
 pub mod stats;
 
-use std::process::Command;
+use std::path::PathBuf;
 use tethys::lsp::{LspError, LspProvider, RustAnalyzerProvider};
 
 /// Check if the LSP server is available in PATH.
@@ -22,36 +22,57 @@ use tethys::lsp::{LspError, LspProvider, RustAnalyzerProvider};
 ///
 /// # Errors
 ///
-/// Returns `LspError::NotFound` if the LSP server is not in PATH or if the
-/// availability check itself fails.
+/// Returns `LspError::NotFound` if the LSP server is not in PATH.
 pub fn check_lsp_availability() -> Result<(), LspError> {
     let provider = RustAnalyzerProvider;
     let command = provider.command();
 
-    // Try to find the command in PATH using `which` on Unix or `where` on Windows
-    let check_cmd = if cfg!(windows) { "where" } else { "which" };
-
-    let result = Command::new(check_cmd).arg(command).output();
-
-    match result {
-        Ok(output) if output.status.success() => {
-            tracing::debug!(command = %command, "LSP server found in PATH");
-            Ok(())
-        }
-        Ok(_) => {
-            // which/where ran but didn't find the command
-            Err(LspError::not_found(command, provider.install_hint()))
-        }
-        Err(e) => {
-            // which/where itself failed - log the system error for debugging
-            tracing::warn!(
-                error = %e,
-                check_cmd = %check_cmd,
-                "Failed to check for LSP server availability"
-            );
-            Err(LspError::not_found(command, provider.install_hint()))
-        }
+    if find_in_path(command).is_some() {
+        tracing::debug!(command = %command, "LSP server found in PATH");
+        Ok(())
+    } else {
+        Err(LspError::not_found(command, provider.install_hint()))
     }
+}
+
+/// Search for an executable by name in the system PATH.
+///
+/// Returns the full path to the first matching executable, or `None` if not found.
+fn find_in_path(name: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    std::env::split_paths(&path_var).find_map(|dir| {
+        let candidate = dir.join(name);
+        if is_executable(&candidate) {
+            return Some(candidate);
+        }
+        // On Windows, also check with common executable extensions
+        if cfg!(windows) {
+            for ext in &["exe", "cmd", "bat", "com"] {
+                let candidate = candidate.with_extension(ext);
+                if is_executable(&candidate) {
+                    return Some(candidate);
+                }
+            }
+        }
+        None
+    })
+}
+
+/// Check if a path points to an executable file.
+#[cfg(unix)]
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.is_file()
+        && path
+            .metadata()
+            .map(|m| m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+}
+
+/// Check if a path points to an existing file (Windows).
+#[cfg(windows)]
+fn is_executable(path: &std::path::Path) -> bool {
+    path.is_file()
 }
 
 /// Check LSP availability if requested, returning early with an error if unavailable.
