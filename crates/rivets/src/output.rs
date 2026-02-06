@@ -116,7 +116,49 @@ fn get_terminal_width() -> usize {
 
 // ============================================================================
 // Color Helpers
+//
+// Semantic Color Theme:
+//   - Success/Done:  green   (closed status, completed actions)
+//   - Warning/Active: yellow (in_progress, P1 priority)
+//   - Error/Blocked: red     (blocked status, P0 priority, bugs)
+//   - Info/Reference: cyan   (issue IDs, root tree node)
+//   - Accent:        magenta (labels, epics)
+//   - Muted:         dimmed  (field labels, connectors, chores)
+//   - Emphasis:      bold    (section headers, P0)
+//   - Default:       white   (open status)
 // ============================================================================
+
+/// Apply semantic "success" color (green) to text.
+pub fn success(text: &str, config: &OutputConfig) -> String {
+    if !config.use_colors {
+        return text.to_string();
+    }
+    text.green().to_string()
+}
+
+/// Apply semantic "error" color (red) to text.
+pub fn error(text: &str, config: &OutputConfig) -> String {
+    if !config.use_colors {
+        return text.to_string();
+    }
+    text.red().to_string()
+}
+
+/// Apply semantic "warning" color (yellow) to text.
+pub fn warning(text: &str, config: &OutputConfig) -> String {
+    if !config.use_colors {
+        return text.to_string();
+    }
+    text.yellow().to_string()
+}
+
+/// Apply semantic "info" color (cyan) to text.
+pub fn info(text: &str, config: &OutputConfig) -> String {
+    if !config.use_colors {
+        return text.to_string();
+    }
+    text.cyan().to_string()
+}
 
 /// Apply color to status text based on issue status.
 fn colorize_status(status: IssueStatus, config: &OutputConfig) -> String {
@@ -1247,6 +1289,37 @@ mod tests {
         assert_eq!(colored_type_icon(IssueType::Epic, &config), "#");
         assert_eq!(colored_type_icon(IssueType::Task, &config), "-");
         assert_eq!(colored_type_icon(IssueType::Chore, &config), ".");
+    }
+
+    #[test]
+    fn test_semantic_colors_with_colors_enabled() {
+        with_colors_enabled(|| {
+            let config = OutputConfig::new(80, false, true);
+            let s = success("done", &config);
+            assert!(s.contains("done"));
+            assert!(s.contains("\x1b["), "success should have ANSI codes");
+
+            let e = error("fail", &config);
+            assert!(e.contains("fail"));
+            assert!(e.contains("\x1b["), "error should have ANSI codes");
+
+            let w = warning("caution", &config);
+            assert!(w.contains("caution"));
+            assert!(w.contains("\x1b["), "warning should have ANSI codes");
+
+            let i = info("note", &config);
+            assert!(i.contains("note"));
+            assert!(i.contains("\x1b["), "info should have ANSI codes");
+        });
+    }
+
+    #[test]
+    fn test_semantic_colors_without_colors() {
+        let config = OutputConfig::new(80, false, false);
+        assert_eq!(success("done", &config), "done");
+        assert_eq!(error("fail", &config), "fail");
+        assert_eq!(warning("caution", &config), "caution");
+        assert_eq!(info("note", &config), "note");
     }
 
     #[test]

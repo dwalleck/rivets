@@ -5,7 +5,6 @@
 use std::io::Write;
 
 use anyhow::{Context, Result};
-use colored::Colorize;
 
 use super::args::{
     BlockedArgs, CloseArgs, CreateArgs, DeleteArgs, DepAction, DepArgs, InfoArgs, InitArgs,
@@ -1338,10 +1337,15 @@ pub async fn execute_stale(
                     args.days
                 );
                 println!();
+                let config = output::OutputConfig::from_env();
                 for issue in &stale_issues {
                     let days_stale = (Utc::now() - issue.updated_at).num_days();
                     output::print_issue(issue, output_mode)?;
-                    println!("  {} {} days", "Stale:".dimmed(), days_stale);
+                    println!(
+                        "  {} {} days",
+                        output::warning("Stale:", &config),
+                        days_stale
+                    );
                 }
             }
         }
