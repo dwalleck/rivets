@@ -131,9 +131,8 @@ impl Index {
 
     /// Drop all tables and recreate the schema from scratch.
     ///
-    /// Unlike [`clear()`](Self::clear) which only deletes rows, this drops and
-    /// recreates all tables, ensuring the schema matches the current version.
-    /// Use this for `--rebuild` to handle schema evolution.
+    /// This drops and recreates all tables, ensuring the schema matches the
+    /// current version. Use this for `--rebuild` to handle schema evolution.
     pub fn reset(&self) -> Result<()> {
         let conn = self.connection()?;
 

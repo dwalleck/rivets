@@ -863,7 +863,7 @@ pub struct IndexUpdate {
 
 /// Report of which files need re-indexing.
 ///
-/// Returned by [`Tethys::get_stale_files()`].
+/// Returned by [`Tethys::get_stale_files()`](crate::Tethys::get_stale_files).
 #[derive(Debug, Clone)]
 pub struct StalenessReport {
     /// Files on disk whose mtime or size changed since last indexing

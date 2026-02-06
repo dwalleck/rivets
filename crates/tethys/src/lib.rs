@@ -2237,12 +2237,6 @@ impl Tethys {
         )
     }
 
-    /// Get the path relative to the workspace root.
-    ///
-    /// Handles symlink differences (e.g., `/var` → `/private/var` on macOS) by
-    /// attempting canonicalization when the initial `strip_prefix` fails on
-    /// absolute paths. Returns `Cow::Borrowed` for the common fast path,
-    /// `Cow::Owned` only when canonicalization was needed.
     /// Determine the crate source root directory for a given file.
     ///
     /// Uses `cargo::get_crate_for_file` to find which crate the file belongs to,
@@ -2271,6 +2265,12 @@ impl Tethys {
         }
     }
 
+    /// Get the path relative to the workspace root.
+    ///
+    /// Handles symlink differences (e.g., `/var` → `/private/var` on macOS) by
+    /// attempting canonicalization when the initial `strip_prefix` fails on
+    /// absolute paths. Returns `Cow::Borrowed` for the common fast path,
+    /// `Cow::Owned` only when canonicalization was needed.
     fn relative_path<'a>(&self, path: &'a Path) -> Cow<'a, Path> {
         if let Ok(relative) = path.strip_prefix(&self.workspace_root) {
             return Cow::Borrowed(relative);

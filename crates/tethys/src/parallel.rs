@@ -72,6 +72,7 @@ impl ParsedFileData {
     /// * `language` - The detected programming language
     /// * `mtime_ns` - File modification time in nanoseconds since Unix epoch
     /// * `size_bytes` - File size in bytes
+    /// * `content_hash` - xxhash64 of file content for change detection
     /// * `symbols` - Extracted symbols from the file
     /// * `references` - Extracted references from the file
     /// * `imports` - Extracted import statements
