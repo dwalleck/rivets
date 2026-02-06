@@ -2329,8 +2329,11 @@ impl Tethys {
     }
 
     /// Rebuild the entire index from scratch.
+    ///
+    /// Drops and recreates all database tables, ensuring the schema matches the
+    /// current version. This handles schema evolution that `clear()` alone cannot.
     pub fn rebuild(&mut self) -> Result<IndexStats> {
-        self.db.clear()?;
+        self.db.reset()?;
         self.index()
     }
 
@@ -2338,7 +2341,7 @@ impl Tethys {
     ///
     /// See [`index_with_options`](Self::index_with_options) for details on options.
     pub fn rebuild_with_options(&mut self, options: IndexOptions) -> Result<IndexStats> {
-        self.db.clear()?;
+        self.db.reset()?;
         self.index_with_options(options)
     }
 
