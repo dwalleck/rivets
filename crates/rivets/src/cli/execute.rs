@@ -608,11 +608,31 @@ fn confirm_action(prompt: &str) -> Result<bool> {
         .flush()
         .context("Failed to flush prompt to stderr")?;
     let mut input = String::new();
-    std::io::stdin()
+    let bytes_read = std::io::stdin()
         .read_line(&mut input)
         .context("Failed to read confirmation from stdin")?;
+    // EOF (e.g. Ctrl+D or piped input) is treated as "no"
+    if bytes_read == 0 {
+        eprintln!();
+        return Ok(false);
+    }
     let response = input.trim().to_lowercase();
     Ok(response == "y" || response == "yes")
+}
+
+/// Confirm a batch operation affecting multiple issues.
+///
+/// Returns `Ok(true)` to proceed, `Ok(false)` if the user cancelled.
+/// Skips the prompt when `skip_confirm` is true or only one issue is affected.
+fn confirm_batch(action: &str, count: usize, skip_confirm: bool) -> Result<bool> {
+    if count > 1 && !skip_confirm {
+        let prompt = format!("{action} {count} issues?");
+        if !confirm_action(&prompt)? {
+            println!("{action} cancelled.");
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Execute the close command
@@ -633,13 +653,8 @@ pub async fn execute_close(
     use super::types::{BatchError, BatchResult};
     use crate::domain::{IssueId, IssueStatus, IssueUpdate};
 
-    // Confirm batch close when multiple issues are being closed
-    if args.issue_ids.len() > 1 && !skip_confirm {
-        let prompt = format!("Close {} issues?", args.issue_ids.len());
-        if !confirm_action(&prompt)? {
-            println!("Close cancelled.");
-            return Ok(());
-        }
+    if !confirm_batch("Close", args.issue_ids.len(), skip_confirm)? {
+        return Ok(());
     }
 
     let mut result = BatchResult::new();
@@ -691,13 +706,8 @@ pub async fn execute_reopen(
     use super::types::{BatchError, BatchResult};
     use crate::domain::{IssueId, IssueStatus, IssueUpdate};
 
-    // Confirm batch reopen when multiple issues are being reopened
-    if args.issue_ids.len() > 1 && !skip_confirm {
-        let prompt = format!("Reopen {} issues?", args.issue_ids.len());
-        if !confirm_action(&prompt)? {
-            println!("Reopen cancelled.");
-            return Ok(());
-        }
+    if !confirm_batch("Reopen", args.issue_ids.len(), skip_confirm)? {
+        return Ok(());
     }
 
     let mut result = BatchResult::new();

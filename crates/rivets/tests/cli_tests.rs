@@ -1255,6 +1255,10 @@ fn test_cli_dep_tree_json_output(initialized_dir: TempDir) {
         json["dependencies"].is_array(),
         "should have 'dependencies' array"
     );
+    assert!(
+        json["dependents"].is_array(),
+        "should have 'dependents' array"
+    );
 }
 
 #[rstest]

@@ -42,8 +42,7 @@ pub fn print_dep_tree(root: &DepTreeNode, mode: OutputMode) -> io::Result<()> {
         OutputMode::Text => print_dep_tree_text(&mut handle, root, &config),
         OutputMode::Json => {
             let json = dep_tree_to_json(root);
-            let output = serde_json::to_string_pretty(&json)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let output = serde_json::to_string_pretty(&json).map_err(io::Error::other)?;
             writeln!(handle, "{}", output)
         }
     }
