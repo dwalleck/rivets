@@ -54,13 +54,13 @@ fn whitespace_only_rust_file_indexes_with_zero_symbols() {
 
 #[test]
 fn rust_file_with_syntax_errors_does_not_panic() {
-    let malformed = r#"
+    let malformed = r"
 fn incomplete(
     // missing closing paren and body
 struct Orphan {
     field: !!!invalid_type,
 }
-"#;
+";
     let (_dir, mut tethys) = workspace_with_files(&[("src/bad.rs", malformed)]);
 
     // Should not panic - tree-sitter handles malformed input gracefully
@@ -97,7 +97,7 @@ pub fn process(data: &[u8]) -> Result<Vec<String>, Error> {
 
 #[test]
 fn rust_file_with_deeply_nested_syntax_errors() {
-    let deeply_broken = r#"
+    let deeply_broken = r"
 mod outer {
     mod inner {
         fn broken() -> {{{{}}}}} {
@@ -106,7 +106,7 @@ mod outer {
     }
 }
 pub fn valid() -> i32 { 42 }
-"#;
+";
     let (_dir, mut tethys) = workspace_with_files(&[("src/nested_errors.rs", deeply_broken)]);
 
     let stats = tethys.index().expect("index should succeed");
@@ -170,7 +170,7 @@ fn mixed_valid_and_invalid_files_indexes_valid_ones() {
 
     // Write a non-UTF-8 file
     let bad_path = dir.path().join("src/bad.rs");
-    fs::write(&bad_path, &[0xFF, 0xFE, 0x80]).expect("should write bad file");
+    fs::write(&bad_path, [0xFF, 0xFE, 0x80]).expect("should write bad file");
 
     // Write another valid file
     let valid2_path = dir.path().join("src/also_good.rs");
@@ -205,7 +205,7 @@ fn mixed_valid_and_invalid_files_indexes_valid_ones() {
 
 #[test]
 fn comment_only_rust_file_indexes_with_zero_symbols() {
-    let comment_only = r#"
+    let comment_only = r"
 // This file has only comments
 // No actual code symbols
 
@@ -214,7 +214,7 @@ fn comment_only_rust_file_indexes_with_zero_symbols() {
  */
 
 /// Doc comment without any following item
-"#;
+";
     let (_dir, mut tethys) = workspace_with_files(&[("src/comments.rs", comment_only)]);
 
     let stats = tethys.index().expect("index should succeed");
@@ -245,10 +245,10 @@ fn rust_file_with_very_long_identifier() {
 
 #[test]
 fn rust_file_with_only_attributes() {
-    let attrs_only = r#"
+    let attrs_only = r"
 #![allow(dead_code)]
 #![cfg_attr(test, allow(unused))]
-"#;
+";
     let (_dir, mut tethys) = workspace_with_files(&[("src/attrs.rs", attrs_only)]);
 
     let stats = tethys.index().expect("index should succeed");
