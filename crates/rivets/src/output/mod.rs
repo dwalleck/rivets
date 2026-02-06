@@ -500,35 +500,13 @@ mod tests {
     use super::*;
     use crate::domain::{Dependency, DependencyType, IssueId, IssueStatus, IssueType};
     use chrono::Utc;
-    use colored::control::set_override;
     use std::env;
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::Mutex;
 
     // Mutex to protect global state in tests:
-    // - colored crate's set_override() is process-global
     // - Environment variables are process-global
-    // Tests modifying either must hold this mutex.
+    // Tests modifying env vars must hold this mutex.
     static GLOBAL_STATE_MUTEX: Mutex<()> = Mutex::new(());
-
-    /// RAII guard that enables colors via set_override and resets on drop.
-    /// Holds the mutex guard to prevent parallel color tests.
-    struct ColorGuard<'a> {
-        _guard: MutexGuard<'a, ()>,
-    }
-
-    impl<'a> ColorGuard<'a> {
-        fn new() -> Self {
-            let guard = GLOBAL_STATE_MUTEX.lock().unwrap();
-            set_override(true);
-            Self { _guard: guard }
-        }
-    }
-
-    impl Drop for ColorGuard<'_> {
-        fn drop(&mut self) {
-            set_override(false);
-        }
-    }
 
     /// Helper for tests that modify environment variables.
     /// Acquires mutex to prevent parallel env var modifications.
