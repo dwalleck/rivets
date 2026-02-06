@@ -1085,9 +1085,7 @@ impl Tethys {
             }
         }
 
-        // FIXME: Assumes crate root is workspace_root/src/. Does not detect actual
-        // main/lib location from Cargo.toml. Needs Cargo.toml parsing support.
-        let crate_root = self.workspace_root.join("src");
+        let crate_root = self.crate_source_root(current_file);
 
         // Track which files we depend on (dedupe)
         let mut depended_files: HashSet<PathBuf> = HashSet::new();
@@ -1512,11 +1510,12 @@ impl Tethys {
             by_file.entry(ref_.file_id).or_default().push(ref_);
         }
 
-        // FIXME: Assumes crate root is workspace_root/src/. Does not detect actual
-        // main/lib location from Cargo.toml. Needs Cargo.toml parsing support.
-        let crate_root = self.workspace_root.join("src");
-
         for (file_id, refs) in by_file {
+            let crate_root = if let Some(f) = self.db.get_file_by_id(file_id)? {
+                self.crate_source_root(&self.workspace_root.join(&f.path))
+            } else {
+                self.workspace_root.join("src")
+            };
             resolved_count += self.resolve_refs_for_file(file_id, refs, &crate_root)?;
         }
 
@@ -2234,6 +2233,34 @@ impl Tethys {
     /// attempting canonicalization when the initial `strip_prefix` fails on
     /// absolute paths. Returns `Cow::Borrowed` for the common fast path,
     /// `Cow::Owned` only when canonicalization was needed.
+    /// Determine the crate source root directory for a given file.
+    ///
+    /// Uses `cargo::get_crate_for_file` to find which crate the file belongs to,
+    /// then returns the parent directory of the crate's library or binary entry point
+    /// (e.g., the `src/` directory containing `lib.rs`).
+    ///
+    /// Falls back to `workspace_root/src` when the file doesn't belong to any
+    /// discovered crate (e.g., non-Cargo projects).
+    fn crate_source_root(&self, file_path: &Path) -> PathBuf {
+        if let Some(crate_info) = cargo::get_crate_for_file(file_path, &self.crates) {
+            // Prefer library entry point (lib.rs parent dir)
+            if let Some(lib_path) = &crate_info.lib_path {
+                if let Some(parent) = crate_info.path.join(lib_path).parent() {
+                    return parent.to_path_buf();
+                }
+            }
+            // Binary-only crate: use first binary's entry directory
+            if let Some((_, bin_path)) = crate_info.bin_paths.first() {
+                if let Some(parent) = crate_info.path.join(bin_path).parent() {
+                    return parent.to_path_buf();
+                }
+            }
+            crate_info.path.join("src")
+        } else {
+            self.workspace_root.join("src")
+        }
+    }
+
     fn relative_path<'a>(&self, path: &'a Path) -> Cow<'a, Path> {
         if let Ok(relative) = path.strip_prefix(&self.workspace_root) {
             return Cow::Borrowed(relative);
