@@ -9,6 +9,20 @@ use super::{row_to_indexed_file, Index, SymbolData, FILES_COLUMNS};
 use crate::error::Result;
 use crate::types::{FileId, IndexedFile, Language, SymbolId};
 
+/// Normalize a file path to use forward slashes for consistent DB storage.
+///
+/// On Windows, `Path::to_string_lossy()` preserves backslashes from OS APIs,
+/// but tests and cross-platform code use forward slashes. Normalizing to `/`
+/// ensures lookups match regardless of how the path was constructed.
+fn normalize_path(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    if cfg!(windows) {
+        s.replace('\\', "/")
+    } else {
+        s.into_owned()
+    }
+}
+
 impl Index {
     /// Insert or update a file record, returning the file ID.
     ///
@@ -29,7 +43,7 @@ impl Index {
 
     /// Get a file by path.
     pub fn get_file(&self, path: &Path) -> Result<Option<IndexedFile>> {
-        let path_str = path.to_string_lossy();
+        let path_str = normalize_path(path);
         let conn = self.connection()?;
 
         conn.query_row(
@@ -43,7 +57,7 @@ impl Index {
 
     /// Get file ID by path.
     pub fn get_file_id(&self, path: &Path) -> Result<Option<FileId>> {
-        let path_str = path.to_string_lossy();
+        let path_str = normalize_path(path);
         let conn = self.connection()?;
 
         conn.query_row("SELECT id FROM files WHERE path = ?1", [&path_str], |row| {
@@ -86,7 +100,7 @@ impl Index {
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
 
-        let path_str = path.to_string_lossy();
+        let path_str = normalize_path(path);
         let lang_str = language.as_str();
         let indexed_at = Self::now_ns()?;
 

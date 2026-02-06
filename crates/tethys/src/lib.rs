@@ -53,6 +53,7 @@ pub use types::{
     ReferenceKind, Span, Symbol, SymbolId, SymbolKind, UnresolvedRefForLsp, Visibility,
 };
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -688,7 +689,7 @@ impl Tethys {
 
         // Store in database atomically
         let (file_id, symbol_ids) = self.db.index_file_atomic(
-            self.relative_path(path),
+            &self.relative_path(path),
             language,
             mtime_ns,
             size_bytes,
@@ -1770,7 +1771,7 @@ impl Tethys {
         };
 
         let relative_path = self.relative_path(&resolved_file);
-        let file_id = self.db.get_file_id(relative_path)?;
+        let file_id = self.db.get_file_id(&relative_path)?;
 
         if file_id.is_none() {
             trace!(
@@ -2229,19 +2230,30 @@ impl Tethys {
 
     /// Get the path relative to the workspace root.
     ///
-    /// Returns the original path if it's not under the workspace root, logging
-    /// a warning for diagnostic visibility.
-    fn relative_path<'a>(&self, path: &'a Path) -> &'a Path {
+    /// Handles symlink differences (e.g., `/var` → `/private/var` on macOS) by
+    /// attempting canonicalization when the initial `strip_prefix` fails on
+    /// absolute paths. Returns `Cow::Borrowed` for the common fast path,
+    /// `Cow::Owned` only when canonicalization was needed.
+    fn relative_path<'a>(&self, path: &'a Path) -> Cow<'a, Path> {
         if let Ok(relative) = path.strip_prefix(&self.workspace_root) {
-            relative
-        } else {
-            warn!(
-                path = %path.display(),
-                workspace = %self.workspace_root.display(),
-                "Path is outside workspace root, using as-is"
-            );
-            path
+            return Cow::Borrowed(relative);
         }
+
+        // For absolute paths, try canonicalizing to resolve symlinks
+        if path.is_absolute() {
+            if let Ok(canonical) = path.canonicalize() {
+                if let Ok(relative) = canonical.strip_prefix(&self.workspace_root) {
+                    return Cow::Owned(relative.to_path_buf());
+                }
+            }
+        }
+
+        warn!(
+            path = %path.display(),
+            workspace = %self.workspace_root.display(),
+            "Path is outside workspace root, using as-is"
+        );
+        Cow::Borrowed(path)
     }
 
     /// Convert a list of file IDs to their paths, tracking missing files.
@@ -2307,7 +2319,7 @@ impl Tethys {
 
     /// Get metadata for an indexed file.
     pub fn get_file(&self, path: &Path) -> Result<Option<IndexedFile>> {
-        self.db.get_file(self.relative_path(path))
+        self.db.get_file(&self.relative_path(path))
     }
 
     // === Symbol Queries ===
@@ -2321,7 +2333,7 @@ impl Tethys {
     pub fn list_symbols(&self, path: &Path) -> Result<Vec<Symbol>> {
         let file_id = self
             .db
-            .get_file_id(self.relative_path(path))?
+            .get_file_id(&self.relative_path(path))?
             .ok_or_else(|| Error::NotFound(format!("file: {}", path.display())))?;
         self.db.list_symbols_in_file(file_id)
     }
@@ -2362,7 +2374,7 @@ impl Tethys {
     pub fn list_references_in_file(&self, path: &Path) -> Result<Vec<Reference>> {
         let file_id = self
             .db
-            .get_file_id(self.relative_path(path))?
+            .get_file_id(&self.relative_path(path))?
             .ok_or_else(|| Error::NotFound(format!("file: {}", path.display())))?;
 
         self.db.list_references_in_file(file_id)
@@ -2377,7 +2389,7 @@ impl Tethys {
     pub fn list_imports_in_file(&self, path: &Path) -> Result<Vec<Import>> {
         let file_id = self
             .db
-            .get_file_id(self.relative_path(path))?
+            .get_file_id(&self.relative_path(path))?
             .ok_or_else(|| Error::NotFound(format!("file: {}", path.display())))?;
 
         self.db.get_imports_for_file(file_id)
@@ -2389,7 +2401,7 @@ impl Tethys {
     pub fn get_dependents(&self, path: &Path) -> Result<Vec<PathBuf>> {
         let file_id = self
             .db
-            .get_file_id(self.relative_path(path))?
+            .get_file_id(&self.relative_path(path))?
             .ok_or_else(|| Error::NotFound(format!("file: {}", path.display())))?;
 
         let dependent_ids = self.db.get_file_dependents(file_id)?;
@@ -2408,7 +2420,7 @@ impl Tethys {
     pub fn get_dependencies(&self, path: &Path) -> Result<Vec<PathBuf>> {
         let file_id = self
             .db
-            .get_file_id(self.relative_path(path))?
+            .get_file_id(&self.relative_path(path))?
             .ok_or_else(|| Error::NotFound(format!("file: {}", path.display())))?;
 
         let dep_ids = self.db.get_file_dependencies(file_id)?;
@@ -2427,7 +2439,7 @@ impl Tethys {
     pub fn get_impact(&self, path: &Path) -> Result<Impact> {
         let file_id = self
             .db
-            .get_file_id(self.relative_path(path))?
+            .get_file_id(&self.relative_path(path))?
             .ok_or_else(|| Error::NotFound(format!("file: {}", path.display())))?;
 
         let file_impact = self.db.get_transitive_dependents(file_id, Some(50))?;
@@ -2735,11 +2747,11 @@ impl Tethys {
     pub fn get_dependency_chain(&self, from: &Path, to: &Path) -> Result<Option<Vec<PathBuf>>> {
         let from_id = self
             .db
-            .get_file_id(self.relative_path(from))?
+            .get_file_id(&self.relative_path(from))?
             .ok_or_else(|| Error::NotFound(format!("file: {}", from.display())))?;
         let to_id = self
             .db
-            .get_file_id(self.relative_path(to))?
+            .get_file_id(&self.relative_path(to))?
             .ok_or_else(|| Error::NotFound(format!("file: {}", to.display())))?;
 
         let path = self.db.find_dependency_path(from_id, to_id)?;
@@ -3017,7 +3029,7 @@ impl Tethys {
             .iter()
             .filter_map(|path| {
                 let relative = self.relative_path(path);
-                match self.db.get_file_id(relative) {
+                match self.db.get_file_id(&relative) {
                     Ok(Some(id)) => Some(id),
                     Ok(None) => {
                         debug!(
