@@ -76,6 +76,10 @@ use tracing::{debug, info, trace, warn};
 ///
 /// Returns a stable 64-bit hash suitable for storing in `SQLite`'s INTEGER column.
 /// Used to skip re-indexing files whose content hasn't changed.
+///
+/// Uses xxhash64 because it is non-cryptographic (fast), has excellent collision
+/// resistance for content deduplication, produces stable output across platforms,
+/// and fits in a 64-bit INTEGER column.
 fn compute_content_hash(content: &[u8]) -> u64 {
     xxhash_rust::xxh64::xxh64(content, 0)
 }
@@ -2246,23 +2250,33 @@ impl Tethys {
     /// Falls back to `workspace_root/src` when the file doesn't belong to any
     /// discovered crate (e.g., non-Cargo projects).
     fn crate_source_root(&self, file_path: &Path) -> PathBuf {
-        if let Some(crate_info) = cargo::get_crate_for_file(file_path, &self.crates) {
-            // Prefer library entry point (lib.rs parent dir)
-            if let Some(lib_path) = &crate_info.lib_path {
-                if let Some(parent) = crate_info.path.join(lib_path).parent() {
-                    return parent.to_path_buf();
-                }
-            }
-            // Binary-only crate: use first binary's entry directory
-            if let Some((_, bin_path)) = crate_info.bin_paths.first() {
-                if let Some(parent) = crate_info.path.join(bin_path).parent() {
-                    return parent.to_path_buf();
-                }
-            }
-            crate_info.path.join("src")
-        } else {
-            self.workspace_root.join("src")
+        let Some(crate_info) = cargo::get_crate_for_file(file_path, &self.crates) else {
+            return self.workspace_root.join("src");
+        };
+
+        // Prefer library entry point (lib.rs parent dir)
+        if let Some(parent) = crate_info.lib_path.as_ref().and_then(|lib_path| {
+            crate_info
+                .path
+                .join(lib_path)
+                .parent()
+                .map(Path::to_path_buf)
+        }) {
+            return parent;
         }
+
+        // Binary-only crate: use first binary's entry directory
+        if let Some(parent) = crate_info.bin_paths.first().and_then(|(_, bin_path)| {
+            crate_info
+                .path
+                .join(bin_path)
+                .parent()
+                .map(Path::to_path_buf)
+        }) {
+            return parent;
+        }
+
+        crate_info.path.join("src")
     }
 
     /// Get the path relative to the workspace root.
@@ -2343,6 +2357,10 @@ impl Tethys {
     /// - **Modified**: files on disk whose mtime or size differ from the index
     /// - **Added**: source files on disk not yet in the index
     /// - **Deleted**: files in the index no longer present on disk
+    ///
+    /// Note: there is a small TOCTOU window where files could change between this
+    /// staleness check and actual re-indexing. This is acceptable for development
+    /// workflows; use `--rebuild` when full consistency is required.
     pub fn get_stale_files(&self) -> Result<StalenessReport> {
         let indexed_files = self.db.list_all_files()?;
         let mut indexed_map: HashMap<PathBuf, (i64, u64)> = indexed_files
@@ -2367,16 +2385,27 @@ impl Tethys {
 
             if let Some((indexed_mtime, indexed_size)) = indexed_map.remove(&relative) {
                 // File exists in both disk and index -- check for changes
-                if let Ok(metadata) = std::fs::metadata(&file_path) {
-                    let size = metadata.len();
-                    #[allow(clippy::cast_possible_truncation)]
-                    let mtime = metadata
-                        .modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                        .map_or(0, |d| d.as_nanos() as i64);
+                match std::fs::metadata(&file_path) {
+                    Ok(metadata) => {
+                        let size = metadata.len();
+                        // Safety: nanoseconds since epoch fit in i64 until year 2262
+                        #[allow(clippy::cast_possible_truncation)]
+                        let mtime = metadata
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                            .map_or(0, |d| d.as_nanos() as i64);
 
-                    if mtime != indexed_mtime || size != indexed_size {
+                        if mtime != indexed_mtime || size != indexed_size {
+                            modified.push(relative);
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            path = %file_path.display(),
+                            error = %e,
+                            "Failed to read metadata during staleness check, treating as modified"
+                        );
                         modified.push(relative);
                     }
                 }
