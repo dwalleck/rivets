@@ -861,6 +861,33 @@ pub struct IndexUpdate {
     pub errors: Vec<IndexError>,
 }
 
+/// Report of which files need re-indexing.
+///
+/// Returned by [`Tethys::get_stale_files()`].
+#[derive(Debug, Clone)]
+pub struct StalenessReport {
+    /// Files on disk whose mtime or size changed since last indexing
+    pub modified: Vec<PathBuf>,
+    /// Files on disk not yet in the index
+    pub added: Vec<PathBuf>,
+    /// Files in the index no longer on disk
+    pub deleted: Vec<PathBuf>,
+}
+
+impl StalenessReport {
+    /// Returns true if any files need re-indexing.
+    #[must_use]
+    pub fn is_stale(&self) -> bool {
+        !self.modified.is_empty() || !self.added.is_empty() || !self.deleted.is_empty()
+    }
+
+    /// Total number of files that need attention.
+    #[must_use]
+    pub fn total(&self) -> usize {
+        self.modified.len() + self.added.len() + self.deleted.len()
+    }
+}
+
 /// Result of impact analysis.
 ///
 /// Shows which files/symbols would be affected by changes to a target.

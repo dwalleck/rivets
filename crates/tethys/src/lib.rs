@@ -50,7 +50,8 @@ pub use types::{
     CrateInfo, Cycle, DatabaseStats, Dependent, FileAnalysis, FileId, FunctionSignature, Impact,
     Import, IndexOptions, IndexStats, IndexUpdate, IndexedFile, Language, PanicKind, PanicPoint,
     Parameter, ParameterKind, ReachabilityDirection, ReachabilityResult, ReachablePath, Reference,
-    ReferenceKind, Span, Symbol, SymbolId, SymbolKind, UnresolvedRefForLsp, Visibility,
+    ReferenceKind, Span, StalenessReport, Symbol, SymbolId, SymbolKind, UnresolvedRefForLsp,
+    Visibility,
 };
 
 use std::borrow::Cow;
@@ -2324,8 +2325,72 @@ impl Tethys {
 
     /// Check if any indexed files have changed since last update.
     pub fn needs_update(&self) -> Result<bool> {
-        // TODO: implement proper staleness check
-        Ok(true)
+        self.get_stale_files().map(|report| report.is_stale())
+    }
+
+    /// Compare indexed files against the filesystem to find what needs re-indexing.
+    ///
+    /// Detects three categories of staleness:
+    /// - **Modified**: files on disk whose mtime or size differ from the index
+    /// - **Added**: source files on disk not yet in the index
+    /// - **Deleted**: files in the index no longer present on disk
+    pub fn get_stale_files(&self) -> Result<StalenessReport> {
+        let indexed_files = self.db.list_all_files()?;
+        let mut indexed_map: HashMap<PathBuf, (i64, u64)> = indexed_files
+            .into_iter()
+            .map(|f| (f.path, (f.mtime_ns, f.size_bytes)))
+            .collect();
+
+        let mut modified = Vec::new();
+        let mut added = Vec::new();
+
+        // Walk the filesystem and compare against indexed state
+        let mut skip_log = Vec::new();
+        let disk_files = self.discover_files(&mut skip_log)?;
+
+        for file_path in disk_files {
+            let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if Language::from_extension(ext).is_none() {
+                continue;
+            }
+
+            let relative = self.relative_path(&file_path).to_path_buf();
+
+            if let Some((indexed_mtime, indexed_size)) = indexed_map.remove(&relative) {
+                // File exists in both disk and index -- check for changes
+                if let Ok(metadata) = std::fs::metadata(&file_path) {
+                    let size = metadata.len();
+                    #[allow(clippy::cast_possible_truncation)]
+                    let mtime = metadata
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                        .map_or(0, |d| d.as_nanos() as i64);
+
+                    if mtime != indexed_mtime || size != indexed_size {
+                        modified.push(relative);
+                    }
+                }
+            } else {
+                added.push(relative);
+            }
+        }
+
+        // Anything remaining in indexed_map was not found on disk
+        let deleted: Vec<PathBuf> = indexed_map.into_keys().collect();
+
+        debug!(
+            modified = modified.len(),
+            added = added.len(),
+            deleted = deleted.len(),
+            "Staleness check complete"
+        );
+
+        Ok(StalenessReport {
+            modified,
+            added,
+            deleted,
+        })
     }
 
     /// Rebuild the entire index from scratch.
