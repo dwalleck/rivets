@@ -3175,10 +3175,16 @@ mod tests {
 
         assert!(result.is_ok());
         let tethys = result.unwrap();
-        assert_eq!(
-            tethys.db_path(),
-            workspace.path().join(".rivets/index/tethys.db")
-        );
+        // Canonicalize expected path to match Tethys::new() which canonicalizes workspace_root
+        // (resolves /var -> /private/var on macOS, short names on Windows)
+        let expected = workspace
+            .path()
+            .canonicalize()
+            .expect("temp dir should be canonicalizable")
+            .join(".rivets")
+            .join("index")
+            .join("tethys.db");
+        assert_eq!(tethys.db_path(), expected);
     }
 
     #[test]
@@ -3220,6 +3226,7 @@ mod tests {
     // ========================================================================
 
     #[test]
+    #[cfg(not(windows))]
     fn uri_to_path_handles_unix_path() {
         let uri = "file:///home/user/project/src/main.rs";
         let result = Tethys::uri_to_path(uri);
@@ -3244,6 +3251,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn uri_to_path_decodes_percent_encoded_spaces() {
         let uri = "file:///home/user/my%20project/src/main.rs";
         let result = Tethys::uri_to_path(uri);
