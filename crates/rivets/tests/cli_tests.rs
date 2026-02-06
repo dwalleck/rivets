@@ -3,11 +3,12 @@
 //! These tests verify the end-to-end behavior of all CLI commands.
 
 use rstest::{fixture, rstest};
+use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
 
 mod common;
-use common::{create_issue, run_rivets_in_dir};
+use common::{create_issue, get_rivets_binary, run_rivets_in_dir};
 
 // ============================================================================
 // Test Fixtures
@@ -1401,4 +1402,65 @@ fn test_cli_show_multiple_json_output(initialized_dir: TempDir) {
         serde_json::from_str(&stdout).expect("Output should be valid JSON");
     assert!(json.is_array());
     assert_eq!(json.as_array().unwrap().len(), 2);
+}
+
+// ============================================================================
+// NO_COLOR Integration Tests
+// ============================================================================
+
+/// Run the rivets binary with a custom environment variable set.
+fn run_rivets_with_env(
+    dir: &Path,
+    args: &[&str],
+    env_key: &str,
+    env_val: &str,
+) -> std::process::Output {
+    let binary = get_rivets_binary();
+    Command::new(&binary)
+        .args(args)
+        .current_dir(dir)
+        .env(env_key, env_val)
+        .output()
+        .expect("Failed to execute rivets binary")
+}
+
+/// Returns true if the string contains any ANSI escape sequences.
+fn contains_ansi_escapes(s: &str) -> bool {
+    s.contains("\x1b[")
+}
+
+#[rstest]
+fn test_cli_no_color_env_disables_ansi(initialized_dir: TempDir) {
+    create_issue(
+        initialized_dir.path(),
+        "Color test issue",
+        &["--type", "bug", "--priority", "1"],
+    );
+
+    // Without NO_COLOR, output may contain ANSI escapes (depends on terminal detection,
+    // but we can at least verify the NO_COLOR path produces clean output)
+    let output = run_rivets_with_env(initialized_dir.path(), &["list"], "NO_COLOR", "1");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !contains_ansi_escapes(&stdout),
+        "NO_COLOR=1 should suppress ANSI escape sequences in output, got: {stdout}"
+    );
+}
+
+#[rstest]
+fn test_cli_rivets_color_zero_disables_ansi(initialized_dir: TempDir) {
+    create_issue(
+        initialized_dir.path(),
+        "Color test issue",
+        &["--type", "feature"],
+    );
+
+    let output = run_rivets_with_env(initialized_dir.path(), &["list"], "RIVETS_COLOR", "0");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !contains_ansi_escapes(&stdout),
+        "RIVETS_COLOR=0 should suppress ANSI escape sequences in output, got: {stdout}"
+    );
 }
