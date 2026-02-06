@@ -787,11 +787,11 @@ fn test_cli_reopen_multiple_issues(initialized_dir: TempDir) {
     let id1 = create_issue(initialized_dir.path(), "Issue 1", &[]);
     let id2 = create_issue(initialized_dir.path(), "Issue 2", &[]);
 
-    // Close both issues
-    run_rivets_in_dir(initialized_dir.path(), &["close", &id1, &id2]);
+    // Close both issues (--yes to skip confirmation)
+    run_rivets_in_dir(initialized_dir.path(), &["--yes", "close", &id1, &id2]);
 
-    // Reopen both at once
-    let output = run_rivets_in_dir(initialized_dir.path(), &["reopen", &id1, &id2]);
+    // Reopen both at once (--yes to skip confirmation)
+    let output = run_rivets_in_dir(initialized_dir.path(), &["--yes", "reopen", &id1, &id2]);
 
     assert!(
         output.status.success(),
@@ -1373,7 +1373,15 @@ fn test_cli_close_multiple_issues(initialized_dir: TempDir) {
 
     let output = run_rivets_in_dir(
         initialized_dir.path(),
-        &["close", &id1, &id2, &id3, "--reason", "Batch close"],
+        &[
+            "--yes",
+            "close",
+            &id1,
+            &id2,
+            &id3,
+            "--reason",
+            "Batch close",
+        ],
     );
 
     assert!(

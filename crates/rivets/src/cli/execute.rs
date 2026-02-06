@@ -598,6 +598,23 @@ fn validate_status_transition(
     }
 }
 
+/// Prompt the user for confirmation and return whether they accepted.
+///
+/// Prints `prompt` to stderr, reads a line from stdin, and returns `true`
+/// if the response is "y" or "yes" (case-insensitive).
+fn confirm_action(prompt: &str) -> Result<bool> {
+    eprint!("{} [y/N]: ", prompt);
+    std::io::stderr()
+        .flush()
+        .context("Failed to flush prompt to stderr")?;
+    let mut input = String::new();
+    std::io::stdin()
+        .read_line(&mut input)
+        .context("Failed to read confirmation from stdin")?;
+    let response = input.trim().to_lowercase();
+    Ok(response == "y" || response == "yes")
+}
+
 /// Execute the close command
 ///
 /// # Batch Processing
@@ -611,9 +628,19 @@ pub async fn execute_close(
     app: &mut crate::app::App,
     args: &CloseArgs,
     output_mode: OutputMode,
+    skip_confirm: bool,
 ) -> Result<()> {
     use super::types::{BatchError, BatchResult};
     use crate::domain::{IssueId, IssueStatus, IssueUpdate};
+
+    // Confirm batch close when multiple issues are being closed
+    if args.issue_ids.len() > 1 && !skip_confirm {
+        let prompt = format!("Close {} issues?", args.issue_ids.len());
+        if !confirm_action(&prompt)? {
+            println!("Close cancelled.");
+            return Ok(());
+        }
+    }
 
     let mut result = BatchResult::new();
 
@@ -659,9 +686,19 @@ pub async fn execute_reopen(
     app: &mut crate::app::App,
     args: &ReopenArgs,
     output_mode: OutputMode,
+    skip_confirm: bool,
 ) -> Result<()> {
     use super::types::{BatchError, BatchResult};
     use crate::domain::{IssueId, IssueStatus, IssueUpdate};
+
+    // Confirm batch reopen when multiple issues are being reopened
+    if args.issue_ids.len() > 1 && !skip_confirm {
+        let prompt = format!("Reopen {} issues?", args.issue_ids.len());
+        if !confirm_action(&prompt)? {
+            println!("Reopen cancelled.");
+            return Ok(());
+        }
+    }
 
     let mut result = BatchResult::new();
 
@@ -703,6 +740,7 @@ pub async fn execute_delete(
     app: &mut crate::app::App,
     args: &DeleteArgs,
     output_mode: OutputMode,
+    skip_confirm: bool,
 ) -> Result<()> {
     use crate::domain::IssueId;
     use crate::output;
@@ -716,18 +754,10 @@ pub async fn execute_delete(
         .await?
         .ok_or_else(|| crate::error::Error::IssueNotFound(issue_id.clone()))?;
 
-    // Confirm deletion unless --force is used
-    if !args.force {
-        eprint!("Delete issue '{}' ({})? [y/N]: ", issue.id, issue.title);
-        std::io::stderr()
-            .flush()
-            .context("Failed to flush prompt to stderr")?;
-        let mut input = String::new();
-        std::io::stdin()
-            .read_line(&mut input)
-            .context("Failed to read confirmation from stdin")?;
-        let response = input.trim().to_lowercase();
-        if response != "y" && response != "yes" {
+    // Confirm deletion unless --force or --yes is used
+    if !args.force && !skip_confirm {
+        let prompt = format!("Delete issue '{}' ({})?", issue.id, issue.title);
+        if !confirm_action(&prompt)? {
             println!("Deletion cancelled.");
             return Ok(());
         }
@@ -2055,7 +2085,7 @@ mod tests {
                 reason: None,
             };
 
-            let result = execute_close(&mut app, &args, OutputMode::Text).await;
+            let result = execute_close(&mut app, &args, OutputMode::Text, true).await;
 
             assert!(result.is_err());
             let error_msg = result.unwrap_err().to_string();
@@ -2098,7 +2128,7 @@ mod tests {
                 reason: None,
             };
 
-            let result = execute_reopen(&mut app, &args, OutputMode::Text).await;
+            let result = execute_reopen(&mut app, &args, OutputMode::Text, true).await;
 
             assert!(result.is_err());
             let error_msg = result.unwrap_err().to_string();
@@ -2142,7 +2172,7 @@ mod tests {
                 reason: None,
             };
 
-            let result = execute_reopen(&mut app, &args, OutputMode::Text).await;
+            let result = execute_reopen(&mut app, &args, OutputMode::Text, true).await;
 
             assert!(result.is_err());
             let error_msg = result.unwrap_err().to_string();
