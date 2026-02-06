@@ -932,11 +932,12 @@ async fn execute_dep_tree(
     output_mode: OutputMode,
 ) -> Result<()> {
     use crate::domain::IssueId;
-    use crate::output;
+    use crate::output::{self, DepTreeNode};
+    use std::collections::HashSet;
 
     let id = IssueId::new(issue_id);
 
-    // Get the issue to verify it exists
+    // Verify the issue exists and get its details
     let issue = app
         .storage()
         .get(&id)
@@ -946,75 +947,103 @@ async fn execute_dep_tree(
     // Convert depth: 0 means unlimited (None), otherwise Some(depth)
     let max_depth = if depth == 0 { None } else { Some(depth) };
 
-    // Get dependency tree
-    let tree = app.storage().get_dependency_tree(&id, max_depth).await?;
+    // Build tree recursively using DFS
+    let mut visited = HashSet::new();
+    visited.insert(id.clone());
+    let children = build_dep_tree_children(app, &id, max_depth, 0, &mut visited).await?;
 
-    // Also get dependents (reverse tree)
+    let root = DepTreeNode {
+        id: issue_id.to_string(),
+        dep_type: None,
+        status: Some(issue.status),
+        title: Some(issue.title.clone()),
+        priority: Some(issue.priority),
+        children,
+    };
+
+    // Get dependents (reverse dependencies)
     let dependents = app.storage().get_dependents(&id).await?;
 
     match output_mode {
         output::OutputMode::Json => {
-            output::print_json(&serde_json::json!({
-                "issue_id": issue_id,
-                "title": issue.title,
-                "dependencies": tree.iter().map(|(dep, tree_depth)| {
-                    serde_json::json!({
-                        "depends_on_id": dep.depends_on_id.to_string(),
-                        "dep_type": format!("{}", dep.dep_type),
-                        "depth": tree_depth
-                    })
-                }).collect::<Vec<_>>(),
-                "dependents": dependents.iter().map(|dep| {
-                    serde_json::json!({
-                        "depends_on_id": dep.depends_on_id.to_string(),
-                        "dep_type": format!("{}", dep.dep_type)
-                    })
-                }).collect::<Vec<_>>()
-            }))?;
+            let json = output::dep_tree_to_json_public(&root, &dependents);
+            output::print_json(&json)?;
         }
         output::OutputMode::Text => {
-            println!("Dependency tree for: {} ({})", issue_id, issue.title);
-            println!();
+            output::print_dep_tree(&root, output_mode)?;
 
-            // Print dependents (what depends on this issue)
-            if dependents.is_empty() {
-                println!("  ↑ No issues depend on this");
-            } else {
-                println!("  ↑ Depended on by ({}):", dependents.len());
-                for dep in &dependents {
-                    println!("    {} ({})", dep.depends_on_id, dep.dep_type);
-                }
-            }
-
-            println!("  │");
-            println!("  ◆ {} [P{}]", issue_id, issue.priority);
-            println!("  │");
-
-            // Print dependencies (what this issue depends on)
-            if tree.is_empty() {
-                println!("  ↓ No dependencies");
-            } else {
-                println!("  ↓ Depends on ({}):", tree.len());
-                const MAX_VISUAL_DEPTH: usize = 10;
-                for (dep, tree_depth) in &tree {
-                    // Cap visual indentation at MAX_VISUAL_DEPTH to prevent extremely wide output
-                    let visual_depth = (*tree_depth).min(MAX_VISUAL_DEPTH);
-                    let indent = "  ".repeat(visual_depth);
-                    let depth_indicator = if *tree_depth > MAX_VISUAL_DEPTH {
-                        format!(" [depth: {}]", tree_depth)
-                    } else {
-                        String::new()
-                    };
-                    println!(
-                        "    {}└── {} ({}){}",
-                        indent, dep.depends_on_id, dep.dep_type, depth_indicator
-                    );
-                }
+            if !dependents.is_empty() {
+                let config = output::OutputConfig::from_env();
+                let stdout = std::io::stdout();
+                let mut handle = stdout.lock();
+                output::print_dep_tree_dependents(&mut handle, &dependents, &config)?;
             }
         }
     }
 
     Ok(())
+}
+
+/// Recursively build dependency tree children via DFS.
+///
+/// Uses a visited set to prevent cycles, and respects the max depth limit.
+async fn build_dep_tree_children(
+    app: &crate::app::App,
+    parent_id: &crate::domain::IssueId,
+    max_depth: Option<usize>,
+    current_depth: usize,
+    visited: &mut std::collections::HashSet<crate::domain::IssueId>,
+) -> Result<Vec<crate::output::DepTreeNode>> {
+    use crate::output::DepTreeNode;
+
+    // Check depth limit
+    if let Some(max) = max_depth {
+        if current_depth >= max {
+            return Ok(vec![]);
+        }
+    }
+
+    let deps = app.storage().get_dependencies(parent_id).await?;
+    let mut children = Vec::new();
+
+    for dep in deps {
+        let child_id = dep.depends_on_id.clone();
+
+        // Skip already-visited nodes to prevent cycles
+        if !visited.insert(child_id.clone()) {
+            continue;
+        }
+
+        // Fetch status for the child node
+        let status = app
+            .storage()
+            .get(&child_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|i| i.status);
+
+        // Recurse into children
+        let grandchildren = Box::pin(build_dep_tree_children(
+            app,
+            &child_id,
+            max_depth,
+            current_depth + 1,
+            visited,
+        ))
+        .await?;
+
+        children.push(DepTreeNode {
+            id: child_id.to_string(),
+            dep_type: Some(dep.dep_type),
+            status,
+            title: None,
+            priority: None,
+            children: grandchildren,
+        });
+    }
+
+    Ok(children)
 }
 
 /// Execute the dep command

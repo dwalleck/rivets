@@ -1177,10 +1177,10 @@ fn test_cli_dep_tree(initialized_dir: TempDir) {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Dependency tree for:"));
-    assert!(stdout.contains("Parent issue"));
-    assert!(stdout.contains(&id2));
-    assert!(stdout.contains("blocks"));
+    assert!(stdout.contains(&id1), "should contain root issue ID");
+    assert!(stdout.contains("Parent issue"), "should contain root title");
+    assert!(stdout.contains(&id2), "should contain child issue ID");
+    assert!(stdout.contains("blocks"), "should contain dep type");
 }
 
 #[rstest]
@@ -1248,10 +1248,12 @@ fn test_cli_dep_tree_json_output(initialized_dir: TempDir) {
 
     let json: serde_json::Value =
         serde_json::from_str(&stdout).expect("Output should be valid JSON");
-    assert!(json["issue_id"].is_string());
-    assert!(json["title"].is_string());
-    assert!(json["dependencies"].is_array());
-    assert!(json["dependents"].is_array());
+    assert!(json["id"].is_string(), "should have 'id' field");
+    assert!(json["title"].is_string(), "should have 'title' field");
+    assert!(
+        json["dependencies"].is_array(),
+        "should have 'dependencies' array"
+    );
 }
 
 #[rstest]
@@ -1262,8 +1264,23 @@ fn test_cli_dep_tree_no_dependencies(initialized_dir: TempDir) {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("No issues depend on this"));
-    assert!(stdout.contains("No dependencies"));
+    // Root node is always displayed with ID and title
+    assert!(
+        stdout.contains(&issue_id),
+        "should contain issue ID, got: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("Standalone issue"),
+        "should contain issue title, got: {}",
+        stdout
+    );
+    // No dependency tree connectors should appear
+    assert!(
+        !stdout.contains("├──") && !stdout.contains("└──"),
+        "should not contain tree connectors for standalone issue, got: {}",
+        stdout
+    );
 }
 
 // ============================================================================
