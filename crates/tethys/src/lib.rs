@@ -131,18 +131,14 @@ impl Tethys {
         })
     }
 
-    /// Create with LSP refinement (placeholder - not yet implemented).
+    /// Create a Tethys instance with LSP refinement enabled.
     ///
-    /// # Note
-    ///
-    /// This method is a **placeholder**. LSP integration is planned for Phase 6.
-    /// Currently behaves identically to [`Self::new`] and ignores `lsp_command`.
+    /// LSP integration is controlled via [`IndexOptions::with_lsp()`] when calling
+    /// [`index_with_options()`](Self::index_with_options). The `lsp_command` parameter
+    /// is reserved for future use (custom LSP server paths); currently LSP providers
+    /// are selected automatically based on language.
     #[allow(unused_variables)]
     pub fn with_lsp(workspace_root: &Path, lsp_command: &str) -> Result<Self> {
-        tracing::warn!(
-            lsp_command,
-            "LSP integration not yet implemented, falling back to tree-sitter only"
-        );
         Self::new(workspace_root)
     }
 
