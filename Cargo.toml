@@ -64,6 +64,7 @@ serde_yaml = "0.9"
 # Testing utilities
 tempfile = "3.18"
 rstest = "0.26"
+proptest = "1.6"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

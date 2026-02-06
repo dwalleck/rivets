@@ -74,6 +74,9 @@ impl Index {
         }
 
         let pattern = format!("%{query}%");
+        // usize limit fits in i64 on all supported platforms
+        #[allow(clippy::cast_possible_wrap)]
+        let limit_i64 = limit as i64;
         let conn = self.connection()?;
 
         let mut stmt = conn.prepare(&format!(
@@ -84,7 +87,7 @@ impl Index {
         ))?;
 
         let symbols = stmt
-            .query_map(params![pattern, query, limit as i64], row_to_symbol)?
+            .query_map(params![pattern, query, limit_i64], row_to_symbol)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(symbols)
@@ -122,6 +125,9 @@ impl Index {
     ///
     /// This is used to build namespace-to-file maps for C# dependency resolution.
     pub fn search_symbols_by_kind(&self, kind: SymbolKind, limit: usize) -> Result<Vec<Symbol>> {
+        // usize limit fits in i64 on all supported platforms
+        #[allow(clippy::cast_possible_wrap)]
+        let limit_i64 = limit as i64;
         let conn = self.connection()?;
 
         let mut stmt = conn.prepare(&format!(
@@ -129,7 +135,7 @@ impl Index {
         ))?;
 
         let symbols = stmt
-            .query_map(params![kind.as_str(), limit as i64], row_to_symbol)?
+            .query_map(params![kind.as_str(), limit_i64], row_to_symbol)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(symbols)
@@ -162,6 +168,8 @@ impl Index {
         let symbols: i64 = conn.query_row("SELECT COUNT(*) FROM symbols", [], |row| row.get(0))?;
         let refs: i64 = conn.query_row("SELECT COUNT(*) FROM refs", [], |row| row.get(0))?;
 
+        // Safety: COUNT(*) returns non-negative values
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         Ok((files as usize, symbols as usize, refs as usize))
     }
 

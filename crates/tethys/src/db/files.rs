@@ -104,6 +104,13 @@ impl Index {
         let lang_str = language.as_str();
         let indexed_at = Self::now_ns()?;
 
+        // u64 size_bytes/content_hash reinterpreted as i64 for SQLite storage;
+        // round-trips correctly via the reverse cast in row_to_indexed_file
+        #[allow(clippy::cast_possible_wrap)]
+        let size_bytes_i64 = size_bytes as i64;
+        #[allow(clippy::cast_possible_wrap)]
+        let content_hash_i64 = content_hash.map(|h| h as i64);
+
         // Try to update first
         let updated = tx.execute(
             "UPDATE files SET language = ?2, mtime_ns = ?3, size_bytes = ?4,
@@ -112,8 +119,8 @@ impl Index {
                 path_str,
                 lang_str,
                 mtime_ns,
-                size_bytes as i64,
-                content_hash.map(|h| h as i64),
+                size_bytes_i64,
+                content_hash_i64,
                 indexed_at
             ],
         )?;
@@ -138,8 +145,8 @@ impl Index {
                     path_str,
                     lang_str,
                     mtime_ns,
-                    size_bytes as i64,
-                    content_hash.map(|h| h as i64),
+                    size_bytes_i64,
+                    content_hash_i64,
                     indexed_at
                 ],
             )?;
@@ -207,5 +214,34 @@ impl Index {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(files)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn normalize_path_is_idempotent(s in "[a-zA-Z0-9_./\\\\-]{0,100}") {
+            let path = Path::new(&s);
+            let once = normalize_path(path);
+            let twice = normalize_path(Path::new(&once));
+            prop_assert_eq!(&once, &twice, "normalize_path should be idempotent");
+        }
+
+        /// On Windows, backslashes are replaced with forward slashes.
+        /// On Unix, backslashes are valid filename chars and preserved.
+        #[cfg(windows)]
+        #[test]
+        fn normalize_path_replaces_backslashes_on_windows(s in "[a-zA-Z0-9_./\\\\-]{0,100}") {
+            let path = Path::new(&s);
+            let normalized = normalize_path(path);
+            prop_assert!(
+                !normalized.contains('\\'),
+                "normalized path should not contain backslashes on Windows: {normalized}"
+            );
+        }
     }
 }
