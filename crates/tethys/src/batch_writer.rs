@@ -148,6 +148,7 @@ impl BatchWriter {
                 } else {
                     "Batch writer thread panicked with unknown payload".to_string()
                 };
+                error!(panic_msg = %msg, "Background batch writer thread panicked");
                 Err(Error::Internal(msg))
             }
         }

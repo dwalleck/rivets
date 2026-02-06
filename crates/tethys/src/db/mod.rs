@@ -107,9 +107,11 @@ impl Index {
     /// Returns a `MutexGuard` providing exclusive access to the underlying connection.
     /// Used internally by all database operations.
     pub(crate) fn connection(&self) -> Result<MutexGuard<'_, Connection>> {
-        self.conn
-            .lock()
-            .map_err(|e| Error::Internal(format!("connection mutex poisoned: {e}")))
+        self.conn.lock().map_err(|e| {
+            Error::Internal(format!(
+                "database connection mutex poisoned (a thread panicked while holding the lock): {e}"
+            ))
+        })
     }
 
     /// Get the current unix timestamp in nanoseconds.

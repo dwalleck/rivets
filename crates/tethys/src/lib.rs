@@ -2163,7 +2163,7 @@ impl Tethys {
         directories_skipped: &mut Vec<(PathBuf, String)>,
     ) -> Result<Vec<PathBuf>> {
         let mut files = Vec::new();
-        self.walk_dir(&self.workspace_root, &mut files, directories_skipped)?;
+        Self::walk_dir(&self.workspace_root, &mut files, directories_skipped)?;
         Ok(files)
     }
 
@@ -2171,9 +2171,7 @@ impl Tethys {
     ///
     /// Directories that cannot be read (e.g., due to permissions) are tracked
     /// in `directories_skipped` for reporting.
-    #[allow(clippy::only_used_in_recursion)] // Method design, may use self in future
     fn walk_dir(
-        &self,
         dir: &Path,
         files: &mut Vec<PathBuf>,
         directories_skipped: &mut Vec<(PathBuf, String)>,
@@ -2215,7 +2213,7 @@ impl Tethys {
             }
 
             if path.is_dir() {
-                self.walk_dir(&path, files, directories_skipped)?;
+                Self::walk_dir(&path, files, directories_skipped)?;
             } else if path.is_file() {
                 // Check if it's a supported file type
                 if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
