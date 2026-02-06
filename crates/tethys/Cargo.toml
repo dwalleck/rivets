@@ -50,6 +50,7 @@ colored.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 rstest.workspace = true
+proptest.workspace = true
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]

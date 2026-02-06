@@ -1664,4 +1664,143 @@ mod tests {
         assert_eq!(info.name, "my_crate");
         assert!(info.lib_path.is_none());
     }
+
+    // === Property-based tests ===
+
+    mod proptest_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn arb_symbol_kind() -> impl Strategy<Value = SymbolKind> {
+            prop_oneof![
+                Just(SymbolKind::Function),
+                Just(SymbolKind::Method),
+                Just(SymbolKind::Struct),
+                Just(SymbolKind::Class),
+                Just(SymbolKind::Enum),
+                Just(SymbolKind::Trait),
+                Just(SymbolKind::Interface),
+                Just(SymbolKind::Const),
+                Just(SymbolKind::Static),
+                Just(SymbolKind::Module),
+                Just(SymbolKind::TypeAlias),
+                Just(SymbolKind::Macro),
+            ]
+        }
+
+        fn arb_language() -> impl Strategy<Value = Language> {
+            prop_oneof![Just(Language::Rust), Just(Language::CSharp),]
+        }
+
+        fn arb_visibility() -> impl Strategy<Value = Visibility> {
+            prop_oneof![
+                Just(Visibility::Public),
+                Just(Visibility::Crate),
+                Just(Visibility::Module),
+                Just(Visibility::Private),
+            ]
+        }
+
+        fn arb_panic_kind() -> impl Strategy<Value = PanicKind> {
+            prop_oneof![Just(PanicKind::Unwrap), Just(PanicKind::Expect),]
+        }
+
+        fn arb_known_reference_kind() -> impl Strategy<Value = ReferenceKind> {
+            prop_oneof![
+                Just(ReferenceKind::Import),
+                Just(ReferenceKind::Call),
+                Just(ReferenceKind::Type),
+                Just(ReferenceKind::Inherit),
+                Just(ReferenceKind::Construct),
+                Just(ReferenceKind::FieldAccess),
+            ]
+        }
+
+        proptest! {
+            #[test]
+            fn symbol_kind_as_str_roundtrips(kind in arb_symbol_kind()) {
+                let parsed = crate::db::parse_symbol_kind(kind.as_str())
+                    .expect("parse_symbol_kind should succeed for valid as_str output");
+                prop_assert_eq!(parsed, kind);
+            }
+
+            #[test]
+            fn language_as_str_roundtrips(lang in arb_language()) {
+                let parsed = crate::db::parse_language(lang.as_str())
+                    .expect("parse_language should succeed for valid as_str output");
+                prop_assert_eq!(parsed, lang);
+            }
+
+            #[test]
+            fn visibility_as_str_roundtrips(vis in arb_visibility()) {
+                let parsed = crate::db::parse_visibility(vis.as_str())
+                    .expect("parse_visibility should succeed for valid as_str output");
+                prop_assert_eq!(parsed, vis);
+            }
+
+            #[test]
+            fn panic_kind_as_str_roundtrips(kind in arb_panic_kind()) {
+                let parsed = PanicKind::parse(kind.as_str());
+                prop_assert_eq!(parsed, Some(kind));
+            }
+
+            #[test]
+            fn reference_kind_as_str_roundtrips(kind in arb_known_reference_kind()) {
+                let parsed = ReferenceKind::parse(kind.as_str());
+                prop_assert_eq!(parsed, Some(kind));
+            }
+
+            #[test]
+            fn reference_kind_parse_or_unknown_never_panics(s in "\\PC{0,50}") {
+                let _ = ReferenceKind::parse_or_unknown(&s);
+            }
+
+            #[test]
+            fn span_valid_construction_preserves_invariant(
+                sl in 1u32..10000,
+                sc in 1u32..10000,
+                extra_lines in 0u32..1000,
+                extra_cols in 0u32..1000,
+            ) {
+                let el = sl + extra_lines;
+                let ec = if el == sl { sc + extra_cols } else { 1 + extra_cols };
+                if let Some(span) = Span::new(sl, sc, el, ec) {
+                    prop_assert!(span.end_line() >= span.start_line());
+                    if span.end_line() == span.start_line() {
+                        prop_assert!(span.end_column() >= span.start_column());
+                    }
+                }
+            }
+
+            #[test]
+            fn span_serde_roundtrip(
+                sl in 1u32..10000,
+                sc in 1u32..10000,
+                extra_lines in 0u32..1000,
+                extra_cols in 0u32..1000,
+            ) {
+                let el = sl + extra_lines;
+                let ec = if el == sl { sc + extra_cols } else { 1 + extra_cols };
+                if let Some(span) = Span::new(sl, sc, el, ec) {
+                    let json = serde_json::to_string(&span)
+                        .expect("span serialization should succeed");
+                    let deserialized: Span = serde_json::from_str(&json)
+                        .expect("span deserialization should succeed");
+                    prop_assert_eq!(span, deserialized);
+                }
+            }
+
+            #[test]
+            fn span_rejects_invalid_same_line(
+                line in 1u32..10000,
+                start_col in 2u32..10000,
+                end_col_offset in 1u32..10000,
+            ) {
+                let end_col = start_col.saturating_sub(end_col_offset);
+                if end_col < start_col {
+                    prop_assert!(Span::new(line, start_col, line, end_col).is_none());
+                }
+            }
+        }
+    }
 }

@@ -216,3 +216,32 @@ impl Index {
         Ok(files)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn normalize_path_is_idempotent(s in "[a-zA-Z0-9_./\\\\-]{0,100}") {
+            let path = Path::new(&s);
+            let once = normalize_path(path);
+            let twice = normalize_path(Path::new(&once));
+            prop_assert_eq!(&once, &twice, "normalize_path should be idempotent");
+        }
+
+        /// On Windows, backslashes are replaced with forward slashes.
+        /// On Unix, backslashes are valid filename chars and preserved.
+        #[cfg(windows)]
+        #[test]
+        fn normalize_path_replaces_backslashes_on_windows(s in "[a-zA-Z0-9_./\\\\-]{0,100}") {
+            let path = Path::new(&s);
+            let normalized = normalize_path(path);
+            prop_assert!(
+                !normalized.contains('\\'),
+                "normalized path should not contain backslashes on Windows: {normalized}"
+            );
+        }
+    }
+}
