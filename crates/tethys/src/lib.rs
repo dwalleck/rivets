@@ -2276,6 +2276,11 @@ impl Tethys {
             return parent;
         }
 
+        debug!(
+            crate_name = %crate_info.name,
+            fallback = %crate_info.path.join("src").display(),
+            "No lib or bin entry point found, falling back to src/"
+        );
         crate_info.path.join("src")
     }
 
@@ -2370,6 +2375,7 @@ impl Tethys {
 
         let mut modified = Vec::new();
         let mut added = Vec::new();
+        let mut deleted = Vec::new();
 
         // Walk the filesystem and compare against indexed state
         let mut skip_log = Vec::new();
@@ -2388,17 +2394,25 @@ impl Tethys {
                 match std::fs::metadata(&file_path) {
                     Ok(metadata) => {
                         let size = metadata.len();
-                        // Safety: nanoseconds since epoch fit in i64 until year 2262
-                        #[allow(clippy::cast_possible_truncation)]
                         let mtime = metadata
                             .modified()
                             .ok()
                             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                            .map_or(0, |d| d.as_nanos() as i64);
+                            .map_or(0, |d| {
+                                // Safety: nanoseconds since epoch fit in i64 until year 2262
+                                #[allow(clippy::cast_possible_truncation)]
+                                {
+                                    d.as_nanos() as i64
+                                }
+                            });
 
                         if mtime != indexed_mtime || size != indexed_size {
                             modified.push(relative);
                         }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        // File was deleted between discovery and metadata check
+                        deleted.push(relative);
                     }
                     Err(e) => {
                         warn!(
@@ -2415,7 +2429,7 @@ impl Tethys {
         }
 
         // Anything remaining in indexed_map was not found on disk
-        let deleted: Vec<PathBuf> = indexed_map.into_keys().collect();
+        deleted.extend(indexed_map.into_keys());
 
         debug!(
             modified = modified.len(),
@@ -2580,7 +2594,7 @@ impl Tethys {
 
         let file_impact = self
             .db
-            .get_transitive_dependents(file_id, max_depth.or(Some(50)))?;
+            .get_transitive_dependents(file_id, Some(max_depth.unwrap_or(50)))?;
 
         // Convert FileImpact to public Impact type
         Ok(Impact {
@@ -2844,7 +2858,7 @@ impl Tethys {
 
         let impact = self
             .db
-            .get_transitive_callers(symbol.id, max_depth.or(Some(50)))?;
+            .get_transitive_callers(symbol.id, Some(max_depth.unwrap_or(50)))?;
 
         // Convert CallerInfo to Dependent
         let caller_to_dependent = |caller: graph::CallerInfo| -> Result<Dependent> {

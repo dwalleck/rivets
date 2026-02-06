@@ -206,27 +206,45 @@ fn rebuild_recreates_schema_and_reindexes() {
 
 #[test]
 fn depth_limits_forward_dependency_traversal() {
-    // Create a chain: a -> b -> c (via function calls)
+    // Create a chain: a.rs -> b.rs -> c.rs (via struct type imports)
+    // Uses the same pattern as graph.rs tests for cross-file resolution.
+    // Dependents of c.rs: b (direct), a (transitive via b)
     let (_dir, mut tethys) = workspace_with_files(&[
-        ("src/a.rs", "use crate::b;\npub fn a_fn() { b::b_fn(); }"),
-        ("src/b.rs", "use crate::c;\npub fn b_fn() { c::c_fn(); }"),
-        ("src/c.rs", "pub fn c_fn() {}"),
+        ("src/lib.rs", "mod a;\nmod b;\nmod c;\n"),
+        (
+            "src/a.rs",
+            "use crate::b::BType;\n\npub struct AType;\n\nimpl AType {\n    pub fn get() -> BType { BType }\n}\n",
+        ),
+        (
+            "src/b.rs",
+            "use crate::c::CType;\n\npub struct BType;\n\nimpl BType {\n    pub fn get() -> CType { CType }\n}\n",
+        ),
+        ("src/c.rs", "pub struct CType;\n"),
     ]);
     tethys.index().expect("index failed");
 
-    // depth=1 from a.rs should only show direct dependencies
+    // depth=1 from c.rs should find only direct dependents
     let impact_d1 = tethys
-        .get_impact(std::path::Path::new("src/a.rs"), Some(1))
+        .get_impact(Path::new("src/c.rs"), Some(1))
         .expect("get_impact depth=1 failed");
 
-    // depth=50 (default) should show transitive dependencies
+    // depth=None (default 50) from c.rs should find the full transitive chain
     let impact_full = tethys
-        .get_impact(std::path::Path::new("src/a.rs"), None)
+        .get_impact(Path::new("src/c.rs"), None)
         .expect("get_impact default depth failed");
 
-    // The full traversal should find at least as many (likely more) reachable files
+    // Full traversal should find at least as many dependents as depth-1
     assert!(
         impact_full.transitive_dependents.len() >= impact_d1.transitive_dependents.len(),
-        "full depth should find >= depth-1 results"
+        "full depth ({}) should find >= depth-1 ({}) dependents",
+        impact_full.transitive_dependents.len(),
+        impact_d1.transitive_dependents.len(),
+    );
+
+    // c.rs should have at least one dependent (b.rs imports CType)
+    let total = impact_full.direct_dependents.len() + impact_full.transitive_dependents.len();
+    assert!(
+        total > 0,
+        "c.rs should have at least one dependent in the chain"
     );
 }
