@@ -17,25 +17,16 @@ pub fn run(
     lsp: bool,
 ) -> Result<(), tethys::Error> {
     ensure_lsp_if_requested(lsp)?;
-    // TODO: Implement depth-limited transitive analysis
-    // Currently, transitive analysis explores the full dependency graph.
-    // The --depth flag would limit how many levels of indirection to follow.
-    if depth.is_some() {
-        eprintln!(
-            "{}: --depth flag is not yet implemented; full transitive analysis will be used",
-            "warning".yellow()
-        );
-    }
 
     let tethys = Tethys::new(workspace)?;
 
     if is_symbol {
-        let impact = tethys.get_symbol_impact(target)?;
+        let impact = tethys.get_symbol_impact(target, depth)?;
         println!("Impact analysis for symbol \"{}\":", target.cyan().bold());
         print_impact_analysis(&impact);
     } else {
         let target_path = Path::new(target);
-        let impact = tethys.get_impact(target_path)?;
+        let impact = tethys.get_impact(target_path, depth)?;
         println!("Impact analysis for {}:", target.cyan().bold());
         print_impact_analysis(&impact);
     }

@@ -22,7 +22,7 @@ pub fn run(
 
     if transitive {
         // Use get_symbol_impact for transitive callers
-        let impact = tethys.get_symbol_impact(symbol)?;
+        let impact = tethys.get_symbol_impact(symbol, None)?;
 
         if impact.direct_dependents.is_empty() && impact.transitive_dependents.is_empty() {
             println!("No callers found for \"{}\"", symbol.cyan());
