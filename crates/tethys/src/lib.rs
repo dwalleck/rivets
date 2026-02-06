@@ -822,10 +822,16 @@ impl Tethys {
             })
             .collect();
 
-        // Compute relative path
+        // Compute relative path — reject files outside the workspace boundary
         let relative_path = file_path
             .strip_prefix(workspace_root)
-            .unwrap_or(file_path)
+            .map_err(|_| {
+                Error::Config(format!(
+                    "file '{}' is outside workspace root '{}'",
+                    file_path.display(),
+                    workspace_root.display()
+                ))
+            })?
             .to_path_buf();
 
         Ok(ParsedFileData::new(
@@ -2233,9 +2239,19 @@ impl Tethys {
 
     /// Get the path relative to the workspace root.
     ///
-    /// Returns the original path if it's not under the workspace root.
+    /// Returns the original path if it's not under the workspace root, logging
+    /// a warning for diagnostic visibility.
     fn relative_path<'a>(&self, path: &'a Path) -> &'a Path {
-        path.strip_prefix(&self.workspace_root).unwrap_or(path)
+        if let Ok(relative) = path.strip_prefix(&self.workspace_root) {
+            relative
+        } else {
+            warn!(
+                path = %path.display(),
+                workspace = %self.workspace_root.display(),
+                "Path is outside workspace root, using as-is"
+            );
+            path
+        }
     }
 
     /// Convert a list of file IDs to their paths, tracking missing files.

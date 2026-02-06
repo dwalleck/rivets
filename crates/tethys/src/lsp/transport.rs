@@ -77,8 +77,18 @@ impl LspClient {
                 }
             })?;
 
-        let stdin = process.stdin.take().expect("stdin was piped");
-        let stdout = process.stdout.take().expect("stdout was piped");
+        let stdin = process.stdin.take().ok_or_else(|| {
+            LspError::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "failed to capture LSP server stdin",
+            ))
+        })?;
+        let stdout = process.stdout.take().ok_or_else(|| {
+            LspError::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "failed to capture LSP server stdout",
+            ))
+        })?;
         let stdout = BufReader::new(stdout);
 
         let mut client = Self {
