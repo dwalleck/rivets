@@ -5,7 +5,6 @@
 use std::io::Write;
 
 use anyhow::{Context, Result};
-use colored::Colorize;
 
 use super::args::{
     BlockedArgs, CloseArgs, CreateArgs, DeleteArgs, DepAction, DepArgs, InfoArgs, InitArgs,
@@ -599,6 +598,43 @@ fn validate_status_transition(
     }
 }
 
+/// Prompt the user for confirmation and return whether they accepted.
+///
+/// Prints `prompt` to stderr, reads a line from stdin, and returns `true`
+/// if the response is "y" or "yes" (case-insensitive).
+fn confirm_action(prompt: &str) -> Result<bool> {
+    eprint!("{} [y/N]: ", prompt);
+    std::io::stderr()
+        .flush()
+        .context("Failed to flush prompt to stderr")?;
+    let mut input = String::new();
+    let bytes_read = std::io::stdin()
+        .read_line(&mut input)
+        .context("Failed to read confirmation from stdin")?;
+    // EOF (e.g. Ctrl+D or piped input) is treated as "no"
+    if bytes_read == 0 {
+        eprintln!();
+        return Ok(false);
+    }
+    let response = input.trim().to_lowercase();
+    Ok(response == "y" || response == "yes")
+}
+
+/// Confirm a batch operation affecting multiple issues.
+///
+/// Returns `Ok(true)` to proceed, `Ok(false)` if the user cancelled.
+/// Skips the prompt when `skip_confirm` is true or only one issue is affected.
+fn confirm_batch(action: &str, count: usize, skip_confirm: bool) -> Result<bool> {
+    if count > 1 && !skip_confirm {
+        let prompt = format!("{action} {count} issues?");
+        if !confirm_action(&prompt)? {
+            println!("{action} cancelled.");
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Execute the close command
 ///
 /// # Batch Processing
@@ -612,9 +648,14 @@ pub async fn execute_close(
     app: &mut crate::app::App,
     args: &CloseArgs,
     output_mode: OutputMode,
+    skip_confirm: bool,
 ) -> Result<()> {
     use super::types::{BatchError, BatchResult};
     use crate::domain::{IssueId, IssueStatus, IssueUpdate};
+
+    if !confirm_batch("Close", args.issue_ids.len(), skip_confirm)? {
+        return Ok(());
+    }
 
     let mut result = BatchResult::new();
 
@@ -660,9 +701,14 @@ pub async fn execute_reopen(
     app: &mut crate::app::App,
     args: &ReopenArgs,
     output_mode: OutputMode,
+    skip_confirm: bool,
 ) -> Result<()> {
     use super::types::{BatchError, BatchResult};
     use crate::domain::{IssueId, IssueStatus, IssueUpdate};
+
+    if !confirm_batch("Reopen", args.issue_ids.len(), skip_confirm)? {
+        return Ok(());
+    }
 
     let mut result = BatchResult::new();
 
@@ -704,6 +750,7 @@ pub async fn execute_delete(
     app: &mut crate::app::App,
     args: &DeleteArgs,
     output_mode: OutputMode,
+    skip_confirm: bool,
 ) -> Result<()> {
     use crate::domain::IssueId;
     use crate::output;
@@ -717,18 +764,10 @@ pub async fn execute_delete(
         .await?
         .ok_or_else(|| crate::error::Error::IssueNotFound(issue_id.clone()))?;
 
-    // Confirm deletion unless --force is used
-    if !args.force {
-        eprint!("Delete issue '{}' ({})? [y/N]: ", issue.id, issue.title);
-        std::io::stderr()
-            .flush()
-            .context("Failed to flush prompt to stderr")?;
-        let mut input = String::new();
-        std::io::stdin()
-            .read_line(&mut input)
-            .context("Failed to read confirmation from stdin")?;
-        let response = input.trim().to_lowercase();
-        if response != "y" && response != "yes" {
+    // Confirm deletion unless --force or --yes is used
+    if !args.force && !skip_confirm {
+        let prompt = format!("Delete issue '{}' ({})?", issue.id, issue.title);
+        if !confirm_action(&prompt)? {
             println!("Deletion cancelled.");
             return Ok(());
         }
@@ -932,11 +971,12 @@ async fn execute_dep_tree(
     output_mode: OutputMode,
 ) -> Result<()> {
     use crate::domain::IssueId;
-    use crate::output;
+    use crate::output::{self, DepTreeNode};
+    use std::collections::HashSet;
 
     let id = IssueId::new(issue_id);
 
-    // Get the issue to verify it exists
+    // Verify the issue exists and get its details
     let issue = app
         .storage()
         .get(&id)
@@ -946,75 +986,103 @@ async fn execute_dep_tree(
     // Convert depth: 0 means unlimited (None), otherwise Some(depth)
     let max_depth = if depth == 0 { None } else { Some(depth) };
 
-    // Get dependency tree
-    let tree = app.storage().get_dependency_tree(&id, max_depth).await?;
+    // Build tree recursively using DFS
+    let mut visited = HashSet::new();
+    visited.insert(id.clone());
+    let children = build_dep_tree_children(app, &id, max_depth, 0, &mut visited).await?;
 
-    // Also get dependents (reverse tree)
+    let root = DepTreeNode {
+        id: issue_id.to_string(),
+        dep_type: None,
+        status: Some(issue.status),
+        title: Some(issue.title.clone()),
+        priority: Some(issue.priority),
+        children,
+    };
+
+    // Get dependents (reverse dependencies)
     let dependents = app.storage().get_dependents(&id).await?;
 
     match output_mode {
         output::OutputMode::Json => {
-            output::print_json(&serde_json::json!({
-                "issue_id": issue_id,
-                "title": issue.title,
-                "dependencies": tree.iter().map(|(dep, tree_depth)| {
-                    serde_json::json!({
-                        "depends_on_id": dep.depends_on_id.to_string(),
-                        "dep_type": format!("{}", dep.dep_type),
-                        "depth": tree_depth
-                    })
-                }).collect::<Vec<_>>(),
-                "dependents": dependents.iter().map(|dep| {
-                    serde_json::json!({
-                        "depends_on_id": dep.depends_on_id.to_string(),
-                        "dep_type": format!("{}", dep.dep_type)
-                    })
-                }).collect::<Vec<_>>()
-            }))?;
+            let json = output::dep_tree_to_json_public(&root, &dependents);
+            output::print_json(&json)?;
         }
         output::OutputMode::Text => {
-            println!("Dependency tree for: {} ({})", issue_id, issue.title);
-            println!();
+            output::print_dep_tree(&root, output_mode)?;
 
-            // Print dependents (what depends on this issue)
-            if dependents.is_empty() {
-                println!("  ↑ No issues depend on this");
-            } else {
-                println!("  ↑ Depended on by ({}):", dependents.len());
-                for dep in &dependents {
-                    println!("    {} ({})", dep.depends_on_id, dep.dep_type);
-                }
-            }
-
-            println!("  │");
-            println!("  ◆ {} [P{}]", issue_id, issue.priority);
-            println!("  │");
-
-            // Print dependencies (what this issue depends on)
-            if tree.is_empty() {
-                println!("  ↓ No dependencies");
-            } else {
-                println!("  ↓ Depends on ({}):", tree.len());
-                const MAX_VISUAL_DEPTH: usize = 10;
-                for (dep, tree_depth) in &tree {
-                    // Cap visual indentation at MAX_VISUAL_DEPTH to prevent extremely wide output
-                    let visual_depth = (*tree_depth).min(MAX_VISUAL_DEPTH);
-                    let indent = "  ".repeat(visual_depth);
-                    let depth_indicator = if *tree_depth > MAX_VISUAL_DEPTH {
-                        format!(" [depth: {}]", tree_depth)
-                    } else {
-                        String::new()
-                    };
-                    println!(
-                        "    {}└── {} ({}){}",
-                        indent, dep.depends_on_id, dep.dep_type, depth_indicator
-                    );
-                }
+            if !dependents.is_empty() {
+                let config = output::OutputConfig::from_env();
+                let stdout = std::io::stdout();
+                let mut handle = stdout.lock();
+                output::print_dep_tree_dependents(&mut handle, &dependents, &config)?;
             }
         }
     }
 
     Ok(())
+}
+
+/// Recursively build dependency tree children via DFS.
+///
+/// Uses a visited set to prevent cycles, and respects the max depth limit.
+async fn build_dep_tree_children(
+    app: &crate::app::App,
+    parent_id: &crate::domain::IssueId,
+    max_depth: Option<usize>,
+    current_depth: usize,
+    visited: &mut std::collections::HashSet<crate::domain::IssueId>,
+) -> Result<Vec<crate::output::DepTreeNode>> {
+    use crate::output::DepTreeNode;
+
+    // Check depth limit
+    if let Some(max) = max_depth {
+        if current_depth >= max {
+            return Ok(vec![]);
+        }
+    }
+
+    let deps = app.storage().get_dependencies(parent_id).await?;
+    let mut children = Vec::new();
+
+    for dep in deps {
+        let child_id = dep.depends_on_id.clone();
+
+        // Skip already-visited nodes to prevent cycles
+        if !visited.insert(child_id.clone()) {
+            continue;
+        }
+
+        // Fetch status for the child node
+        let status = app
+            .storage()
+            .get(&child_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|i| i.status);
+
+        // Recurse into children
+        let grandchildren = Box::pin(build_dep_tree_children(
+            app,
+            &child_id,
+            max_depth,
+            current_depth + 1,
+            visited,
+        ))
+        .await?;
+
+        children.push(DepTreeNode {
+            id: child_id.to_string(),
+            dep_type: Some(dep.dep_type),
+            status,
+            title: None,
+            priority: None,
+            children: grandchildren,
+        });
+    }
+
+    Ok(children)
 }
 
 /// Execute the dep command
@@ -1309,10 +1377,15 @@ pub async fn execute_stale(
                     args.days
                 );
                 println!();
+                let config = output::OutputConfig::from_env();
                 for issue in &stale_issues {
                     let days_stale = (Utc::now() - issue.updated_at).num_days();
                     output::print_issue(issue, output_mode)?;
-                    println!("  {} {} days", "Stale:".dimmed(), days_stale);
+                    println!(
+                        "  {} {} days",
+                        output::warning("Stale:", &config),
+                        days_stale
+                    );
                 }
             }
         }
@@ -2022,7 +2095,7 @@ mod tests {
                 reason: None,
             };
 
-            let result = execute_close(&mut app, &args, OutputMode::Text).await;
+            let result = execute_close(&mut app, &args, OutputMode::Text, true).await;
 
             assert!(result.is_err());
             let error_msg = result.unwrap_err().to_string();
@@ -2065,7 +2138,7 @@ mod tests {
                 reason: None,
             };
 
-            let result = execute_reopen(&mut app, &args, OutputMode::Text).await;
+            let result = execute_reopen(&mut app, &args, OutputMode::Text, true).await;
 
             assert!(result.is_err());
             let error_msg = result.unwrap_err().to_string();
@@ -2109,7 +2182,7 @@ mod tests {
                 reason: None,
             };
 
-            let result = execute_reopen(&mut app, &args, OutputMode::Text).await;
+            let result = execute_reopen(&mut app, &args, OutputMode::Text, true).await;
 
             assert!(result.is_err());
             let error_msg = result.unwrap_err().to_string();

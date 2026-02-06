@@ -3,11 +3,12 @@
 //! These tests verify the end-to-end behavior of all CLI commands.
 
 use rstest::{fixture, rstest};
+use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
 
 mod common;
-use common::{create_issue, run_rivets_in_dir};
+use common::{create_issue, get_rivets_binary, run_rivets_in_dir};
 
 // ============================================================================
 // Test Fixtures
@@ -786,11 +787,11 @@ fn test_cli_reopen_multiple_issues(initialized_dir: TempDir) {
     let id1 = create_issue(initialized_dir.path(), "Issue 1", &[]);
     let id2 = create_issue(initialized_dir.path(), "Issue 2", &[]);
 
-    // Close both issues
-    run_rivets_in_dir(initialized_dir.path(), &["close", &id1, &id2]);
+    // Close both issues (--yes to skip confirmation)
+    run_rivets_in_dir(initialized_dir.path(), &["--yes", "close", &id1, &id2]);
 
-    // Reopen both at once
-    let output = run_rivets_in_dir(initialized_dir.path(), &["reopen", &id1, &id2]);
+    // Reopen both at once (--yes to skip confirmation)
+    let output = run_rivets_in_dir(initialized_dir.path(), &["--yes", "reopen", &id1, &id2]);
 
     assert!(
         output.status.success(),
@@ -1177,10 +1178,10 @@ fn test_cli_dep_tree(initialized_dir: TempDir) {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Dependency tree for:"));
-    assert!(stdout.contains("Parent issue"));
-    assert!(stdout.contains(&id2));
-    assert!(stdout.contains("blocks"));
+    assert!(stdout.contains(&id1), "should contain root issue ID");
+    assert!(stdout.contains("Parent issue"), "should contain root title");
+    assert!(stdout.contains(&id2), "should contain child issue ID");
+    assert!(stdout.contains("blocks"), "should contain dep type");
 }
 
 #[rstest]
@@ -1248,10 +1249,16 @@ fn test_cli_dep_tree_json_output(initialized_dir: TempDir) {
 
     let json: serde_json::Value =
         serde_json::from_str(&stdout).expect("Output should be valid JSON");
-    assert!(json["issue_id"].is_string());
-    assert!(json["title"].is_string());
-    assert!(json["dependencies"].is_array());
-    assert!(json["dependents"].is_array());
+    assert!(json["id"].is_string(), "should have 'id' field");
+    assert!(json["title"].is_string(), "should have 'title' field");
+    assert!(
+        json["dependencies"].is_array(),
+        "should have 'dependencies' array"
+    );
+    assert!(
+        json["dependents"].is_array(),
+        "should have 'dependents' array"
+    );
 }
 
 #[rstest]
@@ -1262,8 +1269,23 @@ fn test_cli_dep_tree_no_dependencies(initialized_dir: TempDir) {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("No issues depend on this"));
-    assert!(stdout.contains("No dependencies"));
+    // Root node is always displayed with ID and title
+    assert!(
+        stdout.contains(&issue_id),
+        "should contain issue ID, got: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("Standalone issue"),
+        "should contain issue title, got: {}",
+        stdout
+    );
+    // No dependency tree connectors should appear
+    assert!(
+        !stdout.contains("├──") && !stdout.contains("└──"),
+        "should not contain tree connectors for standalone issue, got: {}",
+        stdout
+    );
 }
 
 // ============================================================================
@@ -1355,7 +1377,15 @@ fn test_cli_close_multiple_issues(initialized_dir: TempDir) {
 
     let output = run_rivets_in_dir(
         initialized_dir.path(),
-        &["close", &id1, &id2, &id3, "--reason", "Batch close"],
+        &[
+            "--yes",
+            "close",
+            &id1,
+            &id2,
+            &id3,
+            "--reason",
+            "Batch close",
+        ],
     );
 
     assert!(
@@ -1384,4 +1414,77 @@ fn test_cli_show_multiple_json_output(initialized_dir: TempDir) {
         serde_json::from_str(&stdout).expect("Output should be valid JSON");
     assert!(json.is_array());
     assert_eq!(json.as_array().unwrap().len(), 2);
+}
+
+// ============================================================================
+// NO_COLOR Integration Tests
+// ============================================================================
+
+/// Run the rivets binary with a custom environment variable set.
+fn run_rivets_with_env(
+    dir: &Path,
+    args: &[&str],
+    env_key: &str,
+    env_val: &str,
+) -> std::process::Output {
+    let binary = get_rivets_binary();
+    match Command::new(&binary)
+        .args(args)
+        .current_dir(dir)
+        .env(env_key, env_val)
+        .output()
+    {
+        Ok(output) => output,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            Command::new(&binary)
+                .args(args)
+                .current_dir(dir)
+                .env(env_key, env_val)
+                .output()
+                .expect("Failed to execute rivets binary after retry")
+        }
+        Err(e) => panic!("Failed to execute rivets binary: {e}"),
+    }
+}
+
+/// Returns true if the string contains any ANSI escape sequences.
+fn contains_ansi_escapes(s: &str) -> bool {
+    s.contains("\x1b[")
+}
+
+#[rstest]
+fn test_cli_no_color_env_disables_ansi(initialized_dir: TempDir) {
+    create_issue(
+        initialized_dir.path(),
+        "Color test issue",
+        &["--type", "bug", "--priority", "1"],
+    );
+
+    // Without NO_COLOR, output may contain ANSI escapes (depends on terminal detection,
+    // but we can at least verify the NO_COLOR path produces clean output)
+    let output = run_rivets_with_env(initialized_dir.path(), &["list"], "NO_COLOR", "1");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !contains_ansi_escapes(&stdout),
+        "NO_COLOR=1 should suppress ANSI escape sequences in output, got: {stdout}"
+    );
+}
+
+#[rstest]
+fn test_cli_rivets_color_zero_disables_ansi(initialized_dir: TempDir) {
+    create_issue(
+        initialized_dir.path(),
+        "Color test issue",
+        &["--type", "feature"],
+    );
+
+    let output = run_rivets_with_env(initialized_dir.path(), &["list"], "RIVETS_COLOR", "0");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !contains_ansi_escapes(&stdout),
+        "RIVETS_COLOR=0 should suppress ANSI escape sequences in output, got: {stdout}"
+    );
 }

@@ -17,6 +17,7 @@
 //! # Global Flags
 //!
 //! - `--json`: Output in JSON format (applies to all commands)
+//! - `--yes` / `-y`: Skip confirmation prompts (for scripting)
 //!
 //! # Example
 //!
@@ -65,6 +66,10 @@ pub struct Cli {
     /// Output in JSON format for programmatic use
     #[arg(long, global = true)]
     pub json: bool,
+
+    /// Skip confirmation prompts (for scripting)
+    #[arg(short = 'y', long, global = true)]
+    pub yes: bool,
 
     /// Subcommand to execute
     #[command(subcommand)]
@@ -215,15 +220,15 @@ impl Cli {
             }
             Some(Commands::Close(args)) => {
                 let mut app = load_app_from_cwd().await?;
-                execute::execute_close(&mut app, args, output_mode).await
+                execute::execute_close(&mut app, args, output_mode, self.yes).await
             }
             Some(Commands::Reopen(args)) => {
                 let mut app = load_app_from_cwd().await?;
-                execute::execute_reopen(&mut app, args, output_mode).await
+                execute::execute_reopen(&mut app, args, output_mode, self.yes).await
             }
             Some(Commands::Delete(args)) => {
                 let mut app = load_app_from_cwd().await?;
-                execute::execute_delete(&mut app, args, output_mode).await
+                execute::execute_delete(&mut app, args, output_mode, self.yes).await
             }
             Some(Commands::Ready(args)) => {
                 let app = load_app_from_cwd().await?;
@@ -269,6 +274,7 @@ mod tests {
         let cli = Cli::try_parse_from(["rivets"]).unwrap();
         assert!(cli.command.is_none());
         assert!(!cli.json);
+        assert!(!cli.yes);
     }
 
     #[test]
@@ -276,6 +282,28 @@ mod tests {
         let cli = Cli::try_parse_from(["rivets", "--json", "list"]).unwrap();
         assert!(cli.json);
         assert!(matches!(cli.command, Some(Commands::List(_))));
+    }
+
+    #[test]
+    fn test_parse_global_yes_flag_long() {
+        let cli = Cli::try_parse_from(["rivets", "--yes", "close", "proj-abc"]).unwrap();
+        assert!(cli.yes);
+        assert!(matches!(cli.command, Some(Commands::Close(_))));
+    }
+
+    #[test]
+    fn test_parse_global_yes_flag_short() {
+        let cli = Cli::try_parse_from(["rivets", "-y", "delete", "proj-abc"]).unwrap();
+        assert!(cli.yes);
+        assert!(matches!(cli.command, Some(Commands::Delete(_))));
+    }
+
+    #[test]
+    fn test_parse_yes_and_json_combined() {
+        let cli = Cli::try_parse_from(["rivets", "--yes", "--json", "close", "proj-abc"]).unwrap();
+        assert!(cli.yes);
+        assert!(cli.json);
+        assert!(matches!(cli.command, Some(Commands::Close(_))));
     }
 
     #[test]
