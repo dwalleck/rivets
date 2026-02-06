@@ -248,6 +248,21 @@ fn type_icon(issue_type: IssueType, config: &OutputConfig) -> &'static str {
     }
 }
 
+/// Get a colored type icon for issue types.
+fn colored_type_icon(issue_type: IssueType, config: &OutputConfig) -> String {
+    let icon = type_icon(issue_type, config);
+    if !config.use_colors {
+        return icon.to_string();
+    }
+    match issue_type {
+        IssueType::Bug => icon.red().to_string(),
+        IssueType::Feature => icon.green().to_string(),
+        IssueType::Epic => icon.magenta().bold().to_string(),
+        IssueType::Task => icon.blue().to_string(),
+        IssueType::Chore => icon.dimmed().to_string(),
+    }
+}
+
 // ============================================================================
 // Section Printing Helpers
 // ============================================================================
@@ -377,7 +392,7 @@ fn print_issue_text<W: Write>(w: &mut W, issue: &Issue, config: &OutputConfig) -
         "{} {} {} {} {}",
         colored_status_icon(issue.status, config),
         colorize_id(issue.id.as_str(), config),
-        type_icon(issue.issue_type, config),
+        colored_type_icon(issue.issue_type, config),
         colorize_priority(issue.priority, config),
         issue.title
     )?;
@@ -417,7 +432,7 @@ fn print_issues_text<W: Write>(
             "{} {}  {}  {}  {}",
             colored_status_icon(issue.status, config),
             colorize_id(issue.id.as_str(), config),
-            type_icon(issue.issue_type, config),
+            colored_type_icon(issue.issue_type, config),
             colorize_priority(issue.priority, config),
             issue.title
         )?;
@@ -448,7 +463,7 @@ fn print_issue_details_text<W: Write>(
     // Metadata line
     let type_display = format!(
         "{} {}",
-        type_icon(issue.issue_type, config),
+        colored_type_icon(issue.issue_type, config),
         issue.issue_type
     );
     writeln!(
@@ -580,7 +595,7 @@ fn print_blocked_text<W: Write>(
             "{} {}  {}  {}  {}",
             colored_status_icon(issue.status, config),
             colorize_id(issue.id.as_str(), config),
-            type_icon(issue.issue_type, config),
+            colored_type_icon(issue.issue_type, config),
             colorize_priority(issue.priority, config),
             issue.title
         )?;
@@ -1173,6 +1188,65 @@ mod tests {
             !closed.contains("\x1b["),
             "ASCII closed should NOT have ANSI codes"
         );
+    }
+
+    #[test]
+    fn test_colored_type_icon_without_colors() {
+        let config = OutputConfig::new(80, false, false);
+        // Without colors, should return plain icon text
+        let bug = colored_type_icon(IssueType::Bug, &config);
+        assert_eq!(bug, "●");
+        assert!(
+            !bug.contains("\x1b["),
+            "Bug icon should NOT have ANSI codes"
+        );
+
+        let feature = colored_type_icon(IssueType::Feature, &config);
+        assert_eq!(feature, "★");
+        assert!(
+            !feature.contains("\x1b["),
+            "Feature icon should NOT have ANSI codes"
+        );
+    }
+
+    #[test]
+    fn test_colored_type_icon_with_colors() {
+        with_colors_enabled(|| {
+            let config = OutputConfig::new(80, false, true);
+            let bug = colored_type_icon(IssueType::Bug, &config);
+            assert!(bug.contains("●"), "Bug icon should contain the icon");
+            assert!(
+                bug.contains("\x1b["),
+                "Bug icon should have ANSI codes when colors enabled"
+            );
+
+            let feature = colored_type_icon(IssueType::Feature, &config);
+            assert!(
+                feature.contains("★"),
+                "Feature icon should contain the icon"
+            );
+            assert!(
+                feature.contains("\x1b["),
+                "Feature icon should have ANSI codes when colors enabled"
+            );
+
+            let epic = colored_type_icon(IssueType::Epic, &config);
+            assert!(epic.contains("◆"), "Epic icon should contain the icon");
+            assert!(
+                epic.contains("\x1b["),
+                "Epic icon should have ANSI codes when colors enabled"
+            );
+        });
+    }
+
+    #[test]
+    fn test_colored_type_icon_ascii_mode() {
+        let config = OutputConfig::new(80, true, false);
+        assert_eq!(colored_type_icon(IssueType::Bug, &config), "*");
+        assert_eq!(colored_type_icon(IssueType::Feature, &config), "+");
+        assert_eq!(colored_type_icon(IssueType::Epic, &config), "#");
+        assert_eq!(colored_type_icon(IssueType::Task, &config), "-");
+        assert_eq!(colored_type_icon(IssueType::Chore, &config), ".");
     }
 
     #[test]
