@@ -16,12 +16,6 @@
 //! - `file_deps` - File dependency CRUD operations
 //! - `graph` - Graph traversal operations (`SymbolGraphOps`, `FileGraphOps`)
 
-// SQLite uses i64 for all integer storage. These casts are intentional and safe for
-// practical values (file sizes, line numbers, timestamps within reasonable bounds).
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::cast_sign_loss)]
-
 mod call_edges;
 mod file_deps;
 mod files;
@@ -118,6 +112,8 @@ impl Index {
     ///
     /// Returns an error if the system time is before the Unix epoch, which would
     /// break timestamp comparison logic for incremental indexing.
+    // u128 nanoseconds won't exceed i64::MAX until year 2262
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     fn now_ns() -> Result<i64> {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)

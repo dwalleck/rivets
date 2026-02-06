@@ -4,10 +4,6 @@
 //! traits directly on `Index`, eliminating the need for separate graph wrapper
 //! structs and their additional database connections.
 
-// SQLite uses i64 for all integer storage. These casts are intentional and safe.
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-
 use std::collections::{HashMap, HashSet};
 
 use rusqlite::OptionalExtension;
@@ -47,6 +43,8 @@ impl SymbolGraphOps for Index {
         let callers = stmt
             .query_map([symbol_id.as_i64()], |row| {
                 let symbol = row_to_symbol(row)?;
+                // Safety: call_count is a non-negative aggregate count
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let ref_count: usize = row.get::<_, i64>(13)? as usize;
 
                 Ok(CallerInfo {
@@ -80,6 +78,8 @@ impl SymbolGraphOps for Index {
         let callees = stmt
             .query_map([symbol_id.as_i64()], |row| {
                 let symbol = row_to_symbol(row)?;
+                // Safety: call_count is a non-negative aggregate count
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let ref_count: usize = row.get::<_, i64>(13)? as usize;
 
                 Ok(CalleeInfo {
@@ -139,6 +139,8 @@ impl SymbolGraphOps for Index {
 
         let rows = stmt.query_map(rusqlite::params![symbol_id.as_i64(), max_depth], |row| {
             let symbol = row_to_symbol(row)?;
+            // Safety: CTE depth is bounded by max_depth (u32), so i64 value fits in u32
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let depth: u32 = row.get::<_, i64>(13)? as u32;
             Ok((symbol, depth))
         })?;
@@ -265,6 +267,8 @@ impl FileGraphOps for Index {
         let dependents = stmt
             .query_map([file_id.as_i64()], |row| {
                 let file = row_to_indexed_file(row)?;
+                // Safety: ref_count is a non-negative aggregate count
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let ref_count: usize = row.get::<_, i64>(7)? as usize;
 
                 Ok(FileDepInfo { file, ref_count })
@@ -293,6 +297,8 @@ impl FileGraphOps for Index {
         let dependencies = stmt
             .query_map([file_id.as_i64()], |row| {
                 let file = row_to_indexed_file(row)?;
+                // Safety: ref_count is a non-negative aggregate count
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let ref_count: usize = row.get::<_, i64>(7)? as usize;
 
                 Ok(FileDepInfo { file, ref_count })
@@ -344,6 +350,8 @@ impl FileGraphOps for Index {
 
         let rows = stmt.query_map(rusqlite::params![file_id.as_i64(), max_depth], |row| {
             let file = row_to_indexed_file(row)?;
+            // Safety: CTE depth is bounded by max_depth (u32), so i64 value fits in u32
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let depth: u32 = row.get::<_, i64>(7)? as u32;
             Ok((file, depth))
         })?;

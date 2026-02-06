@@ -112,6 +112,8 @@ impl Index {
         let rows = stmt.query_map([], |row| {
             let is_test: bool = row.get(0)?;
             let count: i64 = row.get(1)?;
+            // Safety: COUNT(*) returns non-negative values
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             Ok((is_test, count as usize))
         })?;
 

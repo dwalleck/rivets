@@ -50,6 +50,8 @@ impl Index {
             .query_map([callee_id.as_i64()], |row| {
                 let sym_id: i64 = row.get(0)?;
                 let count: i64 = row.get(1)?;
+                // Safety: call_count is a non-negative aggregate count
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 Ok((SymbolId::from(sym_id), count as usize))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -73,6 +75,8 @@ impl Index {
             .query_map([caller_id.as_i64()], |row| {
                 let sym_id: i64 = row.get(0)?;
                 let count: i64 = row.get(1)?;
+                // Safety: call_count is a non-negative aggregate count
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 Ok((SymbolId::from(sym_id), count as usize))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
