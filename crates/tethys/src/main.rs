@@ -84,7 +84,7 @@ enum Commands {
         #[arg(short, long)]
         symbol: bool,
 
-        /// Maximum depth for transitive analysis (not yet implemented)
+        /// Maximum depth for transitive analysis (default: 50)
         #[arg(short, long)]
         depth: Option<u32>,
 

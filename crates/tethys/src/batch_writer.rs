@@ -237,7 +237,7 @@ impl BatchWriter {
             data.language,
             data.mtime_ns,
             data.size_bytes,
-            None, // TODO: content hash
+            data.content_hash,
             &symbol_data,
         )?;
 
@@ -409,6 +409,7 @@ mod tests {
             Language::Rust,
             1_234_567_890,
             100,
+            Some(0x1234_5678_9abc_def0),
             vec![OwnedSymbolData::new(
                 "main".to_string(),
                 "crate".to_string(),
@@ -443,12 +444,13 @@ mod tests {
         let writer = BatchWriter::new(db_path.clone(), 3);
 
         // Send 7 files - should result in 3 batches (3 + 3 + 1)
-        for i in 0..7 {
+        for i in 0u32..7 {
             let data = ParsedFileData::new(
                 PathBuf::from(format!("src/file{i}.rs")),
                 Language::Rust,
                 1_234_567_890 + i64::from(i),
                 100,
+                Some(u64::from(i)),
                 vec![],
                 vec![],
                 vec![],

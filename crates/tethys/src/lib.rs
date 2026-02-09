@@ -28,7 +28,7 @@
 //! let symbols = tethys.search_symbols("authenticate")?;
 //!
 //! // Get impact analysis
-//! let impact = tethys.get_impact(Path::new("src/auth.rs"))?;
+//! let impact = tethys.get_impact(Path::new("src/auth.rs"), None)?;
 //! println!("{} direct dependents", impact.direct_dependents.len());
 //! # Ok::<(), tethys::Error>(())
 //! ```
@@ -50,7 +50,8 @@ pub use types::{
     CrateInfo, Cycle, DatabaseStats, Dependent, FileAnalysis, FileId, FunctionSignature, Impact,
     Import, IndexOptions, IndexStats, IndexUpdate, IndexedFile, Language, PanicKind, PanicPoint,
     Parameter, ParameterKind, ReachabilityDirection, ReachabilityResult, ReachablePath, Reference,
-    ReferenceKind, Span, Symbol, SymbolId, SymbolKind, UnresolvedRefForLsp, Visibility,
+    ReferenceKind, Span, StalenessReport, Symbol, SymbolId, SymbolKind, UnresolvedRefForLsp,
+    Visibility,
 };
 
 use std::borrow::Cow;
@@ -70,6 +71,18 @@ use lsp::LspProvider;
 use parallel::{OwnedSymbolData, ParsedFileData};
 use resolver::resolve_module_path;
 use tracing::{debug, info, trace, warn};
+
+/// Compute an xxhash64 content hash for change detection.
+///
+/// Returns a stable 64-bit hash suitable for storing in `SQLite`'s INTEGER column.
+/// Used to skip re-indexing files whose content hasn't changed.
+///
+/// Uses xxhash64 because it is non-cryptographic (fast), has excellent collision
+/// resistance for content deduplication, produces stable output across platforms,
+/// and fits in a 64-bit INTEGER column.
+fn compute_content_hash(content: &[u8]) -> u64 {
+    xxhash_rust::xxh64::xxh64(content, 0)
+}
 
 /// A dependency that couldn't be resolved because the target file wasn't indexed yet.
 ///
@@ -696,7 +709,7 @@ impl Tethys {
             language,
             mtime_ns,
             size_bytes,
-            None, // TODO: compute content hash
+            Some(compute_content_hash(&content)),
             &symbol_data,
         )?;
 
@@ -833,6 +846,7 @@ impl Tethys {
             language,
             mtime_ns,
             size_bytes,
+            Some(compute_content_hash(&content)),
             symbols,
             references,
             imports,
@@ -877,7 +891,7 @@ impl Tethys {
             data.language,
             data.mtime_ns,
             data.size_bytes,
-            None, // TODO: content hash
+            data.content_hash,
             &symbol_data,
         )?;
 
@@ -1088,9 +1102,7 @@ impl Tethys {
             }
         }
 
-        // FIXME: Assumes crate root is workspace_root/src/. Does not detect actual
-        // main/lib location from Cargo.toml. Needs Cargo.toml parsing support.
-        let crate_root = self.workspace_root.join("src");
+        let crate_root = self.crate_source_root(current_file);
 
         // Track which files we depend on (dedupe)
         let mut depended_files: HashSet<PathBuf> = HashSet::new();
@@ -1515,11 +1527,12 @@ impl Tethys {
             by_file.entry(ref_.file_id).or_default().push(ref_);
         }
 
-        // FIXME: Assumes crate root is workspace_root/src/. Does not detect actual
-        // main/lib location from Cargo.toml. Needs Cargo.toml parsing support.
-        let crate_root = self.workspace_root.join("src");
-
         for (file_id, refs) in by_file {
+            let crate_root = if let Some(f) = self.db.get_file_by_id(file_id)? {
+                self.crate_source_root(&self.workspace_root.join(&f.path))
+            } else {
+                self.workspace_root.join("src")
+            };
             resolved_count += self.resolve_refs_for_file(file_id, refs, &crate_root)?;
         }
 
@@ -2231,6 +2244,49 @@ impl Tethys {
         )
     }
 
+    /// Determine the crate source root directory for a given file.
+    ///
+    /// Uses `cargo::get_crate_for_file` to find which crate the file belongs to,
+    /// then returns the parent directory of the crate's library or binary entry point
+    /// (e.g., the `src/` directory containing `lib.rs`).
+    ///
+    /// Falls back to `workspace_root/src` when the file doesn't belong to any
+    /// discovered crate (e.g., non-Cargo projects).
+    fn crate_source_root(&self, file_path: &Path) -> PathBuf {
+        let Some(crate_info) = cargo::get_crate_for_file(file_path, &self.crates) else {
+            return self.workspace_root.join("src");
+        };
+
+        // Prefer library entry point (lib.rs parent dir)
+        if let Some(parent) = crate_info.lib_path.as_ref().and_then(|lib_path| {
+            crate_info
+                .path
+                .join(lib_path)
+                .parent()
+                .map(Path::to_path_buf)
+        }) {
+            return parent;
+        }
+
+        // Binary-only crate: use first binary's entry directory
+        if let Some(parent) = crate_info.bin_paths.first().and_then(|(_, bin_path)| {
+            crate_info
+                .path
+                .join(bin_path)
+                .parent()
+                .map(Path::to_path_buf)
+        }) {
+            return parent;
+        }
+
+        debug!(
+            crate_name = %crate_info.name,
+            fallback = %crate_info.path.join("src").display(),
+            "No lib or bin entry point found, falling back to src/"
+        );
+        crate_info.path.join("src")
+    }
+
     /// Get the path relative to the workspace root.
     ///
     /// Handles symlink differences (e.g., `/var` → `/private/var` on macOS) by
@@ -2300,13 +2356,104 @@ impl Tethys {
 
     /// Check if any indexed files have changed since last update.
     pub fn needs_update(&self) -> Result<bool> {
-        // TODO: implement proper staleness check
-        Ok(true)
+        self.get_stale_files().map(|report| report.is_stale())
+    }
+
+    /// Compare indexed files against the filesystem to find what needs re-indexing.
+    ///
+    /// Detects three categories of staleness:
+    /// - **Modified**: files on disk whose mtime or size differ from the index
+    /// - **Added**: source files on disk not yet in the index
+    /// - **Deleted**: files in the index no longer present on disk
+    ///
+    /// Note: there is a small TOCTOU window where files could change between this
+    /// staleness check and actual re-indexing. This is acceptable for development
+    /// workflows; use `--rebuild` when full consistency is required.
+    pub fn get_stale_files(&self) -> Result<StalenessReport> {
+        let indexed_files = self.db.list_all_files()?;
+        let mut indexed_map: HashMap<PathBuf, (i64, u64)> = indexed_files
+            .into_iter()
+            .map(|f| (f.path, (f.mtime_ns, f.size_bytes)))
+            .collect();
+
+        let mut modified = Vec::new();
+        let mut added = Vec::new();
+        let mut deleted = Vec::new();
+
+        // Walk the filesystem and compare against indexed state
+        let mut skip_log = Vec::new();
+        let disk_files = self.discover_files(&mut skip_log)?;
+
+        for file_path in disk_files {
+            let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if Language::from_extension(ext).is_none() {
+                continue;
+            }
+
+            let relative = self.relative_path(&file_path).to_path_buf();
+
+            if let Some((indexed_mtime, indexed_size)) = indexed_map.remove(&relative) {
+                // File exists in both disk and index -- check for changes
+                match std::fs::metadata(&file_path) {
+                    Ok(metadata) => {
+                        let size = metadata.len();
+                        let mtime = metadata
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                            .map_or(0, |d| {
+                                // Safety: nanoseconds since epoch fit in i64 until year 2262
+                                #[allow(clippy::cast_possible_truncation)]
+                                {
+                                    d.as_nanos() as i64
+                                }
+                            });
+
+                        if mtime != indexed_mtime || size != indexed_size {
+                            modified.push(relative);
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        // File was deleted between discovery and metadata check
+                        deleted.push(relative);
+                    }
+                    Err(e) => {
+                        warn!(
+                            path = %file_path.display(),
+                            error = %e,
+                            "Failed to read metadata during staleness check, treating as modified"
+                        );
+                        modified.push(relative);
+                    }
+                }
+            } else {
+                added.push(relative);
+            }
+        }
+
+        // Anything remaining in indexed_map was not found on disk
+        deleted.extend(indexed_map.into_keys());
+
+        debug!(
+            modified = modified.len(),
+            added = added.len(),
+            deleted = deleted.len(),
+            "Staleness check complete"
+        );
+
+        Ok(StalenessReport {
+            modified,
+            added,
+            deleted,
+        })
     }
 
     /// Rebuild the entire index from scratch.
+    ///
+    /// Drops and recreates all database tables, ensuring the schema matches the
+    /// current version. This handles schema evolution that `clear()` alone cannot.
     pub fn rebuild(&mut self) -> Result<IndexStats> {
-        self.db.clear()?;
+        self.db.reset()?;
         self.index()
     }
 
@@ -2314,7 +2461,7 @@ impl Tethys {
     ///
     /// See [`index_with_options`](Self::index_with_options) for details on options.
     pub fn rebuild_with_options(&mut self, options: IndexOptions) -> Result<IndexStats> {
-        self.db.clear()?;
+        self.db.reset()?;
         self.index_with_options(options)
     }
 
@@ -2439,13 +2586,18 @@ impl Tethys {
     }
 
     /// Get impact analysis: direct and transitive dependents of a file.
-    pub fn get_impact(&self, path: &Path) -> Result<Impact> {
+    ///
+    /// `max_depth` limits the transitive traversal depth. Pass `None` for the
+    /// default limit (50).
+    pub fn get_impact(&self, path: &Path, max_depth: Option<u32>) -> Result<Impact> {
         let file_id = self
             .db
             .get_file_id(&self.relative_path(path))?
             .ok_or_else(|| Error::NotFound(format!("file: {}", path.display())))?;
 
-        let file_impact = self.db.get_transitive_dependents(file_id, Some(50))?;
+        let file_impact = self
+            .db
+            .get_transitive_dependents(file_id, Some(max_depth.unwrap_or(50)))?;
 
         // Convert FileImpact to public Impact type
         Ok(Impact {
@@ -2694,13 +2846,22 @@ impl Tethys {
     }
 
     /// Get impact analysis: direct and transitive callers of a symbol.
-    pub fn get_symbol_impact(&self, qualified_name: &str) -> Result<Impact> {
+    ///
+    /// `max_depth` limits the transitive traversal depth. Pass `None` for the
+    /// default limit (50).
+    pub fn get_symbol_impact(
+        &self,
+        qualified_name: &str,
+        max_depth: Option<u32>,
+    ) -> Result<Impact> {
         let symbol = self
             .db
             .get_symbol_by_qualified_name(qualified_name)?
             .ok_or_else(|| Error::NotFound(format!("symbol: {qualified_name}")))?;
 
-        let impact = self.db.get_transitive_callers(symbol.id, Some(50))?;
+        let impact = self
+            .db
+            .get_transitive_callers(symbol.id, Some(max_depth.unwrap_or(50)))?;
 
         // Convert CallerInfo to Dependent
         let caller_to_dependent = |caller: graph::CallerInfo| -> Result<Dependent> {

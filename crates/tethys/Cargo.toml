@@ -42,6 +42,9 @@ percent-encoding = "2.3"
 # Cargo manifest parsing
 cargo_toml = "0.20"
 
+# Fast non-cryptographic hashing (content change detection)
+xxhash-rust.workspace = true
+
 # CLI (for binary)
 clap.workspace = true
 tracing-subscriber.workspace = true

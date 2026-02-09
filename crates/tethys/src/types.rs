@@ -528,7 +528,7 @@ pub struct IndexedFile {
     pub mtime_ns: i64,
     /// File size in bytes
     pub size_bytes: u64,
-    /// Content hash for change detection (algorithm TBD, not yet implemented)
+    /// xxhash64 content hash for change detection
     pub content_hash: Option<u64>,
     /// When this file was last indexed (unix timestamp)
     pub indexed_at: i64,
@@ -859,6 +859,33 @@ pub struct IndexUpdate {
     pub duration: Duration,
     /// Errors encountered
     pub errors: Vec<IndexError>,
+}
+
+/// Report of which files need re-indexing.
+///
+/// Returned by [`Tethys::get_stale_files()`](crate::Tethys::get_stale_files).
+#[derive(Debug, Clone)]
+pub struct StalenessReport {
+    /// Files on disk whose mtime or size changed since last indexing
+    pub modified: Vec<PathBuf>,
+    /// Files on disk not yet in the index
+    pub added: Vec<PathBuf>,
+    /// Files in the index no longer on disk
+    pub deleted: Vec<PathBuf>,
+}
+
+impl StalenessReport {
+    /// Returns true if any files need re-indexing.
+    #[must_use]
+    pub fn is_stale(&self) -> bool {
+        !self.modified.is_empty() || !self.added.is_empty() || !self.deleted.is_empty()
+    }
+
+    /// Total number of files that need attention.
+    #[must_use]
+    pub fn total(&self) -> usize {
+        self.modified.len() + self.added.len() + self.deleted.len()
+    }
 }
 
 /// Result of impact analysis.

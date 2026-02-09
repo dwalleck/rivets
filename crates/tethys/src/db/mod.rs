@@ -125,13 +125,23 @@ impl Index {
             })
     }
 
-    /// Clear all data from the database.
-    pub fn clear(&self) -> Result<()> {
+    /// Drop all tables and recreate the schema from scratch.
+    ///
+    /// This drops and recreates all tables, ensuring the schema matches the
+    /// current version. Use this for `--rebuild` to handle schema evolution.
+    pub fn reset(&self) -> Result<()> {
         let conn = self.connection()?;
 
         conn.execute_batch(
-            "DELETE FROM call_edges; DELETE FROM refs; DELETE FROM symbols; DELETE FROM file_deps; DELETE FROM imports; DELETE FROM files;",
+            "DROP TABLE IF EXISTS call_edges;
+             DROP TABLE IF EXISTS refs;
+             DROP TABLE IF EXISTS file_deps;
+             DROP TABLE IF EXISTS imports;
+             DROP TABLE IF EXISTS symbols;
+             DROP TABLE IF EXISTS files;",
         )?;
+
+        conn.execute_batch(SCHEMA)?;
         Ok(())
     }
 

@@ -54,6 +54,8 @@ pub struct ParsedFileData {
     pub mtime_ns: i64,
     /// File size in bytes
     pub size_bytes: u64,
+    /// xxhash64 of file content for change detection
+    pub content_hash: Option<u64>,
     /// Extracted symbols
     pub symbols: Vec<OwnedSymbolData>,
     /// Extracted references
@@ -70,6 +72,7 @@ impl ParsedFileData {
     /// * `language` - The detected programming language
     /// * `mtime_ns` - File modification time in nanoseconds since Unix epoch
     /// * `size_bytes` - File size in bytes
+    /// * `content_hash` - xxhash64 of file content for change detection
     /// * `symbols` - Extracted symbols from the file
     /// * `references` - Extracted references from the file
     /// * `imports` - Extracted import statements
@@ -79,6 +82,7 @@ impl ParsedFileData {
         language: Language,
         mtime_ns: i64,
         size_bytes: u64,
+        content_hash: Option<u64>,
         symbols: Vec<OwnedSymbolData>,
         references: Vec<ExtractedReference>,
         imports: Vec<ImportStatement>,
@@ -93,6 +97,7 @@ impl ParsedFileData {
             language,
             mtime_ns,
             size_bytes,
+            content_hash,
             symbols,
             references,
             imports,
@@ -222,6 +227,7 @@ mod tests {
             Language::Rust,
             1_234_567_890,
             100,
+            Some(0xdead_beef),
             vec![],
             vec![],
             vec![],
@@ -229,6 +235,7 @@ mod tests {
 
         assert_eq!(data.relative_path, PathBuf::from("src/main.rs"));
         assert_eq!(data.language, Language::Rust);
+        assert_eq!(data.content_hash, Some(0xdead_beef));
     }
 
     #[test]
