@@ -37,7 +37,7 @@ pub struct CreateArgs {
     pub title: Option<String>,
 
     /// Detailed description
-    #[arg(short = 'D', long, value_parser = validate_description)]
+    #[arg(short = 'D', long, allow_hyphen_values = true, value_parser = validate_description)]
     pub description: Option<String>,
 
     /// Priority level (0=critical, 1=high, 2=medium, 3=low, 4=backlog)
@@ -64,11 +64,11 @@ pub struct CreateArgs {
     pub deps: Vec<String>,
 
     /// Design notes
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub design: Option<String>,
 
     /// Acceptance criteria
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub acceptance: Option<String>,
 
     /// External reference (e.g., GitHub issue URL)
@@ -135,7 +135,7 @@ pub struct UpdateArgs {
     pub title: Option<String>,
 
     /// New description
-    #[arg(short = 'D', long, value_parser = validate_description)]
+    #[arg(short = 'D', long, allow_hyphen_values = true, value_parser = validate_description)]
     pub description: Option<String>,
 
     /// New status
@@ -158,15 +158,15 @@ pub struct UpdateArgs {
     pub no_assignee: bool,
 
     /// New design notes
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub design: Option<String>,
 
     /// New acceptance criteria
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub acceptance: Option<String>,
 
     /// New notes
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub notes: Option<String>,
 
     /// New external reference
