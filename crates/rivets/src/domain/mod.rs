@@ -113,10 +113,20 @@ impl Issue {
     /// Checks:
     /// - Title is not empty and within MAX_TITLE_LENGTH
     /// - Priority is within valid range (0-MAX_PRIORITY)
+    /// - No text fields contain control characters
     ///
     /// Returns Ok(()) if valid, Err with description if invalid.
     pub fn validate(&self) -> Result<(), String> {
-        validate_title_and_priority(&self.title, self.priority)
+        validate_title_and_priority(&self.title, self.priority)?;
+        validate_text_fields(
+            &self.description,
+            self.assignee.as_deref(),
+            &self.labels,
+            self.design.as_deref(),
+            self.acceptance_criteria.as_deref(),
+            self.notes.as_deref(),
+            self.external_ref.as_deref(),
+        )
     }
 }
 
@@ -255,6 +265,27 @@ pub const MIN_PRIORITY: u8 = 0;
 /// Maximum priority level (4 = backlog)
 pub const MAX_PRIORITY: u8 = 4;
 
+/// Check a single-line field for control characters (0x00-0x1F except tab, and 0x7F-0x9F).
+///
+/// Returns the position of the first offending character, if any.
+fn find_control_char(s: &str) -> Option<usize> {
+    s.chars().position(|c| {
+        let code = c as u32;
+        (code < 0x20 && code != 0x09) || (0x7F..=0x9F).contains(&code)
+    })
+}
+
+/// Check a multi-line field for control characters, allowing tab, LF, and CR.
+///
+/// Returns the position of the first offending character, if any.
+fn find_control_char_multiline(s: &str) -> Option<usize> {
+    s.chars().position(|c| {
+        let code = c as u32;
+        (code < 0x20 && code != 0x09 && code != 0x0A && code != 0x0D)
+            || (0x7F..=0x9F).contains(&code)
+    })
+}
+
 /// Validate title and priority fields.
 ///
 /// Shared validation logic used by both `Issue::validate()` and `NewIssue::validate()`.
@@ -264,6 +295,7 @@ pub const MAX_PRIORITY: u8 = 4;
 /// Returns an error if:
 /// - Title (after trimming) is empty
 /// - Title (after trimming) exceeds MAX_TITLE_LENGTH
+/// - Title contains control characters
 /// - Priority exceeds MAX_PRIORITY
 fn validate_title_and_priority(title: &str, priority: u8) -> Result<(), String> {
     let trimmed = title.trim();
@@ -280,6 +312,12 @@ fn validate_title_and_priority(title: &str, priority: u8) -> Result<(), String> 
         ));
     }
 
+    if let Some(pos) = find_control_char(trimmed) {
+        return Err(format!(
+            "Title contains invalid control character at position {pos}"
+        ));
+    }
+
     if priority > MAX_PRIORITY {
         return Err(format!(
             "Priority must be in range {}-{} (got {})",
@@ -287,6 +325,70 @@ fn validate_title_and_priority(title: &str, priority: u8) -> Result<(), String> 
         ));
     }
 
+    Ok(())
+}
+
+/// Validate all text fields on an issue for control characters.
+///
+/// Defense-in-depth: rejects terminal-injection characters (ANSI escape sequences,
+/// etc.) even if the CLI layer already validated them. Protects against data
+/// entering through non-CLI paths (import, API, corrupted JSONL).
+fn validate_text_fields(
+    description: &str,
+    assignee: Option<&str>,
+    labels: &[String],
+    design: Option<&str>,
+    acceptance_criteria: Option<&str>,
+    notes: Option<&str>,
+    external_ref: Option<&str>,
+) -> Result<(), String> {
+    if let Some(pos) = find_control_char_multiline(description) {
+        return Err(format!(
+            "Description contains invalid control character at position {pos}"
+        ));
+    }
+    if let Some(val) = assignee {
+        if let Some(pos) = find_control_char(val) {
+            return Err(format!(
+                "Assignee contains invalid control character at position {pos}"
+            ));
+        }
+    }
+    for (i, label) in labels.iter().enumerate() {
+        if let Some(pos) = find_control_char(label) {
+            return Err(format!(
+                "Label {i} contains invalid control character at position {pos}"
+            ));
+        }
+    }
+    if let Some(val) = design {
+        if let Some(pos) = find_control_char_multiline(val) {
+            return Err(format!(
+                "Design contains invalid control character at position {pos}"
+            ));
+        }
+    }
+    if let Some(val) = acceptance_criteria {
+        if let Some(pos) = find_control_char_multiline(val) {
+            return Err(format!(
+                "Acceptance criteria contains invalid control character at position {pos}"
+            ));
+        }
+    }
+    if let Some(val) = notes {
+        if let Some(pos) = find_control_char_multiline(val) {
+            return Err(format!(
+                "Notes contains invalid control character at position {pos}"
+            ));
+        }
+    }
+    if let Some(val) = external_ref {
+        if let Some(pos) = find_control_char(val) {
+            return Err(format!(
+                "External ref contains invalid control character at position {pos}"
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -335,8 +437,18 @@ impl NewIssue {
     /// Returns an error if:
     /// - Title is empty or exceeds MAX_TITLE_LENGTH
     /// - Priority is not in range 0-MAX_PRIORITY
+    /// - Any text field contains control characters
     pub fn validate(&self) -> Result<(), String> {
-        validate_title_and_priority(&self.title, self.priority)
+        validate_title_and_priority(&self.title, self.priority)?;
+        validate_text_fields(
+            &self.description,
+            self.assignee.as_deref(),
+            &self.labels,
+            self.design.as_deref(),
+            self.acceptance_criteria.as_deref(),
+            self.notes.as_deref(),
+            self.external_ref.as_deref(),
+        )
     }
 }
 
@@ -672,5 +784,126 @@ mod tests {
             format!("{}", DependencyType::DiscoveredFrom),
             "discovered-from"
         );
+    }
+
+    // ===== Control Character Validation Tests =====
+
+    mod control_char_tests {
+        use super::super::{find_control_char, find_control_char_multiline, validate_text_fields};
+        use super::*;
+        use rstest::rstest;
+
+        #[rstest]
+        #[case::null_byte("hello\x00world", Some(5))]
+        #[case::escape("before\x1bafter", Some(6))]
+        #[case::bell("ding\x07dong", Some(4))]
+        #[case::del("test\x7fval", Some(4))]
+        #[case::c1_control("test\u{0090}val", Some(4))]
+        #[case::tab_allowed("hello\tworld", None)]
+        #[case::clean_text("hello world 123!@#", None)]
+        fn test_find_control_char(#[case] input: &str, #[case] expected: Option<usize>) {
+            assert_eq!(find_control_char(input), expected);
+        }
+
+        #[rstest]
+        #[case::newline_allowed("line1\nline2", None)]
+        #[case::cr_allowed("line1\rline2", None)]
+        #[case::crlf_allowed("line1\r\nline2", None)]
+        #[case::tab_allowed("col1\tcol2", None)]
+        #[case::escape_rejected("before\x1b[31mred\x1b[0m", Some(6))]
+        #[case::null_rejected("has\x00null", Some(3))]
+        fn test_find_control_char_multiline(#[case] input: &str, #[case] expected: Option<usize>) {
+            assert_eq!(find_control_char_multiline(input), expected);
+        }
+
+        #[test]
+        fn title_with_escape_sequence_rejected() {
+            let issue = NewIssue {
+                title: "Normal \x1b[31mRED\x1b[0m title".to_string(),
+                ..Default::default()
+            };
+            let result = issue.validate();
+            assert!(result.is_err());
+            assert!(
+                result.unwrap_err().contains("Title"),
+                "Error should mention 'Title'"
+            );
+        }
+
+        #[test]
+        fn description_with_escape_sequence_rejected() {
+            let issue = NewIssue {
+                title: "Clean title".to_string(),
+                description: "Has \x1b[1mbold\x1b[0m text".to_string(),
+                ..Default::default()
+            };
+            let result = issue.validate();
+            assert!(result.is_err());
+            assert!(
+                result.unwrap_err().contains("Description"),
+                "Error should mention 'Description'"
+            );
+        }
+
+        #[test]
+        fn description_with_newlines_accepted() {
+            let issue = NewIssue {
+                title: "Clean title".to_string(),
+                description: "Line 1\nLine 2\nLine 3".to_string(),
+                ..Default::default()
+            };
+            assert!(issue.validate().is_ok());
+        }
+
+        #[test]
+        fn assignee_with_control_char_rejected() {
+            let issue = NewIssue {
+                title: "Clean title".to_string(),
+                assignee: Some("user\x00name".to_string()),
+                ..Default::default()
+            };
+            let result = issue.validate();
+            assert!(result.is_err());
+            assert!(result.unwrap_err().contains("Assignee"));
+        }
+
+        #[test]
+        fn label_with_control_char_rejected() {
+            let issue = NewIssue {
+                title: "Clean title".to_string(),
+                labels: vec!["good".to_string(), "bad\x1btag".to_string()],
+                ..Default::default()
+            };
+            let result = issue.validate();
+            assert!(result.is_err());
+            let err = result.unwrap_err();
+            assert!(err.contains("Label 1"), "Error should identify label index");
+        }
+
+        #[test]
+        fn notes_with_escape_rejected() {
+            let issue = NewIssue {
+                title: "Clean title".to_string(),
+                notes: Some("See \x1b[4munderlined\x1b[0m note".to_string()),
+                ..Default::default()
+            };
+            let result = issue.validate();
+            assert!(result.is_err());
+            assert!(result.unwrap_err().contains("Notes"));
+        }
+
+        #[test]
+        fn all_clean_fields_accepted() {
+            assert!(validate_text_fields(
+                "A normal description\nwith newlines",
+                Some("alice"),
+                &["bug".to_string(), "urgent".to_string()],
+                Some("Use approach A"),
+                Some("- [ ] Done"),
+                Some("Extra context"),
+                Some("GH-123"),
+            )
+            .is_ok());
+        }
     }
 }

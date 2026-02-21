@@ -36,7 +36,7 @@
 use crate::error::{ConfigError, Result};
 use crate::storage::StorageBackend;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use tokio::fs;
 
 /// Default issue prefix if none specified
@@ -100,10 +100,16 @@ impl StorageConfig {
     pub fn to_backend(&self, root_dir: impl AsRef<Path>) -> Result<StorageBackend> {
         let root_dir = root_dir.as_ref();
 
-        // Validate that data_file is a relative path
+        // Validate that data_file is a relative path with no parent traversal
         let data_file_path = Path::new(&self.data_file);
         if data_file_path.is_absolute() {
             return Err(ConfigError::AbsoluteDataPath.into());
+        }
+        if data_file_path
+            .components()
+            .any(|c| matches!(c, Component::ParentDir))
+        {
+            return Err(ConfigError::PathTraversal.into());
         }
 
         let data_path = root_dir.join(&self.data_file);
@@ -486,6 +492,26 @@ storage:
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("relative path"));
+    }
+
+    #[rstest]
+    #[case::simple_parent("..", "parent directory")]
+    #[case::nested_traversal("../../etc/passwd", "parent directory")]
+    #[case::mid_path_traversal("data/../../../etc/shadow", "parent directory")]
+    fn test_to_backend_path_traversal_rejected(#[case] path: &str, #[case] expected_msg: &str) {
+        let temp_dir = TempDir::new().unwrap();
+        let config = StorageConfig {
+            backend: "jsonl".to_string(),
+            data_file: path.to_string(),
+        };
+
+        let result = config.to_backend(temp_dir.path());
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains(expected_msg),
+            "Expected error containing '{expected_msg}', got: '{err_msg}'"
+        );
     }
 
     // ========== Init Command Tests ==========

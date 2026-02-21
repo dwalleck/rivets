@@ -36,6 +36,10 @@ pub enum ConfigError {
     #[error("data_file must be a relative path")]
     AbsoluteDataPath,
 
+    /// data_file path contains parent directory references.
+    #[error("data_file must not contain parent directory references ('..')")]
+    PathTraversal,
+
     /// Unknown storage backend specified in config.
     #[error("Unknown storage backend '{0}'. Supported backends: jsonl, postgresql")]
     UnknownBackend(String),
@@ -185,6 +189,10 @@ mod tests {
         "Storage backend not yet implemented: PostgreSQL"
     )]
     #[case::absolute_data_path(ConfigError::AbsoluteDataPath, "data_file must be a relative path")]
+    #[case::path_traversal(
+        ConfigError::PathTraversal,
+        "data_file must not contain parent directory references ('..')"
+    )]
     #[case::unknown_backend(
         ConfigError::UnknownBackend("redis".to_string()),
         "Unknown storage backend 'redis'. Supported backends: jsonl, postgresql"
