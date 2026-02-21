@@ -110,11 +110,7 @@ impl StorageConfig {
 
         match self.backend.as_str() {
             "jsonl" => Ok(StorageBackend::Jsonl(data_path)),
-            "postgresql" => Err(ConfigError::UnsupportedBackend(
-                "PostgreSQL. See https://github.com/dwalleck/rivets/issues for tracking."
-                    .to_string(),
-            )
-            .into()),
+            "postgresql" => Err(ConfigError::UnsupportedBackend("PostgreSQL".to_string()).into()),
             other => Err(ConfigError::UnknownBackend(other.to_string()).into()),
         }
     }
@@ -188,23 +184,21 @@ pub struct InitResult {
 pub fn validate_prefix(prefix: &str) -> Result<()> {
     if prefix.len() < MIN_PREFIX_LENGTH {
         return Err(ConfigError::InvalidPrefix(format!(
-            "must be at least {} characters",
-            MIN_PREFIX_LENGTH
+            "Prefix must be at least {MIN_PREFIX_LENGTH} characters"
         ))
         .into());
     }
 
     if prefix.len() > MAX_PREFIX_LENGTH {
         return Err(ConfigError::InvalidPrefix(format!(
-            "cannot exceed {} characters",
-            MAX_PREFIX_LENGTH
+            "Prefix cannot exceed {MAX_PREFIX_LENGTH} characters"
         ))
         .into());
     }
 
     if !prefix.chars().all(|c| c.is_ascii_alphanumeric()) {
         return Err(ConfigError::InvalidPrefix(
-            "must contain only alphanumeric characters".to_string(),
+            "Prefix must contain only alphanumeric characters".to_string(),
         )
         .into());
     }
