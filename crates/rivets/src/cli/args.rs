@@ -33,6 +33,9 @@ pub struct CreateArgs {
     ///
     /// Short description of the issue. Will be prompted if not provided.
     /// Maximum length defined by `MAX_TITLE_LENGTH` (currently 200 characters).
+    /// Note: `allow_hyphen_values` is intentionally omitted here — titles are
+    /// short identifiers, not markdown. Catching accidental flag-like input
+    /// (e.g., `--title --description`) is more useful than allowing `- ...`.
     #[arg(long, value_parser = validate_title)]
     pub title: Option<String>,
 
@@ -131,6 +134,7 @@ pub struct UpdateArgs {
     pub issue_ids: Vec<String>,
 
     /// New title (maximum length: `MAX_TITLE_LENGTH`)
+    /// Note: `allow_hyphen_values` intentionally omitted (see `CreateArgs::title`).
     #[arg(long, value_parser = validate_title)]
     pub title: Option<String>,
 

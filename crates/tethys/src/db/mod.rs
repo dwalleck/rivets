@@ -529,8 +529,10 @@ mod tests {
             .expect("reset should succeed with sidecar files");
 
         // After reset the database should be usable and contain no stale data.
-        // Note: reopen creates fresh (empty) WAL/SHM files since we use WAL mode,
-        // so we verify the DB is clean rather than asserting sidecars are absent.
+        // We cannot assert !wal_path.exists() here because Index::open() enables
+        // WAL journal mode (PRAGMA journal_mode=WAL), which causes SQLite to
+        // immediately recreate the -wal and -shm files on connection open.
+        // Instead we verify the DB contains no stale data from before reset.
         assert!(path.exists(), "database file should be recreated");
         assert!(
             index.get_file(Path::new("src/lib.rs")).unwrap().is_none(),
