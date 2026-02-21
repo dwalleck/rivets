@@ -62,10 +62,6 @@ pub enum Error {
     /// JSON serialization/deserialization error.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
-
-    /// MCP protocol error.
-    #[error("MCP error: {0}")]
-    Mcp(String),
 }
 
 /// Result type for rivets MCP operations.

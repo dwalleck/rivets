@@ -33,10 +33,10 @@
 //! assert!(validate_prefix("my-proj").is_err());  // contains hyphen
 //! ```
 
-use crate::error::{Error, Result};
+use crate::error::{ConfigError, Result};
 use crate::storage::StorageBackend;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use tokio::fs;
 
 /// Default issue prefix if none specified
@@ -100,26 +100,24 @@ impl StorageConfig {
     pub fn to_backend(&self, root_dir: impl AsRef<Path>) -> Result<StorageBackend> {
         let root_dir = root_dir.as_ref();
 
-        // Validate that data_file is a relative path
+        // Validate that data_file is a relative path with no parent traversal
         let data_file_path = Path::new(&self.data_file);
         if data_file_path.is_absolute() {
-            return Err(Error::Config(
-                "data_file must be a relative path".to_string(),
-            ));
+            return Err(ConfigError::AbsoluteDataPath.into());
+        }
+        if data_file_path
+            .components()
+            .any(|c| matches!(c, Component::ParentDir))
+        {
+            return Err(ConfigError::PathTraversal.into());
         }
 
         let data_path = root_dir.join(&self.data_file);
 
         match self.backend.as_str() {
             "jsonl" => Ok(StorageBackend::Jsonl(data_path)),
-            "postgresql" => Err(Error::Config(
-                "PostgreSQL backend is not yet implemented. \
-                 See https://github.com/dwalleck/rivets/issues for tracking."
-                    .to_string(),
-            )),
-            other => Err(Error::Config(format!(
-                "Unknown storage backend '{other}'. Supported backends: jsonl, postgresql"
-            ))),
+            "postgresql" => Err(ConfigError::UnsupportedBackend("PostgreSQL".to_string()).into()),
+            other => Err(ConfigError::UnknownBackend(other.to_string()).into()),
         }
     }
 }
@@ -141,12 +139,9 @@ impl RivetsConfig {
     /// Validates the configuration after loading, including prefix validation.
     pub async fn load(path: &Path) -> Result<Self> {
         let content = fs::read_to_string(path).await?;
-        let config: Self = serde_yaml::from_str(&content).map_err(|e| {
-            Error::Config(format!(
-                "Failed to parse config file '{}': {}",
-                path.display(),
-                e
-            ))
+        let config: Self = serde_yaml::from_str(&content).map_err(|e| ConfigError::Parse {
+            path: path.display().to_string(),
+            source: e,
         })?;
 
         // Validate the prefix
@@ -157,8 +152,7 @@ impl RivetsConfig {
 
     /// Save configuration to a file
     pub async fn save(&self, path: &Path) -> Result<()> {
-        let content =
-            serde_yaml::to_string(self).map_err(|e| Error::Config(format!("YAML error: {}", e)))?;
+        let content = serde_yaml::to_string(self).map_err(ConfigError::YamlSerialization)?;
         fs::write(path, content).await?;
         Ok(())
     }
@@ -195,23 +189,24 @@ pub struct InitResult {
 /// Note: Expects pre-trimmed input. Callers should trim whitespace before calling.
 pub fn validate_prefix(prefix: &str) -> Result<()> {
     if prefix.len() < MIN_PREFIX_LENGTH {
-        return Err(Error::Config(format!(
-            "Prefix must be at least {} characters",
-            MIN_PREFIX_LENGTH
-        )));
+        return Err(ConfigError::InvalidPrefix(format!(
+            "Prefix must be at least {MIN_PREFIX_LENGTH} characters"
+        ))
+        .into());
     }
 
     if prefix.len() > MAX_PREFIX_LENGTH {
-        return Err(Error::Config(format!(
-            "Prefix cannot exceed {} characters",
-            MAX_PREFIX_LENGTH
-        )));
+        return Err(ConfigError::InvalidPrefix(format!(
+            "Prefix cannot exceed {MAX_PREFIX_LENGTH} characters"
+        ))
+        .into());
     }
 
     if !prefix.chars().all(|c| c.is_ascii_alphanumeric()) {
-        return Err(Error::Config(
+        return Err(ConfigError::InvalidPrefix(
             "Prefix must contain only alphanumeric characters".to_string(),
-        ));
+        )
+        .into());
     }
 
     Ok(())
@@ -247,10 +242,7 @@ pub async fn init(base_dir: &Path, prefix: Option<&str>) -> Result<InitResult> {
     match fs::create_dir(&rivets_dir).await {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(Error::Config(format!(
-                "Rivets is already initialized in this directory. Found existing '{}'",
-                RIVETS_DIR_NAME
-            )));
+            return Err(ConfigError::AlreadyInitialized(RIVETS_DIR_NAME.to_string()).into());
         }
         Err(e) => return Err(e.into()),
     }
@@ -500,6 +492,26 @@ storage:
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("relative path"));
+    }
+
+    #[rstest]
+    #[case::simple_parent("..", "parent directory")]
+    #[case::nested_traversal("../../etc/passwd", "parent directory")]
+    #[case::mid_path_traversal("data/../../../etc/shadow", "parent directory")]
+    fn test_to_backend_path_traversal_rejected(#[case] path: &str, #[case] expected_msg: &str) {
+        let temp_dir = TempDir::new().unwrap();
+        let config = StorageConfig {
+            backend: "jsonl".to_string(),
+            data_file: path.to_string(),
+        };
+
+        let result = config.to_backend(temp_dir.path());
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains(expected_msg),
+            "Expected error containing '{expected_msg}', got: '{err_msg}'"
+        );
     }
 
     // ========== Init Command Tests ==========
