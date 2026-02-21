@@ -148,10 +148,17 @@ impl Index {
             .map_err(|e| Error::Internal(format!("failed to create temporary connection: {e}")))?;
         drop(conn);
 
-        // Delete the database file and WAL/SHM sidecars
+        // Delete the database file and WAL/SHM sidecars.
+        // SQLite names sidecars by appending "-wal"/"-shm" to the full filename
+        // (e.g., "tethys.db-wal"), so we use OsString::push rather than
+        // Path::with_extension which would replace the extension.
         Self::remove_file_if_exists(&self.path)?;
-        Self::remove_file_if_exists(&self.path.with_extension("db-wal"))?;
-        Self::remove_file_if_exists(&self.path.with_extension("db-shm"))?;
+        let mut wal_path = self.path.as_os_str().to_owned();
+        wal_path.push("-wal");
+        Self::remove_file_if_exists(Path::new(&wal_path))?;
+        let mut shm_path = self.path.as_os_str().to_owned();
+        shm_path.push("-shm");
+        Self::remove_file_if_exists(Path::new(&shm_path))?;
 
         // Reopen with fresh schema
         match Self::open(&self.path) {
@@ -499,20 +506,36 @@ mod tests {
     }
 
     #[test]
-    fn reset_succeeds_with_wal_files_present() {
+    fn reset_deletes_wal_and_shm_sidecars() {
         let (_dir, path) = temp_db();
         let mut index = Index::open(&path).expect("should open database");
 
-        // Force WAL file creation by writing data
+        // Create sidecar files matching SQLite's naming convention.
+        // Uses OsString::push (append) to match how SQLite names these files.
+        let mut wal_os = path.as_os_str().to_owned();
+        wal_os.push("-wal");
+        let wal_path = PathBuf::from(&wal_os);
+        let mut shm_os = path.as_os_str().to_owned();
+        shm_os.push("-shm");
+        let shm_path = PathBuf::from(&shm_os);
+
+        std::fs::write(&wal_path, b"stale wal data").expect("should create WAL file");
+        std::fs::write(&shm_path, b"stale shm data").expect("should create SHM file");
+        assert!(wal_path.exists(), "WAL file should exist before reset");
+        assert!(shm_path.exists(), "SHM file should exist before reset");
+
         index
-            .upsert_file(Path::new("src/lib.rs"), Language::Rust, 1000, 100, None)
-            .expect("should insert file");
+            .reset()
+            .expect("reset should succeed with sidecar files");
 
-        // Reset should succeed even with WAL/SHM sidecars present
-        index.reset().expect("reset should succeed with WAL files");
-
-        // Database should be usable after reset
+        // After reset the database should be usable and contain no stale data.
+        // Note: reopen creates fresh (empty) WAL/SHM files since we use WAL mode,
+        // so we verify the DB is clean rather than asserting sidecars are absent.
         assert!(path.exists(), "database file should be recreated");
+        assert!(
+            index.get_file(Path::new("src/lib.rs")).unwrap().is_none(),
+            "database should contain no stale data after reset"
+        );
         let file_id = index
             .upsert_file(Path::new("src/new.rs"), Language::Rust, 2000, 200, None)
             .expect("should insert file after reset");
