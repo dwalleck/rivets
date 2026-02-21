@@ -508,10 +508,9 @@ mod tests {
     #[test]
     fn reset_deletes_wal_and_shm_sidecars() {
         let (_dir, path) = temp_db();
-        let mut index = Index::open(&path).expect("should open database");
 
-        // Create sidecar files matching SQLite's naming convention.
-        // Uses OsString::push (append) to match how SQLite names these files.
+        // Build sidecar paths using OsString::push (append) to match
+        // how SQLite names these files.
         let mut wal_os = path.as_os_str().to_owned();
         wal_os.push("-wal");
         let wal_path = PathBuf::from(&wal_os);
@@ -519,20 +518,28 @@ mod tests {
         shm_os.push("-shm");
         let shm_path = PathBuf::from(&shm_os);
 
+        // Open and immediately drop the index so SQLite releases its memory-mapped
+        // hold on the SHM file. On Windows, SQLite's WAL-mode memory mapping
+        // prevents external writes to the SHM file while a connection is open.
+        {
+            let _index = Index::open(&path).expect("should open database");
+        }
+
+        // With no active SQLite connection, we can safely write fake sidecar data.
         std::fs::write(&wal_path, b"stale wal data").expect("should create WAL file");
         std::fs::write(&shm_path, b"stale shm data").expect("should create SHM file");
         assert!(wal_path.exists(), "WAL file should exist before reset");
         assert!(shm_path.exists(), "SHM file should exist before reset");
 
+        // Reopen and reset — this should delete the stale sidecars.
+        let mut index = Index::open(&path).expect("should reopen database");
         index
             .reset()
             .expect("reset should succeed with sidecar files");
 
         // After reset the database should be usable and contain no stale data.
         // We cannot assert !wal_path.exists() here because Index::open() enables
-        // WAL journal mode (PRAGMA journal_mode=WAL), which causes SQLite to
-        // immediately recreate the -wal and -shm files on connection open.
-        // Instead we verify the DB contains no stale data from before reset.
+        // WAL journal mode, which causes SQLite to immediately recreate sidecars.
         assert!(path.exists(), "database file should be recreated");
         assert!(
             index.get_file(Path::new("src/lib.rs")).unwrap().is_none(),
