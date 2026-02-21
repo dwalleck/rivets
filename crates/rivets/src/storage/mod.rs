@@ -549,7 +549,7 @@ pub async fn create_storage(
         }
         StorageBackend::PostgreSQL(_conn_str) => {
             // TODO: Implement PostgreSQL backend
-            Err(crate::error::StorageError::UnsupportedBackend("PostgreSQL".to_string()).into())
+            Err(crate::error::ConfigError::UnsupportedBackend("PostgreSQL".to_string()).into())
         }
     }
 }

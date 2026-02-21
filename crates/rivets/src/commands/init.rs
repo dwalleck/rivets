@@ -152,7 +152,7 @@ impl RivetsConfig {
 
     /// Save configuration to a file
     pub async fn save(&self, path: &Path) -> Result<()> {
-        let content = serde_yaml::to_string(self).map_err(ConfigError::Yaml)?;
+        let content = serde_yaml::to_string(self).map_err(ConfigError::YamlSerialization)?;
         fs::write(path, content).await?;
         Ok(())
     }

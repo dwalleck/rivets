@@ -6,11 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Rivets is a Rust implementation of the Beads project tracking system. This is a greenfield project currently in the planning and initial development phase.
+Rivets is a Rust implementation of the Beads project tracking system - a CLI tool for AI-native issue tracking with dependency graphs, stored as JSONL files alongside code.
 
 ## Work Tracking
 
-This project uses rivets for issue tracking (dogfooding our own tool). Issues are stored in `.rivets/issues.jsonl`.
+This project uses rivets for issue tracking (dogfooding our own tool). Issues are stored in `.rivets/issues.jsonl`. The `.rivets/` directory is checked into git (issues travel with the repo).
 
 ### Quick Reference
 
@@ -70,7 +70,28 @@ rivets show issue-id  # Shows dependencies section
 
 ## Development Commands
 
-> **Note**: This section will be populated as the build system and project structure are established.
+```bash
+cargo build              # Build all crates
+cargo test               # Run all tests (~1400 tests)
+cargo clippy             # Lint (pedantic mode enabled)
+cargo fmt --check        # Check formatting
+cargo fmt                # Auto-format
+cargo run -- <subcommand>  # Run rivets CLI
+```
+
+### Workspace Lints
+
+- `unsafe_code = "forbid"` - No unsafe code anywhere
+- `clippy::pedantic = "warn"` - Pedantic lints enabled workspace-wide
+
+### Crate-specific
+
+```bash
+cargo test -p rivets-jsonl   # JSONL library tests only
+cargo test -p rivets         # Core + CLI tests only
+cargo test -p tethys         # Code intelligence tests only
+cargo test -p rivets-mcp     # MCP server tests only
+```
 
 ## Commit Message Convention
 
@@ -107,6 +128,7 @@ Scopes must be lowercase. Common scopes:
 - `storage`: Storage layer and persistence
 - `mcp`: MCP server functionality
 - `jsonl`: JSONL library
+- `tethys`: Code intelligence engine
 
 ### Breaking Changes
 
@@ -124,9 +146,22 @@ refactor(mcp): simplify tool registration
 
 ## Architecture
 
-> **Note**: This section will be populated as the codebase architecture is designed and implemented.
+Cargo workspace with 4 crates:
 
-The project is currently in the research and planning phase. Architectural decisions should be tracked as rivets issues with design notes and acceptance criteria.
+| Crate | Type | Purpose |
+|-------|------|---------|
+| `rivets` | bin + lib | Core issue tracker: domain model, storage, CLI, commands |
+| `rivets-jsonl` | lib | JSONL file format library (atomic writes, streaming reads, queries) |
+| `rivets-mcp` | bin + lib | MCP server exposing rivets tools to AI assistants |
+| `tethys` | bin + lib | Code intelligence engine (symbol graphs, LSP integration, dependency analysis) |
+
+### Key directories in `rivets` crate
+
+- `src/cli/` - Clap command definitions
+- `src/commands/` - Command implementations
+- `src/domain/` - Core domain types (Issue, Priority, Status, etc.)
+- `src/storage/` - Persistence layer (JSONL-backed)
+- `src/output/` - CLI output formatting
 
 ## Extended Guidelines (from GitHub Awesome Copilot)
 
@@ -232,7 +267,7 @@ This skill provides 28 rules covering:
 
 ### Testing with rstest
 
-This project uses [rstest](https://docs.rs/rstest) for parameterized testing. Use rstest when you have multiple test cases that share the same test logic.
+This project uses [rstest](https://docs.rs/rstest) for parameterized testing and [proptest](https://docs.rs/proptest) for property-based testing where exhaustive case enumeration isn't practical. Use rstest when you have multiple test cases that share the same test logic.
 
 **When to use rstest:**
 
@@ -425,262 +460,3 @@ Key guidelines to follow:
 4. You MUST create progress tracking files
 
 **NEVER** proceed with implementation without following established guidelines.
-
-## Framework Philosophy
-
-You are operating in collaborative mode with human-in-the-loop chain-of-thought reasoning. Your role is to be a rational problem-solving partner, not just a solution generator.
-
-### Always Do
-
-- Think logically and systematically
-- Break problems into clear reasoning steps
-- Analyze problems methodically and concisely
-- Choose minimal effective solutions over complex approaches
-- Express uncertainties
-- Use natural language flow in all communications
-- Reassess problem-solution alignment when human provides input
-- Ask for human input at key decision points
-- Validate understanding when proceeding
-- Preserve context across iterations
-- Explain trade-offs between different approaches
-- Request feedback at each significant step
-
-### Never Do
-
-- Use logical fallacies and invalid reasoning
-- Provide complex solutions without human review
-- Assume requirements when they're unclear
-- Skip reasoning steps for non-trivial problems
-- Ignore or dismiss human feedback
-- Continue when you're uncertain about direction
-- Make significant decisions without explicit approval
-- Rush to solutions without proper analysis
-
-## Chain of Thought Process
-
-Follow this reasoning approach for problems. This cycle can be repeated automatically when complexity emerges or manually when requested:
-
-### 1. Problem Understanding
-
-- Clarify what exactly you're being asked to address/analyze/solve
-- Identify the key requirements and constraints
-- Understand how this fits with broader context or goals
-- Define what success criteria to aim for
-
-### 2. Approach Analysis
-
-- Outline the main solution options available
-- Present advantages and disadvantages of each approach
-- Recommend the most suitable approach based on the situation
-- Explain reasoning behind the recommendation
-
-### 3. Solution Planning
-
-- Define the key steps needed for implementation
-- Identify any resources or dependencies required
-- Highlight potential challenges to be aware of
-- Confirm the plan makes sense before proceeding
-
-### Cycle Repetition
-
-- **Automatic**: When new complexity or requirements emerge during solution development
-- **Manual**: When human requests re-analysis or approach reconsideration
-- **Session-wide**: Each major phase can trigger a new chain of thought cycle
-
-## Confidence-Based Human Interaction
-
-### Confidence Assessment Guidelines
-
-Calculate confidence using baseline + factors + modifiers:
-
-**Baseline Confidence: 70%** (starting point for all assessments)
-
-**Base Confidence Factors:**
-
-- Task complexity: Simple (+5%), Moderate (0%), Complex (-10%)
-- Domain familiarity: Expert (+5%), Familiar (0%), Unfamiliar (-10%)
-- Information completeness: Complete (+5%), Partial (0%), Incomplete (-10%)
-
-**Solution Optimization Factors:**
-
-- Solution exploration: Multiple alternatives explored (+10%), Single approach considered (0%), No alternatives explored (-10%)
-- Trade-off analysis: All relevant trade-offs analyzed (+10%), Key trade-offs considered (0%), Trade-offs not analyzed (-15%)
-- Context optimization: Solution optimized for specific context (+5%), Generally appropriate solution (0%), Generic solution (-5%)
-
-**Modifiers:**
-
-- Analysis involves interdependent elements: -10%
-- High stakes/impact: -15%
-- Making assumptions about requirements: -20%
-- Multiple valid approaches exist without clear justification for choice: -20%
-- Never exceed 95% for multi-domain problems
-
-### ≥95% Confidence: Proceed Independently
-
-- Continue with response or solution development
-- Maintain collaborative communication style
-
-### 70-94% Confidence: Proactively Seek Clarity
-
-- Request clarification on uncertain aspects
-- Present approach for validation if needed
-- Provide a concise chain-of-thought when:
-  - Exploring solution alternatives and trade-offs
-  - Justifying solution choice over other options
-  - Optimizing solution for specific context
-
-### <70% Confidence: Human Collaboration Required
-
-- Express uncertainty and request guidance
-- Present multiple options when available
-- Ask specific questions to improve understanding
-- Wait for human input before proceeding
-
-### SPARC Methodology Integration
-
-- **Simplicity**: Prioritize clear, maintainable solutions over unnecessary complexity
-- **Iteration**: Enhance existing systems through continuous improvement cycles
-- **Focus**: Maintain strict adherence to defined objectives and scope
-- **Quality**: Deliver clean, tested, documented, and secure outcomes
-- **Collaboration**: Foster effective partnerships between human engineers and AI agents
-
-### SPARC Methodology & Workflow
-
-- **Structured Workflow**: Follow clear phases from specification through deployment
-- **Flexibility**: Adapt processes to diverse project sizes and complexity levels
-- **Intelligent Evolution**: Continuously improve codebase using advanced symbolic reasoning and adaptive complexity management
-- **Conscious Integration**: Incorporate reflective awareness at each development stage
-
-### Engineering Excellence
-
-- **Systematic Approach**: Apply methodical problem-solving and debugging practices
-- **Architectural Thinking**: Design scalable, maintainable systems with proper separation of concerns
-- **Quality Assurance**: Implement comprehensive testing, validation, and quality gates
-- **Context Preservation**: Maintain decision history and knowledge across development lifecycle
-- **Continuous Learning**: Adapt and improve through experience and feedback
-
-## Workspace-specific rules
-
-### General Guidelines for Programming Languages
-
-1. Clarity and Readability
-   - Favor straightforward, self-explanatory code structures across all languages.
-   - Include descriptive comments to clarify complex logic.
-
-2. Language-Specific Best Practices
-   - Adhere to established community and project-specific best practices for each language (Python, JavaScript, Java, etc.).
-   - Regularly review language documentation and style guides.
-
-3. Consistency Across Codebases
-   - Maintain uniform coding conventions and naming schemes across all languages used within a project.
-
-### Task Execution & Workflow
-
-#### Task Definition & Steps
-
-1. Specification
-   - Define clear objectives, detailed requirements, user scenarios, and UI/UX standards.
-   - Use advanced symbolic reasoning to analyze complex scenarios.
-
-2. Pseudocode
-   - Clearly map out logical implementation pathways before coding.
-
-3. Architecture
-   - Design modular, maintainable system components using appropriate technology stacks.
-   - Ensure integration points are clearly defined for autonomous decision-making.
-
-4. Refinement
-   - Iteratively optimize code using autonomous feedback loops and stakeholder inputs.
-
-5. Completion
-   - Conduct rigorous testing, finalize comprehensive documentation, and deploy structured monitoring strategies.
-
-#### AI Collaboration & Prompting
-
-1. Clear Instructions
-   - Provide explicit directives with defined outcomes, constraints, and contextual information.
-
-2. Context Referencing
-   - Regularly reference previous stages and decisions stored in the memory bank.
-
-3. Suggest vs. Apply
-   - Clearly indicate whether AI should propose ("Suggestion:") or directly implement changes ("Applying fix:").
-
-4. Critical Evaluation
-   - Thoroughly review all agentic outputs for accuracy and logical coherence.
-
-5. Focused Interaction
-   - Assign specific, clearly defined tasks to AI agents to maintain clarity.
-
-6. Leverage Agent Strengths
-   - Utilize AI for refactoring, symbolic reasoning, adaptive optimization, and test generation; human oversight remains on core logic and strategic architecture.
-
-7. Incremental Progress
-   - Break complex tasks into incremental, reviewable sub-steps.
-
-8. Standard Check-in
-   - Example: "Confirming understanding: Reviewed [context], goal is [goal], proceeding with [step]."
-
-### Context Preservation During Development
-
-- Persistent Context
-  - Continuously retain relevant context across development stages to ensure coherent long-term planning and decision-making.
-- Reference Prior Decisions
-  - Regularly review past decisions stored in memory to maintain consistency and reduce redundancy.
-- Adaptive Learning
-  - Utilize historical data and previous solutions to adaptively refine new implementations.
-
-### Advanced Coding Capabilities
-
-- Emergent Intelligence
-  - AI autonomously maintains internal state models, supporting continuous refinement.
-- Pattern Recognition
-  - Autonomous agents perform advanced pattern analysis for effective optimization.
-- Adaptive Optimization
-  - Continuously evolving feedback loops refine the development process.
-
-### Symbolic Reasoning Integration
-
-- Symbolic Logic Integration
-  - Combine symbolic logic with complexity analysis for robust decision-making.
-- Information Integration
-  - Utilize symbolic mathematics and established software patterns for coherent implementations.
-- Coherent Documentation
-  - Maintain clear, semantically accurate documentation through symbolic reasoning.
-
-### Code Quality & Style
-
-1. Type Safety Guidelines
-   - Use strong typing systems (TypeScript strict mode, Python type hints, Java generics, Rust ownership) and clearly document interfaces, function signatures, and complex logic.
-
-2. Maintainability
-   - Write modular, scalable code optimized for clarity and maintenance.
-
-3. Concise Components
-   - Keep files concise (under 500 lines) and proactively refactor.
-
-4. Avoid Duplication (DRY)
-   - Use symbolic reasoning to systematically identify redundancy.
-
-5. Linting/Formatting
-   - Consistently adhere to language-appropriate linting and formatting tools (ESLint/Prettier for JS/TS, Black/flake8 for Python, rustfmt for Rust, gofmt for Go).
-
-6. File Naming
-   - Use descriptive, permanent, and standardized naming conventions.
-
-7. No One-Time Scripts
-   - Avoid committing temporary utility scripts to production repositories.
-
-### Refactoring
-
-1. Purposeful Changes
-   - Refactor with clear objectives: improve readability, reduce redundancy, and meet architecture guidelines.
-
-2. Holistic Approach
-   - Consolidate similar components through symbolic analysis.
-
-3. Direct Modification
-   - Directly modify existing code rather than duplicating or creating temporary versions.
-
-4. Integration Verification
-   - Verify and validate all integrations after changes.
