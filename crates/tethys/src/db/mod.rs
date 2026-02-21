@@ -44,7 +44,7 @@ pub(crate) use schema::SCHEMA;
 #[cfg(test)]
 pub(crate) use helpers::parse_visibility;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -75,9 +75,11 @@ pub struct SymbolData<'a> {
 /// `SQLite` database wrapper for Tethys index.
 ///
 /// The connection is wrapped in a `Mutex` to allow sharing across graph operations
-/// while maintaining thread safety.
+/// while maintaining thread safety. The database path is stored to support
+/// `reset()`, which deletes and recreates the database file.
 pub struct Index {
     conn: Mutex<Connection>,
+    path: PathBuf,
 }
 
 impl Index {
@@ -99,6 +101,7 @@ impl Index {
 
         Ok(Self {
             conn: Mutex::new(conn),
+            path: path.to_path_buf(),
         })
     }
 
@@ -129,14 +132,63 @@ impl Index {
             })
     }
 
-    /// Clear all data from the database.
-    pub fn clear(&self) -> Result<()> {
-        let conn = self.connection()?;
+    /// Delete the database file and reopen with a fresh schema.
+    ///
+    /// This method handles schema changes by removing the file entirely and
+    /// recreating it, rather than just deleting rows (which would leave an
+    /// outdated schema in place). The old connection is replaced with an
+    /// in-memory placeholder before deletion to release `SQLite` file locks.
+    pub fn reset(&mut self) -> Result<()> {
+        tracing::info!(path = %self.path.display(), "Resetting database");
 
-        conn.execute_batch(
-            "DELETE FROM call_edges; DELETE FROM refs; DELETE FROM symbols; DELETE FROM file_deps; DELETE FROM imports; DELETE FROM files;",
-        )?;
-        Ok(())
+        // Replace the file-backed connection with an in-memory placeholder
+        // to release SQLite file locks before deleting the database file.
+        let mut conn = self.connection()?;
+        *conn = Connection::open_in_memory()
+            .map_err(|e| Error::Internal(format!("failed to create temporary connection: {e}")))?;
+        drop(conn);
+
+        // Delete the database file and WAL/SHM sidecars
+        Self::remove_file_if_exists(&self.path)?;
+        Self::remove_file_if_exists(&self.path.with_extension("db-wal"))?;
+        Self::remove_file_if_exists(&self.path.with_extension("db-shm"))?;
+
+        // Reopen with fresh schema
+        match Self::open(&self.path) {
+            Ok(new) => {
+                *self = new;
+                tracing::debug!(path = %self.path.display(), "Database reset complete");
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!(
+                    path = %self.path.display(),
+                    error = %e,
+                    "Failed to reopen database after reset; \
+                     index holds an in-memory placeholder until next reset"
+                );
+                Err(e)
+            }
+        }
+    }
+
+    /// Remove a file, ignoring `NotFound` errors (the file may not exist).
+    fn remove_file_if_exists(path: &Path) -> Result<()> {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "Failed to delete file during reset"
+                );
+                Err(Error::Io(std::io::Error::new(
+                    e.kind(),
+                    format!("failed to delete {}: {e}", path.display()),
+                )))
+            }
+        }
     }
 
     /// Get statistics about the database contents.
@@ -399,5 +451,71 @@ mod tests {
 
         let results = index.search_symbols("", 10).unwrap();
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn reset_deletes_database_and_recreates_schema() {
+        let (_dir, path) = temp_db();
+        let mut index = Index::open(&path).expect("should open database");
+
+        // Insert some data
+        let file_id = index
+            .upsert_file(Path::new("src/lib.rs"), Language::Rust, 1000, 100, None)
+            .expect("should insert file");
+        index
+            .insert_symbol(
+                file_id,
+                "foo",
+                "crate",
+                "foo",
+                SymbolKind::Function,
+                1,
+                0,
+                None,
+                None,
+                Visibility::Public,
+                None,
+                false,
+            )
+            .expect("should insert symbol");
+
+        // Verify data exists
+        assert!(index.get_file(Path::new("src/lib.rs")).unwrap().is_some());
+
+        // Reset
+        index.reset().expect("reset should succeed");
+
+        // Data should be gone
+        assert!(
+            index.get_file(Path::new("src/lib.rs")).unwrap().is_none(),
+            "file should not exist after reset"
+        );
+
+        // Schema should still work — can insert new data
+        let new_file_id = index
+            .upsert_file(Path::new("src/new.rs"), Language::Rust, 2000, 200, None)
+            .expect("should insert file after reset");
+        assert!(new_file_id.as_i64() > 0);
+    }
+
+    #[test]
+    fn reset_succeeds_with_wal_files_present() {
+        let (_dir, path) = temp_db();
+        let mut index = Index::open(&path).expect("should open database");
+
+        // Force WAL file creation by writing data
+        index
+            .upsert_file(Path::new("src/lib.rs"), Language::Rust, 1000, 100, None)
+            .expect("should insert file");
+
+        // Reset should succeed even with WAL/SHM sidecars present
+        index.reset().expect("reset should succeed with WAL files");
+
+        // Database should be usable after reset
+        assert!(path.exists(), "database file should be recreated");
+        let file_id = index
+            .upsert_file(Path::new("src/new.rs"), Language::Rust, 2000, 200, None)
+            .expect("should insert file after reset");
+        assert!(file_id.as_i64() > 0);
     }
 }
