@@ -33,7 +33,7 @@
 //! assert!(validate_prefix("my-proj").is_err());  // contains hyphen
 //! ```
 
-use crate::error::{Error, Result};
+use crate::error::{ConfigError, Result};
 use crate::storage::StorageBackend;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -103,23 +103,19 @@ impl StorageConfig {
         // Validate that data_file is a relative path
         let data_file_path = Path::new(&self.data_file);
         if data_file_path.is_absolute() {
-            return Err(Error::Config(
-                "data_file must be a relative path".to_string(),
-            ));
+            return Err(ConfigError::AbsoluteDataPath.into());
         }
 
         let data_path = root_dir.join(&self.data_file);
 
         match self.backend.as_str() {
             "jsonl" => Ok(StorageBackend::Jsonl(data_path)),
-            "postgresql" => Err(Error::Config(
-                "PostgreSQL backend is not yet implemented. \
-                 See https://github.com/dwalleck/rivets/issues for tracking."
+            "postgresql" => Err(ConfigError::UnsupportedBackend(
+                "PostgreSQL. See https://github.com/dwalleck/rivets/issues for tracking."
                     .to_string(),
-            )),
-            other => Err(Error::Config(format!(
-                "Unknown storage backend '{other}'. Supported backends: jsonl, postgresql"
-            ))),
+            )
+            .into()),
+            other => Err(ConfigError::UnknownBackend(other.to_string()).into()),
         }
     }
 }
@@ -141,12 +137,9 @@ impl RivetsConfig {
     /// Validates the configuration after loading, including prefix validation.
     pub async fn load(path: &Path) -> Result<Self> {
         let content = fs::read_to_string(path).await?;
-        let config: Self = serde_yaml::from_str(&content).map_err(|e| {
-            Error::Config(format!(
-                "Failed to parse config file '{}': {}",
-                path.display(),
-                e
-            ))
+        let config: Self = serde_yaml::from_str(&content).map_err(|e| ConfigError::Parse {
+            path: path.display().to_string(),
+            source: e,
         })?;
 
         // Validate the prefix
@@ -157,8 +150,7 @@ impl RivetsConfig {
 
     /// Save configuration to a file
     pub async fn save(&self, path: &Path) -> Result<()> {
-        let content =
-            serde_yaml::to_string(self).map_err(|e| Error::Config(format!("YAML error: {}", e)))?;
+        let content = serde_yaml::to_string(self).map_err(ConfigError::Yaml)?;
         fs::write(path, content).await?;
         Ok(())
     }
@@ -195,23 +187,26 @@ pub struct InitResult {
 /// Note: Expects pre-trimmed input. Callers should trim whitespace before calling.
 pub fn validate_prefix(prefix: &str) -> Result<()> {
     if prefix.len() < MIN_PREFIX_LENGTH {
-        return Err(Error::Config(format!(
-            "Prefix must be at least {} characters",
+        return Err(ConfigError::InvalidPrefix(format!(
+            "must be at least {} characters",
             MIN_PREFIX_LENGTH
-        )));
+        ))
+        .into());
     }
 
     if prefix.len() > MAX_PREFIX_LENGTH {
-        return Err(Error::Config(format!(
-            "Prefix cannot exceed {} characters",
+        return Err(ConfigError::InvalidPrefix(format!(
+            "cannot exceed {} characters",
             MAX_PREFIX_LENGTH
-        )));
+        ))
+        .into());
     }
 
     if !prefix.chars().all(|c| c.is_ascii_alphanumeric()) {
-        return Err(Error::Config(
-            "Prefix must contain only alphanumeric characters".to_string(),
-        ));
+        return Err(ConfigError::InvalidPrefix(
+            "must contain only alphanumeric characters".to_string(),
+        )
+        .into());
     }
 
     Ok(())
@@ -247,10 +242,7 @@ pub async fn init(base_dir: &Path, prefix: Option<&str>) -> Result<InitResult> {
     match fs::create_dir(&rivets_dir).await {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(Error::Config(format!(
-                "Rivets is already initialized in this directory. Found existing '{}'",
-                RIVETS_DIR_NAME
-            )));
+            return Err(ConfigError::AlreadyInitialized(RIVETS_DIR_NAME.to_string()).into());
         }
         Err(e) => return Err(e.into()),
     }

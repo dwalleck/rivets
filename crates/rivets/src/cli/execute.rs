@@ -38,10 +38,12 @@ pub async fn execute_init(args: &InitArgs) -> Result<()> {
                 None // Use default prefix
             } else {
                 // Validate the input
-                Some(
-                    super::validators::validate_prefix(trimmed)
-                        .map_err(|e| anyhow::anyhow!("{}", e))?,
-                )
+                Some(super::validators::validate_prefix(trimmed).map_err(|e| {
+                    crate::error::Error::Validation {
+                        field: "prefix",
+                        reason: e,
+                    }
+                })?)
             }
         }
         None => None, // Quiet mode: use default prefix
@@ -140,7 +142,12 @@ pub async fn execute_create(
                 .read_line(&mut input)
                 .context("Failed to read title from stdin")?;
             // Apply same validation as CLI argument parsing
-            super::validators::validate_title(input.trim()).map_err(|e| anyhow::anyhow!("{}", e))?
+            super::validators::validate_title(input.trim()).map_err(|e| {
+                crate::error::Error::Validation {
+                    field: "title",
+                    reason: e,
+                }
+            })?
         }
     };
 
