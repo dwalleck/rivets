@@ -143,6 +143,9 @@ impl Index {
 
         // Replace the file-backed connection with an in-memory placeholder
         // to release SQLite file locks before deleting the database file.
+        // NOTE: `&mut self` is load-bearing here — it guarantees exclusive
+        // access so no other thread can use the connection between the swap
+        // and the file deletion.
         let mut conn = self.connection()?;
         *conn = Connection::open_in_memory()
             .map_err(|e| Error::Internal(format!("failed to create temporary connection: {e}")))?;
@@ -172,7 +175,7 @@ impl Index {
                     path = %self.path.display(),
                     error = %e,
                     "Failed to reopen database after reset; \
-                     index holds an in-memory placeholder until next reset"
+                     index holds an in-memory placeholder until next successful reset"
                 );
                 Err(e)
             }
@@ -497,6 +500,10 @@ mod tests {
             index.get_file(Path::new("src/lib.rs")).unwrap().is_none(),
             "file should not exist after reset"
         );
+        let symbols = index
+            .search_symbols("foo", 10)
+            .expect("search after reset should succeed");
+        assert!(symbols.is_empty(), "symbols should be cleared after reset");
 
         // Schema should still work — can insert new data
         let new_file_id = index
