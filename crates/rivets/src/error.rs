@@ -29,8 +29,8 @@ pub enum ConfigError {
     },
 
     /// YAML serialization error.
-    #[error("YAML serialization error: {0}")]
-    Yaml(serde_yaml::Error),
+    #[error("YAML serialization error")]
+    Yaml(#[source] serde_yaml::Error),
 
     /// data_file path must be relative, not absolute.
     #[error("data_file must be a relative path")]
@@ -94,9 +94,9 @@ pub enum Error {
     Storage(#[from] StorageError),
 
     /// CLI input validation error.
-    #[error("Invalid {field}: {reason}")]
+    #[error("{reason}")]
     Validation {
-        /// The field that failed validation.
+        /// The field that failed validation (available for programmatic access).
         field: &'static str,
         /// Why the value was invalid.
         reason: String,
