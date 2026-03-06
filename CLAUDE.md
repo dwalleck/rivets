@@ -71,13 +71,15 @@ rivets show issue-id  # Shows dependencies section
 ## Development Commands
 
 ```bash
-cargo build              # Build all crates
-cargo test               # Run all tests (~1400 tests)
-cargo clippy             # Lint (pedantic mode enabled)
-cargo fmt --check        # Check formatting
-cargo fmt                # Auto-format
-cargo run -- <subcommand>  # Run rivets CLI
+cargo build                  # Build all crates
+cargo nextest run            # Run all tests (~1400 tests, parallel)
+cargo clippy                 # Lint (pedantic mode enabled)
+cargo fmt --check            # Check formatting
+cargo fmt                    # Auto-format
+cargo run -- <subcommand>    # Run rivets CLI
 ```
+
+**Testing**: Use `cargo nextest run` instead of `cargo test` for unit/integration tests. Nextest runs each test in its own process in parallel (~3.7x faster). Use `cargo test --doc` for doc tests only (nextest does not support doc tests).
 
 ### Workspace Lints
 
@@ -87,11 +89,24 @@ cargo run -- <subcommand>  # Run rivets CLI
 ### Crate-specific
 
 ```bash
-cargo test -p rivets-jsonl   # JSONL library tests only
-cargo test -p rivets         # Core + CLI tests only
-cargo test -p tethys         # Code intelligence tests only
-cargo test -p rivets-mcp     # MCP server tests only
+cargo nextest run -p rivets-jsonl   # JSONL library tests only
+cargo nextest run -p rivets         # Core + CLI tests only
+cargo nextest run -p tethys         # Code intelligence tests only
+cargo nextest run -p rivets-mcp     # MCP server tests only
 ```
+
+### Available Tools
+
+These tools are installed and should be used when appropriate:
+
+| Tool | When to use |
+|------|-------------|
+| `cargo nextest run` | **Always** use instead of `cargo test` for running tests |
+| `cargo expand` | Debugging derive macros or proc macros — shows the actual expanded code |
+| `cargo machete` | After removing code or refactoring — finds unused dependencies in Cargo.toml |
+| `cargo deny check` | Checking for RUSTSEC advisories and license compliance |
+| `hyperfine` | Benchmarking CLI commands (e.g. `hyperfine 'cargo nextest run' 'cargo test'`) |
+| `tokei` | Quick line-count / language stats for the workspace |
 
 ## Commit Message Convention
 
