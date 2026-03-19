@@ -8,25 +8,27 @@ use super::{Index, SYMBOLS_COLUMNS, row_to_symbol};
 use crate::error::Result;
 use crate::types::{FileId, Symbol, SymbolId, SymbolKind};
 
+/// Parameters for inserting a symbol into the index (test-only).
+#[cfg(test)]
+pub(crate) struct InsertSymbolParams<'a> {
+    pub file_id: FileId,
+    pub name: &'a str,
+    pub module_path: &'a str,
+    pub qualified_name: &'a str,
+    pub kind: SymbolKind,
+    pub line: u32,
+    pub column: u32,
+    pub span: Option<crate::types::Span>,
+    pub signature: Option<&'a str>,
+    pub visibility: crate::types::Visibility,
+    pub parent_symbol_id: Option<SymbolId>,
+    pub is_test: bool,
+}
+
 impl Index {
     /// Insert a symbol, returning the symbol ID.
     #[cfg(test)]
-    #[allow(clippy::too_many_arguments)] // Database row has many columns
-    pub fn insert_symbol(
-        &self,
-        file_id: FileId,
-        name: &str,
-        module_path: &str,
-        qualified_name: &str,
-        kind: SymbolKind,
-        line: u32,
-        column: u32,
-        span: Option<crate::types::Span>,
-        signature: Option<&str>,
-        visibility: crate::types::Visibility,
-        parent_symbol_id: Option<SymbolId>,
-        is_test: bool,
-    ) -> Result<SymbolId> {
+    pub fn insert_symbol(&self, params: &InsertSymbolParams<'_>) -> Result<SymbolId> {
         let conn = self.connection()?;
 
         conn.execute(
@@ -34,19 +36,19 @@ impl Index {
              end_line, end_column, signature, visibility, parent_symbol_id, is_test)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
-                file_id.as_i64(),
-                name,
-                module_path,
-                qualified_name,
-                kind.as_str(),
-                line,
-                column,
-                span.map(|s| s.end_line()),
-                span.map(|s| s.end_column()),
-                signature,
-                visibility.as_str(),
-                parent_symbol_id.map(SymbolId::as_i64),
-                is_test
+                params.file_id.as_i64(),
+                params.name,
+                params.module_path,
+                params.qualified_name,
+                params.kind.as_str(),
+                params.line,
+                params.column,
+                params.span.map(|s| s.end_line()),
+                params.span.map(|s| s.end_column()),
+                params.signature,
+                params.visibility.as_str(),
+                params.parent_symbol_id.map(SymbolId::as_i64),
+                params.is_test
             ],
         )?;
         Ok(SymbolId::from(conn.last_insert_rowid()))

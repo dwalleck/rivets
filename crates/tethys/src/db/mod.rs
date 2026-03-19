@@ -32,11 +32,14 @@ pub(crate) use helpers::{
     FILES_COLUMNS, REFS_COLUMNS, SYMBOLS_COLUMNS, parse_language, parse_symbol_kind, row_to_import,
     row_to_indexed_file, row_to_reference, row_to_symbol,
 };
+pub(crate) use references::InsertReferenceParams;
 pub(crate) use schema::SCHEMA;
 
 // Re-export parse_visibility for tests in types.rs
 #[cfg(test)]
 pub(crate) use helpers::parse_visibility;
+#[cfg(test)]
+pub(crate) use symbols::InsertSymbolParams;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -376,37 +379,37 @@ mod tests {
             .unwrap();
 
         index
-            .insert_symbol(
+            .insert_symbol(&InsertSymbolParams {
                 file_id,
-                "foo",
-                "crate",
-                "foo",
-                SymbolKind::Function,
-                10,
-                1,
-                None,
-                Some("fn foo()"),
-                Visibility::Public,
-                None,
-                false,
-            )
+                name: "foo",
+                module_path: "crate",
+                qualified_name: "foo",
+                kind: SymbolKind::Function,
+                line: 10,
+                column: 1,
+                span: None,
+                signature: Some("fn foo()"),
+                visibility: Visibility::Public,
+                parent_symbol_id: None,
+                is_test: false,
+            })
             .unwrap();
 
         index
-            .insert_symbol(
+            .insert_symbol(&InsertSymbolParams {
                 file_id,
-                "bar",
-                "crate",
-                "bar",
-                SymbolKind::Function,
-                20,
-                1,
-                None,
-                None,
-                Visibility::Private,
-                None,
-                false,
-            )
+                name: "bar",
+                module_path: "crate",
+                qualified_name: "bar",
+                kind: SymbolKind::Function,
+                line: 20,
+                column: 1,
+                span: None,
+                signature: None,
+                visibility: Visibility::Private,
+                parent_symbol_id: None,
+                is_test: false,
+            })
             .unwrap();
 
         let symbols = index.list_symbols_in_file(file_id).unwrap();
@@ -425,37 +428,37 @@ mod tests {
             .unwrap();
 
         index
-            .insert_symbol(
+            .insert_symbol(&InsertSymbolParams {
                 file_id,
-                "authenticate",
-                "crate::auth",
-                "authenticate",
-                SymbolKind::Function,
-                10,
-                1,
-                None,
-                None,
-                Visibility::Public,
-                None,
-                false,
-            )
+                name: "authenticate",
+                module_path: "crate::auth",
+                qualified_name: "authenticate",
+                kind: SymbolKind::Function,
+                line: 10,
+                column: 1,
+                span: None,
+                signature: None,
+                visibility: Visibility::Public,
+                parent_symbol_id: None,
+                is_test: false,
+            })
             .unwrap();
 
         index
-            .insert_symbol(
+            .insert_symbol(&InsertSymbolParams {
                 file_id,
-                "authorize",
-                "crate::auth",
-                "authorize",
-                SymbolKind::Function,
-                20,
-                1,
-                None,
-                None,
-                Visibility::Public,
-                None,
-                false,
-            )
+                name: "authorize",
+                module_path: "crate::auth",
+                qualified_name: "authorize",
+                kind: SymbolKind::Function,
+                line: 20,
+                column: 1,
+                span: None,
+                signature: None,
+                visibility: Visibility::Public,
+                parent_symbol_id: None,
+                is_test: false,
+            })
             .unwrap();
 
         let results = index.search_symbols("auth", 10).unwrap();

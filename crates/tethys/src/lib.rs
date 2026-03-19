@@ -63,13 +63,25 @@ use std::time::{Instant, UNIX_EPOCH};
 use rayon::prelude::*;
 
 use batch_writer::BatchWriter;
-use db::{Index, SymbolData};
+use db::{Index, InsertReferenceParams, SymbolData};
 use graph::{FileGraphOps, SymbolGraphOps};
 use languages::common;
 use lsp::LspProvider;
 use parallel::{OwnedSymbolData, ParsedFileData};
 use resolver::resolve_module_path;
 use tracing::{debug, info, trace, warn};
+
+/// Per-file context used during cross-file reference resolution (Pass 2).
+///
+/// Bundles the import tables and path information that stay constant while
+/// resolving every reference within a single file.
+struct ResolveContext<'a> {
+    explicit_imports: &'a HashMap<&'a str, (&'a str, &'a str)>,
+    glob_imports: &'a [&'a str],
+    current_file_path: Option<&'a Path>,
+    crate_root: &'a Path,
+    file_id: FileId,
+}
 
 /// A dependency that couldn't be resolved because the target file wasn't indexed yet.
 ///
@@ -675,19 +687,19 @@ impl Tethys {
                 // parallel threads without access to the crate list. The module_path is
                 // computed later during write_parsed_file (batch mode) or post-indexing
                 // for streaming mode. Streaming mode currently does not populate module_path.
-                OwnedSymbolData::new(
-                    sym.name.clone(),
-                    String::new(),
+                OwnedSymbolData {
+                    name: sym.name.clone(),
+                    module_path: String::new(),
                     qualified_name,
-                    sym.kind,
-                    sym.line,
-                    sym.column,
-                    sym.span,
-                    sym.signature.clone(),
-                    sym.visibility,
-                    None, // TODO: parent_symbol_id
-                    sym.is_test,
-                )
+                    kind: sym.kind,
+                    line: sym.line,
+                    column: sym.column,
+                    span: sym.span,
+                    signature: sym.signature.clone(),
+                    visibility: sym.visibility,
+                    parent_symbol_id: None, // TODO: parent_symbol_id
+                    is_test: sym.is_test,
+                }
             })
             .collect();
 
@@ -703,7 +715,12 @@ impl Tethys {
             })?
             .to_path_buf();
 
-        Ok(ParsedFileData::new(
+        debug_assert!(
+            !relative_path.is_absolute(),
+            "relative_path should not be absolute: {}",
+            relative_path.display()
+        );
+        Ok(ParsedFileData {
             relative_path,
             language,
             mtime_ns,
@@ -711,7 +728,7 @@ impl Tethys {
             symbols,
             references,
             imports,
-        ))
+        })
     }
 
     /// Write a single parsed file to the database and compute its dependencies.
@@ -848,15 +865,15 @@ impl Tethys {
                 .containing_symbol_span
                 .and_then(|span| span_to_id.get(&span).copied());
 
-            self.db.insert_reference(
+            self.db.insert_reference(&InsertReferenceParams {
                 symbol_id,
                 file_id,
-                r.kind.to_db_kind().as_str(),
-                r.line,
-                r.column,
+                kind: r.kind.to_db_kind().as_str(),
+                line: r.line,
+                column: r.column,
                 in_symbol_id,
-                reference_name.as_deref(),
-            )?;
+                reference_name: reference_name.as_deref(),
+            })?;
             count += 1;
         }
 
@@ -1427,6 +1444,14 @@ impl Tethys {
         // Build import structures
         let (explicit_imports, glob_imports) = Self::build_import_maps(&imports);
 
+        let ctx = ResolveContext {
+            explicit_imports: &explicit_imports,
+            glob_imports: &glob_imports,
+            current_file_path: current_file_path.as_deref(),
+            crate_root,
+            file_id,
+        };
+
         let mut resolved_count = 0;
 
         for ref_ in refs {
@@ -1434,15 +1459,7 @@ impl Tethys {
                 continue;
             };
 
-            let resolved = self.try_resolve_reference(
-                &ref_,
-                ref_name,
-                &explicit_imports,
-                &glob_imports,
-                current_file_path.as_deref(),
-                crate_root,
-                file_id,
-            )?;
+            let resolved = self.try_resolve_reference(&ref_, ref_name, &ctx)?;
 
             if resolved {
                 resolved_count += 1;
@@ -1481,25 +1498,20 @@ impl Tethys {
     }
 
     /// Try to resolve a single reference using imports and fallback search.
-    #[allow(clippy::too_many_arguments)]
     fn try_resolve_reference(
         &self,
         ref_: &Reference,
         ref_name: &str,
-        explicit_imports: &HashMap<&str, (&str, &str)>,
-        glob_imports: &[&str],
-        current_file_path: Option<&Path>,
-        crate_root: &Path,
-        file_id: FileId,
+        ctx: &ResolveContext<'_>,
     ) -> Result<bool> {
         let is_qualified = ref_name.contains("::");
 
         // Try explicit imports
         if let Some(symbol) = self.resolve_via_explicit_import(
             ref_name,
-            explicit_imports,
-            current_file_path,
-            crate_root,
+            ctx.explicit_imports,
+            ctx.current_file_path,
+            ctx.crate_root,
             is_qualified,
         )? {
             trace!(
@@ -1513,12 +1525,12 @@ impl Tethys {
         }
 
         // Try glob imports
-        for source_module in glob_imports {
+        for source_module in ctx.glob_imports {
             if let Some(symbol) = self.resolve_symbol_in_module(
                 ref_name,
                 source_module,
-                current_file_path,
-                crate_root,
+                ctx.current_file_path,
+                ctx.crate_root,
                 is_qualified,
             )? {
                 trace!(
@@ -1546,7 +1558,7 @@ impl Tethys {
 
         trace!(
             ref_name = %ref_name,
-            file_id = %file_id,
+            file_id = %ctx.file_id,
             "Reference remains unresolved (likely external crate)"
         );
         Ok(false)

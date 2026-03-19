@@ -12,35 +12,43 @@ use super::{Index, REFS_COLUMNS, row_to_reference};
 use crate::error::Result;
 use crate::types::{FileId, RefId, Reference, SymbolId};
 
+/// Parameters for inserting a reference into the index.
+pub(crate) struct InsertReferenceParams<'a> {
+    /// The symbol this reference points to, or `None` for unresolved references.
+    pub symbol_id: Option<SymbolId>,
+    /// The file containing this reference.
+    pub file_id: FileId,
+    /// The kind of reference (e.g., "call", "use").
+    pub kind: &'a str,
+    /// Line number of the reference (1-indexed).
+    pub line: u32,
+    /// Column number of the reference (0-indexed).
+    pub column: u32,
+    /// The symbol that contains this reference, if any.
+    pub in_symbol_id: Option<SymbolId>,
+    /// The name used in the reference, for later resolution in Pass 2.
+    pub reference_name: Option<&'a str>,
+}
+
 impl Index {
     /// Insert a reference to a symbol.
     ///
     /// If `symbol_id` is `None`, the reference is unresolved and `reference_name`
     /// should be provided for later resolution in Pass 2.
-    #[allow(clippy::too_many_arguments)]
-    pub fn insert_reference(
-        &self,
-        symbol_id: Option<SymbolId>,
-        file_id: FileId,
-        kind: &str,
-        line: u32,
-        column: u32,
-        in_symbol_id: Option<SymbolId>,
-        reference_name: Option<&str>,
-    ) -> Result<i64> {
+    pub fn insert_reference(&self, params: &InsertReferenceParams<'_>) -> Result<i64> {
         let conn = self.connection()?;
 
         conn.execute(
             "INSERT INTO refs (symbol_id, file_id, kind, line, column, in_symbol_id, reference_name)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
-                symbol_id.map(SymbolId::as_i64),
-                file_id.as_i64(),
-                kind,
-                line,
-                column,
-                in_symbol_id.map(SymbolId::as_i64),
-                reference_name
+                params.symbol_id.map(SymbolId::as_i64),
+                params.file_id.as_i64(),
+                params.kind,
+                params.line,
+                params.column,
+                params.in_symbol_id.map(SymbolId::as_i64),
+                params.reference_name
             ],
         )?;
         Ok(conn.last_insert_rowid())
