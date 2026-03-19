@@ -605,7 +605,8 @@ impl Drop for LspClient {
             }
         }
 
-        // Reap the process to prevent zombies
+        // Reap the child process to prevent zombies. The exit status is
+        // irrelevant during cleanup — we already attempted kill() above.
         let _ = self.process.wait();
     }
 }
