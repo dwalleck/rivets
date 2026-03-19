@@ -487,20 +487,20 @@ mod tests {
             .upsert_file(Path::new("src/lib.rs"), Language::Rust, 1000, 100, None)
             .expect("should insert file");
         index
-            .insert_symbol(
+            .insert_symbol(&InsertSymbolParams {
                 file_id,
-                "foo",
-                "crate",
-                "foo",
-                SymbolKind::Function,
-                1,
-                0,
-                None,
-                None,
-                Visibility::Public,
-                None,
-                false,
-            )
+                name: "foo",
+                module_path: "crate",
+                qualified_name: "foo",
+                kind: SymbolKind::Function,
+                line: 1,
+                column: 0,
+                span: None,
+                signature: None,
+                visibility: Visibility::Public,
+                parent_symbol_id: None,
+                is_test: false,
+            })
             .expect("should insert symbol");
 
         // Verify data exists
