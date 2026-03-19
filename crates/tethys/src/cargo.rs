@@ -68,10 +68,10 @@ pub fn discover_crates(workspace_root: &Path) -> Vec<CrateInfo> {
         }
     }
 
-    if manifest.package.is_some() {
-        if let Some(info) = parse_crate_from_manifest(workspace_root, &manifest) {
-            crates.push(info);
-        }
+    if manifest.package.is_some()
+        && let Some(info) = parse_crate_from_manifest(workspace_root, &manifest)
+    {
+        crates.push(info);
     }
 
     debug!(
@@ -299,10 +299,10 @@ fn determine_entry_point(file_path: &Path, crate_info: &CrateInfo) -> Option<(Pa
         }
     }
 
-    if let Some(lib_dir) = lib_entry_dir {
-        if file_path.starts_with(&lib_dir) {
-            return Some((lib_dir, "crate".to_string()));
-        }
+    if let Some(lib_dir) = lib_entry_dir
+        && file_path.starts_with(&lib_dir)
+    {
+        return Some((lib_dir, "crate".to_string()));
     }
 
     for (bin_name, bin_path) in &crate_info.bin_paths {

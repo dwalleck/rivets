@@ -8,11 +8,11 @@
 
 use std::path::PathBuf;
 
+use super::LanguageSupport;
 use super::common::{
     ExtractedReference, ExtractedReferenceKind, ExtractedSymbol, ImportContext, ImportStatement,
 };
 use super::tree_sitter_utils::{node_span, node_text};
-use super::LanguageSupport;
 use crate::resolver::resolve_module_path;
 use crate::types::{FunctionSignature, Parameter, Span, SymbolKind, Visibility};
 
@@ -191,17 +191,17 @@ fn extract_references_recursive(
 
         TYPE_IDENTIFIER => {
             // Type annotation - but only if not part of a definition
-            if !is_type_definition_context(node) {
-                if let Some(name) = node_text(node, content) {
-                    refs.push(ExtractedReference {
-                        name,
-                        kind: ExtractedReferenceKind::Type,
-                        line: node.start_position().row as u32 + 1,
-                        column: node.start_position().column as u32 + 1,
-                        path: None,
-                        containing_symbol_span: containing_span,
-                    });
-                }
+            if !is_type_definition_context(node)
+                && let Some(name) = node_text(node, content)
+            {
+                refs.push(ExtractedReference {
+                    name,
+                    kind: ExtractedReferenceKind::Type,
+                    line: node.start_position().row as u32 + 1,
+                    column: node.start_position().column as u32 + 1,
+                    path: None,
+                    containing_symbol_span: containing_span,
+                });
             }
         }
 
@@ -386,10 +386,10 @@ fn is_type_definition_context(node: &tree_sitter::Node) -> bool {
             // These define the type, not reference it
             "struct_item" | "enum_item" | "trait_item" | "type_item" => {
                 // Check if the type_identifier is the "name" field of the definition
-                if let Some(name_node) = parent.child_by_field_name("name") {
-                    if name_node.id() == node.id() {
-                        return true;
-                    }
+                if let Some(name_node) = parent.child_by_field_name("name")
+                    && name_node.id() == node.id()
+                {
+                    return true;
                 }
             }
             // impl blocks can be definitions or references
@@ -548,10 +548,10 @@ fn collect_scoped_path(node: &tree_sitter::Node, content: &[u8], segments: &mut 
             if let Some(path_node) = node.child_by_field_name("path") {
                 collect_scoped_path(&path_node, content, segments);
             }
-            if let Some(name_node) = node.child_by_field_name("name") {
-                if let Some(text) = node_text(&name_node, content) {
-                    segments.push(text);
-                }
+            if let Some(name_node) = node.child_by_field_name("name")
+                && let Some(text) = node_text(&name_node, content)
+            {
+                segments.push(text);
             }
         }
         IDENTIFIER | CRATE | SELF | SUPER => {
@@ -719,13 +719,12 @@ fn extract_symbols_recursive(
                 if child.kind() == DECLARATION_LIST {
                     let mut inner_cursor = child.walk();
                     for item in child.children(&mut inner_cursor) {
-                        if item.kind() == FUNCTION_ITEM {
-                            if let Some(mut sym) =
+                        if item.kind() == FUNCTION_ITEM
+                            && let Some(mut sym) =
                                 extract_function(&item, content, type_name.as_deref())
-                            {
-                                sym.kind = SymbolKind::Method;
-                                symbols.push(sym);
-                            }
+                        {
+                            sym.kind = SymbolKind::Method;
+                            symbols.push(sym);
                         }
                     }
                 }

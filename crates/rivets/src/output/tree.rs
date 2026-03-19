@@ -174,11 +174,12 @@ fn dep_tree_to_json(node: &DepTreeNode) -> serde_json::Value {
     if let Some(s) = node.status {
         obj["status"] = serde_json::json!(format!("{}", s));
     }
-    obj["dependencies"] = serde_json::json!(node
-        .children
-        .iter()
-        .map(dep_tree_to_json)
-        .collect::<Vec<_>>());
+    obj["dependencies"] = serde_json::json!(
+        node.children
+            .iter()
+            .map(dep_tree_to_json)
+            .collect::<Vec<_>>()
+    );
 
     obj
 }
@@ -189,15 +190,17 @@ pub fn dep_tree_to_json_public(
     dependents: &[crate::domain::Dependency],
 ) -> serde_json::Value {
     let mut json = dep_tree_to_json(root);
-    json["dependents"] = serde_json::json!(dependents
-        .iter()
-        .map(|dep| {
-            serde_json::json!({
-                "depends_on_id": dep.depends_on_id.to_string(),
-                "dep_type": format!("{}", dep.dep_type)
+    json["dependents"] = serde_json::json!(
+        dependents
+            .iter()
+            .map(|dep| {
+                serde_json::json!({
+                    "depends_on_id": dep.depends_on_id.to_string(),
+                    "dep_type": format!("{}", dep.dep_type)
+                })
             })
-        })
-        .collect::<Vec<_>>());
+            .collect::<Vec<_>>()
+    );
     json
 }
 

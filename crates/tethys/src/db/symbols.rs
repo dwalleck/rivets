@@ -1,10 +1,10 @@
 //! Symbol CRUD operations for the Tethys index.
 
-use rusqlite::params;
 use rusqlite::OptionalExtension;
+use rusqlite::params;
 use tracing::trace;
 
-use super::{row_to_symbol, Index, SYMBOLS_COLUMNS};
+use super::{Index, SYMBOLS_COLUMNS, row_to_symbol};
 use crate::error::Result;
 use crate::types::{FileId, Span, Symbol, SymbolId, SymbolKind, Visibility};
 

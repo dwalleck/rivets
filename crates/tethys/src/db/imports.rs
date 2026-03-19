@@ -3,7 +3,7 @@
 use rusqlite::params;
 use tracing::trace;
 
-use super::{row_to_import, Index};
+use super::{Index, row_to_import};
 use crate::error::Result;
 use crate::types::{FileId, Import};
 

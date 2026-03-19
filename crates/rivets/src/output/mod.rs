@@ -20,7 +20,7 @@ use std::io::{self, Write};
 
 // Re-export public items for backwards compatibility
 pub use color::{error, info, success, warning};
-pub use tree::{dep_tree_to_json_public, print_dep_tree, print_dep_tree_dependents, DepTreeNode};
+pub use tree::{DepTreeNode, dep_tree_to_json_public, print_dep_tree, print_dep_tree_dependents};
 
 use color::{
     bold, colored_status_icon, colored_type_icon, colorize_id, colorize_labels, colorize_priority,
@@ -577,39 +577,59 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn test_output_config_from_env() {
         with_env_lock(|| {
-            env::remove_var("RIVETS_MAX_WIDTH");
-            env::remove_var("RIVETS_ASCII");
-            env::remove_var("NO_COLOR");
-            env::remove_var("RIVETS_COLOR");
+            // SAFETY: These env mutations are safe because with_env_lock
+            // serialises all env-touching tests in the process.
+            unsafe {
+                env::remove_var("RIVETS_MAX_WIDTH");
+                env::remove_var("RIVETS_ASCII");
+                env::remove_var("NO_COLOR");
+                env::remove_var("RIVETS_COLOR");
 
-            env::set_var("RIVETS_MAX_WIDTH", "120");
-            env::set_var("RIVETS_ASCII", "1");
+                env::set_var("RIVETS_MAX_WIDTH", "120");
+                env::set_var("RIVETS_ASCII", "1");
+            }
             let config = OutputConfig::from_env();
             assert_eq!(config.max_width, 120);
             assert!(config.use_ascii);
             assert!(config.use_colors);
 
-            env::set_var("RIVETS_MAX_WIDTH", "invalid");
-            env::set_var("RIVETS_ASCII", "false");
+            // SAFETY: same as above
+            unsafe {
+                env::set_var("RIVETS_MAX_WIDTH", "invalid");
+                env::set_var("RIVETS_ASCII", "false");
+            }
             let config = OutputConfig::from_env();
             assert_eq!(config.max_width, DEFAULT_MAX_CONTENT_WIDTH);
             assert!(!config.use_ascii);
 
             // Test NO_COLOR standard
-            env::set_var("NO_COLOR", "1");
+            // SAFETY: same as above
+            unsafe {
+                env::set_var("NO_COLOR", "1");
+            }
             let config = OutputConfig::from_env();
             assert!(!config.use_colors, "NO_COLOR should disable colors");
 
-            env::remove_var("NO_COLOR");
+            // SAFETY: same as above
+            unsafe {
+                env::remove_var("NO_COLOR");
+            }
 
             // Test RIVETS_COLOR=0 disables colors
-            env::set_var("RIVETS_COLOR", "0");
+            // SAFETY: same as above
+            unsafe {
+                env::set_var("RIVETS_COLOR", "0");
+            }
             let config = OutputConfig::from_env();
             assert!(!config.use_colors, "RIVETS_COLOR=0 should disable colors");
 
-            env::set_var("RIVETS_COLOR", "false");
+            // SAFETY: same as above
+            unsafe {
+                env::set_var("RIVETS_COLOR", "false");
+            }
             let config = OutputConfig::from_env();
             assert!(
                 !config.use_colors,
@@ -617,9 +637,12 @@ mod tests {
             );
 
             // Clean up
-            env::remove_var("RIVETS_MAX_WIDTH");
-            env::remove_var("RIVETS_ASCII");
-            env::remove_var("RIVETS_COLOR");
+            // SAFETY: same as above
+            unsafe {
+                env::remove_var("RIVETS_MAX_WIDTH");
+                env::remove_var("RIVETS_ASCII");
+                env::remove_var("RIVETS_COLOR");
+            }
             let config = OutputConfig::from_env();
             assert_eq!(config.max_width, DEFAULT_MAX_CONTENT_WIDTH);
             assert!(!config.use_ascii);

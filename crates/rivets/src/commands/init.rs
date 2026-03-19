@@ -351,11 +351,13 @@ mod tests {
         // validate_prefix expects pre-trimmed input; whitespace is not alphanumeric
         let result = validate_prefix("  ab  ");
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .to_lowercase()
-            .contains("alphanumeric"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .to_lowercase()
+                .contains("alphanumeric")
+        );
     }
 
     // ========== RivetsConfig Tests ==========

@@ -6,20 +6,20 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use lsp_types::{
-    notification::{DidOpenTextDocument, Notification},
-    request::{GotoDefinition, Initialize, References, Shutdown},
     ClientCapabilities, DidOpenTextDocumentParams, GotoDefinitionParams, GotoDefinitionResponse,
     InitializeParams, InitializeResult, Location, PartialResultParams, Position, ReferenceContext,
     ReferenceParams, TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams, Uri,
     WindowClientCapabilities, WorkDoneProgressParams,
+    notification::{DidOpenTextDocument, Notification},
+    request::{GotoDefinition, Initialize, References, Shutdown},
 };
-use serde::{de::DeserializeOwned, Serialize};
-use serde_json::{json, Value};
+use serde::{Serialize, de::DeserializeOwned};
+use serde_json::{Value, json};
 use tracing::{debug, trace, warn};
 
+use super::Result;
 use super::error::LspError;
 use super::provider::LspProvider;
-use super::Result;
 
 /// LSP client for communicating with language servers.
 ///
@@ -437,63 +437,57 @@ impl LspClient {
                 }
 
                 // Check for $/progress notifications
-                if method == "$/progress" {
-                    if let Some(params) = message.get("params") {
-                        let token = params.get("token").and_then(|t| {
-                            // Token can be string or number
-                            t.as_str()
-                                .map(String::from)
-                                .or_else(|| t.as_i64().map(|n| n.to_string()))
-                        });
+                if method == "$/progress"
+                    && let Some(params) = message.get("params")
+                {
+                    let token = params.get("token").and_then(|t| {
+                        // Token can be string or number
+                        t.as_str()
+                            .map(String::from)
+                            .or_else(|| t.as_i64().map(|n| n.to_string()))
+                    });
 
-                        if let Some(value) = params.get("value") {
-                            let kind = value.get("kind").and_then(Value::as_str);
+                    if let Some(value) = params.get("value") {
+                        let kind = value.get("kind").and_then(Value::as_str);
 
-                            match kind {
-                                Some("begin") => {
-                                    // Check if this is the workspace loading progress
-                                    if let Some(title) = value.get("title").and_then(Value::as_str)
-                                    {
-                                        if title.starts_with("Loading workspace") {
-                                            if let Some(ref tok) = token {
-                                                debug!(
-                                                    token = tok,
-                                                    title = title,
-                                                    "Detected solution loading started"
-                                                );
-                                                loading_token = token;
-                                            }
-                                        }
-                                    }
+                        match kind {
+                            Some("begin") => {
+                                // Check if this is the workspace loading progress
+                                if let Some(title) = value.get("title").and_then(Value::as_str)
+                                    && title.starts_with("Loading workspace")
+                                    && let Some(ref tok) = token
+                                {
+                                    debug!(
+                                        token = tok,
+                                        title = title,
+                                        "Detected solution loading started"
+                                    );
+                                    loading_token = token;
                                 }
-                                Some("report") => {
-                                    // Log progress updates if we're tracking this token
-                                    if loading_token.is_some() && token == loading_token {
-                                        if let Some(msg) =
-                                            value.get("message").and_then(Value::as_str)
-                                        {
-                                            trace!(message = msg, "Solution loading progress");
-                                        }
-                                    }
-                                }
-                                Some("end") => {
-                                    // Check if this is the end of our tracked loading
-                                    if loading_token.is_some() && token == loading_token {
-                                        let msg = value
-                                            .get("message")
-                                            .and_then(Value::as_str)
-                                            .unwrap_or("completed");
-                                        #[allow(clippy::cast_possible_truncation)]
-                                        let elapsed_ms = start.elapsed().as_millis() as u64;
-                                        debug!(
-                                            message = msg,
-                                            elapsed_ms, "Solution loading completed"
-                                        );
-                                        return Ok(true);
-                                    }
-                                }
-                                _ => {}
                             }
+                            Some("report") => {
+                                // Log progress updates if we're tracking this token
+                                if loading_token.is_some()
+                                    && token == loading_token
+                                    && let Some(msg) = value.get("message").and_then(Value::as_str)
+                                {
+                                    trace!(message = msg, "Solution loading progress");
+                                }
+                            }
+                            Some("end") => {
+                                // Check if this is the end of our tracked loading
+                                if loading_token.is_some() && token == loading_token {
+                                    let msg = value
+                                        .get("message")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("completed");
+                                    #[allow(clippy::cast_possible_truncation)]
+                                    let elapsed_ms = start.elapsed().as_millis() as u64;
+                                    debug!(message = msg, elapsed_ms, "Solution loading completed");
+                                    return Ok(true);
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }

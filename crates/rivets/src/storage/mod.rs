@@ -852,10 +852,12 @@ mod tests {
         let id = IssueId::new(MOCK_ISSUE_ID);
         assert!(storage.get_dependencies(&id).await.unwrap().is_empty());
         assert!(storage.get_dependents(&id).await.unwrap().is_empty());
-        assert!(!storage
-            .has_cycle(&id, &IssueId::new("test-2"))
-            .await
-            .unwrap());
+        assert!(
+            !storage
+                .has_cycle(&id, &IssueId::new("test-2"))
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

@@ -8,8 +8,8 @@ use std::collections::{HashMap, HashSet};
 
 use rusqlite::OptionalExtension;
 
-use super::helpers::{row_to_indexed_file, row_to_symbol};
 use super::Index;
+use super::helpers::{row_to_indexed_file, row_to_symbol};
 use crate::error::{Error, Result};
 use crate::graph::{
     CallPath, CalleeInfo, CallerInfo, FileDepInfo, FileGraphOps, FileImpact, FilePath,

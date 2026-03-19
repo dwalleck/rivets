@@ -1,18 +1,18 @@
 //! IssueStorage trait implementation for in-memory storage.
 
+use super::InMemoryStorage;
 use super::graph::{find_blocked_issues, get_dependency_tree_impl, has_cycle_impl};
 use super::sorting::sort_by_policy;
-use super::InMemoryStorage;
 use crate::domain::{
-    Dependency, DependencyType, Issue, IssueFilter, IssueId, IssueStatus, IssueUpdate, NewIssue,
-    SortPolicy, MAX_PRIORITY,
+    Dependency, DependencyType, Issue, IssueFilter, IssueId, IssueStatus, IssueUpdate,
+    MAX_PRIORITY, NewIssue, SortPolicy,
 };
 use crate::error::{Error, Result, StorageError};
 use crate::storage::IssueStorage;
 use async_trait::async_trait;
 use chrono::Utc;
-use petgraph::visit::EdgeRef;
 use petgraph::Direction;
+use petgraph::visit::EdgeRef;
 
 /// Check if an issue matches all criteria in the filter.
 ///
@@ -405,10 +405,10 @@ impl IssueStorage for InMemoryStorage {
         sort_by_policy(&mut ready, policy);
 
         // Apply limit if specified
-        if let Some(filter) = filter {
-            if let Some(limit) = filter.limit {
-                ready.truncate(limit);
-            }
+        if let Some(filter) = filter
+            && let Some(limit) = filter.limit
+        {
+            ready.truncate(limit);
         }
 
         Ok(ready)
@@ -430,10 +430,10 @@ impl IssueStorage for InMemoryStorage {
             for edge in inner.graph.edges(node) {
                 if edge.weight() == &DependencyType::Blocks {
                     let blocker_id = &inner.graph[edge.target()];
-                    if let Some(blocker) = inner.issues.get(blocker_id) {
-                        if blocker.status != IssueStatus::Closed {
-                            blockers.push(blocker.clone());
-                        }
+                    if let Some(blocker) = inner.issues.get(blocker_id)
+                        && blocker.status != IssueStatus::Closed
+                    {
+                        blockers.push(blocker.clone());
                     }
                 }
             }

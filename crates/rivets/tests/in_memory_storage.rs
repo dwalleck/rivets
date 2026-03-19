@@ -5,12 +5,12 @@
 //! semantics, and sort policies.
 
 use rivets::domain::{
-    DependencyType, IssueFilter, IssueId, IssueStatus, IssueType, IssueUpdate, NewIssue,
-    SortPolicy, MAX_PRIORITY,
+    DependencyType, IssueFilter, IssueId, IssueStatus, IssueType, IssueUpdate, MAX_PRIORITY,
+    NewIssue, SortPolicy,
 };
 use rivets::error::Error;
-use rivets::storage::in_memory::{load_from_jsonl, new_in_memory_storage, save_to_jsonl};
 use rivets::storage::IssueStorage;
+use rivets::storage::in_memory::{load_from_jsonl, new_in_memory_storage, save_to_jsonl};
 use rstest::rstest;
 use tempfile::tempdir;
 
@@ -244,18 +244,22 @@ async fn test_all_dependency_types() {
     assert_eq!(deps.len(), 4);
 
     // Verify each type
-    assert!(deps
-        .iter()
-        .any(|d| d.depends_on_id == issue1.id && d.dep_type == DependencyType::Blocks));
-    assert!(deps
-        .iter()
-        .any(|d| d.depends_on_id == issue2.id && d.dep_type == DependencyType::Related));
-    assert!(deps
-        .iter()
-        .any(|d| d.depends_on_id == issue3.id && d.dep_type == DependencyType::ParentChild));
-    assert!(deps
-        .iter()
-        .any(|d| d.depends_on_id == issue4.id && d.dep_type == DependencyType::DiscoveredFrom));
+    assert!(
+        deps.iter()
+            .any(|d| d.depends_on_id == issue1.id && d.dep_type == DependencyType::Blocks)
+    );
+    assert!(
+        deps.iter()
+            .any(|d| d.depends_on_id == issue2.id && d.dep_type == DependencyType::Related)
+    );
+    assert!(
+        deps.iter()
+            .any(|d| d.depends_on_id == issue3.id && d.dep_type == DependencyType::ParentChild)
+    );
+    assert!(
+        deps.iter()
+            .any(|d| d.depends_on_id == issue4.id && d.dep_type == DependencyType::DiscoveredFrom)
+    );
 }
 
 // ========== Cycle Detection Tests ==========
@@ -360,14 +364,16 @@ async fn test_dependency_tree_simple_chain() {
     assert_eq!(tree.len(), 2);
 
     // B should be at depth 1
-    assert!(tree
-        .iter()
-        .any(|(d, depth)| d.depends_on_id == issue_b.id && *depth == 1));
+    assert!(
+        tree.iter()
+            .any(|(d, depth)| d.depends_on_id == issue_b.id && *depth == 1)
+    );
 
     // C should be at depth 2
-    assert!(tree
-        .iter()
-        .any(|(d, depth)| d.depends_on_id == issue_c.id && *depth == 2));
+    assert!(
+        tree.iter()
+            .any(|(d, depth)| d.depends_on_id == issue_c.id && *depth == 2)
+    );
 }
 
 #[tokio::test]

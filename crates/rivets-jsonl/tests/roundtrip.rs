@@ -246,7 +246,7 @@ async fn roundtrip_mixed_types_as_json_value() {
 
 mod atomic_write_integration {
     use super::*;
-    use rivets_jsonl::{write_jsonl_atomic, write_jsonl_atomic_iter, JsonlReader};
+    use rivets_jsonl::{JsonlReader, write_jsonl_atomic, write_jsonl_atomic_iter};
     use std::path::PathBuf;
 
     fn test_file_path(name: &str) -> PathBuf {

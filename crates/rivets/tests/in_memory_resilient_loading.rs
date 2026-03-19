@@ -14,7 +14,7 @@
 use chrono::Utc;
 use rivets::domain::{DependencyType, Issue, IssueId, IssueStatus, IssueType, NewIssue};
 use rivets::storage::in_memory::{
-    load_from_jsonl, new_in_memory_storage, save_to_jsonl, LoadWarning,
+    LoadWarning, load_from_jsonl, new_in_memory_storage, save_to_jsonl,
 };
 use std::io::Write;
 use tempfile::NamedTempFile;
@@ -398,16 +398,20 @@ mod load_from_jsonl_tests {
         // Only valid issue should be loaded
         let all_issues = storage.export_all().await.unwrap();
         assert_eq!(all_issues.len(), 1);
-        assert!(storage
-            .get(&IssueId::new("test-invalid"))
-            .await
-            .unwrap()
-            .is_none());
-        assert!(storage
-            .get(&IssueId::new("test-valid"))
-            .await
-            .unwrap()
-            .is_some());
+        assert!(
+            storage
+                .get(&IssueId::new("test-invalid"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            storage
+                .get(&IssueId::new("test-valid"))
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test]

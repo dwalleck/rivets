@@ -29,8 +29,8 @@ mod symbols;
 
 // Re-export helper functions and SQL constants used by other modules
 pub(crate) use helpers::{
-    parse_language, parse_symbol_kind, row_to_import, row_to_indexed_file, row_to_reference,
-    row_to_symbol, FILES_COLUMNS, REFS_COLUMNS, SYMBOLS_COLUMNS,
+    FILES_COLUMNS, REFS_COLUMNS, SYMBOLS_COLUMNS, parse_language, parse_symbol_kind, row_to_import,
+    row_to_indexed_file, row_to_reference, row_to_symbol,
 };
 pub(crate) use schema::SCHEMA;
 

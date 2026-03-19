@@ -8,11 +8,11 @@
 
 use std::path::PathBuf;
 
+use super::LanguageSupport;
 use super::common::{
     ExtractedReference, ExtractedReferenceKind, ExtractedSymbol, ImportContext, ImportStatement,
 };
 use super::tree_sitter_utils::{node_span, node_text};
-use super::LanguageSupport;
 use crate::types::{FunctionSignature, Parameter, Span, SymbolKind, Visibility};
 
 /// Tree-sitter node kind constants for C# grammar.
@@ -396,10 +396,10 @@ fn collect_member_access_path(
             if let Some(expr_node) = node.child_by_field_name("expression") {
                 collect_member_access_path(&expr_node, content, segments);
             }
-            if let Some(name_node) = node.child_by_field_name("name") {
-                if let Some(text) = node_text(&name_node, content) {
-                    segments.push(text);
-                }
+            if let Some(name_node) = node.child_by_field_name("name")
+                && let Some(text) = node_text(&name_node, content)
+            {
+                segments.push(text);
             }
         }
         IDENTIFIER => {
@@ -439,10 +439,10 @@ fn collect_qualified_name_path(
             if let Some(qualifier) = node.child_by_field_name("qualifier") {
                 collect_qualified_name_path(&qualifier, content, segments);
             }
-            if let Some(name_node) = node.child_by_field_name("name") {
-                if let Some(text) = node_text(&name_node, content) {
-                    segments.push(text);
-                }
+            if let Some(name_node) = node.child_by_field_name("name")
+                && let Some(text) = node_text(&name_node, content)
+            {
+                segments.push(text);
             }
         }
         IDENTIFIER => {
@@ -534,10 +534,11 @@ fn parse_using_directive(node: &tree_sitter::Node, content: &[u8]) -> Option<Usi
         match child.kind() {
             IDENTIFIER => {
                 // Could be a simple using or the identifier after an alias
-                if alias.is_none() && !is_static {
-                    if let Some(text) = node_text(&child, content) {
-                        namespace.push(text);
-                    }
+                if alias.is_none()
+                    && !is_static
+                    && let Some(text) = node_text(&child, content)
+                {
+                    namespace.push(text);
                 }
             }
             QUALIFIED_NAME => {
@@ -919,12 +920,11 @@ fn has_modifier(node: &tree_sitter::Node, content: &[u8], modifier: &str) -> boo
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if child.kind() == MODIFIER {
-            if let Some(text) = node_text(&child, content) {
-                if text == modifier {
-                    return true;
-                }
-            }
+        if child.kind() == MODIFIER
+            && let Some(text) = node_text(&child, content)
+            && text == modifier
+        {
+            return true;
         }
     }
     false
@@ -954,17 +954,17 @@ fn has_test_attribute(node: &tree_sitter::Node, content: &[u8]) -> bool {
             for attr_child in child.children(&mut inner_cursor) {
                 if attr_child.kind() == ATTRIBUTE {
                     // Get the attribute name (first identifier child)
-                    if let Some(name_node) = attr_child.child_by_field_name("name") {
-                        if let Some(attr_name) = node_text(&name_node, content) {
-                            // Handle fully qualified names like "NUnit.Framework.Test"
-                            // by checking the last segment
-                            let simple_name = attr_name.rsplit('.').next().unwrap_or(&attr_name);
-                            // Also strip "Attribute" suffix if present
-                            let name_without_suffix =
-                                simple_name.strip_suffix("Attribute").unwrap_or(simple_name);
-                            if CSHARP_TEST_ATTRIBUTES.contains(&name_without_suffix) {
-                                return true;
-                            }
+                    if let Some(name_node) = attr_child.child_by_field_name("name")
+                        && let Some(attr_name) = node_text(&name_node, content)
+                    {
+                        // Handle fully qualified names like "NUnit.Framework.Test"
+                        // by checking the last segment
+                        let simple_name = attr_name.rsplit('.').next().unwrap_or(&attr_name);
+                        // Also strip "Attribute" suffix if present
+                        let name_without_suffix =
+                            simple_name.strip_suffix("Attribute").unwrap_or(simple_name);
+                        if CSHARP_TEST_ATTRIBUTES.contains(&name_without_suffix) {
+                            return true;
                         }
                     }
                 }
@@ -1047,10 +1047,10 @@ fn extract_parameters(params_node: &tree_sitter::Node, content: &[u8]) -> Vec<Pa
     let mut cursor = params_node.walk();
 
     for child in params_node.children(&mut cursor) {
-        if child.kind() == PARAMETER {
-            if let Some(param) = extract_parameter(&child, content) {
-                parameters.push(param);
-            }
+        if child.kind() == PARAMETER
+            && let Some(param) = extract_parameter(&child, content)
+        {
+            parameters.push(param);
         }
     }
 

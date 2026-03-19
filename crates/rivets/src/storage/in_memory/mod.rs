@@ -85,7 +85,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 // Re-export public API
-pub use jsonl::{load_from_jsonl, save_to_jsonl, LoadWarning};
+pub use jsonl::{LoadWarning, load_from_jsonl, save_to_jsonl};
 
 /// Thread-safe in-memory storage.
 ///

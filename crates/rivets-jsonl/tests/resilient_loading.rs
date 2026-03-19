@@ -25,7 +25,7 @@
 
 use futures::stream::StreamExt;
 use rivets_jsonl::warning::{Warning, WarningCollector};
-use rivets_jsonl::{read_jsonl_resilient, JsonlReader};
+use rivets_jsonl::{JsonlReader, read_jsonl_resilient};
 use serde::{Deserialize, Serialize};
 use std::io::{Cursor, Write};
 use std::path::PathBuf;

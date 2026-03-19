@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use rusqlite::params;
 use tracing::trace;
 
-use super::{row_to_reference, Index, REFS_COLUMNS};
+use super::{Index, REFS_COLUMNS, row_to_reference};
 use crate::error::Result;
 use crate::types::{FileId, RefId, Reference, SymbolId};
 

@@ -16,7 +16,7 @@
 
 use crate::error::{Error, Result};
 use rivets::commands::init::RivetsConfig;
-use rivets::storage::{create_storage, IssueStorage};
+use rivets::storage::{IssueStorage, create_storage};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

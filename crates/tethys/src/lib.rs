@@ -56,8 +56,8 @@ pub use types::{
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Instant, UNIX_EPOCH};
 
 use rayon::prelude::*;
@@ -1081,10 +1081,10 @@ impl Tethys {
         for r in refs {
             referenced_names.insert(&r.name);
             // Also add the first path component if present (for `Foo::bar()` style calls)
-            if let Some(path) = &r.path {
-                if let Some(first) = path.first() {
-                    referenced_names.insert(first);
-                }
+            if let Some(path) = &r.path
+                && let Some(first) = path.first()
+            {
+                referenced_names.insert(first);
             }
         }
 
@@ -2202,20 +2202,20 @@ impl Tethys {
             let path = entry.path();
 
             // Skip hidden directories and common build directories
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with('.') || Self::is_excluded_dir(name) {
-                    continue;
-                }
+            if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && (name.starts_with('.') || Self::is_excluded_dir(name))
+            {
+                continue;
             }
 
             if path.is_dir() {
                 Self::walk_dir(&path, files, directories_skipped)?;
             } else if path.is_file() {
                 // Check if it's a supported file type
-                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                    if Language::from_extension(ext).is_some() {
-                        files.push(path);
-                    }
+                if let Some(ext) = path.extension().and_then(|e| e.to_str())
+                    && Language::from_extension(ext).is_some()
+                {
+                    files.push(path);
                 }
             }
         }
@@ -2243,12 +2243,11 @@ impl Tethys {
         }
 
         // For absolute paths, try canonicalizing to resolve symlinks
-        if path.is_absolute() {
-            if let Ok(canonical) = path.canonicalize() {
-                if let Ok(relative) = canonical.strip_prefix(&self.workspace_root) {
-                    return Cow::Owned(relative.to_path_buf());
-                }
-            }
+        if path.is_absolute()
+            && let Ok(canonical) = path.canonicalize()
+            && let Ok(relative) = canonical.strip_prefix(&self.workspace_root)
+        {
+            return Cow::Owned(relative.to_path_buf());
         }
 
         warn!(

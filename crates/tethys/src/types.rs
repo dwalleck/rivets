@@ -1289,110 +1289,138 @@ mod tests {
 
     #[test]
     fn parameter_is_self_for_self_variants() {
-        assert!(Parameter {
-            name: "self".to_string(),
-            type_annotation: None,
-            kind: ParameterKind::SelfValue,
-        }
-        .is_self());
-        assert!(Parameter {
-            name: "&self".to_string(),
-            type_annotation: None,
-            kind: ParameterKind::SelfRef,
-        }
-        .is_self());
-        assert!(Parameter {
-            name: "&mut self".to_string(),
-            type_annotation: None,
-            kind: ParameterKind::SelfMutRef,
-        }
-        .is_self());
+        assert!(
+            Parameter {
+                name: "self".to_string(),
+                type_annotation: None,
+                kind: ParameterKind::SelfValue,
+            }
+            .is_self()
+        );
+        assert!(
+            Parameter {
+                name: "&self".to_string(),
+                type_annotation: None,
+                kind: ParameterKind::SelfRef,
+            }
+            .is_self()
+        );
+        assert!(
+            Parameter {
+                name: "&mut self".to_string(),
+                type_annotation: None,
+                kind: ParameterKind::SelfMutRef,
+            }
+            .is_self()
+        );
     }
 
     #[test]
     fn parameter_is_self_false_for_regular_param() {
-        assert!(!Parameter {
-            name: "other".to_string(),
-            type_annotation: None,
-            kind: ParameterKind::Regular,
-        }
-        .is_self());
-        assert!(!Parameter {
-            name: "self_ref".to_string(),
-            type_annotation: None,
-            kind: ParameterKind::Regular,
-        }
-        .is_self());
+        assert!(
+            !Parameter {
+                name: "other".to_string(),
+                type_annotation: None,
+                kind: ParameterKind::Regular,
+            }
+            .is_self()
+        );
+        assert!(
+            !Parameter {
+                name: "self_ref".to_string(),
+                type_annotation: None,
+                kind: ParameterKind::Regular,
+            }
+            .is_self()
+        );
     }
 
     #[test]
     fn parameter_is_mut_self_only_for_mut_self() {
-        assert!(Parameter {
-            name: "&mut self".to_string(),
-            type_annotation: None,
-            kind: ParameterKind::SelfMutRef,
-        }
-        .is_mut_self());
-        assert!(!Parameter {
-            name: "&self".to_string(),
-            type_annotation: None,
-            kind: ParameterKind::SelfRef,
-        }
-        .is_mut_self());
-        assert!(!Parameter {
-            name: "self".to_string(),
-            type_annotation: None,
-            kind: ParameterKind::SelfValue,
-        }
-        .is_mut_self());
+        assert!(
+            Parameter {
+                name: "&mut self".to_string(),
+                type_annotation: None,
+                kind: ParameterKind::SelfMutRef,
+            }
+            .is_mut_self()
+        );
+        assert!(
+            !Parameter {
+                name: "&self".to_string(),
+                type_annotation: None,
+                kind: ParameterKind::SelfRef,
+            }
+            .is_mut_self()
+        );
+        assert!(
+            !Parameter {
+                name: "self".to_string(),
+                type_annotation: None,
+                kind: ParameterKind::SelfValue,
+            }
+            .is_mut_self()
+        );
     }
 
     #[test]
     fn parameter_is_reference_for_reference_types() {
-        assert!(Parameter {
-            name: "x".to_string(),
-            type_annotation: Some("&str".to_string()),
-            kind: ParameterKind::Regular,
-        }
-        .is_reference());
-        assert!(Parameter {
-            name: "x".to_string(),
-            type_annotation: Some("&mut String".to_string()),
-            kind: ParameterKind::Regular,
-        }
-        .is_reference());
-        assert!(Parameter {
-            name: "x".to_string(),
-            type_annotation: Some("&'a T".to_string()),
-            kind: ParameterKind::Regular,
-        }
-        .is_reference());
+        assert!(
+            Parameter {
+                name: "x".to_string(),
+                type_annotation: Some("&str".to_string()),
+                kind: ParameterKind::Regular,
+            }
+            .is_reference()
+        );
+        assert!(
+            Parameter {
+                name: "x".to_string(),
+                type_annotation: Some("&mut String".to_string()),
+                kind: ParameterKind::Regular,
+            }
+            .is_reference()
+        );
+        assert!(
+            Parameter {
+                name: "x".to_string(),
+                type_annotation: Some("&'a T".to_string()),
+                kind: ParameterKind::Regular,
+            }
+            .is_reference()
+        );
     }
 
     #[test]
     fn parameter_is_reference_false_for_owned_types() {
-        assert!(!Parameter {
-            name: "x".to_string(),
-            type_annotation: Some("String".to_string()),
-            kind: ParameterKind::Regular,
-        }
-        .is_reference());
-        assert!(!Parameter {
-            name: "x".to_string(),
-            type_annotation: Some("i32".to_string()),
-            kind: ParameterKind::Regular,
-        }
-        .is_reference());
+        assert!(
+            !Parameter {
+                name: "x".to_string(),
+                type_annotation: Some("String".to_string()),
+                kind: ParameterKind::Regular,
+            }
+            .is_reference()
+        );
+        assert!(
+            !Parameter {
+                name: "x".to_string(),
+                type_annotation: Some("i32".to_string()),
+                kind: ParameterKind::Regular,
+            }
+            .is_reference()
+        );
     }
 
     #[test]
     fn parameter_is_reference_false_for_none_type() {
-        assert!(!Parameter {
-            name: "x".to_string(),
-            type_annotation: None,
-            kind: ParameterKind::Regular,
-        }
-        .is_reference());
+        assert!(
+            !Parameter {
+                name: "x".to_string(),
+                type_annotation: None,
+                kind: ParameterKind::Regular,
+            }
+            .is_reference()
+        );
     }
 
     // === Span validation tests ===

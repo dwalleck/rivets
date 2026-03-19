@@ -2,10 +2,10 @@
 
 use std::path::Path;
 
-use rusqlite::params;
 use rusqlite::OptionalExtension;
+use rusqlite::params;
 
-use super::{row_to_indexed_file, Index, SymbolData, FILES_COLUMNS};
+use super::{FILES_COLUMNS, Index, SymbolData, row_to_indexed_file};
 use crate::error::Result;
 use crate::types::{FileId, IndexedFile, Language, SymbolId};
 

@@ -19,15 +19,13 @@ pub(crate) const FILES_COLUMNS: &str =
 /// SQL column list for symbols table.
 ///
 /// Use with `row_to_symbol` for consistent column ordering.
-pub(crate) const SYMBOLS_COLUMNS: &str =
-    "id, file_id, name, module_path, qualified_name, kind, line, column, \
+pub(crate) const SYMBOLS_COLUMNS: &str = "id, file_id, name, module_path, qualified_name, kind, line, column, \
      end_line, end_column, signature, visibility, parent_symbol_id, is_test";
 
 /// SQL column list for refs table.
 ///
 /// Use with `row_to_reference` for consistent column ordering.
-pub(crate) const REFS_COLUMNS: &str =
-    "id, symbol_id, file_id, kind, line, column, end_line, end_column, in_symbol_id, reference_name";
+pub(crate) const REFS_COLUMNS: &str = "id, symbol_id, file_id, kind, line, column, end_line, end_column, in_symbol_id, reference_name";
 
 /// Parse a language string from the database.
 ///

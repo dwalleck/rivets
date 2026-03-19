@@ -17,9 +17,9 @@
 //! }
 //! ```
 
-use crate::commands::init::{find_rivets_root, RivetsConfig, CONFIG_FILE_NAME, RIVETS_DIR_NAME};
+use crate::commands::init::{CONFIG_FILE_NAME, RIVETS_DIR_NAME, RivetsConfig, find_rivets_root};
 use crate::error::{ConfigError, Result};
-use crate::storage::{create_storage, IssueStorage};
+use crate::storage::{IssueStorage, create_storage};
 use std::path::{Path, PathBuf};
 
 /// Application context for CLI operations.

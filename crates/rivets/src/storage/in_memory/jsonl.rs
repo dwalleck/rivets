@@ -8,7 +8,7 @@ use super::inner::InMemoryStorageInner;
 use crate::domain::{Issue, IssueId};
 use crate::error::{Error, Result, StorageError};
 use crate::storage::IssueStorage;
-use rivets_jsonl::{read_jsonl_resilient, Warning as JsonlWarning};
+use rivets_jsonl::{Warning as JsonlWarning, read_jsonl_resilient};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::fs::File;
