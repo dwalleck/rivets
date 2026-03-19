@@ -141,6 +141,18 @@ impl IndexErrorKind {
     }
 }
 
+impl From<&Error> for IndexErrorKind {
+    fn from(error: &Error) -> Self {
+        match error {
+            Error::Io(_) => Self::IoError,
+            Error::Database(_) => Self::DatabaseError,
+            Error::Parser(_) | Error::Config(_) | Error::NotFound(_) | Error::Internal(_) => {
+                Self::ParseFailed
+            }
+        }
+    }
+}
+
 impl IndexError {
     /// Create a new indexing error.
     #[must_use]
