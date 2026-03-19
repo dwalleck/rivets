@@ -14,6 +14,7 @@
 //! - `imports` - Import CRUD operations
 //! - `call_edges` - Call edge CRUD operations
 //! - `file_deps` - File dependency CRUD operations
+//! - `panic_points` - Panic point CRUD operations
 //! - `graph` - Graph traversal operations (`SymbolGraphOps`, `FileGraphOps`)
 
 mod call_edges;

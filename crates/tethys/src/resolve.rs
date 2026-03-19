@@ -384,7 +384,7 @@ impl Tethys {
         provider: &dyn lsp::LspProvider,
         language: Language,
         lsp_timeout_secs: u64,
-    ) -> Result<usize> {
+    ) -> Result<(usize, Vec<String>)> {
         // Get unresolved references with file path information, filtered by language
         let all_unresolved = self.db.get_unresolved_references_for_lsp()?;
         let unresolved: Vec<_> = all_unresolved
@@ -402,7 +402,7 @@ impl Tethys {
                 language = ?language,
                 "No unresolved references for LSP resolution"
             );
-            return Ok(0);
+            return Ok((0, vec![]));
         }
 
         debug!(
@@ -416,6 +416,10 @@ impl Tethys {
             Ok(c) => c,
             Err(e) => {
                 // User explicitly requested LSP with --lsp flag, so log at error level
+                let error_msg = format!(
+                    "LSP server for {language:?} failed to start: {e}. {}",
+                    provider.install_hint()
+                );
                 tracing::error!(
                     error = %e,
                     language = ?language,
@@ -424,13 +428,14 @@ impl Tethys {
                      {} Or remove --lsp flag.",
                     provider.install_hint()
                 );
-                return Ok(0);
+                return Ok((0, vec![error_msg]));
             }
         };
 
         let mut resolved_count = 0;
         let mut lsp_errors = 0;
         let mut opened_files: HashSet<PathBuf> = HashSet::new();
+        let mut did_open_warned = false;
 
         // Language::as_str() returns the LSP language identifier ("rust", "csharp")
         let language_id = language.as_str();
@@ -452,19 +457,34 @@ impl Tethys {
                 Ok(content) => {
                     if client.did_open(file_path, &content, language_id).is_ok() {
                         opened_files.insert(file_path.clone());
-                    } else {
+                    } else if did_open_warned {
                         trace!(
                             file = %file_path.display(),
                             "Failed to send didOpen notification"
                         );
+                    } else {
+                        warn!(
+                            file = %file_path.display(),
+                            "Failed to send didOpen notification"
+                        );
+                        did_open_warned = true;
                     }
                 }
                 Err(e) => {
-                    trace!(
-                        file = %file_path.display(),
-                        error = %e,
-                        "Failed to read file for LSP pre-opening"
-                    );
+                    if did_open_warned {
+                        trace!(
+                            file = %file_path.display(),
+                            error = %e,
+                            "Failed to read file for LSP pre-opening"
+                        );
+                    } else {
+                        warn!(
+                            file = %file_path.display(),
+                            error = %e,
+                            "Failed to read file for LSP pre-opening"
+                        );
+                        did_open_warned = true;
+                    }
                 }
             }
         }
@@ -501,6 +521,7 @@ impl Tethys {
                 &mut lsp_errors,
                 &mut opened_files,
                 language_id,
+                &mut did_open_warned,
             ) {
                 Ok(true) => resolved_count += 1,
                 Ok(false) => {}
@@ -534,13 +555,17 @@ impl Tethys {
             "LSP resolution pass complete"
         );
 
-        Ok(resolved_count)
+        Ok((resolved_count, vec![]))
     }
 
     /// Attempt to resolve a single reference via LSP.
     ///
     /// Returns `Ok(true)` if resolved, `Ok(false)` if not resolved (but no error),
     /// or `Err` for database errors.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "didOpen warn/trace branching adds lines but keeps logic cohesive"
+    )]
     fn resolve_single_ref_via_lsp(
         &self,
         client: &mut lsp::LspClient,
@@ -548,6 +573,7 @@ impl Tethys {
         lsp_errors: &mut usize,
         opened_files: &mut HashSet<PathBuf>,
         language_id: &str,
+        did_open_warned: &mut bool,
     ) -> Result<bool> {
         // Construct absolute file path for LSP
         let file_path = self.workspace_root.join(&unresolved_ref.file_path);
@@ -558,22 +584,40 @@ impl Tethys {
             let content = match std::fs::read_to_string(&file_path) {
                 Ok(c) => c,
                 Err(e) => {
-                    trace!(
-                        file = %file_path.display(),
-                        error = %e,
-                        "Failed to read file for LSP didOpen"
-                    );
+                    if *did_open_warned {
+                        trace!(
+                            file = %file_path.display(),
+                            error = %e,
+                            "Failed to read file for LSP didOpen"
+                        );
+                    } else {
+                        warn!(
+                            file = %file_path.display(),
+                            error = %e,
+                            "Failed to read file for LSP didOpen"
+                        );
+                        *did_open_warned = true;
+                    }
                     return Ok(false);
                 }
             };
 
             // Send didOpen notification
             if let Err(e) = client.did_open(&file_path, &content, language_id) {
-                trace!(
-                    file = %file_path.display(),
-                    error = %e,
-                    "Failed to send didOpen notification"
-                );
+                if *did_open_warned {
+                    trace!(
+                        file = %file_path.display(),
+                        error = %e,
+                        "Failed to send didOpen notification"
+                    );
+                } else {
+                    warn!(
+                        file = %file_path.display(),
+                        error = %e,
+                        "Failed to send didOpen notification"
+                    );
+                    *did_open_warned = true;
+                }
                 // Continue anyway - some servers might work without it
             }
             opened_files.insert(file_path.clone());
@@ -747,14 +791,15 @@ impl Tethys {
         let mut lsp_client = match lsp::LspClient::start(&provider, &self.workspace_root) {
             Ok(client) => client,
             Err(e) => {
-                // User explicitly requested --lsp, so log at error level
-                tracing::error!(
+                // User explicitly requested --lsp, so log at warn level.
+                // Results will be incomplete: only tree-sitter-indexed callers are returned.
+                warn!(
                     error = %e,
                     symbol = %qualified_name,
                     language = ?symbol_file.language,
                     install_hint = %provider.install_hint(),
-                    "LSP server failed to start - returning DB-only callers. \
-                     {} Or remove --lsp flag.",
+                    "LSP server failed to start — returning DB-only callers \
+                     (results may be incomplete). {} Or remove --lsp flag.",
                     provider.install_hint()
                 );
                 return self.convert_callers_to_dependents(db_callers);
@@ -863,7 +908,7 @@ impl Tethys {
         self.convert_callers_to_dependents(all_callers)
     }
 
-    /// Convert a list of `CallerInfo` to `Dependent` for the public API.
+    /// Convert a list of `CallerInfo` to `Dependent` for the crate-internal API.
     pub(crate) fn convert_callers_to_dependents(
         &self,
         callers: Vec<graph::CallerInfo>,

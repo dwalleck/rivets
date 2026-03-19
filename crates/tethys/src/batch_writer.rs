@@ -23,7 +23,10 @@
 //! ## Usage
 //!
 //! ```ignore
-//! let batch_writer = BatchWriter::new(db, 100)?;
+//! use std::path::PathBuf;
+//!
+//! let db_path = PathBuf::from("/tmp/index.db");
+//! let batch_writer = BatchWriter::new(db_path, 100);
 //!
 //! source_files.par_iter().for_each(|(path, lang)| {
 //!     if let Ok(data) = Tethys::parse_file_static(&workspace_root, path, *lang) {
