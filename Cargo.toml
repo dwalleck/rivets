@@ -68,7 +68,7 @@ rstest = "0.26"
 proptest = "1.6"
 
 [workspace.lints.rust]
-unsafe_code = "deny"
+unsafe_code = "forbid"
 missing_docs = "warn"
 
 [workspace.lints.clippy]

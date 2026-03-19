@@ -3,7 +3,7 @@
 //! This crate provides both a CLI application and a library for issue tracking
 //! using various storage backends.
 
-#![deny(unsafe_code)]
+#![forbid(unsafe_code)]
 
 // Public modules for library usage
 pub mod app;

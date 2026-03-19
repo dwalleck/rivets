@@ -59,7 +59,7 @@ impl OutputConfig {
         }
     }
 
-    /// Create an OutputConfig by reading from environment variables.
+    /// Create an `OutputConfig` by reading from environment variables.
     ///
     /// Reads:
     /// - `RIVETS_MAX_WIDTH`: Maximum content width (default: 80)
@@ -67,8 +67,27 @@ impl OutputConfig {
     /// - `NO_COLOR`: Standard env var to disable colors (any value disables colors)
     /// - `RIVETS_COLOR`: Set to "0" or "false" to disable colors (default: true)
     pub fn from_env() -> Self {
-        let max_width = match env::var("RIVETS_MAX_WIDTH") {
-            Ok(s) if !s.is_empty() => match s.parse() {
+        Self::from_env_values(
+            env::var("RIVETS_MAX_WIDTH").ok().as_deref(),
+            env::var("RIVETS_ASCII").ok().as_deref(),
+            env::var("NO_COLOR").ok().as_deref(),
+            env::var("RIVETS_COLOR").ok().as_deref(),
+        )
+    }
+
+    /// Build an `OutputConfig` from raw env-var values.
+    ///
+    /// Extracted from [`from_env`](Self::from_env) so the parsing logic can
+    /// be tested without mutating the process environment (which is unsafe in
+    /// edition 2024).
+    fn from_env_values(
+        max_width_raw: Option<&str>,
+        ascii_raw: Option<&str>,
+        no_color_raw: Option<&str>,
+        color_raw: Option<&str>,
+    ) -> Self {
+        let max_width = match max_width_raw {
+            Some(s) if !s.is_empty() => match s.parse() {
                 Ok(width) => width,
                 Err(_) => {
                     tracing::warn!(
@@ -83,10 +102,10 @@ impl OutputConfig {
             _ => DEFAULT_MAX_CONTENT_WIDTH,
         };
 
-        let use_ascii = match env::var("RIVETS_ASCII") {
-            Ok(v) if v == "1" || v.eq_ignore_ascii_case("true") => true,
-            Ok(v) if v == "0" || v.eq_ignore_ascii_case("false") || v.is_empty() => false,
-            Ok(v) => {
+        let use_ascii = match ascii_raw {
+            Some(v) if v == "1" || v.eq_ignore_ascii_case("true") => true,
+            Some(v) if v == "0" || v.eq_ignore_ascii_case("false") || v.is_empty() => false,
+            Some(v) => {
                 tracing::warn!(
                     env_var = "RIVETS_ASCII",
                     value = %v,
@@ -94,13 +113,13 @@ impl OutputConfig {
                 );
                 false
             }
-            Err(_) => false,
+            None => false,
         };
 
         // Respect NO_COLOR standard (https://no-color.org/)
         // Also support RIVETS_COLOR for explicit control
-        let use_colors = env::var("NO_COLOR").is_err()
-            && env::var("RIVETS_COLOR")
+        let use_colors = no_color_raw.is_none()
+            && color_raw
                 .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
                 .unwrap_or(true);
 
@@ -500,24 +519,6 @@ mod tests {
     use super::*;
     use crate::domain::{Dependency, DependencyType, IssueId, IssueStatus, IssueType};
     use chrono::Utc;
-    use std::env;
-    use std::sync::Mutex;
-
-    // Mutex to protect global state in tests:
-    // - Environment variables are process-global
-    // Tests modifying env vars must hold this mutex.
-    static GLOBAL_STATE_MUTEX: Mutex<()> = Mutex::new(());
-
-    /// Helper for tests that modify environment variables.
-    /// Acquires mutex to prevent parallel env var modifications.
-    fn with_env_lock<F, R>(f: F) -> R
-    where
-        F: FnOnce() -> R,
-    {
-        let _guard = GLOBAL_STATE_MUTEX.lock().unwrap();
-        f()
-    }
-
     fn test_issue() -> Issue {
         Issue {
             id: IssueId::new("test-abc"),
@@ -577,77 +578,32 @@ mod tests {
     }
 
     #[test]
-    #[allow(unsafe_code)]
-    fn test_output_config_from_env() {
-        with_env_lock(|| {
-            // SAFETY: These env mutations are safe because with_env_lock
-            // serialises all env-touching tests in the process.
-            unsafe {
-                env::remove_var("RIVETS_MAX_WIDTH");
-                env::remove_var("RIVETS_ASCII");
-                env::remove_var("NO_COLOR");
-                env::remove_var("RIVETS_COLOR");
+    fn test_output_config_from_env_values() {
+        let config = OutputConfig::from_env_values(Some("120"), Some("1"), None, None);
+        assert_eq!(config.max_width, 120);
+        assert!(config.use_ascii);
+        assert!(config.use_colors);
 
-                env::set_var("RIVETS_MAX_WIDTH", "120");
-                env::set_var("RIVETS_ASCII", "1");
-            }
-            let config = OutputConfig::from_env();
-            assert_eq!(config.max_width, 120);
-            assert!(config.use_ascii);
-            assert!(config.use_colors);
+        let config = OutputConfig::from_env_values(Some("invalid"), Some("false"), None, None);
+        assert_eq!(config.max_width, DEFAULT_MAX_CONTENT_WIDTH);
+        assert!(!config.use_ascii);
 
-            // SAFETY: same as above
-            unsafe {
-                env::set_var("RIVETS_MAX_WIDTH", "invalid");
-                env::set_var("RIVETS_ASCII", "false");
-            }
-            let config = OutputConfig::from_env();
-            assert_eq!(config.max_width, DEFAULT_MAX_CONTENT_WIDTH);
-            assert!(!config.use_ascii);
+        let config = OutputConfig::from_env_values(None, None, Some("1"), None);
+        assert!(!config.use_colors, "NO_COLOR should disable colors");
 
-            // Test NO_COLOR standard
-            // SAFETY: same as above
-            unsafe {
-                env::set_var("NO_COLOR", "1");
-            }
-            let config = OutputConfig::from_env();
-            assert!(!config.use_colors, "NO_COLOR should disable colors");
+        let config = OutputConfig::from_env_values(None, None, None, Some("0"));
+        assert!(!config.use_colors, "RIVETS_COLOR=0 should disable colors");
 
-            // SAFETY: same as above
-            unsafe {
-                env::remove_var("NO_COLOR");
-            }
+        let config = OutputConfig::from_env_values(None, None, None, Some("false"));
+        assert!(
+            !config.use_colors,
+            "RIVETS_COLOR=false should disable colors"
+        );
 
-            // Test RIVETS_COLOR=0 disables colors
-            // SAFETY: same as above
-            unsafe {
-                env::set_var("RIVETS_COLOR", "0");
-            }
-            let config = OutputConfig::from_env();
-            assert!(!config.use_colors, "RIVETS_COLOR=0 should disable colors");
-
-            // SAFETY: same as above
-            unsafe {
-                env::set_var("RIVETS_COLOR", "false");
-            }
-            let config = OutputConfig::from_env();
-            assert!(
-                !config.use_colors,
-                "RIVETS_COLOR=false should disable colors"
-            );
-
-            // Clean up
-            // SAFETY: same as above
-            unsafe {
-                env::remove_var("RIVETS_MAX_WIDTH");
-                env::remove_var("RIVETS_ASCII");
-                env::remove_var("RIVETS_COLOR");
-            }
-            let config = OutputConfig::from_env();
-            assert_eq!(config.max_width, DEFAULT_MAX_CONTENT_WIDTH);
-            assert!(!config.use_ascii);
-            assert!(config.use_colors);
-        });
+        let config = OutputConfig::from_env_values(None, None, None, None);
+        assert_eq!(config.max_width, DEFAULT_MAX_CONTENT_WIDTH);
+        assert!(!config.use_ascii);
+        assert!(config.use_colors);
     }
 
     #[test]
