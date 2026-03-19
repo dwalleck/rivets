@@ -14,7 +14,13 @@ pub struct ExtractedSymbol {
     pub column: u32,
     pub span: Option<Span>,
     pub signature: Option<String>,
-    #[allow(dead_code)] // Populated for future use by callers
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "populated by parsers, will be read when signature queries are added"
+        )
+    )]
     pub signature_details: Option<FunctionSignature>,
     pub visibility: Visibility,
     pub parent_name: Option<String>,
@@ -69,18 +75,6 @@ impl ExtractedReferenceKind {
             Self::Constructor => crate::types::ReferenceKind::Construct,
         }
     }
-}
-
-/// Context needed to resolve imports within a workspace.
-#[derive(Debug)]
-#[allow(dead_code)] // Fields accessed by LanguageSupport implementations
-pub struct ImportContext<'a> {
-    /// Path of the file containing the import
-    pub file_path: &'a std::path::Path,
-    /// Root of the workspace
-    pub workspace_root: &'a std::path::Path,
-    /// All known file paths in the workspace (for lookup)
-    pub known_files: &'a [&'a std::path::Path],
 }
 
 /// A unified import statement extracted from source code.

@@ -6,11 +6,11 @@ use tracing::trace;
 
 use super::{Index, SYMBOLS_COLUMNS, row_to_symbol};
 use crate::error::Result;
-use crate::types::{FileId, Span, Symbol, SymbolId, SymbolKind, Visibility};
+use crate::types::{FileId, Symbol, SymbolId, SymbolKind};
 
 impl Index {
     /// Insert a symbol, returning the symbol ID.
-    #[allow(dead_code)] // Public API, not yet used internally
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)] // Database row has many columns
     pub fn insert_symbol(
         &self,
@@ -21,9 +21,9 @@ impl Index {
         kind: SymbolKind,
         line: u32,
         column: u32,
-        span: Option<Span>,
+        span: Option<crate::types::Span>,
         signature: Option<&str>,
-        visibility: Visibility,
+        visibility: crate::types::Visibility,
         parent_symbol_id: Option<SymbolId>,
         is_test: bool,
     ) -> Result<SymbolId> {
@@ -157,20 +157,6 @@ impl Index {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(symbols)
-    }
-
-    /// Get total counts for stats.
-    #[allow(dead_code)] // Public API, not yet used internally
-    pub fn get_counts(&self) -> Result<(usize, usize, usize)> {
-        let conn = self.connection()?;
-
-        let files: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))?;
-        let symbols: i64 = conn.query_row("SELECT COUNT(*) FROM symbols", [], |row| row.get(0))?;
-        let refs: i64 = conn.query_row("SELECT COUNT(*) FROM refs", [], |row| row.get(0))?;
-
-        // Safety: COUNT(*) returns non-negative values
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        Ok((files as usize, symbols as usize, refs as usize))
     }
 
     /// Search for a symbol by name within a specific file.

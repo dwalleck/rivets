@@ -6,14 +6,9 @@
 // This is safe for practical source files (no file has 4 billion lines).
 #![allow(clippy::cast_possible_truncation)]
 
-use std::path::PathBuf;
-
 use super::LanguageSupport;
-use super::common::{
-    ExtractedReference, ExtractedReferenceKind, ExtractedSymbol, ImportContext, ImportStatement,
-};
+use super::common::{ExtractedReference, ExtractedReferenceKind, ExtractedSymbol, ImportStatement};
 use super::tree_sitter_utils::{node_span, node_text};
-use crate::resolver::resolve_module_path;
 use crate::types::{FunctionSignature, Parameter, Span, SymbolKind, Visibility};
 
 /// Tree-sitter node kind constants for Rust grammar.
@@ -74,16 +69,8 @@ mod node_kinds {
 pub struct RustLanguage;
 
 impl LanguageSupport for RustLanguage {
-    fn extensions(&self) -> &[&str] {
-        &["rs"]
-    }
-
     fn tree_sitter_language(&self) -> tree_sitter::Language {
         tree_sitter_rust::LANGUAGE.into()
-    }
-
-    fn lsp_command(&self) -> Option<&str> {
-        Some("rust-analyzer")
     }
 
     fn extract_symbols(&self, tree: &tree_sitter::Tree, content: &[u8]) -> Vec<ExtractedSymbol> {
@@ -103,17 +90,6 @@ impl LanguageSupport for RustLanguage {
             .into_iter()
             .map(|u| u.to_import_statement())
             .collect()
-    }
-
-    fn resolve_import(&self, import: &ImportStatement, context: &ImportContext) -> Vec<PathBuf> {
-        // Reconstruct the full module path from the import's path segments.
-        // The resolver expects the path including the leading segment (crate/self/super).
-        let resolved = resolve_module_path(&import.path, context.file_path, context.workspace_root);
-
-        match resolved {
-            Some(path) => vec![path],
-            None => vec![],
-        }
     }
 }
 
@@ -138,7 +114,6 @@ pub struct UseStatement {
 impl UseStatement {
     /// Convert to the common `ImportStatement` representation.
     #[must_use]
-    #[allow(dead_code)] // Public API, will be used when language-agnostic indexing is implemented
     pub fn to_import_statement(&self) -> ImportStatement {
         ImportStatement {
             path: self.path.clone(),
@@ -1091,18 +1066,6 @@ mod tests {
     }
 
     #[test]
-    fn rust_language_extensions() {
-        let lang = RustLanguage;
-        assert_eq!(lang.extensions(), &["rs"]);
-    }
-
-    #[test]
-    fn rust_language_has_lsp() {
-        let lang = RustLanguage;
-        assert_eq!(lang.lsp_command(), Some("rust-analyzer"));
-    }
-
-    #[test]
     fn extracts_simple_function() {
         let code = "fn hello() {}";
         let tree = parse_rust(code);
@@ -1551,76 +1514,5 @@ fn outer() {
             3,
             "containing span should point to inner() function, not outer()"
         );
-    }
-
-    // ========================================================================
-    // resolve_import Tests (Task 5)
-    // ========================================================================
-
-    #[test]
-    fn resolve_import_resolves_crate_path() {
-        use crate::languages::common::ImportContext;
-        use std::fs;
-
-        let dir = tempfile::tempdir().expect("should create temp directory");
-        let src = dir.path().join("src");
-        fs::create_dir_all(&src).expect("should create src directory");
-        fs::write(src.join("lib.rs"), "mod config;").expect("should write lib.rs");
-        fs::write(src.join("config.rs"), "pub struct Config {}").expect("should write config.rs");
-
-        let import = ImportStatement {
-            path: vec!["crate".to_string(), "config".to_string()],
-            imported_names: vec!["Config".to_string()],
-            is_glob: false,
-            alias: None,
-            line: 1,
-        };
-
-        let file_path = src.join("lib.rs");
-        let context = ImportContext {
-            file_path: &file_path,
-            workspace_root: &src,
-            known_files: &[],
-        };
-
-        let lang = RustLanguage;
-        let resolved = lang.resolve_import(&import, &context);
-
-        assert_eq!(resolved.len(), 1, "should resolve to exactly one file");
-        assert!(
-            resolved[0].ends_with("config.rs"),
-            "should resolve to config.rs, got: {}",
-            resolved[0].display()
-        );
-        assert!(resolved[0].exists(), "resolved path should exist");
-    }
-
-    #[test]
-    fn resolve_import_returns_empty_for_external_crate() {
-        use crate::languages::common::ImportContext;
-
-        let dir = tempfile::tempdir().expect("should create temp directory");
-        let src = dir.path().join("src");
-        std::fs::create_dir_all(&src).expect("should create src directory");
-
-        let import = ImportStatement {
-            path: vec!["serde".to_string()],
-            imported_names: vec!["Serialize".to_string()],
-            is_glob: false,
-            alias: None,
-            line: 1,
-        };
-
-        let file_path = src.join("lib.rs");
-        let context = ImportContext {
-            file_path: &file_path,
-            workspace_root: &src,
-            known_files: &[],
-        };
-
-        let lang = RustLanguage;
-        let resolved = lang.resolve_import(&import, &context);
-
-        assert!(resolved.is_empty(), "external crate should not resolve");
     }
 }

@@ -50,7 +50,6 @@ impl Index {
     ///
     /// These references need to be resolved in Pass 2 by matching their
     /// `reference_name` to symbols discovered in other files.
-    #[allow(dead_code)] // Public API, not yet used internally
     pub fn get_unresolved_references(&self) -> Result<Vec<Reference>> {
         trace!("Getting unresolved references");
         let conn = self.connection()?;
@@ -113,7 +112,6 @@ impl Index {
     ///
     /// This is used in Pass 2 to link unresolved references to their target symbols
     /// after cross-file symbol resolution.
-    #[allow(dead_code)] // Public API, not yet used internally
     pub fn resolve_reference(&self, ref_id: i64, symbol_id: SymbolId) -> Result<()> {
         trace!(
             ref_id = ref_id,

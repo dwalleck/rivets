@@ -27,7 +27,7 @@ impl Index {
     /// Insert or update a file record, returning the file ID.
     ///
     /// Delegates to [`Self::index_file_atomic`] with an empty symbol list.
-    #[allow(dead_code)] // Public API, not yet used internally
+    #[cfg(test)]
     pub fn upsert_file(
         &mut self,
         path: &Path,

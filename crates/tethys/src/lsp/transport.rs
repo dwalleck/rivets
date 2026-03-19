@@ -654,7 +654,6 @@ mod tests {
     }
 
     /// Test helper to create a mock JSON-RPC error response.
-    #[allow(dead_code)]
     fn mock_error_response(id: i64, code: i64, message: &str) -> String {
         let response = json!({
             "jsonrpc": "2.0",
