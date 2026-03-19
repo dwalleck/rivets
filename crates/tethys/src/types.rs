@@ -844,6 +844,12 @@ pub struct IndexStats {
     ///
     /// Only non-zero when `IndexOptions::use_lsp` was set.
     pub lsp_resolved_count: usize,
+    /// Errors encountered when attempting to start or use LSP servers.
+    ///
+    /// When `IndexOptions::use_lsp` is set but an LSP server fails to start,
+    /// the error is captured here instead of causing the indexing to fail.
+    /// An empty vec means LSP either wasn't requested or started successfully.
+    pub lsp_errors: Vec<String>,
 }
 
 /// Statistics from an incremental update.

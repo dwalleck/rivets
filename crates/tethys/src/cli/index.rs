@@ -94,5 +94,12 @@ pub fn run(
         );
     }
 
+    if !stats.lsp_errors.is_empty() {
+        println!();
+        for err in &stats.lsp_errors {
+            println!("{}: {err}", "LSP error".red());
+        }
+    }
+
     Ok(())
 }
