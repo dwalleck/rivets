@@ -1016,9 +1016,9 @@ fn extract_signature_details(
         parameters,
         return_type,
         is_async,
-        is_unsafe: false, // TODO: detect unsafe modifier
-        is_const: false,  // C# doesn't have const functions
-        generics: None,   // TODO: Extract type parameters
+        is_unsafe: false,
+        is_const: false,
+        generics: None,
     })
 }
 

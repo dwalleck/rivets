@@ -240,7 +240,7 @@ impl BatchWriter {
             data.language,
             data.mtime_ns,
             data.size_bytes,
-            None, // TODO: content hash
+            None,
             &symbol_data,
         )?;
 

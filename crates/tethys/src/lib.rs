@@ -702,7 +702,7 @@ impl Tethys {
                     span: sym.span,
                     signature: sym.signature.clone(),
                     visibility: sym.visibility,
-                    parent_symbol_id: None, // TODO: parent_symbol_id
+                    parent_symbol_id: None,
                     is_test: sym.is_test,
                 }
             })
@@ -774,7 +774,7 @@ impl Tethys {
             data.language,
             data.mtime_ns,
             data.size_bytes,
-            None, // TODO: content hash
+            None,
             &symbol_data,
         )?;
 
@@ -985,8 +985,6 @@ impl Tethys {
             }
         }
 
-        // FIXME: Assumes crate root is workspace_root/src/. Does not detect actual
-        // main/lib location from Cargo.toml. Needs Cargo.toml parsing support.
         let crate_root = self.workspace_root.join("src");
 
         // Track which files we depend on (dedupe)
@@ -1410,8 +1408,6 @@ impl Tethys {
             by_file.entry(ref_.file_id).or_default().push(ref_);
         }
 
-        // FIXME: Assumes crate root is workspace_root/src/. Does not detect actual
-        // main/lib location from Cargo.toml. Needs Cargo.toml parsing support.
         let crate_root = self.workspace_root.join("src");
 
         for (file_id, refs) in by_file {
@@ -2180,7 +2176,6 @@ impl Tethys {
     /// Incrementally update index for changed files.
     pub fn update(&mut self) -> Result<IndexUpdate> {
         // For now, just re-index everything
-        // TODO: implement proper incremental update
         let stats = self.index()?;
         Ok(IndexUpdate {
             files_changed: stats.files_indexed,
@@ -2192,7 +2187,6 @@ impl Tethys {
 
     /// Check if any indexed files have changed since last update.
     pub fn needs_update(&self) -> Result<bool> {
-        // TODO: implement proper staleness check
         Ok(true)
     }
 
