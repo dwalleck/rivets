@@ -45,11 +45,8 @@ impl LspClient {
     /// - The LSP server executable is not found
     /// - The server fails to start
     /// - The initialize handshake fails
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if stdin/stdout are not available after spawning the process.
-    /// This should never happen when `Stdio::piped()` is used.
+    /// - stdin/stdout are not available after spawning the process
+    ///   (should not happen when `Stdio::piped()` is used)
     #[must_use = "LSP client holds a running process that should be shut down"]
     pub fn start(provider: &dyn LspProvider, workspace_path: &Path) -> Result<Self> {
         let command = provider.command();

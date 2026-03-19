@@ -383,21 +383,7 @@ impl Tethys {
 
         let callers = self.db.get_callers(symbol.id)?;
 
-        // Convert CallerInfo to Dependent
-        callers
-            .into_iter()
-            .map(|c| {
-                let file = self
-                    .db
-                    .get_file_by_id(c.symbol.file_id)?
-                    .ok_or_else(|| Error::NotFound(format!("file id: {}", c.symbol.file_id)))?;
-                Ok(Dependent {
-                    file: file.path,
-                    symbols_used: vec![c.symbol.qualified_name],
-                    line_count: c.reference_count,
-                })
-            })
-            .collect()
+        self.convert_callers_to_dependents(callers)
     }
 
     /// Get symbols that the given symbol calls/uses.
@@ -421,30 +407,9 @@ impl Tethys {
 
         let impact = self.db.get_transitive_callers(symbol.id, Some(50))?;
 
-        // Convert CallerInfo to Dependent
-        let caller_to_dependent = |caller: graph::CallerInfo| -> Result<Dependent> {
-            let file = self
-                .db
-                .get_file_by_id(caller.symbol.file_id)?
-                .ok_or_else(|| Error::NotFound(format!("file id: {}", caller.symbol.file_id)))?;
-            Ok(Dependent {
-                file: file.path,
-                symbols_used: vec![caller.symbol.qualified_name],
-                line_count: caller.reference_count,
-            })
-        };
-
-        let direct_dependents = impact
-            .direct_callers
-            .into_iter()
-            .map(&caller_to_dependent)
-            .collect::<Result<Vec<_>>>()?;
-
-        let transitive_dependents = impact
-            .transitive_callers
-            .into_iter()
-            .map(caller_to_dependent)
-            .collect::<Result<Vec<_>>>()?;
+        let direct_dependents = self.convert_callers_to_dependents(impact.direct_callers)?;
+        let transitive_dependents =
+            self.convert_callers_to_dependents(impact.transitive_callers)?;
 
         let target_file = self
             .db
@@ -483,6 +448,64 @@ impl Tethys {
 
     // === Reachability Analysis ===
 
+    /// BFS traversal of the call graph in a given direction.
+    ///
+    /// Shared implementation for both forward (callees) and backward (callers) reachability.
+    /// The `get_neighbors` closure determines the direction by returning either callees or
+    /// callers for a given symbol.
+    ///
+    /// The BFS uses fail-fast error handling: if a database error occurs while fetching
+    /// neighbors for any symbol, traversal stops immediately and the error is returned.
+    #[expect(
+        clippy::unused_self,
+        reason = "method is a private helper called on self; callers pass closures that capture self"
+    )]
+    fn bfs_reachable(
+        &self,
+        start_id: SymbolId,
+        max_depth: usize,
+        get_neighbors: impl Fn(SymbolId) -> Result<Vec<Symbol>>,
+        direction: types::ReachabilityDirection,
+        source: Symbol,
+    ) -> Result<types::ReachabilityResult> {
+        use std::collections::{HashSet, VecDeque};
+
+        let mut visited: HashSet<SymbolId> = HashSet::new();
+        let mut results: Vec<types::ReachablePath> = Vec::new();
+        let mut queue: VecDeque<(SymbolId, Vec<Symbol>, usize)> = VecDeque::new();
+
+        queue.push_back((start_id, vec![], 0));
+        visited.insert(start_id);
+
+        while let Some((current_id, path, depth)) = queue.pop_front() {
+            if depth >= max_depth {
+                continue;
+            }
+
+            for neighbor in get_neighbors(current_id)? {
+                if visited.insert(neighbor.id) {
+                    let mut new_path = path.clone();
+                    new_path.push(neighbor.clone());
+
+                    results.push(types::ReachablePath {
+                        target: neighbor.clone(),
+                        path: new_path.clone(),
+                        depth: depth + 1,
+                    });
+
+                    queue.push_back((neighbor.id, new_path, depth + 1));
+                }
+            }
+        }
+
+        Ok(types::ReachabilityResult {
+            source,
+            reachable: results,
+            max_depth,
+            direction,
+        })
+    }
+
     /// Get forward reachable symbols: what can this symbol reach?
     ///
     /// Performs BFS traversal of the call graph following callees (outgoing edges).
@@ -517,50 +540,25 @@ impl Tethys {
         qualified_name: &str,
         max_depth: Option<usize>,
     ) -> Result<types::ReachabilityResult> {
-        use std::collections::{HashSet, VecDeque};
-
         let source = self
             .db
             .get_symbol_by_qualified_name(qualified_name)?
             .ok_or_else(|| Error::NotFound(format!("symbol: {qualified_name}")))?;
 
-        let max_depth = max_depth.unwrap_or(50);
-        let mut visited: HashSet<SymbolId> = HashSet::new();
-        let mut results: Vec<types::ReachablePath> = Vec::new();
-        let mut queue: VecDeque<(SymbolId, Vec<Symbol>, usize)> = VecDeque::new();
-
-        // Start BFS from the source
-        queue.push_back((source.id, vec![], 0));
-        visited.insert(source.id);
-
-        while let Some((current_id, path, depth)) = queue.pop_front() {
-            if depth >= max_depth {
-                continue;
-            }
-
-            // Get callees (outgoing edges) for forward reachability
-            for callee_info in self.db.get_callees(current_id)? {
-                if visited.insert(callee_info.symbol.id) {
-                    let mut new_path = path.clone();
-                    new_path.push(callee_info.symbol.clone());
-
-                    results.push(types::ReachablePath {
-                        target: callee_info.symbol.clone(),
-                        path: new_path.clone(),
-                        depth: depth + 1,
-                    });
-
-                    queue.push_back((callee_info.symbol.id, new_path, depth + 1));
-                }
-            }
-        }
-
-        Ok(types::ReachabilityResult {
+        self.bfs_reachable(
+            source.id,
+            max_depth.unwrap_or(50),
+            |id| {
+                Ok(self
+                    .db
+                    .get_callees(id)?
+                    .into_iter()
+                    .map(|c| c.symbol)
+                    .collect())
+            },
+            types::ReachabilityDirection::Forward,
             source,
-            reachable: results,
-            max_depth,
-            direction: types::ReachabilityDirection::Forward,
-        })
+        )
     }
 
     /// Get backward reachable symbols: who can reach this symbol?
@@ -597,50 +595,25 @@ impl Tethys {
         qualified_name: &str,
         max_depth: Option<usize>,
     ) -> Result<types::ReachabilityResult> {
-        use std::collections::{HashSet, VecDeque};
-
         let source = self
             .db
             .get_symbol_by_qualified_name(qualified_name)?
             .ok_or_else(|| Error::NotFound(format!("symbol: {qualified_name}")))?;
 
-        let max_depth = max_depth.unwrap_or(50);
-        let mut visited: HashSet<SymbolId> = HashSet::new();
-        let mut results: Vec<types::ReachablePath> = Vec::new();
-        let mut queue: VecDeque<(SymbolId, Vec<Symbol>, usize)> = VecDeque::new();
-
-        // Start BFS from the source
-        queue.push_back((source.id, vec![], 0));
-        visited.insert(source.id);
-
-        while let Some((current_id, path, depth)) = queue.pop_front() {
-            if depth >= max_depth {
-                continue;
-            }
-
-            // Get callers (incoming edges) for backward reachability
-            for caller_info in self.db.get_callers(current_id)? {
-                if visited.insert(caller_info.symbol.id) {
-                    let mut new_path = path.clone();
-                    new_path.push(caller_info.symbol.clone());
-
-                    results.push(types::ReachablePath {
-                        target: caller_info.symbol.clone(),
-                        path: new_path.clone(),
-                        depth: depth + 1,
-                    });
-
-                    queue.push_back((caller_info.symbol.id, new_path, depth + 1));
-                }
-            }
-        }
-
-        Ok(types::ReachabilityResult {
+        self.bfs_reachable(
+            source.id,
+            max_depth.unwrap_or(50),
+            |id| {
+                Ok(self
+                    .db
+                    .get_callers(id)?
+                    .into_iter()
+                    .map(|c| c.symbol)
+                    .collect())
+            },
+            types::ReachabilityDirection::Backward,
             source,
-            reachable: results,
-            max_depth,
-            direction: types::ReachabilityDirection::Backward,
-        })
+        )
     }
 
     // === Crate Resolution ===

@@ -30,12 +30,37 @@ pub(crate) struct InsertReferenceParams<'a> {
     pub reference_name: Option<&'a str>,
 }
 
+impl InsertReferenceParams<'_> {
+    /// Asserts struct invariants in debug builds.
+    ///
+    /// - `line` must be >= 1 (1-indexed).
+    /// - If `symbol_id` is `None`, `reference_name` must be `Some` (unresolved refs need a name for Pass 2).
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_assert_valid(&self) {
+        debug_assert!(
+            self.line >= 1,
+            "reference line should be >= 1, got {}",
+            self.line
+        );
+        debug_assert!(
+            self.symbol_id.is_some() || self.reference_name.is_some(),
+            "unresolved reference (symbol_id is None) must have a reference_name for Pass 2"
+        );
+    }
+
+    /// No-op in release builds.
+    #[cfg(not(debug_assertions))]
+    #[inline]
+    pub(crate) fn debug_assert_valid(&self) {}
+}
+
 impl Index {
     /// Insert a reference to a symbol.
     ///
     /// If `symbol_id` is `None`, the reference is unresolved and `reference_name`
     /// should be provided for later resolution in Pass 2.
     pub fn insert_reference(&self, params: &InsertReferenceParams<'_>) -> Result<i64> {
+        params.debug_assert_valid();
         let conn = self.connection()?;
 
         conn.execute(

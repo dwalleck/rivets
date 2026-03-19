@@ -454,22 +454,27 @@ impl Tethys {
 
         for file_path in &unique_files {
             match std::fs::read_to_string(file_path) {
-                Ok(content) => {
-                    if client.did_open(file_path, &content, language_id).is_ok() {
+                Ok(content) => match client.did_open(file_path, &content, language_id) {
+                    Ok(()) => {
                         opened_files.insert(file_path.clone());
-                    } else if did_open_warned {
-                        trace!(
-                            file = %file_path.display(),
-                            "Failed to send didOpen notification"
-                        );
-                    } else {
-                        warn!(
-                            file = %file_path.display(),
-                            "Failed to send didOpen notification"
-                        );
-                        did_open_warned = true;
                     }
-                }
+                    Err(e) => {
+                        if did_open_warned {
+                            trace!(
+                                file = %file_path.display(),
+                                error = %e,
+                                "Failed to send didOpen notification"
+                            );
+                        } else {
+                            warn!(
+                                file = %file_path.display(),
+                                error = %e,
+                                "Failed to send didOpen notification"
+                            );
+                            did_open_warned = true;
+                        }
+                    }
+                },
                 Err(e) => {
                     if did_open_warned {
                         trace!(
@@ -562,7 +567,7 @@ impl Tethys {
     ///
     /// Returns `Ok(true)` if resolved, `Ok(false)` if not resolved (but no error),
     /// or `Err` for database errors.
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
         reason = "didOpen warn/trace branching adds lines but keeps logic cohesive"
     )]
@@ -927,5 +932,128 @@ impl Tethys {
                 })
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{FileId, Import};
+
+    // ========================================================================
+    // build_import_maps Tests
+    // ========================================================================
+
+    #[test]
+    fn build_import_maps_empty_imports() {
+        let (explicit, glob) = Tethys::build_import_maps(&[]);
+        assert!(explicit.is_empty());
+        assert!(glob.is_empty());
+    }
+
+    #[test]
+    fn build_import_maps_explicit_import() {
+        let imports = vec![Import {
+            file_id: FileId::from(1),
+            symbol_name: "HashMap".to_string(),
+            source_module: "std::collections".to_string(),
+            alias: None,
+        }];
+
+        let (explicit, glob) = Tethys::build_import_maps(&imports);
+
+        assert!(glob.is_empty());
+        assert_eq!(explicit.len(), 1);
+        let (symbol_name, source_module) = explicit["HashMap"];
+        assert_eq!(symbol_name, "HashMap");
+        assert_eq!(source_module, "std::collections");
+    }
+
+    #[test]
+    fn build_import_maps_glob_import() {
+        let imports = vec![Import {
+            file_id: FileId::from(1),
+            symbol_name: "*".to_string(),
+            source_module: "crate::prelude".to_string(),
+            alias: None,
+        }];
+
+        let (explicit, glob) = Tethys::build_import_maps(&imports);
+
+        assert!(explicit.is_empty());
+        assert_eq!(glob, vec!["crate::prelude"]);
+    }
+
+    #[test]
+    fn build_import_maps_aliased_import_uses_alias_as_key() {
+        let imports = vec![Import {
+            file_id: FileId::from(1),
+            symbol_name: "HashMap".to_string(),
+            source_module: "std::collections".to_string(),
+            alias: Some("Map".to_string()),
+        }];
+
+        let (explicit, _) = Tethys::build_import_maps(&imports);
+
+        assert!(!explicit.contains_key("HashMap"));
+        assert_eq!(explicit.len(), 1);
+        let (symbol_name, source_module) = explicit["Map"];
+        assert_eq!(symbol_name, "HashMap");
+        assert_eq!(source_module, "std::collections");
+    }
+
+    #[test]
+    fn build_import_maps_mixed_explicit_and_glob() {
+        let imports = vec![
+            Import {
+                file_id: FileId::from(1),
+                symbol_name: "Index".to_string(),
+                source_module: "crate::db".to_string(),
+                alias: None,
+            },
+            Import {
+                file_id: FileId::from(1),
+                symbol_name: "*".to_string(),
+                source_module: "crate::prelude".to_string(),
+                alias: None,
+            },
+            Import {
+                file_id: FileId::from(1),
+                symbol_name: "Error".to_string(),
+                source_module: "crate::error".to_string(),
+                alias: None,
+            },
+        ];
+
+        let (explicit, glob) = Tethys::build_import_maps(&imports);
+
+        assert_eq!(explicit.len(), 2);
+        assert!(explicit.contains_key("Index"));
+        assert!(explicit.contains_key("Error"));
+        assert_eq!(glob, vec!["crate::prelude"]);
+    }
+
+    #[test]
+    fn build_import_maps_duplicate_name_keeps_last() {
+        let imports = vec![
+            Import {
+                file_id: FileId::from(1),
+                symbol_name: "Error".to_string(),
+                source_module: "std::io".to_string(),
+                alias: None,
+            },
+            Import {
+                file_id: FileId::from(1),
+                symbol_name: "Error".to_string(),
+                source_module: "crate::error".to_string(),
+                alias: None,
+            },
+        ];
+
+        let (explicit, _) = Tethys::build_import_maps(&imports);
+
+        assert_eq!(explicit.len(), 1);
+        let (_, source_module) = explicit["Error"];
+        assert_eq!(source_module, "crate::error");
     }
 }

@@ -144,11 +144,9 @@ impl IndexErrorKind {
 impl From<&Error> for IndexErrorKind {
     fn from(error: &Error) -> Self {
         match error {
-            Error::Io(_) => Self::IoError,
-            Error::Database(_) => Self::DatabaseError,
-            Error::Parser(_) | Error::Config(_) | Error::NotFound(_) | Error::Internal(_) => {
-                Self::ParseFailed
-            }
+            Error::Io(_) | Error::Config(_) | Error::NotFound(_) => Self::IoError,
+            Error::Database(_) | Error::Internal(_) => Self::DatabaseError,
+            Error::Parser(_) => Self::ParseFailed,
         }
     }
 }

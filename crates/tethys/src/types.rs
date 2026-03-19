@@ -732,10 +732,22 @@ impl IndexOptions {
     /// defaulting to 60 seconds.
     #[must_use]
     pub fn with_lsp() -> Self {
-        let timeout = std::env::var("TETHYS_LSP_TIMEOUT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_LSP_TIMEOUT_SECS);
+        let timeout = match std::env::var("TETHYS_LSP_TIMEOUT").ok().as_deref() {
+            Some(s) if !s.is_empty() => {
+                if let Ok(val) = s.parse() {
+                    val
+                } else {
+                    tracing::warn!(
+                        env_var = "TETHYS_LSP_TIMEOUT",
+                        value = %s,
+                        default = DEFAULT_LSP_TIMEOUT_SECS,
+                        "Invalid value, using default"
+                    );
+                    DEFAULT_LSP_TIMEOUT_SECS
+                }
+            }
+            _ => DEFAULT_LSP_TIMEOUT_SECS,
+        };
 
         Self {
             use_lsp: true,

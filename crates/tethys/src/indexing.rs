@@ -40,6 +40,25 @@ pub(crate) struct PendingDependency {
     pub(crate) dep_path: PathBuf,
 }
 
+impl PendingDependency {
+    /// Asserts struct invariants in debug builds.
+    ///
+    /// - `dep_path` must not be absolute (it should be relative to workspace root).
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_assert_valid(&self) {
+        debug_assert!(
+            !self.dep_path.is_absolute(),
+            "dep_path should not be absolute: {}",
+            self.dep_path.display()
+        );
+    }
+
+    /// No-op in release builds.
+    #[cfg(not(debug_assertions))]
+    #[inline]
+    pub(crate) fn debug_assert_valid(&self) {}
+}
+
 #[expect(
     clippy::missing_errors_doc,
     reason = "error docs deferred to avoid churn during active development"
@@ -843,17 +862,16 @@ impl Tethys {
 
         // Store dependencies in the database, queueing unresolved ones for later
         for dep_path in depended_files {
-            match self.db.get_file_id(&dep_path)? {
-                Some(dep_file_id) => {
-                    self.db.insert_file_dependency(file_id, dep_file_id)?;
-                }
-                None => {
-                    // Target file not indexed yet - queue for resolution pass
-                    pending.push(PendingDependency {
-                        from_file_id: file_id,
-                        dep_path,
-                    });
-                }
+            if let Some(dep_file_id) = self.db.get_file_id(&dep_path)? {
+                self.db.insert_file_dependency(file_id, dep_file_id)?;
+            } else {
+                // Target file not indexed yet - queue for resolution pass
+                let dep = PendingDependency {
+                    from_file_id: file_id,
+                    dep_path,
+                };
+                dep.debug_assert_valid();
+                pending.push(dep);
             }
         }
 
@@ -1003,16 +1021,15 @@ impl Tethys {
         }
 
         for dep_path in depended_files {
-            match self.db.get_file_id(&dep_path)? {
-                Some(dep_file_id) => {
-                    self.db.insert_file_dependency(file_id, dep_file_id)?;
-                }
-                None => {
-                    pending.push(PendingDependency {
-                        from_file_id: file_id,
-                        dep_path,
-                    });
-                }
+            if let Some(dep_file_id) = self.db.get_file_id(&dep_path)? {
+                self.db.insert_file_dependency(file_id, dep_file_id)?;
+            } else {
+                let dep = PendingDependency {
+                    from_file_id: file_id,
+                    dep_path,
+                };
+                dep.debug_assert_valid();
+                pending.push(dep);
             }
         }
 
@@ -1273,5 +1290,195 @@ impl Tethys {
             name,
             "target" | "node_modules" | "vendor" | "bin" | "obj" | "build" | "dist" | "__pycache__"
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{FileId, Import, Language};
+
+    // ========================================================================
+    // is_excluded_dir Tests
+    // ========================================================================
+
+    #[test]
+    fn is_excluded_dir_excludes_target() {
+        assert!(Tethys::is_excluded_dir("target"));
+    }
+
+    #[test]
+    fn is_excluded_dir_excludes_node_modules() {
+        assert!(Tethys::is_excluded_dir("node_modules"));
+    }
+
+    #[test]
+    fn is_excluded_dir_does_not_match_dot_git() {
+        // .git is NOT in the exclusion list — it's handled separately by
+        // the hidden-directory filter (starts with '.'). Verify it is not
+        // matched here so the two filters stay orthogonal.
+        assert!(!Tethys::is_excluded_dir(".git"));
+    }
+
+    #[test]
+    fn is_excluded_dir_excludes_bin() {
+        assert!(Tethys::is_excluded_dir("bin"));
+    }
+
+    #[test]
+    fn is_excluded_dir_excludes_obj() {
+        assert!(Tethys::is_excluded_dir("obj"));
+    }
+
+    #[test]
+    fn is_excluded_dir_excludes_build() {
+        assert!(Tethys::is_excluded_dir("build"));
+    }
+
+    #[test]
+    fn is_excluded_dir_excludes_dist() {
+        assert!(Tethys::is_excluded_dir("dist"));
+    }
+
+    #[test]
+    fn is_excluded_dir_excludes_vendor() {
+        assert!(Tethys::is_excluded_dir("vendor"));
+    }
+
+    #[test]
+    fn is_excluded_dir_excludes_pycache() {
+        assert!(Tethys::is_excluded_dir("__pycache__"));
+    }
+
+    #[test]
+    fn is_excluded_dir_allows_src() {
+        assert!(!Tethys::is_excluded_dir("src"));
+    }
+
+    #[test]
+    fn is_excluded_dir_allows_lib() {
+        assert!(!Tethys::is_excluded_dir("lib"));
+    }
+
+    #[test]
+    fn is_excluded_dir_allows_tests() {
+        assert!(!Tethys::is_excluded_dir("tests"));
+    }
+
+    #[test]
+    fn is_excluded_dir_allows_my_module() {
+        assert!(!Tethys::is_excluded_dir("my_module"));
+    }
+
+    #[test]
+    fn is_excluded_dir_is_case_sensitive() {
+        assert!(!Tethys::is_excluded_dir("Target"));
+        assert!(!Tethys::is_excluded_dir("NODE_MODULES"));
+        assert!(!Tethys::is_excluded_dir("Vendor"));
+    }
+
+    #[test]
+    fn is_excluded_dir_rejects_empty_string() {
+        assert!(!Tethys::is_excluded_dir(""));
+    }
+
+    // ========================================================================
+    // convert_imports_to_statements Tests
+    // ========================================================================
+
+    #[test]
+    fn convert_imports_to_statements_empty_imports() {
+        let result = Tethys::convert_imports_to_statements(&[], Language::Rust);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn convert_imports_to_statements_single_rust_import() {
+        let imports = vec![Import {
+            file_id: FileId::from(1),
+            symbol_name: "HashMap".to_string(),
+            source_module: "std::collections".to_string(),
+            alias: None,
+        }];
+
+        let result = Tethys::convert_imports_to_statements(&imports, Language::Rust);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].path, vec!["std", "collections"]);
+        assert_eq!(result[0].imported_names, vec!["HashMap"]);
+        assert!(!result[0].is_glob);
+        assert!(result[0].alias.is_none());
+    }
+
+    #[test]
+    fn convert_imports_to_statements_glob_import() {
+        let imports = vec![Import {
+            file_id: FileId::from(1),
+            symbol_name: "*".to_string(),
+            source_module: "crate::prelude".to_string(),
+            alias: None,
+        }];
+
+        let result = Tethys::convert_imports_to_statements(&imports, Language::Rust);
+
+        assert_eq!(result.len(), 1);
+        assert!(result[0].is_glob);
+        assert!(result[0].imported_names.is_empty());
+    }
+
+    #[test]
+    fn convert_imports_to_statements_groups_by_source_module() {
+        let imports = vec![
+            Import {
+                file_id: FileId::from(1),
+                symbol_name: "HashMap".to_string(),
+                source_module: "std::collections".to_string(),
+                alias: None,
+            },
+            Import {
+                file_id: FileId::from(1),
+                symbol_name: "HashSet".to_string(),
+                source_module: "std::collections".to_string(),
+                alias: None,
+            },
+        ];
+
+        let result = Tethys::convert_imports_to_statements(&imports, Language::Rust);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].path, vec!["std", "collections"]);
+        let mut names = result[0].imported_names.clone();
+        names.sort();
+        assert_eq!(names, vec!["HashMap", "HashSet"]);
+    }
+
+    #[test]
+    fn convert_imports_to_statements_csharp_uses_dot_separator() {
+        let imports = vec![Import {
+            file_id: FileId::from(1),
+            symbol_name: "List".to_string(),
+            source_module: "System.Collections.Generic".to_string(),
+            alias: None,
+        }];
+
+        let result = Tethys::convert_imports_to_statements(&imports, Language::CSharp);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].path, vec!["System", "Collections", "Generic"]);
+    }
+
+    #[test]
+    fn convert_imports_to_statements_preserves_alias() {
+        let imports = vec![Import {
+            file_id: FileId::from(1),
+            symbol_name: "HashMap".to_string(),
+            source_module: "std::collections".to_string(),
+            alias: Some("Map".to_string()),
+        }];
+
+        let result = Tethys::convert_imports_to_statements(&imports, Language::Rust);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].alias, Some("Map".to_string()));
     }
 }

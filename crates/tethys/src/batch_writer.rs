@@ -58,6 +58,8 @@ use crate::types::{FileId, Language, Span, SymbolId};
 pub struct WriteStats {
     /// Number of files successfully written to the database.
     pub files_written: usize,
+    /// Number of files that failed to write.
+    pub files_failed: usize,
     /// Number of symbols written.
     pub symbols_written: usize,
     /// Number of references written.
@@ -189,6 +191,7 @@ impl BatchWriter {
 
         debug!(
             files = stats.files_written,
+            failed = stats.files_failed,
             symbols = stats.symbols_written,
             references = stats.references_written,
             batches = stats.batches_committed,
@@ -220,6 +223,7 @@ impl BatchWriter {
                         error = %e,
                         "Failed to write file to database"
                     );
+                    stats.files_failed += 1;
                 }
             }
         }
@@ -485,6 +489,7 @@ mod tests {
     fn write_stats_default() {
         let stats = WriteStats::default();
         assert_eq!(stats.files_written, 0);
+        assert_eq!(stats.files_failed, 0);
         assert_eq!(stats.symbols_written, 0);
         assert_eq!(stats.references_written, 0);
         assert_eq!(stats.batches_committed, 0);
