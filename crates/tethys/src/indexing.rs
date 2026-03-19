@@ -140,14 +140,7 @@ impl Tethys {
                         batch_writer.send(data);
                     }
                     Err(e) => {
-                        let kind = match &e {
-                            Error::Io(_) => IndexErrorKind::IoError,
-                            Error::Database(_) => IndexErrorKind::DatabaseError,
-                            Error::Parser(_) => IndexErrorKind::ParseFailed,
-                            Error::Config(_) | Error::NotFound(_) | Error::Internal(_) => {
-                                IndexErrorKind::ParseFailed
-                            }
-                        };
+                        let kind = IndexErrorKind::from(&e);
                         match parse_errors.lock() {
                             Ok(mut guard) => {
                                 guard.push(IndexError::new(file_path.clone(), kind, e.to_string()));
@@ -221,14 +214,7 @@ impl Tethys {
                     match Self::parse_file_static(&workspace_root, file_path, *language) {
                         Ok(data) => Some(data),
                         Err(e) => {
-                            let kind = match &e {
-                                Error::Io(_) => IndexErrorKind::IoError,
-                                Error::Database(_) => IndexErrorKind::DatabaseError,
-                                Error::Parser(_) => IndexErrorKind::ParseFailed,
-                                Error::Config(_) | Error::NotFound(_) | Error::Internal(_) => {
-                                    IndexErrorKind::ParseFailed
-                                }
-                            };
+                            let kind = IndexErrorKind::from(&e);
                             // Handle mutex poisoning - we still want to collect errors even if
                             // another thread panicked. PoisonError contains the guard.
                             match parse_errors.lock() {
@@ -286,14 +272,7 @@ impl Tethys {
                         references_found += ref_count;
                     }
                     Err(e) => {
-                        let kind = match &e {
-                            Error::Io(_) => IndexErrorKind::IoError,
-                            Error::Database(_) => IndexErrorKind::DatabaseError,
-                            Error::Parser(_) => IndexErrorKind::ParseFailed,
-                            Error::Config(_) | Error::NotFound(_) | Error::Internal(_) => {
-                                IndexErrorKind::ParseFailed
-                            }
-                        };
+                        let kind = IndexErrorKind::from(&e);
                         errors.push(IndexError::new(
                             data.relative_path.clone(),
                             kind,
@@ -379,12 +358,13 @@ impl Tethys {
 
         // Pass 3: LSP-based resolution (optional)
         // Resolve each language separately using its appropriate LSP server
+        let mut lsp_errors_collected: Vec<String> = vec![];
         let lsp_resolved_count = if options.use_lsp() {
             let mut total_resolved = 0;
 
             // Resolve Rust files with rust-analyzer
             let rust_provider = lsp::AnyProvider::for_language(Language::Rust);
-            let rust_count =
+            let (rust_count, rust_lsp_errors) =
                 self.resolve_via_lsp(&rust_provider, Language::Rust, options.lsp_timeout_secs())?;
             if rust_count > 0 {
                 tracing::info!(
@@ -394,10 +374,11 @@ impl Tethys {
                 );
             }
             total_resolved += rust_count;
+            lsp_errors_collected.extend(rust_lsp_errors);
 
             // Resolve C# files with csharp-ls
             let csharp_provider = lsp::AnyProvider::for_language(Language::CSharp);
-            let csharp_count = self.resolve_via_lsp(
+            let (csharp_count, csharp_lsp_errors) = self.resolve_via_lsp(
                 &csharp_provider,
                 Language::CSharp,
                 options.lsp_timeout_secs(),
@@ -410,6 +391,7 @@ impl Tethys {
                 );
             }
             total_resolved += csharp_count;
+            lsp_errors_collected.extend(csharp_lsp_errors);
 
             total_resolved
         } else {
@@ -446,6 +428,7 @@ impl Tethys {
             errors,
             unresolved_dependencies,
             lsp_resolved_count,
+            lsp_errors: lsp_errors_collected,
         })
     }
 
@@ -517,9 +500,15 @@ impl Tethys {
         let mtime_ns = match metadata.modified() {
             Ok(mtime) => match mtime.duration_since(UNIX_EPOCH) {
                 Ok(duration) => duration.as_nanos() as i64,
-                Err(_) => 0,
+                Err(e) => {
+                    debug!(path = %file_path.display(), error = %e, "File modification time before Unix epoch, using 0");
+                    0
+                }
             },
-            Err(_) => 0,
+            Err(e) => {
+                debug!(path = %file_path.display(), error = %e, "Cannot read file modification time, using 0");
+                0
+            }
         };
         let size_bytes = metadata.len();
 
@@ -536,7 +525,7 @@ impl Tethys {
                 // parallel threads without access to the crate list. The module_path is
                 // computed later during write_parsed_file (batch mode) or post-indexing
                 // for streaming mode. Streaming mode currently does not populate module_path.
-                OwnedSymbolData {
+                let owned = OwnedSymbolData {
                     name: sym.name.clone(),
                     module_path: String::new(),
                     qualified_name,
@@ -548,7 +537,9 @@ impl Tethys {
                     visibility: sym.visibility,
                     parent_symbol_id: None,
                     is_test: sym.is_test,
-                }
+                };
+                owned.debug_assert_valid();
+                owned
             })
             .collect();
 
@@ -564,12 +555,7 @@ impl Tethys {
             })?
             .to_path_buf();
 
-        debug_assert!(
-            !relative_path.is_absolute(),
-            "relative_path should not be absolute: {}",
-            relative_path.display()
-        );
-        Ok(ParsedFileData {
+        let parsed = ParsedFileData {
             relative_path,
             language,
             mtime_ns,
@@ -577,7 +563,9 @@ impl Tethys {
             symbols,
             references,
             imports,
-        })
+        };
+        parsed.debug_assert_valid();
+        Ok(parsed)
     }
 
     /// Write a single parsed file to the database and compute its dependencies.
@@ -597,18 +585,10 @@ impl Tethys {
         let symbol_data: Vec<SymbolData<'_>> = data
             .symbols
             .iter()
-            .map(|s| SymbolData {
-                name: &s.name,
-                module_path: &module_path,
-                qualified_name: &s.qualified_name,
-                kind: s.kind,
-                line: s.line,
-                column: s.column,
-                span: s.span,
-                signature: s.signature.as_deref(),
-                visibility: s.visibility,
-                parent_symbol_id: s.parent_symbol_id,
-                is_test: s.is_test,
+            .map(|s| {
+                let mut sd = s.as_symbol_data();
+                sd.module_path = &module_path;
+                sd
             })
             .collect();
 
@@ -841,15 +821,10 @@ impl Tethys {
             }
 
             // Check if any imported name from this import statement is actually referenced
-            let mut is_used = false;
-            for name in &import_stmt.imported_names {
-                // Check both the original name and alias
+            let is_used = import_stmt.imported_names.iter().any(|name| {
                 let lookup_name = import_stmt.alias.as_ref().unwrap_or(name);
-                if referenced_names.contains(lookup_name.as_str()) {
-                    is_used = true;
-                    break;
-                }
-            }
+                referenced_names.contains(lookup_name.as_str())
+            });
 
             // Only record dependency if the import is actually used (L2 behavior)
             if !is_used {
@@ -1010,14 +985,10 @@ impl Tethys {
             }
 
             // Check if any imported name is actually referenced
-            let mut is_used = false;
-            for name in &import_stmt.imported_names {
+            let is_used = import_stmt.imported_names.iter().any(|name| {
                 let lookup_name = import_stmt.alias.as_ref().unwrap_or(name);
-                if refs_set.contains(lookup_name.as_str()) {
-                    is_used = true;
-                    break;
-                }
-            }
+                refs_set.contains(lookup_name.as_str())
+            });
 
             if !is_used {
                 continue;

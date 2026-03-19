@@ -83,7 +83,46 @@ pub struct OwnedSymbolData {
     pub is_test: bool,
 }
 
+impl ParsedFileData {
+    /// Asserts struct invariants in debug builds.
+    ///
+    /// - `relative_path` must not be absolute.
+    #[cfg(debug_assertions)]
+    pub fn debug_assert_valid(&self) {
+        debug_assert!(
+            !self.relative_path.is_absolute(),
+            "relative_path should not be absolute: {}",
+            self.relative_path.display()
+        );
+    }
+
+    /// No-op in release builds.
+    #[cfg(not(debug_assertions))]
+    #[inline]
+    pub fn debug_assert_valid(&self) {}
+}
+
 impl OwnedSymbolData {
+    /// Asserts struct invariants in debug builds.
+    ///
+    /// - `name` must not be empty.
+    /// - `line` must be >= 1.
+    #[cfg(debug_assertions)]
+    pub fn debug_assert_valid(&self) {
+        debug_assert!(!self.name.is_empty(), "symbol name should not be empty");
+        debug_assert!(
+            self.line >= 1,
+            "symbol line should be >= 1, got {} for '{}'",
+            self.line,
+            self.name
+        );
+    }
+
+    /// No-op in release builds.
+    #[cfg(not(debug_assertions))]
+    #[inline]
+    pub fn debug_assert_valid(&self) {}
+
     /// Convert to borrowed `SymbolData` for database insertion.
     pub fn as_symbol_data(&self) -> SymbolData<'_> {
         SymbolData {
@@ -149,7 +188,7 @@ mod tests {
     }
 
     #[test]
-    fn owned_symbol_data_new_constructor() {
+    fn owned_symbol_data_struct_literal_construction() {
         let owned = OwnedSymbolData {
             name: "test_fn".to_string(),
             module_path: "crate::module".to_string(),
