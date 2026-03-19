@@ -106,9 +106,15 @@ impl Index {
 
         // u64 size_bytes/content_hash reinterpreted as i64 for SQLite storage;
         // round-trips correctly via the reverse cast in row_to_indexed_file
-        #[allow(clippy::cast_possible_wrap)]
+        #[expect(
+            clippy::cast_possible_wrap,
+            reason = "u64 bit-pattern stored as i64 for SQLite; round-trips via reverse cast"
+        )]
         let size_bytes_i64 = size_bytes as i64;
-        #[allow(clippy::cast_possible_wrap)]
+        #[expect(
+            clippy::cast_possible_wrap,
+            reason = "u64 bit-pattern stored as i64 for SQLite; round-trips via reverse cast"
+        )]
         let content_hash_i64 = content_hash.map(|h| h as i64);
 
         // Try to update first

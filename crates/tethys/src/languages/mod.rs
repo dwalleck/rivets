@@ -25,14 +25,11 @@ use common::{ExtractedReference, ExtractedSymbol, ImportStatement};
 use crate::types::Language;
 
 /// Get the language support implementation for a language.
-///
-/// Returns `None` for languages that are declared but not yet implemented.
 #[must_use]
-#[allow(clippy::unnecessary_wraps)] // Option return is intentional for future language stubs
-pub fn get_language_support(lang: Language) -> Option<&'static dyn LanguageSupport> {
+pub fn get_language_support(lang: Language) -> &'static dyn LanguageSupport {
     match lang {
-        Language::Rust => Some(&rust::RustLanguage),
-        Language::CSharp => Some(&csharp::CSharpLanguage),
+        Language::Rust => &rust::RustLanguage,
+        Language::CSharp => &csharp::CSharpLanguage,
     }
 }
 

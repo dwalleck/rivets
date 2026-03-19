@@ -108,9 +108,10 @@ pub struct Tethys {
     crates: Vec<CrateInfo>,
 }
 
-// Note: `# Errors` docs deferred to avoid documentation churn during active development.
-// See https://rust-lang.github.io/api-guidelines/documentation.html#c-failure
-#[allow(clippy::missing_errors_doc)]
+#[expect(
+    clippy::missing_errors_doc,
+    reason = "error docs deferred to avoid churn during active development"
+)]
 impl Tethys {
     /// Create a new Tethys instance for a workspace.
     ///
@@ -150,8 +151,7 @@ impl Tethys {
     /// [`index_with_options()`](Self::index_with_options). The `lsp_command` parameter
     /// is reserved for future use (custom LSP server paths); currently LSP providers
     /// are selected automatically based on language.
-    #[allow(unused_variables)]
-    pub fn with_lsp(workspace_root: &Path, lsp_command: &str) -> Result<Self> {
+    pub fn with_lsp(workspace_root: &Path, _lsp_command: &str) -> Result<Self> {
         Self::new(workspace_root)
     }
 
@@ -233,7 +233,10 @@ impl Tethys {
     /// println!("Resolved {} references via LSP", stats.lsp_resolved_count);
     /// # Ok::<(), tethys::Error>(())
     /// ```
-    #[allow(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "orchestration method with sequential indexing phases"
+    )]
     pub fn index_with_options(&mut self, options: IndexOptions) -> Result<IndexStats> {
         let start = Instant::now();
         let mut files_indexed = 0;
@@ -635,8 +638,7 @@ impl Tethys {
         let content_str = std::str::from_utf8(&content)
             .map_err(|_| Error::Parser("file is not valid UTF-8".to_string()))?;
 
-        let lang_support = languages::get_language_support(language)
-            .ok_or_else(|| Error::Parser(format!("no support for language: {language:?}")))?;
+        let lang_support = languages::get_language_support(language);
 
         // try_borrow_mut prevents panics if code structure changes to allow re-entrant calls
         let tree = PARSER.with(|parser| {
@@ -664,7 +666,10 @@ impl Tethys {
         let references = lang_support.extract_references(&tree, content_str.as_bytes());
 
         let metadata = std::fs::metadata(file_path)?;
-        #[allow(clippy::cast_possible_truncation)]
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "nanosecond timestamp fits in i64 until year 2262"
+        )]
         let mtime_ns = match metadata.modified() {
             Ok(mtime) => match mtime.duration_since(UNIX_EPOCH) {
                 Ok(duration) => duration.as_nanos() as i64,
@@ -1263,9 +1268,7 @@ impl Tethys {
         let mut files_skipped_parse: usize = 0;
 
         // Get language support once before the loop
-        let lang_support = languages::get_language_support(Language::CSharp).ok_or_else(|| {
-            Error::Parser("No language support for C#, cannot resolve C# dependencies".to_string())
-        })?;
+        let lang_support = languages::get_language_support(Language::CSharp);
 
         self.parser
             .set_language(&lang_support.tree_sitter_language())
@@ -1721,7 +1724,10 @@ impl Tethys {
     /// # Returns
     ///
     /// The number of references successfully resolved via LSP.
-    #[allow(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "LSP resolution involves multiple sequential protocol steps"
+    )]
     fn resolve_via_lsp(
         &self,
         provider: &dyn lsp::LspProvider,
@@ -2406,7 +2412,10 @@ impl Tethys {
     ///
     /// If LSP fails to start or returns errors, falls back to DB-only results
     /// and logs a warning.
-    #[allow(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "combines DB lookup with LSP refinement in a single user-facing method"
+    )]
     pub fn get_callers_with_lsp(&self, qualified_name: &str) -> Result<Vec<Dependent>> {
         use std::collections::HashSet;
 

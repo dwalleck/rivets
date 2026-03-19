@@ -155,7 +155,10 @@ impl BatchWriter {
     }
 
     /// Background thread function that receives and writes file data.
-    #[allow(clippy::needless_pass_by_value)] // Receiver is consumed by loop, PathBuf owned by thread
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "PathBuf must be owned by the spawned thread"
+    )]
     fn writer_thread(
         db_path: PathBuf,
         receiver: Receiver<ParsedFileData>,

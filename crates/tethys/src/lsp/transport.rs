@@ -105,7 +105,9 @@ impl LspClient {
     }
 
     /// Perform the LSP initialize handshake.
-    #[allow(deprecated)] // root_uri is deprecated but still widely used
+    // root_uri is deprecated in the LSP spec in favor of workspaceFolders, but many
+    // language servers (e.g. rust-analyzer, csharp-ls) still require it for initialization.
+    #[expect(deprecated, reason = "root_uri required by some LSP servers")]
     fn initialize(&mut self, workspace_path: &Path, init_options: Option<Value>) -> Result<()> {
         let workspace_uri = path_to_uri(workspace_path)?;
 
@@ -481,7 +483,10 @@ impl LspClient {
                                         .get("message")
                                         .and_then(Value::as_str)
                                         .unwrap_or("completed");
-                                    #[allow(clippy::cast_possible_truncation)]
+                                    #[expect(
+                                        clippy::cast_possible_truncation,
+                                        reason = "elapsed millis for logging; truncation harmless"
+                                    )]
                                     let elapsed_ms = start.elapsed().as_millis() as u64;
                                     debug!(message = msg, elapsed_ms, "Solution loading completed");
                                     return Ok(true);

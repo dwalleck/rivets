@@ -113,7 +113,11 @@ impl Index {
             let is_test: bool = row.get(0)?;
             let count: i64 = row.get(1)?;
             // Safety: COUNT(*) returns non-negative values
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "COUNT(*) is a non-negative SQL aggregate"
+            )]
             Ok((is_test, count as usize))
         })?;
 

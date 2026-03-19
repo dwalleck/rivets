@@ -435,7 +435,7 @@ fn parse_use_declaration(node: &tree_sitter::Node, content: &[u8]) -> Option<Use
             }
             SCOPED_USE_LIST => {
                 // List use: `use std::collections::{HashMap, HashSet};`
-                return parse_scoped_use_list(&child, content, line);
+                return Some(parse_scoped_use_list(&child, content, line));
             }
             USE_AS_CLAUSE => {
                 // Alias use: `use std::collections::HashMap as Map;`
@@ -454,7 +454,7 @@ fn parse_use_declaration(node: &tree_sitter::Node, content: &[u8]) -> Option<Use
             }
             USE_WILDCARD => {
                 // Glob use: `use std::collections::*;` - the wildcard node contains the path
-                return parse_use_wildcard(&child, content, line);
+                return Some(parse_use_wildcard(&child, content, line));
             }
             USE_LIST => {
                 // Bare use list without path (rare)
@@ -475,8 +475,7 @@ fn parse_use_declaration(node: &tree_sitter::Node, content: &[u8]) -> Option<Use
 }
 
 /// Parse a `use_wildcard` node like `std::collections::*`.
-#[allow(clippy::unnecessary_wraps)] // Consistency with other parse functions; may need Option later
-fn parse_use_wildcard(node: &tree_sitter::Node, content: &[u8], line: u32) -> Option<UseStatement> {
+fn parse_use_wildcard(node: &tree_sitter::Node, content: &[u8], line: u32) -> UseStatement {
     use node_kinds::SCOPED_IDENTIFIER;
 
     let mut path = Vec::new();
@@ -490,13 +489,13 @@ fn parse_use_wildcard(node: &tree_sitter::Node, content: &[u8], line: u32) -> Op
         }
     }
 
-    Some(UseStatement {
+    UseStatement {
         path,
         imported_names: vec![],
         is_glob: true,
         alias: None,
         line,
-    })
+    }
 }
 
 /// Parse a scoped identifier like `std::collections::HashMap`.
@@ -539,12 +538,7 @@ fn collect_scoped_path(node: &tree_sitter::Node, content: &[u8], segments: &mut 
 }
 
 /// Parse a scoped use list like `std::collections::{HashMap, HashSet}` or `std::collections::*`.
-#[allow(clippy::unnecessary_wraps)] // Consistency with other parse functions; may need Option later
-fn parse_scoped_use_list(
-    node: &tree_sitter::Node,
-    content: &[u8],
-    line: u32,
-) -> Option<UseStatement> {
+fn parse_scoped_use_list(node: &tree_sitter::Node, content: &[u8], line: u32) -> UseStatement {
     use node_kinds::{USE_LIST, USE_WILDCARD};
 
     let mut path = Vec::new();
@@ -575,13 +569,13 @@ fn parse_scoped_use_list(
         }
     }
 
-    Some(UseStatement {
+    UseStatement {
         path,
         imported_names: names,
         is_glob,
         alias: None,
         line,
-    })
+    }
 }
 
 /// Collect names from a use list `{A, B, C}`.

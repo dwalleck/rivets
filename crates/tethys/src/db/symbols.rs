@@ -76,9 +76,7 @@ impl Index {
         }
 
         let pattern = format!("%{query}%");
-        // usize limit fits in i64 on all supported platforms
-        #[allow(clippy::cast_possible_wrap)]
-        let limit_i64 = limit as i64;
+        let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
         let conn = self.connection()?;
 
         let mut stmt = conn.prepare(&format!(
@@ -127,9 +125,7 @@ impl Index {
     ///
     /// This is used to build namespace-to-file maps for C# dependency resolution.
     pub fn search_symbols_by_kind(&self, kind: SymbolKind, limit: usize) -> Result<Vec<Symbol>> {
-        // usize limit fits in i64 on all supported platforms
-        #[allow(clippy::cast_possible_wrap)]
-        let limit_i64 = limit as i64;
+        let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
         let conn = self.connection()?;
 
         let mut stmt = conn.prepare(&format!(

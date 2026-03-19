@@ -128,10 +128,16 @@ pub(crate) fn row_to_indexed_file(row: &rusqlite::Row) -> rusqlite::Result<Index
         language: parse_language(row.get::<_, String>(2)?.as_str())?,
         mtime_ns: row.get(3)?,
         // Safety: size_bytes stored as i64 in SQLite; bit-pattern round-trips correctly
-        #[allow(clippy::cast_sign_loss)]
+        #[expect(
+            clippy::cast_sign_loss,
+            reason = "i64 from SQLite is a bit-pattern round-trip of u64"
+        )]
         size_bytes: row.get::<_, i64>(4)? as u64,
         // Safety: content_hash stored as i64 in SQLite; bit-pattern round-trips correctly
-        #[allow(clippy::cast_sign_loss)]
+        #[expect(
+            clippy::cast_sign_loss,
+            reason = "i64 from SQLite is a bit-pattern round-trip of u64"
+        )]
         content_hash: row.get::<_, Option<i64>>(5)?.map(|h| h as u64),
         indexed_at: row.get(6)?,
     })
