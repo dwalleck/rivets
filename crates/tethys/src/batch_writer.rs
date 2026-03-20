@@ -174,18 +174,27 @@ impl BatchWriter {
         let mut batch: Vec<ParsedFileData> = Vec::with_capacity(batch_size);
 
         loop {
-            if let Ok(data) = receiver.recv() {
-                batch.push(data);
+            // Use match (not if-let) to make the channel-closed path explicit
+            // rather than hiding it in an else branch.
+            #[expect(
+                clippy::single_match_else,
+                reason = "explicit match makes the channel-closed path visible"
+            )]
+            match receiver.recv() {
+                Ok(data) => {
+                    batch.push(data);
 
-                if batch.len() >= batch_size {
-                    Self::write_batch(&mut db, &mut batch, &mut stats);
+                    if batch.len() >= batch_size {
+                        Self::write_batch(&mut db, &mut batch, &mut stats);
+                    }
                 }
-            } else {
-                // Channel closed, write any remaining files
-                if !batch.is_empty() {
-                    Self::write_batch(&mut db, &mut batch, &mut stats);
+                Err(_) => {
+                    // Channel closed (all senders dropped) -- write remaining batch and exit.
+                    if !batch.is_empty() {
+                        Self::write_batch(&mut db, &mut batch, &mut stats);
+                    }
+                    break;
                 }
-                break;
             }
         }
 

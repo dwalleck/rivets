@@ -217,6 +217,36 @@ mod tests {
     }
 
     #[test]
+    fn error_to_index_error_kind_mapping() {
+        // IO-category errors
+        let io_err = Error::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "missing"));
+        assert_eq!(IndexErrorKind::from(&io_err), IndexErrorKind::IoError);
+
+        let config_err = Error::Config("bad config".to_string());
+        assert_eq!(IndexErrorKind::from(&config_err), IndexErrorKind::IoError);
+
+        let not_found_err = Error::NotFound("no such file".to_string());
+        assert_eq!(
+            IndexErrorKind::from(&not_found_err),
+            IndexErrorKind::IoError
+        );
+
+        // Database-category errors
+        let internal_err = Error::Internal("mutex poisoned".to_string());
+        assert_eq!(
+            IndexErrorKind::from(&internal_err),
+            IndexErrorKind::DatabaseError
+        );
+
+        // Parser-category errors
+        let parser_err = Error::Parser("tree-sitter init failed".to_string());
+        assert_eq!(
+            IndexErrorKind::from(&parser_err),
+            IndexErrorKind::ParseFailed
+        );
+    }
+
+    #[test]
     fn index_error_display_includes_path_and_kind() {
         let error = IndexError::parse_failed(PathBuf::from("src/main.rs"), "unexpected token");
 

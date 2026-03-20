@@ -1002,8 +1002,13 @@ mod tests {
             .expect("index");
 
         assert_eq!(
-            stats.lsp_resolved_count, 0,
+            stats.total_lsp_resolved(),
+            0,
             "LSP resolved count should be 0 when use_lsp is false"
+        );
+        assert!(
+            stats.lsp_sessions.is_empty(),
+            "LSP sessions should be empty when use_lsp is false"
         );
     }
 }

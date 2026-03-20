@@ -12,7 +12,7 @@
 //! - `symbols` - Symbol CRUD operations
 //! - `references` - Reference CRUD operations
 //! - `imports` - Import CRUD operations
-//! - `call_edges` - Call edge CRUD operations
+//! - `call_edges` - Call edge bulk operations
 //! - `file_deps` - File dependency CRUD operations
 //! - `panic_points` - Panic point CRUD operations
 //! - `graph` - Graph traversal operations (`SymbolGraphOps`, `FileGraphOps`)

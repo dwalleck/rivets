@@ -3,6 +3,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use lsp_types::{
@@ -21,6 +22,11 @@ use super::Result;
 use super::error::LspError;
 use super::provider::LspProvider;
 
+/// Default timeout for waiting for a response to a single LSP request.
+/// Individual requests (`goto_definition`, `find_references`) should not take
+/// longer than this. Solution loading has its own separate timeout.
+const DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// LSP client for communicating with language servers.
 ///
 /// Provides a thin JSON-RPC transport layer over stdin/stdout.
@@ -29,6 +35,10 @@ pub struct LspClient {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     request_id: i64,
+    response_timeout: Duration,
+    /// Background thread draining the server's stderr into tracing logs.
+    /// Joined on shutdown to avoid leaking threads.
+    stderr_thread: Option<JoinHandle<()>>,
 }
 
 impl LspClient {
@@ -64,7 +74,7 @@ impl LspClient {
             .args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
@@ -88,11 +98,38 @@ impl LspClient {
         })?;
         let stdout = BufReader::new(stdout);
 
+        // Drain stderr in a background thread so LSP server diagnostics are
+        // captured via tracing instead of being permanently lost.
+        let server_name = command.to_string();
+        let stderr_thread = process.stderr.take().map(|stderr| {
+            std::thread::spawn(move || {
+                let reader = BufReader::new(stderr);
+                for line in reader.lines() {
+                    match line {
+                        Ok(line) if !line.is_empty() => {
+                            debug!(server = %server_name, "{line}");
+                        }
+                        Err(e) => {
+                            trace!(
+                                server = %server_name,
+                                error = %e,
+                                "LSP stderr read error"
+                            );
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            })
+        });
+
         let mut client = Self {
             process,
             stdin,
             stdout,
             request_id: 0,
+            response_timeout: DEFAULT_RESPONSE_TIMEOUT,
+            stderr_thread,
         };
 
         // Perform initialize handshake
@@ -203,8 +240,22 @@ impl LspClient {
     /// - Notifications (have `method` but no `id`) - skipped
     /// - Server requests (have both `method` AND `id`) - acknowledged with null result
     /// - Responses (have `id` but no `method`) - returned to caller
+    ///
+    /// Times out after `self.response_timeout` to prevent infinite hangs if the
+    /// server enters a pathological state (e.g., sending endless notifications).
     fn read_response<T: DeserializeOwned>(&mut self, expected_id: i64) -> Result<T> {
+        let start = Instant::now();
+        let mut skipped_messages: u32 = 0;
+
         loop {
+            if start.elapsed() > self.response_timeout {
+                return Err(LspError::InvalidHeader(format!(
+                    "timeout after {}s waiting for response to request {expected_id} \
+                     (skipped {skipped_messages} intermediate messages)",
+                    self.response_timeout.as_secs(),
+                )));
+            }
+
             // Read Content-Length header
             let content_length = self.read_content_length()?;
 
@@ -229,6 +280,7 @@ impl LspClient {
                 } else {
                     trace!(method = method, "Skipping LSP notification");
                 }
+                skipped_messages += 1;
                 continue;
             }
 
@@ -237,9 +289,14 @@ impl LspClient {
 
             // Check for error response
             if let Some(error) = message.get("error") {
-                let code = error["code"].as_i64().unwrap_or(-1);
-                let message = error["message"].as_str().unwrap_or("unknown error");
-                return Err(LspError::server_error(code, message));
+                let code = error.get("code").and_then(Value::as_i64);
+                let msg = error.get("message").and_then(Value::as_str);
+                return Err(match (code, msg) {
+                    (Some(code), Some(msg)) => LspError::server_error(code, msg),
+                    _ => LspError::InvalidHeader(format!(
+                        "malformed LSP error response (missing code or message): {error}"
+                    )),
+                });
             }
 
             // Verify response ID matches
@@ -544,11 +601,13 @@ impl LspClient {
     /// Gracefully shut down the LSP server.
     ///
     /// Sends a shutdown request followed by an exit notification.
+    /// Returns the process exit code so callers can detect problematic sessions.
+    /// `None` means the exit code could not be determined.
     ///
     /// # Errors
     ///
     /// Returns an error if communication with the server fails.
-    pub fn shutdown(&mut self) -> Result<()> {
+    pub fn shutdown(&mut self) -> Result<Option<i32>> {
         debug!("Shutting down LSP server");
 
         // Send shutdown request
@@ -557,7 +616,13 @@ impl LspClient {
         // Send exit notification
         self.send_notification("exit", &json!(null))?;
 
-        // Wait for process to exit and verify clean shutdown
+        // Wait for the stderr drain thread to finish before waiting on the process,
+        // so we capture all diagnostic output.
+        if let Some(handle) = self.stderr_thread.take() {
+            let _ = handle.join();
+        }
+
+        // Wait for process to exit and return exit code
         match self.process.wait() {
             Ok(status) => {
                 if !status.success() {
@@ -566,13 +631,13 @@ impl LspClient {
                         "LSP server exited with non-zero status"
                     );
                 }
+                Ok(status.code())
             }
             Err(e) => {
                 warn!(error = %e, "Failed to wait for LSP server process exit");
+                Ok(None)
             }
         }
-
-        Ok(())
     }
 
     /// Extract the first Location from a `GotoDefinitionResponse`.
@@ -600,6 +665,11 @@ impl Drop for LspClient {
             if e.kind() != std::io::ErrorKind::InvalidInput {
                 warn!(error = %e, "Failed to kill LSP server process during cleanup");
             }
+        }
+
+        // Join stderr thread before reaping, so any remaining output is flushed.
+        if let Some(handle) = self.stderr_thread.take() {
+            let _ = handle.join();
         }
 
         // Reap the child process to prevent zombies. The exit status is

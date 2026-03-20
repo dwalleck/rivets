@@ -861,13 +861,16 @@ impl IndexStats {
     /// Total number of references resolved across all LSP sessions.
     #[must_use]
     pub fn total_lsp_resolved(&self) -> usize {
-        self.lsp_sessions.iter().map(|s| s.resolved_count()).sum()
+        self.lsp_sessions
+            .iter()
+            .map(LspSessionResult::resolved_count)
+            .sum()
     }
 
     /// Whether any LSP session encountered errors.
     #[must_use]
     pub fn has_lsp_errors(&self) -> bool {
-        self.lsp_sessions.iter().any(|s| s.has_errors())
+        self.lsp_sessions.iter().any(LspSessionResult::has_errors)
     }
 }
 

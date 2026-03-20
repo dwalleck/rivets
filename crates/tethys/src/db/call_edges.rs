@@ -1,4 +1,4 @@
-//! Call edge CRUD operations for the Tethys index.
+//! Call edge bulk operations for the Tethys index.
 //!
 //! Call edges are pre-computed from the refs table for fast graph queries.
 //! They represent "who calls what" at the symbol level.
