@@ -173,6 +173,35 @@ fn rebuild_clears_and_reindexes_cleanly() {
     assert!(!symbols.is_empty(), "should find symbols after rebuild");
 }
 
+#[test]
+fn update_maps_index_stats_to_index_update_fields() {
+    let (_dir, mut tethys) =
+        workspace_with_files(&[("src/lib.rs", "pub fn hello() {}\npub struct Config {}\n")]);
+
+    tethys.index().expect("initial index should succeed");
+    let update = tethys.update().expect("update should succeed");
+
+    assert!(
+        update.files_changed > 0,
+        "update should report changed files"
+    );
+    assert_eq!(
+        update.files_unchanged, 0,
+        "update currently re-indexes everything so nothing is unchanged"
+    );
+    assert!(update.duration > std::time::Duration::ZERO);
+}
+
+#[test]
+fn needs_update_returns_true() {
+    let (_dir, tethys) = workspace_with_files(&[("src/lib.rs", "pub fn placeholder() {}\n")]);
+
+    assert!(
+        tethys.needs_update().expect("needs_update should not fail"),
+        "needs_update currently always returns true"
+    );
+}
+
 // === Filesystem edge cases: deeply nested directories ===
 
 #[test]

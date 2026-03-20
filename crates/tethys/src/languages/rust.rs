@@ -6,14 +6,9 @@
 // This is safe for practical source files (no file has 4 billion lines).
 #![allow(clippy::cast_possible_truncation)]
 
-use std::path::PathBuf;
-
-use super::common::{
-    ExtractedReference, ExtractedReferenceKind, ExtractedSymbol, ImportContext, ImportStatement,
-};
-use super::tree_sitter_utils::{node_span, node_text};
 use super::LanguageSupport;
-use crate::resolver::resolve_module_path;
+use super::common::{ExtractedReference, ExtractedReferenceKind, ExtractedSymbol, ImportStatement};
+use super::tree_sitter_utils::{node_span, node_text};
 use crate::types::{FunctionSignature, Parameter, Span, SymbolKind, Visibility};
 
 /// Tree-sitter node kind constants for Rust grammar.
@@ -74,16 +69,8 @@ mod node_kinds {
 pub struct RustLanguage;
 
 impl LanguageSupport for RustLanguage {
-    fn extensions(&self) -> &[&str] {
-        &["rs"]
-    }
-
     fn tree_sitter_language(&self) -> tree_sitter::Language {
         tree_sitter_rust::LANGUAGE.into()
-    }
-
-    fn lsp_command(&self) -> Option<&str> {
-        Some("rust-analyzer")
     }
 
     fn extract_symbols(&self, tree: &tree_sitter::Tree, content: &[u8]) -> Vec<ExtractedSymbol> {
@@ -103,17 +90,6 @@ impl LanguageSupport for RustLanguage {
             .into_iter()
             .map(|u| u.to_import_statement())
             .collect()
-    }
-
-    fn resolve_import(&self, import: &ImportStatement, context: &ImportContext) -> Vec<PathBuf> {
-        // Reconstruct the full module path from the import's path segments.
-        // The resolver expects the path including the leading segment (crate/self/super).
-        let resolved = resolve_module_path(&import.path, context.file_path, context.workspace_root);
-
-        match resolved {
-            Some(path) => vec![path],
-            None => vec![],
-        }
     }
 }
 
@@ -138,7 +114,6 @@ pub struct UseStatement {
 impl UseStatement {
     /// Convert to the common `ImportStatement` representation.
     #[must_use]
-    #[allow(dead_code)] // Public API, will be used when language-agnostic indexing is implemented
     pub fn to_import_statement(&self) -> ImportStatement {
         ImportStatement {
             path: self.path.clone(),
@@ -191,17 +166,17 @@ fn extract_references_recursive(
 
         TYPE_IDENTIFIER => {
             // Type annotation - but only if not part of a definition
-            if !is_type_definition_context(node) {
-                if let Some(name) = node_text(node, content) {
-                    refs.push(ExtractedReference {
-                        name,
-                        kind: ExtractedReferenceKind::Type,
-                        line: node.start_position().row as u32 + 1,
-                        column: node.start_position().column as u32 + 1,
-                        path: None,
-                        containing_symbol_span: containing_span,
-                    });
-                }
+            if !is_type_definition_context(node)
+                && let Some(name) = node_text(node, content)
+            {
+                refs.push(ExtractedReference {
+                    name,
+                    kind: ExtractedReferenceKind::Type,
+                    line: node.start_position().row as u32 + 1,
+                    column: node.start_position().column as u32 + 1,
+                    path: None,
+                    containing_symbol_span: containing_span,
+                });
             }
         }
 
@@ -386,10 +361,10 @@ fn is_type_definition_context(node: &tree_sitter::Node) -> bool {
             // These define the type, not reference it
             "struct_item" | "enum_item" | "trait_item" | "type_item" => {
                 // Check if the type_identifier is the "name" field of the definition
-                if let Some(name_node) = parent.child_by_field_name("name") {
-                    if name_node.id() == node.id() {
-                        return true;
-                    }
+                if let Some(name_node) = parent.child_by_field_name("name")
+                    && name_node.id() == node.id()
+                {
+                    return true;
                 }
             }
             // impl blocks can be definitions or references
@@ -460,7 +435,7 @@ fn parse_use_declaration(node: &tree_sitter::Node, content: &[u8]) -> Option<Use
             }
             SCOPED_USE_LIST => {
                 // List use: `use std::collections::{HashMap, HashSet};`
-                return parse_scoped_use_list(&child, content, line);
+                return Some(parse_scoped_use_list(&child, content, line));
             }
             USE_AS_CLAUSE => {
                 // Alias use: `use std::collections::HashMap as Map;`
@@ -479,7 +454,7 @@ fn parse_use_declaration(node: &tree_sitter::Node, content: &[u8]) -> Option<Use
             }
             USE_WILDCARD => {
                 // Glob use: `use std::collections::*;` - the wildcard node contains the path
-                return parse_use_wildcard(&child, content, line);
+                return Some(parse_use_wildcard(&child, content, line));
             }
             USE_LIST => {
                 // Bare use list without path (rare)
@@ -500,8 +475,7 @@ fn parse_use_declaration(node: &tree_sitter::Node, content: &[u8]) -> Option<Use
 }
 
 /// Parse a `use_wildcard` node like `std::collections::*`.
-#[allow(clippy::unnecessary_wraps)] // Consistency with other parse functions; may need Option later
-fn parse_use_wildcard(node: &tree_sitter::Node, content: &[u8], line: u32) -> Option<UseStatement> {
+fn parse_use_wildcard(node: &tree_sitter::Node, content: &[u8], line: u32) -> UseStatement {
     use node_kinds::SCOPED_IDENTIFIER;
 
     let mut path = Vec::new();
@@ -515,13 +489,13 @@ fn parse_use_wildcard(node: &tree_sitter::Node, content: &[u8], line: u32) -> Op
         }
     }
 
-    Some(UseStatement {
+    UseStatement {
         path,
         imported_names: vec![],
         is_glob: true,
         alias: None,
         line,
-    })
+    }
 }
 
 /// Parse a scoped identifier like `std::collections::HashMap`.
@@ -548,10 +522,10 @@ fn collect_scoped_path(node: &tree_sitter::Node, content: &[u8], segments: &mut 
             if let Some(path_node) = node.child_by_field_name("path") {
                 collect_scoped_path(&path_node, content, segments);
             }
-            if let Some(name_node) = node.child_by_field_name("name") {
-                if let Some(text) = node_text(&name_node, content) {
-                    segments.push(text);
-                }
+            if let Some(name_node) = node.child_by_field_name("name")
+                && let Some(text) = node_text(&name_node, content)
+            {
+                segments.push(text);
             }
         }
         IDENTIFIER | CRATE | SELF | SUPER => {
@@ -564,12 +538,7 @@ fn collect_scoped_path(node: &tree_sitter::Node, content: &[u8], segments: &mut 
 }
 
 /// Parse a scoped use list like `std::collections::{HashMap, HashSet}` or `std::collections::*`.
-#[allow(clippy::unnecessary_wraps)] // Consistency with other parse functions; may need Option later
-fn parse_scoped_use_list(
-    node: &tree_sitter::Node,
-    content: &[u8],
-    line: u32,
-) -> Option<UseStatement> {
+fn parse_scoped_use_list(node: &tree_sitter::Node, content: &[u8], line: u32) -> UseStatement {
     use node_kinds::{USE_LIST, USE_WILDCARD};
 
     let mut path = Vec::new();
@@ -600,13 +569,13 @@ fn parse_scoped_use_list(
         }
     }
 
-    Some(UseStatement {
+    UseStatement {
         path,
         imported_names: names,
         is_glob,
         alias: None,
         line,
-    })
+    }
 }
 
 /// Collect names from a use list `{A, B, C}`.
@@ -719,13 +688,12 @@ fn extract_symbols_recursive(
                 if child.kind() == DECLARATION_LIST {
                     let mut inner_cursor = child.walk();
                     for item in child.children(&mut inner_cursor) {
-                        if item.kind() == FUNCTION_ITEM {
-                            if let Some(mut sym) =
+                        if item.kind() == FUNCTION_ITEM
+                            && let Some(mut sym) =
                                 extract_function(&item, content, type_name.as_deref())
-                            {
-                                sym.kind = SymbolKind::Method;
-                                symbols.push(sym);
-                            }
+                        {
+                            sym.kind = SymbolKind::Method;
+                            symbols.push(sym);
                         }
                     }
                 }
@@ -1089,18 +1057,6 @@ mod tests {
         parser
             .parse(code, None)
             .expect("parsing test code should succeed")
-    }
-
-    #[test]
-    fn rust_language_extensions() {
-        let lang = RustLanguage;
-        assert_eq!(lang.extensions(), &["rs"]);
-    }
-
-    #[test]
-    fn rust_language_has_lsp() {
-        let lang = RustLanguage;
-        assert_eq!(lang.lsp_command(), Some("rust-analyzer"));
     }
 
     #[test]
@@ -1552,76 +1508,5 @@ fn outer() {
             3,
             "containing span should point to inner() function, not outer()"
         );
-    }
-
-    // ========================================================================
-    // resolve_import Tests (Task 5)
-    // ========================================================================
-
-    #[test]
-    fn resolve_import_resolves_crate_path() {
-        use crate::languages::common::ImportContext;
-        use std::fs;
-
-        let dir = tempfile::tempdir().expect("should create temp directory");
-        let src = dir.path().join("src");
-        fs::create_dir_all(&src).expect("should create src directory");
-        fs::write(src.join("lib.rs"), "mod config;").expect("should write lib.rs");
-        fs::write(src.join("config.rs"), "pub struct Config {}").expect("should write config.rs");
-
-        let import = ImportStatement {
-            path: vec!["crate".to_string(), "config".to_string()],
-            imported_names: vec!["Config".to_string()],
-            is_glob: false,
-            alias: None,
-            line: 1,
-        };
-
-        let file_path = src.join("lib.rs");
-        let context = ImportContext {
-            file_path: &file_path,
-            workspace_root: &src,
-            known_files: &[],
-        };
-
-        let lang = RustLanguage;
-        let resolved = lang.resolve_import(&import, &context);
-
-        assert_eq!(resolved.len(), 1, "should resolve to exactly one file");
-        assert!(
-            resolved[0].ends_with("config.rs"),
-            "should resolve to config.rs, got: {}",
-            resolved[0].display()
-        );
-        assert!(resolved[0].exists(), "resolved path should exist");
-    }
-
-    #[test]
-    fn resolve_import_returns_empty_for_external_crate() {
-        use crate::languages::common::ImportContext;
-
-        let dir = tempfile::tempdir().expect("should create temp directory");
-        let src = dir.path().join("src");
-        std::fs::create_dir_all(&src).expect("should create src directory");
-
-        let import = ImportStatement {
-            path: vec!["serde".to_string()],
-            imported_names: vec!["Serialize".to_string()],
-            is_glob: false,
-            alias: None,
-            line: 1,
-        };
-
-        let file_path = src.join("lib.rs");
-        let context = ImportContext {
-            file_path: &file_path,
-            workspace_root: &src,
-            known_files: &[],
-        };
-
-        let lang = RustLanguage;
-        let resolved = lang.resolve_import(&import, &context);
-
-        assert!(resolved.is_empty(), "external crate should not resolve");
     }
 }

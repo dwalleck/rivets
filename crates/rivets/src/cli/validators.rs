@@ -194,17 +194,17 @@ pub fn validate_label(s: &str) -> Result<String, String> {
     }
 
     // Must start with alphanumeric
-    if let Some(first) = s.chars().next() {
-        if !first.is_ascii_alphanumeric() {
-            return Err("Label must start with a letter or number".to_string());
-        }
+    if let Some(first) = s.chars().next()
+        && !first.is_ascii_alphanumeric()
+    {
+        return Err("Label must start with a letter or number".to_string());
     }
 
     // Must end with alphanumeric
-    if let Some(last) = s.chars().last() {
-        if !last.is_ascii_alphanumeric() {
-            return Err("Label must end with a letter or number".to_string());
-        }
+    if let Some(last) = s.chars().last()
+        && !last.is_ascii_alphanumeric()
+    {
+        return Err("Label must end with a letter or number".to_string());
     }
 
     // No consecutive hyphens or underscores
@@ -296,10 +296,12 @@ mod tests {
     fn test_validate_issue_id_prefix_too_short() {
         let result = validate_issue_id("a-123");
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_lowercase()
-            .contains("at least 2 characters"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_lowercase()
+                .contains("at least 2 characters")
+        );
     }
 
     #[test]
@@ -330,10 +332,12 @@ mod tests {
         let issue_id = format!("{}-xyz", prefix_21);
         let result = validate_issue_id(&issue_id);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_lowercase()
-            .contains("cannot exceed 20"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_lowercase()
+                .contains("cannot exceed 20")
+        );
     }
 
     #[test]
@@ -355,9 +359,11 @@ mod tests {
     fn test_validate_issue_id_consecutive_hyphens() {
         let result = validate_issue_id("proj-a--b");
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .contains("cannot contain consecutive hyphens"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("cannot contain consecutive hyphens")
+        );
     }
 
     // ========== Title Validation ==========
@@ -533,9 +539,11 @@ mod tests {
     fn test_validate_label_space_rejected() {
         let result = validate_label("high priority");
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .contains("lowercase letters, numbers, hyphens"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("lowercase letters, numbers, hyphens")
+        );
     }
 
     #[test]

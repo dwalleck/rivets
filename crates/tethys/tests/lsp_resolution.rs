@@ -99,7 +99,7 @@ pub fn use_data_processor() -> i32 {
     assert!(
         !symbols.is_empty(),
         "should find 'process' symbol (trait method or impl); LSP resolved {} references",
-        stats.lsp_resolved_count
+        stats.total_lsp_resolved()
     );
 
     // Verify we can query callers for the trait method
@@ -189,7 +189,7 @@ pub fn chain_inference() -> Option<i32> {
         "create_data should have at least 2 callers (process_data, chain_inference), \
          got: {}; LSP resolved {} references",
         callers.len(),
-        stats.lsp_resolved_count
+        stats.total_lsp_resolved()
     );
 }
 
@@ -251,7 +251,8 @@ fn internal_work() -> i32 {
 
     // Key assertion: non-LSP index should report 0 LSP resolutions
     assert_eq!(
-        stats_no_lsp.lsp_resolved_count, 0,
+        stats_no_lsp.total_lsp_resolved(),
+        0,
         "non-LSP index should report 0 LSP resolutions"
     );
 
@@ -266,7 +267,7 @@ fn internal_work() -> i32 {
          without LSP: {} refs found, with LSP: {} refs found ({} via LSP)",
         stats_no_lsp.references_found,
         stats_with_lsp.references_found,
-        stats_with_lsp.lsp_resolved_count
+        stats_with_lsp.total_lsp_resolved()
     );
 }
 
@@ -330,7 +331,7 @@ pub fn use_string_container() -> String {
         new_callers.len() >= 2,
         "Container::new should have at least 2 callers, got: {}; LSP resolved {} refs",
         new_callers.len(),
-        stats.lsp_resolved_count
+        stats.total_lsp_resolved()
     );
 
     let get_callers = tethys

@@ -7,10 +7,10 @@
 
 use crate::domain::{Dependency, DependencyType, Issue, IssueId, IssueStatus};
 use crate::error::{Error, Result};
+use petgraph::Direction;
 use petgraph::algo;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
-use petgraph::Direction;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Maximum depth for BFS traversal in blocking detection.
@@ -54,10 +54,10 @@ pub(super) fn get_dependency_tree_impl(
     // BFS traversal for transitive dependencies
     while let Some((current_node, depth)) = queue.pop_front() {
         // Check max depth limit
-        if let Some(max) = max_depth {
-            if depth >= max {
-                continue;
-            }
+        if let Some(max) = max_depth
+            && depth >= max
+        {
+            continue;
         }
 
         // Explore dependencies of current node
@@ -154,11 +154,11 @@ pub(super) fn find_blocked_issues(
         for edge in graph.edges(node) {
             if edge.weight() == &DependencyType::Blocks {
                 let blocker_id = &graph[edge.target()];
-                if let Some(blocker) = issues.get(blocker_id) {
-                    if blocker.status != IssueStatus::Closed {
-                        blocked.insert(id.clone());
-                        break;
-                    }
+                if let Some(blocker) = issues.get(blocker_id)
+                    && blocker.status != IssueStatus::Closed
+                {
+                    blocked.insert(id.clone());
+                    break;
                 }
             }
         }

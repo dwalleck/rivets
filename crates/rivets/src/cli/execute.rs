@@ -1043,10 +1043,10 @@ async fn build_dep_tree_children(
     use crate::output::DepTreeNode;
 
     // Check depth limit
-    if let Some(max) = max_depth {
-        if current_depth >= max {
-            return Ok(vec![]);
-        }
+    if let Some(max) = max_depth
+        && current_depth >= max
+    {
+        return Ok(vec![]);
     }
 
     let deps = app.storage().get_dependencies(parent_id).await?;
@@ -2017,7 +2017,7 @@ mod tests {
     }
 
     mod execute_update_tests {
-        use super::super::{execute_update, UpdateArgs};
+        use super::super::{UpdateArgs, execute_update};
         use crate::output::OutputMode;
         use tempfile::TempDir;
 
@@ -2064,7 +2064,7 @@ mod tests {
     }
 
     mod execute_close_tests {
-        use super::super::{execute_close, CloseArgs};
+        use super::super::{CloseArgs, execute_close};
         use crate::domain::{IssueStatus, IssueUpdate, NewIssue};
         use crate::output::OutputMode;
         use tempfile::TempDir;
@@ -2115,7 +2115,7 @@ mod tests {
     }
 
     mod execute_reopen_tests {
-        use super::super::{execute_reopen, ReopenArgs};
+        use super::super::{ReopenArgs, execute_reopen};
         use crate::domain::NewIssue;
         use crate::output::OutputMode;
         use tempfile::TempDir;

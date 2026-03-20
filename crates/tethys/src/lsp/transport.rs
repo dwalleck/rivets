@@ -3,23 +3,29 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use lsp_types::{
-    notification::{DidOpenTextDocument, Notification},
-    request::{GotoDefinition, Initialize, References, Shutdown},
     ClientCapabilities, DidOpenTextDocumentParams, GotoDefinitionParams, GotoDefinitionResponse,
     InitializeParams, InitializeResult, Location, PartialResultParams, Position, ReferenceContext,
     ReferenceParams, TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams, Uri,
     WindowClientCapabilities, WorkDoneProgressParams,
+    notification::{DidOpenTextDocument, Notification},
+    request::{GotoDefinition, Initialize, References, Shutdown},
 };
-use serde::{de::DeserializeOwned, Serialize};
-use serde_json::{json, Value};
+use serde::{Serialize, de::DeserializeOwned};
+use serde_json::{Value, json};
 use tracing::{debug, trace, warn};
 
+use super::Result;
 use super::error::LspError;
 use super::provider::LspProvider;
-use super::Result;
+
+/// Default timeout for waiting for a response to a single LSP request.
+/// Individual requests (`goto_definition`, `find_references`) should not take
+/// longer than this. Solution loading has its own separate timeout.
+const DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// LSP client for communicating with language servers.
 ///
@@ -29,6 +35,10 @@ pub struct LspClient {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     request_id: i64,
+    response_timeout: Duration,
+    /// Background thread draining the server's stderr into tracing logs.
+    /// Joined on shutdown to avoid leaking threads.
+    stderr_thread: Option<JoinHandle<()>>,
 }
 
 impl LspClient {
@@ -45,11 +55,8 @@ impl LspClient {
     /// - The LSP server executable is not found
     /// - The server fails to start
     /// - The initialize handshake fails
-    ///
-    /// # Panics
-    ///
-    /// Panics if stdin/stdout are not available after spawning the process.
-    /// This should never happen when `Stdio::piped()` is used.
+    /// - stdin/stdout are not available after spawning the process
+    ///   (should not happen when `Stdio::piped()` is used)
     #[must_use = "LSP client holds a running process that should be shut down"]
     pub fn start(provider: &dyn LspProvider, workspace_path: &Path) -> Result<Self> {
         let command = provider.command();
@@ -67,7 +74,7 @@ impl LspClient {
             .args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
@@ -91,11 +98,38 @@ impl LspClient {
         })?;
         let stdout = BufReader::new(stdout);
 
+        // Drain stderr in a background thread so LSP server diagnostics are
+        // captured via tracing instead of being permanently lost.
+        let server_name = command.to_string();
+        let stderr_thread = process.stderr.take().map(|stderr| {
+            std::thread::spawn(move || {
+                let reader = BufReader::new(stderr);
+                for line in reader.lines() {
+                    match line {
+                        Ok(line) if !line.is_empty() => {
+                            debug!(server = %server_name, "{line}");
+                        }
+                        Err(e) => {
+                            trace!(
+                                server = %server_name,
+                                error = %e,
+                                "LSP stderr read error"
+                            );
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            })
+        });
+
         let mut client = Self {
             process,
             stdin,
             stdout,
             request_id: 0,
+            response_timeout: DEFAULT_RESPONSE_TIMEOUT,
+            stderr_thread,
         };
 
         // Perform initialize handshake
@@ -105,7 +139,9 @@ impl LspClient {
     }
 
     /// Perform the LSP initialize handshake.
-    #[allow(deprecated)] // root_uri is deprecated but still widely used
+    // root_uri is deprecated in the LSP spec in favor of workspaceFolders, but many
+    // language servers (e.g. rust-analyzer, csharp-ls) still require it for initialization.
+    #[expect(deprecated, reason = "root_uri required by some LSP servers")]
     fn initialize(&mut self, workspace_path: &Path, init_options: Option<Value>) -> Result<()> {
         let workspace_uri = path_to_uri(workspace_path)?;
 
@@ -204,8 +240,22 @@ impl LspClient {
     /// - Notifications (have `method` but no `id`) - skipped
     /// - Server requests (have both `method` AND `id`) - acknowledged with null result
     /// - Responses (have `id` but no `method`) - returned to caller
+    ///
+    /// Times out after `self.response_timeout` to prevent infinite hangs if the
+    /// server enters a pathological state (e.g., sending endless notifications).
     fn read_response<T: DeserializeOwned>(&mut self, expected_id: i64) -> Result<T> {
+        let start = Instant::now();
+        let mut skipped_messages: u32 = 0;
+
         loop {
+            if start.elapsed() > self.response_timeout {
+                return Err(LspError::InvalidHeader(format!(
+                    "timeout after {}s waiting for response to request {expected_id} \
+                     (skipped {skipped_messages} intermediate messages)",
+                    self.response_timeout.as_secs(),
+                )));
+            }
+
             // Read Content-Length header
             let content_length = self.read_content_length()?;
 
@@ -230,6 +280,7 @@ impl LspClient {
                 } else {
                     trace!(method = method, "Skipping LSP notification");
                 }
+                skipped_messages += 1;
                 continue;
             }
 
@@ -238,9 +289,14 @@ impl LspClient {
 
             // Check for error response
             if let Some(error) = message.get("error") {
-                let code = error["code"].as_i64().unwrap_or(-1);
-                let message = error["message"].as_str().unwrap_or("unknown error");
-                return Err(LspError::server_error(code, message));
+                let code = error.get("code").and_then(Value::as_i64);
+                let msg = error.get("message").and_then(Value::as_str);
+                return Err(match (code, msg) {
+                    (Some(code), Some(msg)) => LspError::server_error(code, msg),
+                    _ => LspError::InvalidHeader(format!(
+                        "malformed LSP error response (missing code or message): {error}"
+                    )),
+                });
             }
 
             // Verify response ID matches
@@ -437,63 +493,60 @@ impl LspClient {
                 }
 
                 // Check for $/progress notifications
-                if method == "$/progress" {
-                    if let Some(params) = message.get("params") {
-                        let token = params.get("token").and_then(|t| {
-                            // Token can be string or number
-                            t.as_str()
-                                .map(String::from)
-                                .or_else(|| t.as_i64().map(|n| n.to_string()))
-                        });
+                if method == "$/progress"
+                    && let Some(params) = message.get("params")
+                {
+                    let token = params.get("token").and_then(|t| {
+                        // Token can be string or number
+                        t.as_str()
+                            .map(String::from)
+                            .or_else(|| t.as_i64().map(|n| n.to_string()))
+                    });
 
-                        if let Some(value) = params.get("value") {
-                            let kind = value.get("kind").and_then(Value::as_str);
+                    if let Some(value) = params.get("value") {
+                        let kind = value.get("kind").and_then(Value::as_str);
 
-                            match kind {
-                                Some("begin") => {
-                                    // Check if this is the workspace loading progress
-                                    if let Some(title) = value.get("title").and_then(Value::as_str)
-                                    {
-                                        if title.starts_with("Loading workspace") {
-                                            if let Some(ref tok) = token {
-                                                debug!(
-                                                    token = tok,
-                                                    title = title,
-                                                    "Detected solution loading started"
-                                                );
-                                                loading_token = token;
-                                            }
-                                        }
-                                    }
+                        match kind {
+                            Some("begin") => {
+                                // Check if this is the workspace loading progress
+                                if let Some(title) = value.get("title").and_then(Value::as_str)
+                                    && title.starts_with("Loading workspace")
+                                    && let Some(ref tok) = token
+                                {
+                                    debug!(
+                                        token = tok,
+                                        title = title,
+                                        "Detected solution loading started"
+                                    );
+                                    loading_token = token;
                                 }
-                                Some("report") => {
-                                    // Log progress updates if we're tracking this token
-                                    if loading_token.is_some() && token == loading_token {
-                                        if let Some(msg) =
-                                            value.get("message").and_then(Value::as_str)
-                                        {
-                                            trace!(message = msg, "Solution loading progress");
-                                        }
-                                    }
-                                }
-                                Some("end") => {
-                                    // Check if this is the end of our tracked loading
-                                    if loading_token.is_some() && token == loading_token {
-                                        let msg = value
-                                            .get("message")
-                                            .and_then(Value::as_str)
-                                            .unwrap_or("completed");
-                                        #[allow(clippy::cast_possible_truncation)]
-                                        let elapsed_ms = start.elapsed().as_millis() as u64;
-                                        debug!(
-                                            message = msg,
-                                            elapsed_ms, "Solution loading completed"
-                                        );
-                                        return Ok(true);
-                                    }
-                                }
-                                _ => {}
                             }
+                            Some("report") => {
+                                // Log progress updates if we're tracking this token
+                                if loading_token.is_some()
+                                    && token == loading_token
+                                    && let Some(msg) = value.get("message").and_then(Value::as_str)
+                                {
+                                    trace!(message = msg, "Solution loading progress");
+                                }
+                            }
+                            Some("end") => {
+                                // Check if this is the end of our tracked loading
+                                if loading_token.is_some() && token == loading_token {
+                                    let msg = value
+                                        .get("message")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("completed");
+                                    #[expect(
+                                        clippy::cast_possible_truncation,
+                                        reason = "elapsed millis for logging; truncation harmless"
+                                    )]
+                                    let elapsed_ms = start.elapsed().as_millis() as u64;
+                                    debug!(message = msg, elapsed_ms, "Solution loading completed");
+                                    return Ok(true);
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -548,11 +601,13 @@ impl LspClient {
     /// Gracefully shut down the LSP server.
     ///
     /// Sends a shutdown request followed by an exit notification.
+    /// Returns the process exit code so callers can detect problematic sessions.
+    /// `None` means the exit code could not be determined.
     ///
     /// # Errors
     ///
     /// Returns an error if communication with the server fails.
-    pub fn shutdown(&mut self) -> Result<()> {
+    pub fn shutdown(&mut self) -> Result<Option<i32>> {
         debug!("Shutting down LSP server");
 
         // Send shutdown request
@@ -561,7 +616,13 @@ impl LspClient {
         // Send exit notification
         self.send_notification("exit", &json!(null))?;
 
-        // Wait for process to exit and verify clean shutdown
+        // Wait for the stderr drain thread to finish before waiting on the process,
+        // so we capture all diagnostic output.
+        if let Some(handle) = self.stderr_thread.take() {
+            let _ = handle.join();
+        }
+
+        // Wait for process to exit and return exit code
         match self.process.wait() {
             Ok(status) => {
                 if !status.success() {
@@ -570,13 +631,13 @@ impl LspClient {
                         "LSP server exited with non-zero status"
                     );
                 }
+                Ok(status.code())
             }
             Err(e) => {
                 warn!(error = %e, "Failed to wait for LSP server process exit");
+                Ok(None)
             }
         }
-
-        Ok(())
     }
 
     /// Extract the first Location from a `GotoDefinitionResponse`.
@@ -606,7 +667,13 @@ impl Drop for LspClient {
             }
         }
 
-        // Reap the process to prevent zombies
+        // Join stderr thread before reaping, so any remaining output is flushed.
+        if let Some(handle) = self.stderr_thread.take() {
+            let _ = handle.join();
+        }
+
+        // Reap the child process to prevent zombies. The exit status is
+        // irrelevant during cleanup — we already attempted kill() above.
         let _ = self.process.wait();
     }
 }
@@ -660,7 +727,6 @@ mod tests {
     }
 
     /// Test helper to create a mock JSON-RPC error response.
-    #[allow(dead_code)]
     fn mock_error_response(id: i64, code: i64, message: &str) -> String {
         let response = json!({
             "jsonrpc": "2.0",

@@ -6,13 +6,9 @@
 // This is safe for practical source files (no file has 4 billion lines).
 #![allow(clippy::cast_possible_truncation)]
 
-use std::path::PathBuf;
-
-use super::common::{
-    ExtractedReference, ExtractedReferenceKind, ExtractedSymbol, ImportContext, ImportStatement,
-};
-use super::tree_sitter_utils::{node_span, node_text};
 use super::LanguageSupport;
+use super::common::{ExtractedReference, ExtractedReferenceKind, ExtractedSymbol, ImportStatement};
+use super::tree_sitter_utils::{node_span, node_text};
 use crate::types::{FunctionSignature, Parameter, Span, SymbolKind, Visibility};
 
 /// Tree-sitter node kind constants for C# grammar.
@@ -67,16 +63,8 @@ mod node_kinds {
 pub struct CSharpLanguage;
 
 impl LanguageSupport for CSharpLanguage {
-    fn extensions(&self) -> &[&str] {
-        &["cs"]
-    }
-
     fn tree_sitter_language(&self) -> tree_sitter::Language {
         tree_sitter_c_sharp::LANGUAGE.into()
-    }
-
-    fn lsp_command(&self) -> Option<&str> {
-        Some("csharp-ls")
     }
 
     fn extract_symbols(
@@ -104,11 +92,6 @@ impl LanguageSupport for CSharpLanguage {
             .into_iter()
             .map(|u| u.to_import_statement())
             .collect()
-    }
-
-    fn resolve_import(&self, _import: &ImportStatement, _context: &ImportContext) -> Vec<PathBuf> {
-        // TODO: Implement namespace resolution (Task 6)
-        vec![]
     }
 }
 
@@ -396,10 +379,10 @@ fn collect_member_access_path(
             if let Some(expr_node) = node.child_by_field_name("expression") {
                 collect_member_access_path(&expr_node, content, segments);
             }
-            if let Some(name_node) = node.child_by_field_name("name") {
-                if let Some(text) = node_text(&name_node, content) {
-                    segments.push(text);
-                }
+            if let Some(name_node) = node.child_by_field_name("name")
+                && let Some(text) = node_text(&name_node, content)
+            {
+                segments.push(text);
             }
         }
         IDENTIFIER => {
@@ -439,10 +422,10 @@ fn collect_qualified_name_path(
             if let Some(qualifier) = node.child_by_field_name("qualifier") {
                 collect_qualified_name_path(&qualifier, content, segments);
             }
-            if let Some(name_node) = node.child_by_field_name("name") {
-                if let Some(text) = node_text(&name_node, content) {
-                    segments.push(text);
-                }
+            if let Some(name_node) = node.child_by_field_name("name")
+                && let Some(text) = node_text(&name_node, content)
+            {
+                segments.push(text);
             }
         }
         IDENTIFIER => {
@@ -534,10 +517,11 @@ fn parse_using_directive(node: &tree_sitter::Node, content: &[u8]) -> Option<Usi
         match child.kind() {
             IDENTIFIER => {
                 // Could be a simple using or the identifier after an alias
-                if alias.is_none() && !is_static {
-                    if let Some(text) = node_text(&child, content) {
-                        namespace.push(text);
-                    }
+                if alias.is_none()
+                    && !is_static
+                    && let Some(text) = node_text(&child, content)
+                {
+                    namespace.push(text);
                 }
             }
             QUALIFIED_NAME => {
@@ -919,12 +903,11 @@ fn has_modifier(node: &tree_sitter::Node, content: &[u8], modifier: &str) -> boo
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if child.kind() == MODIFIER {
-            if let Some(text) = node_text(&child, content) {
-                if text == modifier {
-                    return true;
-                }
-            }
+        if child.kind() == MODIFIER
+            && let Some(text) = node_text(&child, content)
+            && text == modifier
+        {
+            return true;
         }
     }
     false
@@ -954,17 +937,17 @@ fn has_test_attribute(node: &tree_sitter::Node, content: &[u8]) -> bool {
             for attr_child in child.children(&mut inner_cursor) {
                 if attr_child.kind() == ATTRIBUTE {
                     // Get the attribute name (first identifier child)
-                    if let Some(name_node) = attr_child.child_by_field_name("name") {
-                        if let Some(attr_name) = node_text(&name_node, content) {
-                            // Handle fully qualified names like "NUnit.Framework.Test"
-                            // by checking the last segment
-                            let simple_name = attr_name.rsplit('.').next().unwrap_or(&attr_name);
-                            // Also strip "Attribute" suffix if present
-                            let name_without_suffix =
-                                simple_name.strip_suffix("Attribute").unwrap_or(simple_name);
-                            if CSHARP_TEST_ATTRIBUTES.contains(&name_without_suffix) {
-                                return true;
-                            }
+                    if let Some(name_node) = attr_child.child_by_field_name("name")
+                        && let Some(attr_name) = node_text(&name_node, content)
+                    {
+                        // Handle fully qualified names like "NUnit.Framework.Test"
+                        // by checking the last segment
+                        let simple_name = attr_name.rsplit('.').next().unwrap_or(&attr_name);
+                        // Also strip "Attribute" suffix if present
+                        let name_without_suffix =
+                            simple_name.strip_suffix("Attribute").unwrap_or(simple_name);
+                        if CSHARP_TEST_ATTRIBUTES.contains(&name_without_suffix) {
+                            return true;
                         }
                     }
                 }
@@ -1033,9 +1016,9 @@ fn extract_signature_details(
         parameters,
         return_type,
         is_async,
-        is_unsafe: false, // TODO: detect unsafe modifier
-        is_const: false,  // C# doesn't have const functions
-        generics: None,   // TODO: Extract type parameters
+        is_unsafe: false,
+        is_const: false,
+        generics: None,
     })
 }
 
@@ -1047,10 +1030,10 @@ fn extract_parameters(params_node: &tree_sitter::Node, content: &[u8]) -> Vec<Pa
     let mut cursor = params_node.walk();
 
     for child in params_node.children(&mut cursor) {
-        if child.kind() == PARAMETER {
-            if let Some(param) = extract_parameter(&child, content) {
-                parameters.push(param);
-            }
+        if child.kind() == PARAMETER
+            && let Some(param) = extract_parameter(&child, content)
+        {
+            parameters.push(param);
         }
     }
 
@@ -1085,18 +1068,6 @@ mod tests {
         parser
             .parse(code, None)
             .expect("parsing test code should succeed")
-    }
-
-    #[test]
-    fn csharp_language_extensions() {
-        let lang = CSharpLanguage;
-        assert_eq!(lang.extensions(), &["cs"]);
-    }
-
-    #[test]
-    fn csharp_language_has_lsp() {
-        let lang = CSharpLanguage;
-        assert_eq!(lang.lsp_command(), Some("csharp-ls"));
     }
 
     #[test]
@@ -1623,46 +1594,6 @@ public class Test {
         assert_ne!(
             foo_ref.containing_symbol_span.unwrap().start_line(),
             bar_ref.containing_symbol_span.unwrap().start_line()
-        );
-    }
-
-    // ========================================================================
-    // resolve_import Tests (Task 5)
-    // ========================================================================
-
-    #[test]
-    fn resolve_import_returns_empty_for_csharp() {
-        use crate::languages::common::ImportContext;
-
-        let dir = tempfile::tempdir().expect("should create temp directory");
-        let src = dir.path().join("src");
-        std::fs::create_dir_all(&src).expect("should create src directory");
-
-        let import = ImportStatement {
-            path: vec![
-                "System".to_string(),
-                "Collections".to_string(),
-                "Generic".to_string(),
-            ],
-            imported_names: vec![],
-            is_glob: false,
-            alias: None,
-            line: 1,
-        };
-
-        let file_path = src.join("Program.cs");
-        let context = ImportContext {
-            file_path: &file_path,
-            workspace_root: &src,
-            known_files: &[],
-        };
-
-        let lang = CSharpLanguage;
-        let resolved = lang.resolve_import(&import, &context);
-
-        assert!(
-            resolved.is_empty(),
-            "C# resolve_import should return empty vec (stub)"
         );
     }
 }

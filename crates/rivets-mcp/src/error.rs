@@ -43,7 +43,9 @@ pub enum Error {
     NoRivetsDirectory(String),
 
     /// Failed to load workspace configuration.
-    #[error("Failed to load config from '{path}': {reason}. Run 'rivets init' to create a valid configuration.")]
+    #[error(
+        "Failed to load config from '{path}': {reason}. Run 'rivets init' to create a valid configuration."
+    )]
     ConfigLoad {
         /// The path to the config file.
         path: String,

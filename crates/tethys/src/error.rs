@@ -141,6 +141,16 @@ impl IndexErrorKind {
     }
 }
 
+impl From<&Error> for IndexErrorKind {
+    fn from(error: &Error) -> Self {
+        match error {
+            Error::Io(_) | Error::Config(_) | Error::NotFound(_) => Self::IoError,
+            Error::Database(_) | Error::Internal(_) => Self::DatabaseError,
+            Error::Parser(_) => Self::ParseFailed,
+        }
+    }
+}
+
 impl IndexError {
     /// Create a new indexing error.
     #[must_use]
@@ -204,6 +214,36 @@ mod tests {
         assert!(IndexErrorKind::IoError.is_internal_error());
         assert!(IndexErrorKind::DatabaseError.is_internal_error());
         assert!(!IndexErrorKind::IoError.is_input_error());
+    }
+
+    #[test]
+    fn error_to_index_error_kind_mapping() {
+        // IO-category errors
+        let io_err = Error::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "missing"));
+        assert_eq!(IndexErrorKind::from(&io_err), IndexErrorKind::IoError);
+
+        let config_err = Error::Config("bad config".to_string());
+        assert_eq!(IndexErrorKind::from(&config_err), IndexErrorKind::IoError);
+
+        let not_found_err = Error::NotFound("no such file".to_string());
+        assert_eq!(
+            IndexErrorKind::from(&not_found_err),
+            IndexErrorKind::IoError
+        );
+
+        // Database-category errors
+        let internal_err = Error::Internal("mutex poisoned".to_string());
+        assert_eq!(
+            IndexErrorKind::from(&internal_err),
+            IndexErrorKind::DatabaseError
+        );
+
+        // Parser-category errors
+        let parser_err = Error::Parser("tree-sitter init failed".to_string());
+        assert_eq!(
+            IndexErrorKind::from(&parser_err),
+            IndexErrorKind::ParseFailed
+        );
     }
 
     #[test]

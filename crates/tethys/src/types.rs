@@ -711,7 +711,7 @@ pub struct IndexOptions {
     ///
     /// When enabled, parsed files are written to `SQLite` immediately via a background
     /// writer thread instead of accumulating all data in memory. This reduces memory
-    /// usage from O(n) to O(1) for large codebases.
+    /// usage from `O(n)` to `O(batch_size)` for large codebases.
     ///
     /// Default: false (traditional batch mode)
     use_streaming: bool,
@@ -732,10 +732,22 @@ impl IndexOptions {
     /// defaulting to 60 seconds.
     #[must_use]
     pub fn with_lsp() -> Self {
-        let timeout = std::env::var("TETHYS_LSP_TIMEOUT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_LSP_TIMEOUT_SECS);
+        let timeout = match std::env::var("TETHYS_LSP_TIMEOUT").ok().as_deref() {
+            Some(s) if !s.is_empty() => {
+                if let Ok(val) = s.parse() {
+                    val
+                } else {
+                    tracing::warn!(
+                        env_var = "TETHYS_LSP_TIMEOUT",
+                        value = %s,
+                        default = DEFAULT_LSP_TIMEOUT_SECS,
+                        "Invalid value, using default"
+                    );
+                    DEFAULT_LSP_TIMEOUT_SECS
+                }
+            }
+            _ => DEFAULT_LSP_TIMEOUT_SECS,
+        };
 
         Self {
             use_lsp: true,
@@ -840,10 +852,107 @@ pub struct IndexStats {
     /// Dependencies that couldn't be resolved (`from_file`, `dep_path`).
     /// These are typically external crate dependencies or missing files.
     pub unresolved_dependencies: Vec<(PathBuf, PathBuf)>,
-    /// Number of references resolved via LSP (Pass 3).
-    ///
-    /// Only non-zero when `IndexOptions::use_lsp` was set.
-    pub lsp_resolved_count: usize,
+    /// Results from LSP resolution sessions (one per language attempted).
+    /// Empty when `IndexOptions::use_lsp` was not set.
+    pub lsp_sessions: Vec<LspSessionResult>,
+}
+
+impl IndexStats {
+    /// Total number of references resolved across all LSP sessions.
+    #[must_use]
+    pub fn total_lsp_resolved(&self) -> usize {
+        self.lsp_sessions
+            .iter()
+            .map(LspSessionResult::resolved_count)
+            .sum()
+    }
+
+    /// Whether any LSP session encountered errors.
+    #[must_use]
+    pub fn has_lsp_errors(&self) -> bool {
+        self.lsp_sessions.iter().any(LspSessionResult::has_errors)
+    }
+}
+
+/// Result of a single LSP resolution session for one language.
+#[derive(Debug, Clone)]
+pub struct LspSessionResult {
+    /// The language this session targeted.
+    pub language: Language,
+    /// The outcome of the session.
+    pub outcome: LspOutcome,
+}
+
+impl LspSessionResult {
+    /// Whether this session resolved at least one reference.
+    #[must_use]
+    pub fn has_resolutions(&self) -> bool {
+        matches!(
+            &self.outcome,
+            LspOutcome::Completed(s) if s.resolved_count > 0
+        )
+    }
+
+    /// Whether this session encountered errors (server unavailable or resolution errors).
+    #[must_use]
+    pub fn has_errors(&self) -> bool {
+        match &self.outcome {
+            LspOutcome::ServerUnavailable { .. } => true,
+            LspOutcome::Completed(s) => s.error_count > 0,
+            LspOutcome::NothingToResolve => false,
+        }
+    }
+
+    /// Number of references resolved in this session (0 if not completed).
+    #[must_use]
+    pub fn resolved_count(&self) -> usize {
+        match &self.outcome {
+            LspOutcome::Completed(s) => s.resolved_count,
+            _ => 0,
+        }
+    }
+}
+
+/// Outcome of an LSP resolution attempt for a single language.
+#[derive(Debug, Clone)]
+pub enum LspOutcome {
+    /// No unresolved references existed for this language.
+    NothingToResolve,
+    /// The LSP server could not be started.
+    ServerUnavailable {
+        /// Why the server could not be started.
+        reason: String,
+        /// Suggestion for how to install the server.
+        install_hint: String,
+    },
+    /// The session ran to completion.
+    Completed(LspCompletedSession),
+}
+
+/// Statistics from a completed LSP resolution session.
+#[derive(Debug, Clone)]
+pub struct LspCompletedSession {
+    /// Number of previously-unresolved references that LSP resolved.
+    pub resolved_count: usize,
+    /// Number of references that LSP attempted but could not resolve.
+    pub unresolved_attempted: usize,
+    /// Number of errors encountered during resolution.
+    pub error_count: usize,
+    /// A sample of error messages (capped at [`Self::MAX_ERROR_MESSAGES`]).
+    pub errors: Vec<String>,
+    /// The exit code of the LSP server process, if available.
+    pub server_exit_code: Option<i32>,
+}
+
+impl LspCompletedSession {
+    /// Maximum number of error messages retained per session.
+    pub const MAX_ERROR_MESSAGES: usize = 5;
+
+    /// Whether the LSP server exited cleanly (exit code 0 or not yet exited).
+    #[must_use]
+    pub fn server_exited_cleanly(&self) -> bool {
+        self.server_exit_code.is_none_or(|code| code == 0)
+    }
 }
 
 /// Statistics from an incremental update.
@@ -1289,110 +1398,138 @@ mod tests {
 
     #[test]
     fn parameter_is_self_for_self_variants() {
-        assert!(Parameter {
-            name: "self".to_string(),
-            type_annotation: None,
-            kind: ParameterKind::SelfValue,
-        }
-        .is_self());
-        assert!(Parameter {
-            name: "&self".to_string(),
-            type_annotation: None,
-            kind: ParameterKind::SelfRef,
-        }
-        .is_self());
-        assert!(Parameter {
-            name: "&mut self".to_string(),
-            type_annotation: None,
-            kind: ParameterKind::SelfMutRef,
-        }
-        .is_self());
+        assert!(
+            Parameter {
+                name: "self".to_string(),
+                type_annotation: None,
+                kind: ParameterKind::SelfValue,
+            }
+            .is_self()
+        );
+        assert!(
+            Parameter {
+                name: "&self".to_string(),
+                type_annotation: None,
+                kind: ParameterKind::SelfRef,
+            }
+            .is_self()
+        );
+        assert!(
+            Parameter {
+                name: "&mut self".to_string(),
+                type_annotation: None,
+                kind: ParameterKind::SelfMutRef,
+            }
+            .is_self()
+        );
     }
 
     #[test]
     fn parameter_is_self_false_for_regular_param() {
-        assert!(!Parameter {
-            name: "other".to_string(),
-            type_annotation: None,
-            kind: ParameterKind::Regular,
-        }
-        .is_self());
-        assert!(!Parameter {
-            name: "self_ref".to_string(),
-            type_annotation: None,
-            kind: ParameterKind::Regular,
-        }
-        .is_self());
+        assert!(
+            !Parameter {
+                name: "other".to_string(),
+                type_annotation: None,
+                kind: ParameterKind::Regular,
+            }
+            .is_self()
+        );
+        assert!(
+            !Parameter {
+                name: "self_ref".to_string(),
+                type_annotation: None,
+                kind: ParameterKind::Regular,
+            }
+            .is_self()
+        );
     }
 
     #[test]
     fn parameter_is_mut_self_only_for_mut_self() {
-        assert!(Parameter {
-            name: "&mut self".to_string(),
-            type_annotation: None,
-            kind: ParameterKind::SelfMutRef,
-        }
-        .is_mut_self());
-        assert!(!Parameter {
-            name: "&self".to_string(),
-            type_annotation: None,
-            kind: ParameterKind::SelfRef,
-        }
-        .is_mut_self());
-        assert!(!Parameter {
-            name: "self".to_string(),
-            type_annotation: None,
-            kind: ParameterKind::SelfValue,
-        }
-        .is_mut_self());
+        assert!(
+            Parameter {
+                name: "&mut self".to_string(),
+                type_annotation: None,
+                kind: ParameterKind::SelfMutRef,
+            }
+            .is_mut_self()
+        );
+        assert!(
+            !Parameter {
+                name: "&self".to_string(),
+                type_annotation: None,
+                kind: ParameterKind::SelfRef,
+            }
+            .is_mut_self()
+        );
+        assert!(
+            !Parameter {
+                name: "self".to_string(),
+                type_annotation: None,
+                kind: ParameterKind::SelfValue,
+            }
+            .is_mut_self()
+        );
     }
 
     #[test]
     fn parameter_is_reference_for_reference_types() {
-        assert!(Parameter {
-            name: "x".to_string(),
-            type_annotation: Some("&str".to_string()),
-            kind: ParameterKind::Regular,
-        }
-        .is_reference());
-        assert!(Parameter {
-            name: "x".to_string(),
-            type_annotation: Some("&mut String".to_string()),
-            kind: ParameterKind::Regular,
-        }
-        .is_reference());
-        assert!(Parameter {
-            name: "x".to_string(),
-            type_annotation: Some("&'a T".to_string()),
-            kind: ParameterKind::Regular,
-        }
-        .is_reference());
+        assert!(
+            Parameter {
+                name: "x".to_string(),
+                type_annotation: Some("&str".to_string()),
+                kind: ParameterKind::Regular,
+            }
+            .is_reference()
+        );
+        assert!(
+            Parameter {
+                name: "x".to_string(),
+                type_annotation: Some("&mut String".to_string()),
+                kind: ParameterKind::Regular,
+            }
+            .is_reference()
+        );
+        assert!(
+            Parameter {
+                name: "x".to_string(),
+                type_annotation: Some("&'a T".to_string()),
+                kind: ParameterKind::Regular,
+            }
+            .is_reference()
+        );
     }
 
     #[test]
     fn parameter_is_reference_false_for_owned_types() {
-        assert!(!Parameter {
-            name: "x".to_string(),
-            type_annotation: Some("String".to_string()),
-            kind: ParameterKind::Regular,
-        }
-        .is_reference());
-        assert!(!Parameter {
-            name: "x".to_string(),
-            type_annotation: Some("i32".to_string()),
-            kind: ParameterKind::Regular,
-        }
-        .is_reference());
+        assert!(
+            !Parameter {
+                name: "x".to_string(),
+                type_annotation: Some("String".to_string()),
+                kind: ParameterKind::Regular,
+            }
+            .is_reference()
+        );
+        assert!(
+            !Parameter {
+                name: "x".to_string(),
+                type_annotation: Some("i32".to_string()),
+                kind: ParameterKind::Regular,
+            }
+            .is_reference()
+        );
     }
 
     #[test]
     fn parameter_is_reference_false_for_none_type() {
-        assert!(!Parameter {
-            name: "x".to_string(),
-            type_annotation: None,
-            kind: ParameterKind::Regular,
-        }
-        .is_reference());
+        assert!(
+            !Parameter {
+                name: "x".to_string(),
+                type_annotation: None,
+                kind: ParameterKind::Regular,
+            }
+            .is_reference()
+        );
     }
 
     // === Span validation tests ===
@@ -1802,5 +1939,119 @@ mod tests {
                 }
             }
         }
+    }
+
+    // === LspSessionResult / LspCompletedSession tests ===
+
+    fn make_completed_session(
+        resolved: usize,
+        unresolved: usize,
+        errors: usize,
+        exit_code: Option<i32>,
+    ) -> LspCompletedSession {
+        LspCompletedSession {
+            resolved_count: resolved,
+            unresolved_attempted: unresolved,
+            error_count: errors,
+            errors: vec![],
+            server_exit_code: exit_code,
+        }
+    }
+
+    #[test]
+    fn lsp_completed_session_exited_cleanly_with_zero() {
+        let session = make_completed_session(5, 0, 0, Some(0));
+        assert!(session.server_exited_cleanly());
+    }
+
+    #[test]
+    fn lsp_completed_session_exited_cleanly_with_none() {
+        let session = make_completed_session(5, 0, 0, None);
+        assert!(session.server_exited_cleanly());
+    }
+
+    #[test]
+    fn lsp_completed_session_not_clean_with_nonzero() {
+        let session = make_completed_session(5, 0, 0, Some(1));
+        assert!(!session.server_exited_cleanly());
+    }
+
+    #[test]
+    fn lsp_session_result_has_resolutions_completed() {
+        let result = LspSessionResult {
+            language: Language::Rust,
+            outcome: LspOutcome::Completed(make_completed_session(3, 1, 0, Some(0))),
+        };
+        assert!(result.has_resolutions());
+        assert_eq!(result.resolved_count(), 3);
+    }
+
+    #[test]
+    fn lsp_session_result_has_errors_server_unavailable() {
+        let result = LspSessionResult {
+            language: Language::CSharp,
+            outcome: LspOutcome::ServerUnavailable {
+                reason: "not installed".to_string(),
+                install_hint: "dotnet tool install csharp-ls".to_string(),
+            },
+        };
+        assert!(result.has_errors());
+        assert!(!result.has_resolutions());
+        assert_eq!(result.resolved_count(), 0);
+    }
+
+    #[test]
+    fn lsp_session_result_nothing_to_resolve() {
+        let result = LspSessionResult {
+            language: Language::Rust,
+            outcome: LspOutcome::NothingToResolve,
+        };
+        assert!(!result.has_errors());
+        assert!(!result.has_resolutions());
+        assert_eq!(result.resolved_count(), 0);
+    }
+
+    // === IndexStats LSP aggregation tests ===
+
+    #[test]
+    fn index_stats_total_lsp_resolved_sums_sessions() {
+        let stats = IndexStats {
+            files_indexed: 10,
+            symbols_found: 50,
+            references_found: 100,
+            duration: Duration::from_secs(1),
+            files_skipped: 0,
+            directories_skipped: vec![],
+            errors: vec![],
+            unresolved_dependencies: vec![],
+            lsp_sessions: vec![
+                LspSessionResult {
+                    language: Language::Rust,
+                    outcome: LspOutcome::Completed(make_completed_session(7, 2, 0, Some(0))),
+                },
+                LspSessionResult {
+                    language: Language::CSharp,
+                    outcome: LspOutcome::Completed(make_completed_session(3, 1, 0, Some(0))),
+                },
+            ],
+        };
+        assert_eq!(stats.total_lsp_resolved(), 10);
+    }
+
+    #[test]
+    fn index_stats_no_lsp_sessions() {
+        let stats = IndexStats {
+            files_indexed: 5,
+            symbols_found: 20,
+            references_found: 40,
+            duration: Duration::from_secs(1),
+            files_skipped: 0,
+            directories_skipped: vec![],
+            errors: vec![],
+            unresolved_dependencies: vec![],
+            lsp_sessions: vec![],
+        };
+        assert_eq!(stats.total_lsp_resolved(), 0);
+        assert!(!stats.has_lsp_errors());
     }
 }

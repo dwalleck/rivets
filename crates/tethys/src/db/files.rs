@@ -2,10 +2,10 @@
 
 use std::path::Path;
 
-use rusqlite::params;
 use rusqlite::OptionalExtension;
+use rusqlite::params;
 
-use super::{row_to_indexed_file, Index, SymbolData, FILES_COLUMNS};
+use super::{FILES_COLUMNS, Index, SymbolData, row_to_indexed_file};
 use crate::error::Result;
 use crate::types::{FileId, IndexedFile, Language, SymbolId};
 
@@ -27,7 +27,7 @@ impl Index {
     /// Insert or update a file record, returning the file ID.
     ///
     /// Delegates to [`Self::index_file_atomic`] with an empty symbol list.
-    #[allow(dead_code)] // Public API, not yet used internally
+    #[cfg(test)]
     pub fn upsert_file(
         &mut self,
         path: &Path,
@@ -106,9 +106,15 @@ impl Index {
 
         // u64 size_bytes/content_hash reinterpreted as i64 for SQLite storage;
         // round-trips correctly via the reverse cast in row_to_indexed_file
-        #[allow(clippy::cast_possible_wrap)]
+        #[expect(
+            clippy::cast_possible_wrap,
+            reason = "u64 bit-pattern stored as i64 for SQLite; round-trips via reverse cast"
+        )]
         let size_bytes_i64 = size_bytes as i64;
-        #[allow(clippy::cast_possible_wrap)]
+        #[expect(
+            clippy::cast_possible_wrap,
+            reason = "u64 bit-pattern stored as i64 for SQLite; round-trips via reverse cast"
+        )]
         let content_hash_i64 = content_hash.map(|h| h as i64);
 
         // Try to update first

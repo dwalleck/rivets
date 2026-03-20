@@ -18,8 +18,8 @@
 use crate::context::Context;
 use crate::error::{Error, Result};
 use crate::models::{
-    dep_type_to_str, parse_dep_type, parse_issue_type, parse_status, BlockedIssueResponse,
-    McpIssue, SetContextResponse, WhereAmIResponse,
+    BlockedIssueResponse, McpIssue, SetContextResponse, WhereAmIResponse, dep_type_to_str,
+    parse_dep_type, parse_issue_type, parse_status,
 };
 use rivets::domain::{
     DependencyType, IssueFilter, IssueId, IssueStatus, IssueType, IssueUpdate, NewIssue,

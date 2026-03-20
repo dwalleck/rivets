@@ -347,12 +347,12 @@ fn validate_text_fields(
             "Description contains invalid control character at position {pos}"
         ));
     }
-    if let Some(val) = assignee {
-        if let Some(pos) = find_control_char(val) {
-            return Err(format!(
-                "Assignee contains invalid control character at position {pos}"
-            ));
-        }
+    if let Some(val) = assignee
+        && let Some(pos) = find_control_char(val)
+    {
+        return Err(format!(
+            "Assignee contains invalid control character at position {pos}"
+        ));
     }
     for (i, label) in labels.iter().enumerate() {
         if let Some(pos) = find_control_char(label) {
@@ -361,33 +361,33 @@ fn validate_text_fields(
             ));
         }
     }
-    if let Some(val) = design {
-        if let Some(pos) = find_control_char_multiline(val) {
-            return Err(format!(
-                "Design contains invalid control character at position {pos}"
-            ));
-        }
+    if let Some(val) = design
+        && let Some(pos) = find_control_char_multiline(val)
+    {
+        return Err(format!(
+            "Design contains invalid control character at position {pos}"
+        ));
     }
-    if let Some(val) = acceptance_criteria {
-        if let Some(pos) = find_control_char_multiline(val) {
-            return Err(format!(
-                "Acceptance criteria contains invalid control character at position {pos}"
-            ));
-        }
+    if let Some(val) = acceptance_criteria
+        && let Some(pos) = find_control_char_multiline(val)
+    {
+        return Err(format!(
+            "Acceptance criteria contains invalid control character at position {pos}"
+        ));
     }
-    if let Some(val) = notes {
-        if let Some(pos) = find_control_char_multiline(val) {
-            return Err(format!(
-                "Notes contains invalid control character at position {pos}"
-            ));
-        }
+    if let Some(val) = notes
+        && let Some(pos) = find_control_char_multiline(val)
+    {
+        return Err(format!(
+            "Notes contains invalid control character at position {pos}"
+        ));
     }
-    if let Some(val) = external_ref {
-        if let Some(pos) = find_control_char(val) {
-            return Err(format!(
-                "External ref contains invalid control character at position {pos}"
-            ));
-        }
+    if let Some(val) = external_ref
+        && let Some(pos) = find_control_char(val)
+    {
+        return Err(format!(
+            "External ref contains invalid control character at position {pos}"
+        ));
     }
     Ok(())
 }
@@ -622,9 +622,11 @@ mod tests {
         };
         let result = issue.validate();
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .contains(&format!("cannot exceed {}", MAX_TITLE_LENGTH)));
+        assert!(
+            result
+                .unwrap_err()
+                .contains(&format!("cannot exceed {}", MAX_TITLE_LENGTH))
+        );
     }
 
     #[test]
@@ -655,9 +657,11 @@ mod tests {
         };
         let result = issue.validate();
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .contains("Priority must be in range 0-4"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("Priority must be in range 0-4")
+        );
     }
 
     #[test]
@@ -669,9 +673,11 @@ mod tests {
         };
         let result = issue.validate();
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .contains("Priority must be in range 0-4"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("Priority must be in range 0-4")
+        );
     }
 
     #[test]
@@ -694,7 +700,7 @@ mod tests {
 
     mod validate_title_and_priority_tests {
         use super::super::{
-            validate_title_and_priority, MAX_PRIORITY, MAX_TITLE_LENGTH, MIN_PRIORITY,
+            MAX_PRIORITY, MAX_TITLE_LENGTH, MIN_PRIORITY, validate_title_and_priority,
         };
         use rstest::rstest;
 
@@ -894,16 +900,18 @@ mod tests {
 
         #[test]
         fn all_clean_fields_accepted() {
-            assert!(validate_text_fields(
-                "A normal description\nwith newlines",
-                Some("alice"),
-                &["bug".to_string(), "urgent".to_string()],
-                Some("Use approach A"),
-                Some("- [ ] Done"),
-                Some("Extra context"),
-                Some("GH-123"),
-            )
-            .is_ok());
+            assert!(
+                validate_text_fields(
+                    "A normal description\nwith newlines",
+                    Some("alice"),
+                    &["bug".to_string(), "urgent".to_string()],
+                    Some("Use approach A"),
+                    Some("- [ ] Done"),
+                    Some("Extra context"),
+                    Some("GH-123"),
+                )
+                .is_ok()
+            );
         }
     }
 }

@@ -9,7 +9,9 @@ use thiserror::Error;
 #[non_exhaustive]
 pub enum ConfigError {
     /// No rivets repository found in directory tree.
-    #[error("Not a rivets repository (or any of the parent directories). Run 'rivets init' to create a new repository.")]
+    #[error(
+        "Not a rivets repository (or any of the parent directories). Run 'rivets init' to create a new repository."
+    )]
     NotInitialized,
 
     /// Rivets is already initialized in the target directory.
@@ -131,7 +133,9 @@ pub enum Error {
     IssueNotFound(IssueId),
 
     /// Cannot delete issue because other issues depend on it.
-    #[error("Cannot delete {issue_id}: {dependent_count} other issue(s) depend on it. Dependents: {dependents:?}")]
+    #[error(
+        "Cannot delete {issue_id}: {dependent_count} other issue(s) depend on it. Dependents: {dependents:?}"
+    )]
     HasDependents {
         /// The issue that cannot be deleted
         issue_id: IssueId,

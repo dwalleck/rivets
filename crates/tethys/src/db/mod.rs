@@ -12,8 +12,9 @@
 //! - `symbols` - Symbol CRUD operations
 //! - `references` - Reference CRUD operations
 //! - `imports` - Import CRUD operations
-//! - `call_edges` - Call edge CRUD operations
+//! - `call_edges` - Call edge bulk operations
 //! - `file_deps` - File dependency CRUD operations
+//! - `panic_points` - Panic point CRUD operations
 //! - `graph` - Graph traversal operations (`SymbolGraphOps`, `FileGraphOps`)
 
 mod call_edges;
@@ -29,14 +30,17 @@ mod symbols;
 
 // Re-export helper functions and SQL constants used by other modules
 pub(crate) use helpers::{
-    parse_language, parse_symbol_kind, row_to_import, row_to_indexed_file, row_to_reference,
-    row_to_symbol, FILES_COLUMNS, REFS_COLUMNS, SYMBOLS_COLUMNS,
+    FILES_COLUMNS, REFS_COLUMNS, SYMBOLS_COLUMNS, parse_language, parse_symbol_kind, row_to_import,
+    row_to_indexed_file, row_to_reference, row_to_symbol,
 };
+pub(crate) use references::InsertReferenceParams;
 pub(crate) use schema::SCHEMA;
 
 // Re-export parse_visibility for tests in types.rs
 #[cfg(test)]
 pub(crate) use helpers::parse_visibility;
+#[cfg(test)]
+pub(crate) use symbols::InsertSymbolParams;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -116,7 +120,10 @@ impl Index {
     /// Returns an error if the system time is before the Unix epoch, which would
     /// break timestamp comparison logic for incremental indexing.
     // u128 nanoseconds won't exceed i64::MAX until year 2262
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "nanosecond timestamp fits in i64 until year 2262"
+    )]
     fn now_ns() -> Result<i64> {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -376,37 +383,37 @@ mod tests {
             .unwrap();
 
         index
-            .insert_symbol(
+            .insert_symbol(&InsertSymbolParams {
                 file_id,
-                "foo",
-                "crate",
-                "foo",
-                SymbolKind::Function,
-                10,
-                1,
-                None,
-                Some("fn foo()"),
-                Visibility::Public,
-                None,
-                false,
-            )
+                name: "foo",
+                module_path: "crate",
+                qualified_name: "foo",
+                kind: SymbolKind::Function,
+                line: 10,
+                column: 1,
+                span: None,
+                signature: Some("fn foo()"),
+                visibility: Visibility::Public,
+                parent_symbol_id: None,
+                is_test: false,
+            })
             .unwrap();
 
         index
-            .insert_symbol(
+            .insert_symbol(&InsertSymbolParams {
                 file_id,
-                "bar",
-                "crate",
-                "bar",
-                SymbolKind::Function,
-                20,
-                1,
-                None,
-                None,
-                Visibility::Private,
-                None,
-                false,
-            )
+                name: "bar",
+                module_path: "crate",
+                qualified_name: "bar",
+                kind: SymbolKind::Function,
+                line: 20,
+                column: 1,
+                span: None,
+                signature: None,
+                visibility: Visibility::Private,
+                parent_symbol_id: None,
+                is_test: false,
+            })
             .unwrap();
 
         let symbols = index.list_symbols_in_file(file_id).unwrap();
@@ -425,37 +432,37 @@ mod tests {
             .unwrap();
 
         index
-            .insert_symbol(
+            .insert_symbol(&InsertSymbolParams {
                 file_id,
-                "authenticate",
-                "crate::auth",
-                "authenticate",
-                SymbolKind::Function,
-                10,
-                1,
-                None,
-                None,
-                Visibility::Public,
-                None,
-                false,
-            )
+                name: "authenticate",
+                module_path: "crate::auth",
+                qualified_name: "authenticate",
+                kind: SymbolKind::Function,
+                line: 10,
+                column: 1,
+                span: None,
+                signature: None,
+                visibility: Visibility::Public,
+                parent_symbol_id: None,
+                is_test: false,
+            })
             .unwrap();
 
         index
-            .insert_symbol(
+            .insert_symbol(&InsertSymbolParams {
                 file_id,
-                "authorize",
-                "crate::auth",
-                "authorize",
-                SymbolKind::Function,
-                20,
-                1,
-                None,
-                None,
-                Visibility::Public,
-                None,
-                false,
-            )
+                name: "authorize",
+                module_path: "crate::auth",
+                qualified_name: "authorize",
+                kind: SymbolKind::Function,
+                line: 20,
+                column: 1,
+                span: None,
+                signature: None,
+                visibility: Visibility::Public,
+                parent_symbol_id: None,
+                is_test: false,
+            })
             .unwrap();
 
         let results = index.search_symbols("auth", 10).unwrap();
@@ -481,20 +488,20 @@ mod tests {
             .upsert_file(Path::new("src/lib.rs"), Language::Rust, 1000, 100, None)
             .expect("should insert file");
         index
-            .insert_symbol(
+            .insert_symbol(&InsertSymbolParams {
                 file_id,
-                "foo",
-                "crate",
-                "foo",
-                SymbolKind::Function,
-                1,
-                0,
-                None,
-                None,
-                Visibility::Public,
-                None,
-                false,
-            )
+                name: "foo",
+                module_path: "crate",
+                qualified_name: "foo",
+                kind: SymbolKind::Function,
+                line: 1,
+                column: 0,
+                span: None,
+                signature: None,
+                visibility: Visibility::Public,
+                parent_symbol_id: None,
+                is_test: false,
+            })
             .expect("should insert symbol");
 
         // Verify data exists

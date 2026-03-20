@@ -8,8 +8,8 @@ use std::collections::{HashMap, HashSet};
 
 use rusqlite::OptionalExtension;
 
-use super::helpers::{row_to_indexed_file, row_to_symbol};
 use super::Index;
+use super::helpers::{row_to_indexed_file, row_to_symbol};
 use crate::error::{Error, Result};
 use crate::graph::{
     CallPath, CalleeInfo, CallerInfo, FileDepInfo, FileGraphOps, FileImpact, FilePath,
@@ -44,7 +44,11 @@ impl SymbolGraphOps for Index {
             .query_map([symbol_id.as_i64()], |row| {
                 let symbol = row_to_symbol(row)?;
                 // Safety: call_count is a non-negative aggregate count
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "call_count is a non-negative SQL COUNT aggregate"
+                )]
                 let ref_count: usize = row.get::<_, i64>(13)? as usize;
 
                 Ok(CallerInfo {
@@ -79,7 +83,11 @@ impl SymbolGraphOps for Index {
             .query_map([symbol_id.as_i64()], |row| {
                 let symbol = row_to_symbol(row)?;
                 // Safety: call_count is a non-negative aggregate count
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "call_count is a non-negative SQL COUNT aggregate"
+                )]
                 let ref_count: usize = row.get::<_, i64>(13)? as usize;
 
                 Ok(CalleeInfo {
@@ -140,7 +148,11 @@ impl SymbolGraphOps for Index {
         let rows = stmt.query_map(rusqlite::params![symbol_id.as_i64(), max_depth], |row| {
             let symbol = row_to_symbol(row)?;
             // Safety: CTE depth is bounded by max_depth (u32), so i64 value fits in u32
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "CTE depth bounded by max_depth (u32)"
+            )]
             let depth: u32 = row.get::<_, i64>(13)? as u32;
             Ok((symbol, depth))
         })?;
@@ -268,7 +280,11 @@ impl FileGraphOps for Index {
             .query_map([file_id.as_i64()], |row| {
                 let file = row_to_indexed_file(row)?;
                 // Safety: ref_count is a non-negative aggregate count
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "ref_count is a non-negative SQL aggregate"
+                )]
                 let ref_count: usize = row.get::<_, i64>(7)? as usize;
 
                 Ok(FileDepInfo { file, ref_count })
@@ -298,7 +314,11 @@ impl FileGraphOps for Index {
             .query_map([file_id.as_i64()], |row| {
                 let file = row_to_indexed_file(row)?;
                 // Safety: ref_count is a non-negative aggregate count
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "ref_count is a non-negative SQL aggregate"
+                )]
                 let ref_count: usize = row.get::<_, i64>(7)? as usize;
 
                 Ok(FileDepInfo { file, ref_count })
@@ -351,7 +371,11 @@ impl FileGraphOps for Index {
         let rows = stmt.query_map(rusqlite::params![file_id.as_i64(), max_depth], |row| {
             let file = row_to_indexed_file(row)?;
             // Safety: CTE depth is bounded by max_depth (u32), so i64 value fits in u32
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "CTE depth bounded by max_depth (u32)"
+            )]
             let depth: u32 = row.get::<_, i64>(7)? as u32;
             Ok((file, depth))
         })?;

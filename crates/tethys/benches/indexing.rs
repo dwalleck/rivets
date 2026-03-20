@@ -14,7 +14,7 @@ mod common;
 
 use std::time::Instant;
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use tethys::Tethys;
 
 use common::{as_file_refs, create_indexed_workspace, create_workspace};

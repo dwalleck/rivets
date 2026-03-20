@@ -16,7 +16,9 @@ pub enum LspError {
     },
 
     /// LSP server executable not found.
-    #[error("{command} not found\n\nLSP refinement was requested but the language server is not available.\n{install_hint}\n\nTo index without LSP refinement, omit the --lsp flag.")]
+    #[error(
+        "{command} not found\n\nLSP refinement was requested but the language server is not available.\n{install_hint}\n\nTo index without LSP refinement, omit the --lsp flag."
+    )]
     NotFound {
         /// The command that was not found.
         command: String,

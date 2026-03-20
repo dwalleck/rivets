@@ -3,10 +3,9 @@
 use std::path::Path;
 
 use colored::Colorize;
-use tethys::{SymbolKind, Tethys};
+use tethys::{DatabaseStats, SymbolKind, Tethys};
 
 /// Run the stats command.
-#[allow(clippy::too_many_lines)]
 pub fn run(workspace: &Path) -> Result<(), tethys::Error> {
     let tethys = Tethys::new(workspace)?;
 
@@ -45,12 +44,22 @@ pub fn run(workspace: &Path) -> Result<(), tethys::Error> {
     );
     println!();
 
-    // File counts
+    print_file_stats(&stats);
+    print_symbol_stats(&stats);
+    print_reference_stats(&stats);
+    print_warnings(&stats);
+
+    Ok(())
+}
+
+/// Print file count and per-language breakdown.
+fn print_file_stats(stats: &DatabaseStats) {
     println!(
         "  {}: {} total",
         "Files".white().bold(),
         stats.file_count.to_string().green()
     );
+
     // Sort languages for deterministic output
     let mut sorted_langs: Vec<_> = stats.files_by_language.iter().collect();
     sorted_langs.sort_by_key(|(lang, _)| match lang {
@@ -66,8 +75,10 @@ pub fn run(workspace: &Path) -> Result<(), tethys::Error> {
         println!("    {}: {}", lang_name.dimmed(), count);
     }
     println!();
+}
 
-    // Symbol counts
+/// Print symbol count and per-kind breakdown.
+fn print_symbol_stats(stats: &DatabaseStats) {
     println!(
         "  {}: {} total",
         "Symbols".white().bold(),
@@ -75,8 +86,8 @@ pub fn run(workspace: &Path) -> Result<(), tethys::Error> {
     );
 
     // Sort by count descending, then by kind for deterministic output
-    let mut kind_counts: Vec<_> = stats.symbols_by_kind.into_iter().collect();
-    kind_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let mut kind_counts: Vec<_> = stats.symbols_by_kind.iter().collect();
+    kind_counts.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
 
     for (kind, count) in kind_counts {
         let kind_name = match kind {
@@ -96,8 +107,10 @@ pub fn run(workspace: &Path) -> Result<(), tethys::Error> {
         println!("    {}: {}", kind_name.dimmed(), count);
     }
     println!();
+}
 
-    // Reference and dependency counts
+/// Print reference and file dependency counts.
+fn print_reference_stats(stats: &DatabaseStats) {
     println!(
         "  {}: {}",
         "References".white().bold(),
@@ -108,8 +121,10 @@ pub fn run(workspace: &Path) -> Result<(), tethys::Error> {
         "File Dependencies".white().bold(),
         stats.file_dependency_count.to_string().green()
     );
+}
 
-    // Warn about skipped entries (possible version mismatch)
+/// Print warnings about skipped entries from possible version mismatch.
+fn print_warnings(stats: &DatabaseStats) {
     if stats.skipped_unknown_languages > 0 || stats.skipped_unknown_kinds > 0 {
         println!();
         println!(
@@ -133,11 +148,12 @@ pub fn run(workspace: &Path) -> Result<(), tethys::Error> {
             "Database may be from a newer Tethys version. Consider reindexing.".dimmed()
         );
     }
-
-    Ok(())
 }
 
-#[allow(clippy::cast_precision_loss)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "file size display doesn't need sub-byte precision"
+)]
 fn format_size(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;

@@ -113,7 +113,11 @@ impl Index {
             let is_test: bool = row.get(0)?;
             let count: i64 = row.get(1)?;
             // Safety: COUNT(*) returns non-negative values
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "COUNT(*) is a non-negative SQL aggregate"
+            )]
             Ok((is_test, count as usize))
         })?;
 
@@ -163,6 +167,7 @@ impl Index {
 mod tests {
     use super::*;
     use crate::db::Index;
+    use crate::db::{InsertReferenceParams, InsertSymbolParams};
     use crate::types::{Language, SymbolKind, Visibility};
     use tempfile::TempDir;
 
@@ -184,77 +189,77 @@ mod tests {
 
         // Create a production function
         let prod_fn_id = index
-            .insert_symbol(
+            .insert_symbol(&InsertSymbolParams {
                 file_id,
-                "process",
-                "crate",
-                "process",
-                SymbolKind::Function,
-                10,
-                1,
-                None,
-                Some("fn process() -> Result<()>"),
-                Visibility::Public,
-                None,
-                false, // is_test = false
-            )
+                name: "process",
+                module_path: "crate",
+                qualified_name: "process",
+                kind: SymbolKind::Function,
+                line: 10,
+                column: 1,
+                span: None,
+                signature: Some("fn process() -> Result<()>"),
+                visibility: Visibility::Public,
+                parent_symbol_id: None,
+                is_test: false,
+            })
             .expect("should create production function");
 
         // Create a test function
         let test_fn_id = index
-            .insert_symbol(
+            .insert_symbol(&InsertSymbolParams {
                 file_id,
-                "test_process",
-                "crate",
-                "test_process",
-                SymbolKind::Function,
-                50,
-                1,
-                None,
-                Some("fn test_process()"),
-                Visibility::Private,
-                None,
-                true, // is_test = true
-            )
+                name: "test_process",
+                module_path: "crate",
+                qualified_name: "test_process",
+                kind: SymbolKind::Function,
+                line: 50,
+                column: 1,
+                span: None,
+                signature: Some("fn test_process()"),
+                visibility: Visibility::Private,
+                parent_symbol_id: None,
+                is_test: true,
+            })
             .expect("should create test function");
 
         // Add .unwrap() call in production code
         index
-            .insert_reference(
-                None,
+            .insert_reference(&InsertReferenceParams {
+                symbol_id: None,
                 file_id,
-                "call",
-                15,
-                10,
-                Some(prod_fn_id),
-                Some("unwrap"),
-            )
+                kind: "call",
+                line: 15,
+                column: 10,
+                in_symbol_id: Some(prod_fn_id),
+                reference_name: Some("unwrap"),
+            })
             .expect("should create unwrap reference");
 
         // Add .expect() call in production code
         index
-            .insert_reference(
-                None,
+            .insert_reference(&InsertReferenceParams {
+                symbol_id: None,
                 file_id,
-                "call",
-                20,
-                10,
-                Some(prod_fn_id),
-                Some("expect"),
-            )
+                kind: "call",
+                line: 20,
+                column: 10,
+                in_symbol_id: Some(prod_fn_id),
+                reference_name: Some("expect"),
+            })
             .expect("should create expect reference");
 
         // Add .unwrap() call in test code
         index
-            .insert_reference(
-                None,
+            .insert_reference(&InsertReferenceParams {
+                symbol_id: None,
                 file_id,
-                "call",
-                55,
-                10,
-                Some(test_fn_id),
-                Some("unwrap"),
-            )
+                kind: "call",
+                line: 55,
+                column: 10,
+                in_symbol_id: Some(test_fn_id),
+                reference_name: Some("unwrap"),
+            })
             .expect("should create unwrap reference in test");
 
         (dir, index)

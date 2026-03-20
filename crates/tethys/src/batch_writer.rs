@@ -23,7 +23,10 @@
 //! ## Usage
 //!
 //! ```ignore
-//! let batch_writer = BatchWriter::new(db, 100)?;
+//! use std::path::PathBuf;
+//!
+//! let db_path = PathBuf::from("/tmp/index.db");
+//! let batch_writer = BatchWriter::new(db_path, 100);
 //!
 //! source_files.par_iter().for_each(|(path, lang)| {
 //!     if let Ok(data) = Tethys::parse_file_static(&workspace_root, path, *lang) {
@@ -43,7 +46,7 @@ use std::thread::{self, JoinHandle};
 
 use tracing::{debug, error, trace, warn};
 
-use crate::db::{Index, SymbolData};
+use crate::db::{Index, InsertReferenceParams, SymbolData};
 use crate::error::{Error, Result};
 use crate::languages::common::{ExtractedReference, ImportStatement};
 use crate::parallel::OwnedSymbolData;
@@ -55,6 +58,8 @@ use crate::types::{FileId, Language, Span, SymbolId};
 pub struct WriteStats {
     /// Number of files successfully written to the database.
     pub files_written: usize,
+    /// Number of files that failed to write.
+    pub files_failed: usize,
     /// Number of symbols written.
     pub symbols_written: usize,
     /// Number of references written.
@@ -155,7 +160,10 @@ impl BatchWriter {
     }
 
     /// Background thread function that receives and writes file data.
-    #[allow(clippy::needless_pass_by_value)] // Receiver is consumed by loop, PathBuf owned by thread
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "PathBuf must be owned by the spawned thread"
+    )]
     fn writer_thread(
         db_path: PathBuf,
         receiver: Receiver<ParsedFileData>,
@@ -166,23 +174,33 @@ impl BatchWriter {
         let mut batch: Vec<ParsedFileData> = Vec::with_capacity(batch_size);
 
         loop {
-            if let Ok(data) = receiver.recv() {
-                batch.push(data);
+            // Use match (not if-let) to make the channel-closed path explicit
+            // rather than hiding it in an else branch.
+            #[expect(
+                clippy::single_match_else,
+                reason = "explicit match makes the channel-closed path visible"
+            )]
+            match receiver.recv() {
+                Ok(data) => {
+                    batch.push(data);
 
-                if batch.len() >= batch_size {
-                    Self::write_batch(&mut db, &mut batch, &mut stats);
+                    if batch.len() >= batch_size {
+                        Self::write_batch(&mut db, &mut batch, &mut stats);
+                    }
                 }
-            } else {
-                // Channel closed, write any remaining files
-                if !batch.is_empty() {
-                    Self::write_batch(&mut db, &mut batch, &mut stats);
+                Err(_) => {
+                    // Channel closed (all senders dropped) -- write remaining batch and exit.
+                    if !batch.is_empty() {
+                        Self::write_batch(&mut db, &mut batch, &mut stats);
+                    }
+                    break;
                 }
-                break;
             }
         }
 
         debug!(
             files = stats.files_written,
+            failed = stats.files_failed,
             symbols = stats.symbols_written,
             references = stats.references_written,
             batches = stats.batches_committed,
@@ -214,6 +232,7 @@ impl BatchWriter {
                         error = %e,
                         "Failed to write file to database"
                     );
+                    stats.files_failed += 1;
                 }
             }
         }
@@ -237,7 +256,7 @@ impl BatchWriter {
             data.language,
             data.mtime_ns,
             data.size_bytes,
-            None, // TODO: content hash
+            None,
             &symbol_data,
         )?;
 
@@ -317,15 +336,15 @@ fn store_references(
             .containing_symbol_span
             .and_then(|span| span_to_id.get(&span).copied());
 
-        db.insert_reference(
+        db.insert_reference(&InsertReferenceParams {
             symbol_id,
             file_id,
-            r.kind.to_db_kind().as_str(),
-            r.line,
-            r.column,
+            kind: r.kind.to_db_kind().as_str(),
+            line: r.line,
+            column: r.column,
             in_symbol_id,
-            reference_name.as_deref(),
-        )?;
+            reference_name: reference_name.as_deref(),
+        })?;
         count += 1;
     }
 
@@ -404,27 +423,27 @@ mod tests {
 
         let writer = BatchWriter::new(db_path.clone(), 10);
 
-        let data = ParsedFileData::new(
-            PathBuf::from("src/main.rs"),
-            Language::Rust,
-            1_234_567_890,
-            100,
-            vec![OwnedSymbolData::new(
-                "main".to_string(),
-                "crate".to_string(),
-                "crate::main".to_string(),
-                SymbolKind::Function,
-                1,
-                0,
-                None,
-                Some("fn main()".to_string()),
-                Visibility::Public,
-                None,
-                false,
-            )],
-            vec![],
-            vec![],
-        );
+        let data = ParsedFileData {
+            relative_path: PathBuf::from("src/main.rs"),
+            language: Language::Rust,
+            mtime_ns: 1_234_567_890,
+            size_bytes: 100,
+            symbols: vec![OwnedSymbolData {
+                name: "main".to_string(),
+                module_path: "crate".to_string(),
+                qualified_name: "crate::main".to_string(),
+                kind: SymbolKind::Function,
+                line: 1,
+                column: 0,
+                span: None,
+                signature: Some("fn main()".to_string()),
+                visibility: Visibility::Public,
+                parent_symbol_id: None,
+                is_test: false,
+            }],
+            references: vec![],
+            imports: vec![],
+        };
 
         writer.send(data);
 
@@ -444,15 +463,15 @@ mod tests {
 
         // Send 7 files - should result in 3 batches (3 + 3 + 1)
         for i in 0..7 {
-            let data = ParsedFileData::new(
-                PathBuf::from(format!("src/file{i}.rs")),
-                Language::Rust,
-                1_234_567_890 + i64::from(i),
-                100,
-                vec![],
-                vec![],
-                vec![],
-            );
+            let data = ParsedFileData {
+                relative_path: PathBuf::from(format!("src/file{i}.rs")),
+                language: Language::Rust,
+                mtime_ns: 1_234_567_890 + i64::from(i),
+                size_bytes: 100,
+                symbols: vec![],
+                references: vec![],
+                imports: vec![],
+            };
             writer.send(data);
         }
 
@@ -479,6 +498,7 @@ mod tests {
     fn write_stats_default() {
         let stats = WriteStats::default();
         assert_eq!(stats.files_written, 0);
+        assert_eq!(stats.files_failed, 0);
         assert_eq!(stats.symbols_written, 0);
         assert_eq!(stats.references_written, 0);
         assert_eq!(stats.batches_committed, 0);

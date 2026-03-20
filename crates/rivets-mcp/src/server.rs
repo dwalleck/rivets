@@ -16,7 +16,7 @@ use rmcp::model::{
     CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
 };
 use rmcp::{
-    handler::server::ServerHandler, tool, tool_handler, tool_router, ErrorData as McpError,
+    ErrorData as McpError, handler::server::ServerHandler, tool, tool_handler, tool_router,
 };
 use std::sync::Arc;
 use tokio::sync::RwLock;

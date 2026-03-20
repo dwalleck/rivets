@@ -892,8 +892,8 @@ mod tests {
 
         #[tokio::test]
         async fn stream_is_lazy_evaluated() {
-            use std::sync::atomic::{AtomicUsize, Ordering};
             use std::sync::Arc;
+            use std::sync::atomic::{AtomicUsize, Ordering};
 
             #[derive(Debug, Deserialize)]
             #[expect(dead_code, reason = "Field used for JSON deserialization only")]
