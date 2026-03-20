@@ -20,7 +20,7 @@ impl Tethys {
         let stats = self.index()?;
         Ok(IndexUpdate {
             files_changed: stats.files_indexed,
-            files_unchanged: 0,
+            files_unchanged: 0, // Always 0 until incremental change detection is implemented
             duration: stats.duration,
             errors: stats.errors,
         })
