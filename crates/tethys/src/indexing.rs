@@ -26,7 +26,8 @@ use crate::lsp;
 use crate::parallel::{OwnedSymbolData, ParsedFileData};
 use crate::resolver::resolve_module_path;
 use crate::types::{
-    FileId, Import, IndexOptions, IndexStats, Language, Span, SymbolId, SymbolKind,
+    FileId, Import, IndexOptions, IndexStats, Language, LspCompletedSession, LspOutcome,
+    LspSessionResult, Span, SymbolId, SymbolKind,
 };
 
 /// A dependency that couldn't be resolved because the target file wasn't indexed yet.
@@ -93,7 +94,7 @@ impl Tethys {
     ///
     /// // Index with LSP refinement enabled
     /// let stats = tethys.index_with_options(IndexOptions::with_lsp())?;
-    /// println!("Resolved {} references via LSP", stats.lsp_resolved_count);
+    /// println!("Resolved {} references via LSP", stats.total_lsp_resolved());
     /// # Ok::<(), tethys::Error>(())
     /// ```
     #[expect(
@@ -185,6 +186,14 @@ impl Tethys {
             files_indexed = write_result.stats.files_written;
             symbols_found = write_result.stats.symbols_written;
             references_found = write_result.stats.references_written;
+
+            if write_result.stats.files_failed > 0 {
+                warn!(
+                    files_failed = write_result.stats.files_failed,
+                    files_written = write_result.stats.files_written,
+                    "Some files failed to write to database during streaming indexing"
+                );
+            }
 
             // Collect parse errors
             match parse_errors.into_inner() {
@@ -377,9 +386,8 @@ impl Tethys {
 
         // Pass 3: LSP-based resolution (optional)
         // Resolve each language separately using its appropriate LSP server
-        let mut lsp_errors_collected: Vec<String> = vec![];
-        let lsp_resolved_count = if options.use_lsp() {
-            let mut total_resolved = 0;
+        let lsp_sessions = if options.use_lsp() {
+            let mut sessions = Vec::new();
 
             // Resolve Rust files with rust-analyzer
             let rust_provider = lsp::AnyProvider::for_language(Language::Rust);
@@ -392,8 +400,20 @@ impl Tethys {
                     "Resolved references via LSP"
                 );
             }
-            total_resolved += rust_count;
-            lsp_errors_collected.extend(rust_lsp_errors);
+            let rust_error_count = rust_lsp_errors.len();
+            sessions.push(LspSessionResult {
+                language: Language::Rust,
+                outcome: LspOutcome::Completed(LspCompletedSession {
+                    resolved_count: rust_count,
+                    unresolved_attempted: 0,
+                    error_count: rust_error_count,
+                    errors: rust_lsp_errors
+                        .into_iter()
+                        .take(LspCompletedSession::MAX_ERROR_MESSAGES)
+                        .collect(),
+                    server_exit_code: None,
+                }),
+            });
 
             // Resolve C# files with csharp-ls
             let csharp_provider = lsp::AnyProvider::for_language(Language::CSharp);
@@ -409,12 +429,24 @@ impl Tethys {
                     "Resolved references via LSP"
                 );
             }
-            total_resolved += csharp_count;
-            lsp_errors_collected.extend(csharp_lsp_errors);
+            let csharp_error_count = csharp_lsp_errors.len();
+            sessions.push(LspSessionResult {
+                language: Language::CSharp,
+                outcome: LspOutcome::Completed(LspCompletedSession {
+                    resolved_count: csharp_count,
+                    unresolved_attempted: 0,
+                    error_count: csharp_error_count,
+                    errors: csharp_lsp_errors
+                        .into_iter()
+                        .take(LspCompletedSession::MAX_ERROR_MESSAGES)
+                        .collect(),
+                    server_exit_code: None,
+                }),
+            });
 
-            total_resolved
+            sessions
         } else {
-            0
+            vec![]
         };
 
         // Populate pre-computed call graph edges after all resolution passes
@@ -446,8 +478,7 @@ impl Tethys {
             directories_skipped,
             errors,
             unresolved_dependencies,
-            lsp_resolved_count,
-            lsp_errors: lsp_errors_collected,
+            lsp_sessions,
         })
     }
 

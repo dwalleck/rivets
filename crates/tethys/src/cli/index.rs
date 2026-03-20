@@ -86,18 +86,40 @@ pub fn run(
         );
     }
 
-    if stats.lsp_resolved_count > 0 {
+    let total_lsp_resolved = stats.total_lsp_resolved();
+    if total_lsp_resolved > 0 {
         println!(
-            "{}: {} references via LSP",
+            "{}: {total_lsp_resolved} references via LSP",
             "LSP resolved".cyan(),
-            stats.lsp_resolved_count
         );
     }
 
-    if !stats.lsp_errors.is_empty() {
-        println!();
-        for err in &stats.lsp_errors {
-            println!("{}: {err}", "LSP error".red());
+    for session in &stats.lsp_sessions {
+        if session.has_errors() {
+            println!();
+            match &session.outcome {
+                tethys::LspOutcome::ServerUnavailable {
+                    reason,
+                    install_hint,
+                } => {
+                    println!(
+                        "{}: {} - {reason}",
+                        "LSP error".red(),
+                        session.language.as_str()
+                    );
+                    println!("  {}: {install_hint}", "hint".dimmed());
+                }
+                tethys::LspOutcome::Completed(s) => {
+                    for err in &s.errors {
+                        println!(
+                            "{}: {} - {err}",
+                            "LSP error".red(),
+                            session.language.as_str()
+                        );
+                    }
+                }
+                tethys::LspOutcome::NothingToResolve => {}
+            }
         }
     }
 
