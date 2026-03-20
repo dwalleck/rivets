@@ -26,8 +26,7 @@ use crate::lsp;
 use crate::parallel::{OwnedSymbolData, ParsedFileData};
 use crate::resolver::resolve_module_path;
 use crate::types::{
-    FileId, Import, IndexOptions, IndexStats, Language, LspCompletedSession, LspOutcome,
-    LspSessionResult, Span, SymbolId, SymbolKind,
+    FileId, Import, IndexOptions, IndexStats, Language, Span, SymbolId, SymbolKind,
 };
 
 /// A dependency that couldn't be resolved because the target file wasn't indexed yet.
@@ -389,64 +388,36 @@ impl Tethys {
         let lsp_sessions = if options.use_lsp() {
             let mut sessions = Vec::new();
 
-            // Resolve Rust files with rust-analyzer
             let rust_provider = lsp::AnyProvider::for_language(Language::Rust);
-            let (rust_count, rust_lsp_errors) =
+            let rust_result =
                 self.resolve_via_lsp(&rust_provider, Language::Rust, options.lsp_timeout_secs())?;
-            if rust_count > 0 {
+            if rust_result.has_resolutions() {
                 tracing::info!(
                     language = "rust",
-                    resolved_count = rust_count,
+                    resolved_count = rust_result.resolved_count(),
                     "Resolved references via LSP"
                 );
             }
-            let rust_error_count = rust_lsp_errors.len();
-            sessions.push(LspSessionResult {
-                language: Language::Rust,
-                outcome: LspOutcome::Completed(LspCompletedSession {
-                    resolved_count: rust_count,
-                    unresolved_attempted: 0,
-                    error_count: rust_error_count,
-                    errors: rust_lsp_errors
-                        .into_iter()
-                        .take(LspCompletedSession::MAX_ERROR_MESSAGES)
-                        .collect(),
-                    server_exit_code: None,
-                }),
-            });
+            sessions.push(rust_result);
 
-            // Resolve C# files with csharp-ls
             let csharp_provider = lsp::AnyProvider::for_language(Language::CSharp);
-            let (csharp_count, csharp_lsp_errors) = self.resolve_via_lsp(
+            let csharp_result = self.resolve_via_lsp(
                 &csharp_provider,
                 Language::CSharp,
                 options.lsp_timeout_secs(),
             )?;
-            if csharp_count > 0 {
+            if csharp_result.has_resolutions() {
                 tracing::info!(
                     language = "csharp",
-                    resolved_count = csharp_count,
+                    resolved_count = csharp_result.resolved_count(),
                     "Resolved references via LSP"
                 );
             }
-            let csharp_error_count = csharp_lsp_errors.len();
-            sessions.push(LspSessionResult {
-                language: Language::CSharp,
-                outcome: LspOutcome::Completed(LspCompletedSession {
-                    resolved_count: csharp_count,
-                    unresolved_attempted: 0,
-                    error_count: csharp_error_count,
-                    errors: csharp_lsp_errors
-                        .into_iter()
-                        .take(LspCompletedSession::MAX_ERROR_MESSAGES)
-                        .collect(),
-                    server_exit_code: None,
-                }),
-            });
+            sessions.push(csharp_result);
 
             sessions
         } else {
-            vec![]
+            Vec::new()
         };
 
         // Populate pre-computed call graph edges after all resolution passes

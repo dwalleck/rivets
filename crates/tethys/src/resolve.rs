@@ -16,8 +16,8 @@ use crate::graph::{self, SymbolGraphOps};
 use crate::lsp::{self, LspProvider};
 use crate::resolver::resolve_module_path;
 use crate::types::{
-    Dependent, FileId, Import, Language, Reference, ReferenceKind, Symbol, SymbolId,
-    UnresolvedRefForLsp,
+    Dependent, FileId, Import, Language, LspCompletedSession, LspOutcome, LspSessionResult,
+    Reference, ReferenceKind, Symbol, SymbolId, UnresolvedRefForLsp,
 };
 
 /// Per-file context used during cross-file reference resolution (Pass 2).
@@ -384,7 +384,7 @@ impl Tethys {
         provider: &dyn lsp::LspProvider,
         language: Language,
         lsp_timeout_secs: u64,
-    ) -> Result<(usize, Vec<String>)> {
+    ) -> Result<LspSessionResult> {
         // Get unresolved references with file path information, filtered by language
         let all_unresolved = self.db.get_unresolved_references_for_lsp()?;
         let unresolved: Vec<_> = all_unresolved
@@ -402,7 +402,10 @@ impl Tethys {
                 language = ?language,
                 "No unresolved references for LSP resolution"
             );
-            return Ok((0, vec![]));
+            return Ok(LspSessionResult {
+                language,
+                outcome: LspOutcome::NothingToResolve,
+            });
         }
 
         debug!(
@@ -416,10 +419,6 @@ impl Tethys {
             Ok(c) => c,
             Err(e) => {
                 // User explicitly requested LSP with --lsp flag, so log at error level
-                let error_msg = format!(
-                    "LSP server for {language:?} failed to start: {e}. {}",
-                    provider.install_hint()
-                );
                 tracing::error!(
                     error = %e,
                     language = ?language,
@@ -428,12 +427,19 @@ impl Tethys {
                      {} Or remove --lsp flag.",
                     provider.install_hint()
                 );
-                return Ok((0, vec![error_msg]));
+                return Ok(LspSessionResult {
+                    language,
+                    outcome: LspOutcome::ServerUnavailable {
+                        reason: format!("LSP server for {language:?} failed to start: {e}"),
+                        install_hint: provider.install_hint().to_string(),
+                    },
+                });
             }
         };
 
         let mut resolved_count = 0;
-        let mut lsp_errors = 0;
+        let mut lsp_error_count: usize = 0;
+        let mut lsp_error_messages: Vec<String> = Vec::new();
         let mut opened_files: HashSet<PathBuf> = HashSet::new();
         let mut did_open_warned = false;
 
@@ -523,7 +529,8 @@ impl Tethys {
             match self.resolve_single_ref_via_lsp(
                 &mut client,
                 unresolved_ref,
-                &mut lsp_errors,
+                &mut lsp_error_count,
+                &mut lsp_error_messages,
                 &mut opened_files,
                 language_id,
                 &mut did_open_warned,
@@ -540,14 +547,9 @@ impl Tethys {
             }
         }
 
-        // Graceful shutdown
-        if let Err(e) = client.shutdown() {
-            warn!(error = %e, "LSP shutdown failed");
-        }
-
-        if lsp_errors > 5 {
+        if lsp_error_count > LspCompletedSession::MAX_ERROR_MESSAGES {
             info!(
-                total_errors = lsp_errors,
+                total_errors = lsp_error_count,
                 "Additional LSP errors suppressed"
             );
         }
@@ -556,11 +558,29 @@ impl Tethys {
             language = ?language,
             resolved_count = resolved_count,
             total_unresolved = unresolved.len(),
-            lsp_errors = lsp_errors,
+            lsp_errors = lsp_error_count,
             "LSP resolution pass complete"
         );
 
-        Ok((resolved_count, vec![]))
+        // Graceful shutdown — capture exit code for the session result
+        let exit_code = match client.shutdown() {
+            Ok(code) => code,
+            Err(e) => {
+                warn!(error = %e, "LSP shutdown failed");
+                None
+            }
+        };
+
+        Ok(LspSessionResult {
+            language,
+            outcome: LspOutcome::Completed(LspCompletedSession {
+                resolved_count,
+                unresolved_attempted: unresolved.len(),
+                error_count: lsp_error_count,
+                errors: lsp_error_messages,
+                server_exit_code: exit_code,
+            }),
+        })
     }
 
     /// Attempt to resolve a single reference via LSP.
@@ -571,11 +591,16 @@ impl Tethys {
         clippy::too_many_lines,
         reason = "didOpen warn/trace branching adds lines but keeps logic cohesive"
     )]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "mutable resolution state is threaded through; bundling into a struct is a future cleanup"
+    )]
     fn resolve_single_ref_via_lsp(
         &self,
         client: &mut lsp::LspClient,
         unresolved_ref: &UnresolvedRefForLsp,
-        lsp_errors: &mut usize,
+        lsp_error_count: &mut usize,
+        lsp_error_messages: &mut Vec<String>,
         opened_files: &mut HashSet<PathBuf>,
         language_id: &str,
         did_open_warned: &mut bool,
@@ -645,15 +670,22 @@ impl Tethys {
                 return Ok(false);
             }
             Err(e) => {
-                *lsp_errors += 1;
+                *lsp_error_count += 1;
+                // Collect first few error messages for the caller
+                if *lsp_error_count <= LspCompletedSession::MAX_ERROR_MESSAGES {
+                    lsp_error_messages.push(format!(
+                        "goto_definition failed for '{}': {e}",
+                        unresolved_ref.reference_name,
+                    ));
+                }
                 // Log first error at warn level so users see something went wrong
-                if *lsp_errors == 1 {
+                if *lsp_error_count == 1 {
                     warn!(
                         ref_id = %unresolved_ref.ref_id,
                         error = %e,
                         "LSP goto_definition failed (further errors logged at trace level)"
                     );
-                } else if *lsp_errors <= 5 {
+                } else if *lsp_error_count <= LspCompletedSession::MAX_ERROR_MESSAGES {
                     trace!(
                         ref_id = %unresolved_ref.ref_id,
                         error = %e,
