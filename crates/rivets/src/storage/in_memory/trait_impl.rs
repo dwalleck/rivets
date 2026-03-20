@@ -7,7 +7,7 @@ use crate::domain::{
     Dependency, DependencyType, Issue, IssueFilter, IssueId, IssueStatus, IssueUpdate, NewIssue,
     SortPolicy, MAX_PRIORITY,
 };
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, StorageError};
 use crate::storage::IssueStorage;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -47,9 +47,7 @@ impl IssueStorage for InMemoryStorage {
 
         // === Phase 1: All validations (no mutations) ===
         // Validate the new issue data (title, priority, etc.)
-        new_issue
-            .validate()
-            .map_err(|e| Error::Storage(format!("Validation failed: {}", e)))?;
+        new_issue.validate().map_err(StorageError::Validation)?;
 
         // Validate all dependency targets exist
         for (depends_on_id, _dep_type) in &new_issue.dependencies {
@@ -177,9 +175,7 @@ impl IssueStorage for InMemoryStorage {
 
         // Validate the updated issue to ensure data integrity
         // This catches invalid titles, descriptions, or priorities that may have been set
-        issue
-            .validate()
-            .map_err(|e| Error::Storage(format!("Validation failed: {}", e)))?;
+        issue.validate().map_err(StorageError::Validation)?;
 
         issue.updated_at = Utc::now();
 
@@ -243,10 +239,11 @@ impl IssueStorage for InMemoryStorage {
         // Check for duplicate dependency using graph lookup (O(1) with find_edge)
         // This is more efficient than iterating through the issue.dependencies vector
         if inner.graph.find_edge(from_node, to_node).is_some() {
-            return Err(Error::Storage(format!(
-                "Dependency already exists: {} -> {}",
-                from, to
-            )));
+            return Err(StorageError::DuplicateDependency {
+                from: from.clone(),
+                to: to.clone(),
+            }
+            .into());
         }
 
         // Check for cycles (must be done after duplicate check to avoid false positives)

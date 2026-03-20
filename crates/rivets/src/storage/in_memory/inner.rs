@@ -4,7 +4,7 @@
 //! and is wrapped in `Arc<Mutex<>>` for thread safety.
 
 use crate::domain::{DependencyType, Issue, IssueId, NewIssue};
-use crate::error::{Error, Result};
+use crate::error::{Result, StorageError};
 use crate::id_generation::{IdGenerator, IdGeneratorConfig};
 use petgraph::graph::{DiGraph, NodeIndex};
 use std::collections::HashMap;
@@ -109,7 +109,7 @@ impl InMemoryStorageInner {
                 new_issue.assignee.as_deref(),
                 None, // No parent ID for top-level issues
             )
-            .map_err(|e| Error::Storage(format!("ID generation failed: {}", e)))?;
+            .map_err(|e| StorageError::IdGeneration(e.to_string()))?;
 
         Ok(IssueId::new(id_str))
     }

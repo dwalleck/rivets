@@ -4,6 +4,99 @@ use crate::domain::IssueId;
 use std::io;
 use thiserror::Error;
 
+/// Configuration-related errors.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum ConfigError {
+    /// No rivets repository found in directory tree.
+    #[error("Not a rivets repository (or any of the parent directories). Run 'rivets init' to create a new repository.")]
+    NotInitialized,
+
+    /// Rivets is already initialized in the target directory.
+    #[error("Rivets is already initialized in this directory. Found existing '{0}'")]
+    AlreadyInitialized(String),
+
+    /// Invalid issue ID prefix format.
+    #[error("{0}")]
+    InvalidPrefix(String),
+
+    /// Failed to parse (deserialize) a YAML config file from disk.
+    ///
+    /// Carries the file path for diagnostic context. Contrast with
+    /// [`YamlSerialization`](Self::YamlSerialization), which fires during
+    /// serialization where no file path is relevant yet.
+    #[error("Failed to parse config file '{path}': {source}")]
+    Parse {
+        /// Path to the config file that failed to parse.
+        path: String,
+        /// The underlying YAML parse error.
+        source: serde_yaml::Error,
+    },
+
+    /// Failed to serialize config to YAML.
+    ///
+    /// This fires when converting an in-memory config struct to a YAML string
+    /// (e.g., during `save()`). Unlike [`Parse`](Self::Parse), no file path
+    /// is available because serialization precedes the write.
+    #[error("YAML serialization error")]
+    YamlSerialization(#[source] serde_yaml::Error),
+
+    /// data_file path must be relative, not absolute.
+    #[error("data_file must be a relative path")]
+    AbsoluteDataPath,
+
+    /// data_file path contains parent directory references.
+    #[error("data_file must not contain parent directory references ('..')")]
+    PathTraversal,
+
+    /// Unknown storage backend specified in config.
+    #[error("Unknown storage backend '{0}'. Supported backends: jsonl, postgresql")]
+    UnknownBackend(String),
+
+    /// Storage backend recognized but not yet implemented.
+    ///
+    /// Raised at both config-resolution time (e.g., `to_backend()`) and
+    /// storage-creation time (e.g., `create_storage()`). A single variant
+    /// here avoids duplication — the concept "this backend isn't ready"
+    /// is a configuration-level concern regardless of which layer detects it.
+    #[error("Storage backend not yet implemented: {0}")]
+    UnsupportedBackend(String),
+}
+
+/// Storage-layer errors.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum StorageError {
+    /// Issue data failed validation.
+    ///
+    /// Currently wraps the `String` returned by domain-level `validate()`.
+    /// If `validate()` evolves to return a richer error type, this variant
+    /// should be updated to wrap it via `#[source]` instead.
+    #[error("Validation failed: {0}")]
+    Validation(String),
+
+    /// Failed to generate a unique issue ID.
+    #[error("ID generation failed: {0}")]
+    IdGeneration(String),
+
+    /// Attempted to add a dependency that already exists.
+    #[error("Dependency already exists: {from} -> {to}")]
+    DuplicateDependency {
+        /// The source issue.
+        from: IssueId,
+        /// The target issue.
+        to: IssueId,
+    },
+
+    /// Invalid format encountered during parsing.
+    #[error("Invalid format: {0}")]
+    InvalidFormat(String),
+
+    /// JSON serialization failed during storage operations.
+    #[error("JSON serialization failed")]
+    Serialization(#[source] serde_json::Error),
+}
+
 /// The error type for rivets operations.
 #[derive(Debug, Error)]
 pub enum Error {
@@ -12,12 +105,26 @@ pub enum Error {
     Io(#[from] io::Error),
 
     /// Configuration error.
-    #[error("Configuration error: {0}")]
-    Config(String),
+    #[error("{0}")]
+    Config(#[from] ConfigError),
 
     /// Storage error.
-    #[error("Storage error: {0}")]
-    Storage(String),
+    #[error("{0}")]
+    Storage(#[from] StorageError),
+
+    /// CLI input validation error.
+    ///
+    /// `field` uses `&'static str` because validation field names are known at
+    /// compile time (e.g., `"prefix"`, `"title"`). This prevents accidental
+    /// use with runtime-generated field names and avoids allocation. If dynamic
+    /// field names are ever needed, this should be changed to `String`.
+    #[error("{reason}")]
+    Validation {
+        /// The field that failed validation (available for programmatic access).
+        field: &'static str,
+        /// Why the value was invalid.
+        reason: String,
+    },
 
     /// Issue not found.
     #[error("Issue not found: {0}")]
@@ -66,10 +173,203 @@ pub enum Error {
     #[error("Issue already exists: {0}")]
     IssueAlreadyExists(IssueId),
 
-    /// JSON parsing error.
+    /// JSON parsing error (e.g., loading corrupt JSONL files).
+    ///
+    /// Note: Storage-layer serialization failures use [`StorageError::Serialization`]
+    /// instead, to distinguish internal bugs from external data problems.
+    /// Because this variant has `#[from]`, bare `?` on `serde_json::Error` will
+    /// route here — use `.map_err(StorageError::Serialization)` explicitly in
+    /// storage code.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 }
 
 /// A specialized Result type for rivets operations.
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rstest::rstest;
+    use std::error::Error as StdError;
+
+    // ========== Display Formatting Tests ==========
+
+    #[rstest]
+    #[case::not_initialized(
+        ConfigError::NotInitialized,
+        "Not a rivets repository (or any of the parent directories). Run 'rivets init' to create a new repository."
+    )]
+    #[case::invalid_prefix(
+        ConfigError::InvalidPrefix("Prefix must be at least 2 characters".to_string()),
+        "Prefix must be at least 2 characters"
+    )]
+    #[case::already_initialized(
+        ConfigError::AlreadyInitialized(".rivets".to_string()),
+        "Rivets is already initialized in this directory. Found existing '.rivets'"
+    )]
+    #[case::unsupported_backend(
+        ConfigError::UnsupportedBackend("PostgreSQL".to_string()),
+        "Storage backend not yet implemented: PostgreSQL"
+    )]
+    #[case::absolute_data_path(ConfigError::AbsoluteDataPath, "data_file must be a relative path")]
+    #[case::path_traversal(
+        ConfigError::PathTraversal,
+        "data_file must not contain parent directory references ('..')"
+    )]
+    #[case::unknown_backend(
+        ConfigError::UnknownBackend("redis".to_string()),
+        "Unknown storage backend 'redis'. Supported backends: jsonl, postgresql"
+    )]
+    fn config_error_display(#[case] error: ConfigError, #[case] expected: &str) {
+        assert_eq!(error.to_string(), expected);
+    }
+
+    #[test]
+    fn config_parse_display_includes_path_and_source() {
+        let yaml_err = serde_yaml::from_str::<String>("invalid: [yaml").unwrap_err();
+        let error = ConfigError::Parse {
+            path: "config.yaml".to_string(),
+            source: yaml_err,
+        };
+        let msg = error.to_string();
+        assert!(msg.starts_with("Failed to parse config file 'config.yaml': "));
+    }
+
+    #[test]
+    fn config_yaml_serialization_display() {
+        let yaml_err = serde_yaml::from_str::<String>("invalid: [yaml").unwrap_err();
+        let error = ConfigError::YamlSerialization(yaml_err);
+        assert_eq!(error.to_string(), "YAML serialization error");
+    }
+
+    #[rstest]
+    #[case::validation(
+        StorageError::Validation("title is required".to_string()),
+        "Validation failed: title is required"
+    )]
+    #[case::duplicate_dependency(
+        StorageError::DuplicateDependency {
+            from: IssueId::new("proj-abc"),
+            to: IssueId::new("proj-def"),
+        },
+        "Dependency already exists: proj-abc -> proj-def"
+    )]
+    #[case::id_generation(
+        StorageError::IdGeneration("exhausted retries".to_string()),
+        "ID generation failed: exhausted retries"
+    )]
+    #[case::invalid_format(
+        StorageError::InvalidFormat("unexpected field".to_string()),
+        "Invalid format: unexpected field"
+    )]
+    fn storage_error_display(#[case] error: StorageError, #[case] expected: &str) {
+        assert_eq!(error.to_string(), expected);
+    }
+
+    #[test]
+    fn storage_serialization_display() {
+        let json_err = serde_json::from_str::<String>("not json").unwrap_err();
+        let error = StorageError::Serialization(json_err);
+        assert_eq!(error.to_string(), "JSON serialization failed");
+    }
+
+    #[test]
+    fn validation_error_display() {
+        let error = Error::Validation {
+            field: "priority",
+            reason: "must be between 0 and 4".to_string(),
+        };
+        assert_eq!(error.to_string(), "must be between 0 and 4");
+    }
+
+    // ========== Source Chain Tests ==========
+
+    #[test]
+    fn config_parse_error_has_source() {
+        let yaml_err = serde_yaml::from_str::<String>("invalid: [yaml").unwrap_err();
+        let error = ConfigError::Parse {
+            path: "config.yaml".to_string(),
+            source: yaml_err,
+        };
+        assert!(
+            error.source().is_some(),
+            "ConfigError::Parse should expose a source"
+        );
+    }
+
+    #[test]
+    fn config_yaml_serialization_error_has_source() {
+        let yaml_err = serde_yaml::from_str::<String>("invalid: [yaml").unwrap_err();
+        let error = ConfigError::YamlSerialization(yaml_err);
+        assert!(
+            error.source().is_some(),
+            "ConfigError::YamlSerialization should expose a source"
+        );
+    }
+
+    #[test]
+    fn storage_serialization_error_has_source() {
+        let json_err = serde_json::from_str::<String>("not json").unwrap_err();
+        let error = StorageError::Serialization(json_err);
+        assert!(
+            error.source().is_some(),
+            "StorageError::Serialization should expose a source"
+        );
+    }
+
+    #[test]
+    fn invalid_prefix_has_no_source() {
+        let error = ConfigError::InvalidPrefix("too short".to_string());
+        assert!(
+            error.source().is_none(),
+            "ConfigError::InvalidPrefix should not have a source"
+        );
+    }
+
+    // ========== From Conversion Tests ==========
+
+    #[test]
+    fn config_error_converts_to_error() {
+        let config_err = ConfigError::InvalidPrefix("bad prefix".to_string());
+        let error: Error = config_err.into();
+        assert!(
+            matches!(error, Error::Config(ConfigError::InvalidPrefix(_))),
+            "ConfigError should convert to Error::Config"
+        );
+    }
+
+    #[test]
+    fn storage_error_converts_to_error() {
+        let storage_err = StorageError::Validation("missing field".to_string());
+        let error: Error = storage_err.into();
+        assert!(
+            matches!(error, Error::Storage(StorageError::Validation(_))),
+            "StorageError should convert to Error::Storage"
+        );
+    }
+
+    #[test]
+    fn io_error_converts_to_error() {
+        let io_err = io::Error::new(io::ErrorKind::NotFound, "file missing");
+        let error: Error = io_err.into();
+        assert!(
+            matches!(error, Error::Io(_)),
+            "io::Error should convert to Error::Io"
+        );
+    }
+
+    // ========== Validation Field Access Test ==========
+
+    #[test]
+    fn validation_error_exposes_field_for_matching() {
+        let error = Error::Validation {
+            field: "prefix",
+            reason: "too short".to_string(),
+        };
+        match &error {
+            Error::Validation { field, .. } => assert_eq!(*field, "prefix"),
+            other => panic!("Expected Error::Validation, got: {other:?}"),
+        }
+    }
+}

@@ -18,7 +18,7 @@
 //! ```
 
 use crate::commands::init::{find_rivets_root, RivetsConfig, CONFIG_FILE_NAME, RIVETS_DIR_NAME};
-use crate::error::{Error, Result};
+use crate::error::{ConfigError, Result};
 use crate::storage::{create_storage, IssueStorage};
 use std::path::{Path, PathBuf};
 
@@ -66,13 +66,7 @@ impl App {
     /// - Storage initialization fails
     pub async fn from_directory(working_dir: &Path) -> Result<Self> {
         // Find rivets root directory
-        let root_dir = find_rivets_root(working_dir).ok_or_else(|| {
-            Error::Config(
-                "Not a rivets repository (or any of the parent directories). \
-                Run 'rivets init' to create a new repository."
-                    .to_string(),
-            )
-        })?;
+        let root_dir = find_rivets_root(working_dir).ok_or(ConfigError::NotInitialized)?;
 
         let rivets_dir = root_dir.join(RIVETS_DIR_NAME);
         let config_path = rivets_dir.join(CONFIG_FILE_NAME);

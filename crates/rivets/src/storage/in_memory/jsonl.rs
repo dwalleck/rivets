@@ -6,7 +6,7 @@
 use super::graph::has_cycle_impl;
 use super::inner::InMemoryStorageInner;
 use crate::domain::{Issue, IssueId};
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, StorageError};
 use crate::storage::IssueStorage;
 use rivets_jsonl::{read_jsonl_resilient, Warning as JsonlWarning};
 use std::path::Path;
@@ -140,7 +140,7 @@ pub async fn load_from_jsonl(
             .map_err(|e| match e {
                 rivets_jsonl::Error::Io(io_err) => Error::Io(io_err),
                 rivets_jsonl::Error::Json(json_err) => Error::Json(json_err),
-                rivets_jsonl::Error::InvalidFormat(msg) => Error::Storage(msg),
+                rivets_jsonl::Error::InvalidFormat(msg) => StorageError::InvalidFormat(msg).into(),
             })?;
 
     let mut warnings = Vec::new();
@@ -256,8 +256,7 @@ pub async fn save_to_jsonl(storage: &dyn IssueStorage, path: &Path) -> Result<()
         // diffs in version control when dependencies are added/removed in different orders.
         issue.dependencies.sort();
 
-        let json = serde_json::to_string(&issue)
-            .map_err(|e| Error::Storage(format!("JSON serialization failed: {}", e)))?;
+        let json = serde_json::to_string(&issue).map_err(StorageError::Serialization)?;
 
         writer.write_all(json.as_bytes()).await.map_err(Error::Io)?;
 
