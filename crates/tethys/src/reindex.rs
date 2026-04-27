@@ -10,8 +10,20 @@ use std::time::UNIX_EPOCH;
 use tracing::{debug, warn};
 
 use crate::Tethys;
+use crate::db::normalize_path;
 use crate::error::Result;
 use crate::types::{IndexOptions, IndexStats, IndexUpdate, StalenessReport};
+
+/// Classification of a single file's state relative to its indexed entry.
+///
+/// Returned by [`classify_indexed_file`] so both [`Tethys::needs_update`] and
+/// [`Tethys::get_stale_files`] share one source of truth for "what changed?".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileChange {
+    Unchanged,
+    Modified,
+    Deleted,
+}
 
 #[expect(
     clippy::missing_errors_doc,
@@ -44,18 +56,20 @@ impl Tethys {
         let disk_files = self.discover_files(&mut Vec::new())?;
 
         for file_path in disk_files {
-            let relative = self.relative_path(&file_path);
-            match indexed_map.remove(relative.as_ref()) {
+            let lookup = self.lookup_key(&file_path);
+            match indexed_map.remove(&lookup) {
                 None => return Ok(true),
                 Some((indexed_mtime, indexed_size)) => {
-                    if file_changed(&file_path, indexed_mtime, indexed_size) {
+                    if classify_indexed_file(&file_path, indexed_mtime, indexed_size)
+                        != FileChange::Unchanged
+                    {
                         return Ok(true);
                     }
                 }
             }
         }
 
-        // Anything still in the map is on disk no longer — i.e. deleted.
+        // Anything still in the map is in the DB but no longer on disk — i.e. deleted.
         Ok(!indexed_map.is_empty())
     }
 
@@ -65,6 +79,10 @@ impl Tethys {
     /// - **Modified**: files on disk whose mtime or size differ from the index
     /// - **Added**: source files on disk not yet in the index
     /// - **Deleted**: files in the index no longer present on disk
+    ///
+    /// Returned paths use forward-slash separators on all platforms, matching
+    /// the [`IndexedFile::path`](crate::types::IndexedFile::path) form stored
+    /// in the DB.
     ///
     /// Note: there is a small TOCTOU window where files could change between
     /// this staleness check and actual re-indexing. This is acceptable for
@@ -82,32 +100,16 @@ impl Tethys {
         let disk_files = self.discover_files(&mut Vec::new())?;
 
         for file_path in disk_files {
-            let relative = self.relative_path(&file_path);
+            let lookup = self.lookup_key(&file_path);
 
-            if let Some((indexed_mtime, indexed_size)) = indexed_map.remove(relative.as_ref()) {
-                match std::fs::metadata(&file_path) {
-                    Ok(metadata) => {
-                        let size = metadata.len();
-                        let mtime = mtime_ns(&metadata, &file_path);
-                        if mtime != indexed_mtime || size != indexed_size {
-                            modified.push(relative.into_owned());
-                        }
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        // File was deleted between discovery and metadata check
-                        deleted.push(relative.into_owned());
-                    }
-                    Err(e) => {
-                        warn!(
-                            path = %file_path.display(),
-                            error = %e,
-                            "Failed to read metadata during staleness check, treating as modified"
-                        );
-                        modified.push(relative.into_owned());
-                    }
+            if let Some((indexed_mtime, indexed_size)) = indexed_map.remove(&lookup) {
+                match classify_indexed_file(&file_path, indexed_mtime, indexed_size) {
+                    FileChange::Unchanged => {}
+                    FileChange::Modified => modified.push(lookup),
+                    FileChange::Deleted => deleted.push(lookup),
                 }
             } else {
-                added.push(relative.into_owned());
+                added.push(lookup);
             }
         }
 
@@ -127,13 +129,34 @@ impl Tethys {
         })
     }
 
+    /// Build the indexed-file lookup map keyed by normalized workspace-relative path.
+    ///
+    /// `IndexedFile::path` is stored normalized (forward slashes) by the DB
+    /// layer; we re-normalize defensively so the contract holds even if a
+    /// future code path inserts a path that bypassed `normalize_path`.
     fn load_indexed_map(&self) -> Result<HashMap<PathBuf, (i64, u64)>> {
         Ok(self
             .db
             .list_all_files()?
             .into_iter()
-            .map(|f| (f.path, (f.mtime_ns, f.size_bytes)))
+            .map(|f| {
+                (
+                    PathBuf::from(normalize_path(&f.path)),
+                    (f.mtime_ns, f.size_bytes),
+                )
+            })
             .collect())
+    }
+
+    /// Compute the lookup key for a discovered disk path.
+    ///
+    /// Strips the workspace prefix and normalizes separators to match the
+    /// forward-slash form stored by the DB layer (critical on Windows, where
+    /// `entry.path()` yields backslash-separated paths but the DB stores
+    /// forward slashes).
+    fn lookup_key(&self, file_path: &Path) -> PathBuf {
+        let relative = self.relative_path(file_path);
+        PathBuf::from(normalize_path(relative.as_ref()))
     }
 
     /// Rebuild the entire index from scratch.
@@ -156,26 +179,30 @@ impl Tethys {
     }
 }
 
-/// Returns whether a file's mtime or size differ from the indexed values.
+/// Classify a file's state relative to its indexed mtime/size.
 ///
-/// Errors are conservatively reported as `true` (treat as changed) so callers
-/// can re-index the file rather than skipping it. `NotFound` is also `true`
-/// because a missing file always invalidates the indexed entry.
-fn file_changed(file_path: &Path, indexed_mtime: i64, indexed_size: u64) -> bool {
+/// Errors are conservatively reported as `Modified` (treat as changed) so
+/// callers re-index the file rather than skipping it. `NotFound` becomes
+/// `Deleted` because a missing file always invalidates the indexed entry.
+fn classify_indexed_file(file_path: &Path, indexed_mtime: i64, indexed_size: u64) -> FileChange {
     match std::fs::metadata(file_path) {
         Ok(metadata) => {
             let size = metadata.len();
             let mtime = mtime_ns(&metadata, file_path);
-            mtime != indexed_mtime || size != indexed_size
+            if mtime != indexed_mtime || size != indexed_size {
+                FileChange::Modified
+            } else {
+                FileChange::Unchanged
+            }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => FileChange::Deleted,
         Err(e) => {
             warn!(
                 path = %file_path.display(),
                 error = %e,
                 "Failed to read metadata during staleness check, treating as modified"
             );
-            true
+            FileChange::Modified
         }
     }
 }
@@ -207,8 +234,79 @@ fn mtime_ns(metadata: &std::fs::Metadata, file_path: &Path) -> i64 {
             return 0;
         }
     };
-    // Nanoseconds since epoch fit in i64 until year 2262.
-    #[allow(clippy::cast_possible_truncation)]
-    let ns = duration.as_nanos() as i64;
-    ns
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "ns since epoch fits in i64 until year 2262"
+    )]
+    {
+        duration.as_nanos() as i64
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FileChange, classify_indexed_file};
+    use std::fs;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    fn write_and_stat(dir: &Path, name: &str, content: &str) -> (std::path::PathBuf, i64, u64) {
+        let path = dir.join(name);
+        fs::write(&path, content).expect("failed to write file");
+        let metadata = fs::metadata(&path).expect("metadata after write");
+        let mtime = metadata
+            .modified()
+            .expect("modified time")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("post-epoch mtime")
+            .as_nanos();
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "ns since epoch fits in i64 until year 2262"
+        )]
+        let mtime = mtime as i64;
+        (path, mtime, metadata.len())
+    }
+
+    #[test]
+    fn classify_unchanged_when_mtime_and_size_match() {
+        let dir = TempDir::new().expect("tempdir");
+        let (path, mtime, size) = write_and_stat(dir.path(), "a.rs", "fn a() {}");
+
+        assert_eq!(
+            classify_indexed_file(&path, mtime, size),
+            FileChange::Unchanged
+        );
+    }
+
+    #[test]
+    fn classify_modified_when_size_differs() {
+        let dir = TempDir::new().expect("tempdir");
+        let (path, mtime, size) = write_and_stat(dir.path(), "a.rs", "fn a() {}");
+
+        // Same mtime, wrong size — pure size-change branch.
+        assert_eq!(
+            classify_indexed_file(&path, mtime, size + 1),
+            FileChange::Modified
+        );
+    }
+
+    #[test]
+    fn classify_modified_when_mtime_differs() {
+        let dir = TempDir::new().expect("tempdir");
+        let (path, mtime, size) = write_and_stat(dir.path(), "a.rs", "fn a() {}");
+
+        assert_eq!(
+            classify_indexed_file(&path, mtime + 1, size),
+            FileChange::Modified
+        );
+    }
+
+    #[test]
+    fn classify_deleted_when_file_is_missing() {
+        let dir = TempDir::new().expect("tempdir");
+        let missing = dir.path().join("never-existed.rs");
+
+        assert_eq!(classify_indexed_file(&missing, 0, 0), FileChange::Deleted);
+    }
 }

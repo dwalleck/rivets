@@ -157,6 +157,30 @@ fn needs_update_returns_true_after_modification() {
 }
 
 #[test]
+fn needs_update_returns_true_after_addition() {
+    let (dir, mut tethys) = workspace_with_files(&[("src/lib.rs", "fn hello() {}")]);
+    tethys.index().expect("index failed");
+
+    fs::write(dir.path().join("src/added.rs"), "fn added() {}")
+        .expect("failed to write added file");
+
+    assert!(tethys.needs_update().expect("needs_update failed"));
+}
+
+#[test]
+fn needs_update_returns_true_after_deletion() {
+    let (dir, mut tethys) = workspace_with_files(&[
+        ("src/lib.rs", "fn hello() {}"),
+        ("src/helper.rs", "fn help() {}"),
+    ]);
+    tethys.index().expect("index failed");
+
+    fs::remove_file(dir.path().join("src/helper.rs")).expect("failed to delete file");
+
+    assert!(tethys.needs_update().expect("needs_update failed"));
+}
+
+#[test]
 fn get_stale_files_ignores_non_source_files() {
     let (dir, mut tethys) = workspace_with_files(&[("src/lib.rs", "fn hello() {}")]);
     tethys.index().expect("index failed");

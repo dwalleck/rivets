@@ -14,7 +14,10 @@ use crate::types::{FileId, IndexedFile, Language, SymbolId};
 /// On Windows, `Path::to_string_lossy()` preserves backslashes from OS APIs,
 /// but tests and cross-platform code use forward slashes. Normalizing to `/`
 /// ensures lookups match regardless of how the path was constructed.
-fn normalize_path(path: &Path) -> String {
+///
+/// Exposed `pub(crate)` so callers that need to compare paths against
+/// DB-stored paths (e.g. staleness detection) use the same normalization.
+pub(crate) fn normalize_path(path: &Path) -> String {
     let s = path.to_string_lossy();
     if cfg!(windows) {
         s.replace('\\', "/")
