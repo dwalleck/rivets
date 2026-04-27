@@ -1,0 +1,187 @@
+//! Integration tests for sub-symbol extraction (variants, fields).
+//!
+//! Verifies that variants and fields land in the `symbols` table with the
+//! expected `kind`, `parent_name`, and `signature` populated, and that the
+//! Gate 4-shape SQL query (find external-error types behind `#[source]` on a
+//! pub variant field) returns the expected hits against an indexed fixture.
+
+#![allow(
+    clippy::needless_raw_string_hashes,
+    clippy::doc_markdown,
+    clippy::uninlined_format_args
+)]
+
+use std::fs;
+
+use rusqlite::Connection;
+use tempfile::TempDir;
+use tethys::Tethys;
+
+fn workspace_with_files(files: &[(&str, &str)]) -> (TempDir, Tethys) {
+    let dir = tempfile::tempdir().expect("failed to create temp dir");
+    for (path, content) in files {
+        let full_path = dir.path().join(path);
+        if let Some(parent) = full_path.parent() {
+            fs::create_dir_all(parent).expect("failed to create parent dirs");
+        }
+        fs::write(&full_path, content).expect("failed to write file");
+    }
+    let tethys = Tethys::new(dir.path()).expect("failed to create Tethys");
+    (dir, tethys)
+}
+
+fn open_db(tethys: &Tethys) -> Connection {
+    Connection::open(tethys.db_path()).expect("opening tethys.db should succeed")
+}
+
+#[test]
+fn enum_variants_persist_with_parent_name() {
+    let (_dir, mut tethys) = workspace_with_files(&[(
+        "src/lib.rs",
+        r"
+pub enum Status {
+    Active,
+    Pending(String),
+    Failed { reason: String },
+}
+",
+    )]);
+    tethys.index().expect("index failed");
+
+    let conn = open_db(&tethys);
+    let mut stmt = conn
+        .prepare(
+            "SELECT name FROM symbols
+             WHERE kind = 'enum_variant'
+             ORDER BY line",
+        )
+        .expect("prepare should succeed");
+    let names: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .expect("query_map should succeed")
+        .collect::<Result<_, _>>()
+        .expect("collect should succeed");
+
+    assert_eq!(names, vec!["Active", "Pending", "Failed"]);
+}
+
+#[test]
+fn struct_field_signatures_persist() {
+    let (_dir, mut tethys) = workspace_with_files(&[(
+        "src/lib.rs",
+        r"
+pub struct User {
+    pub id: u64,
+    name: String,
+}
+",
+    )]);
+    tethys.index().expect("index failed");
+
+    let conn = open_db(&tethys);
+    let mut stmt = conn
+        .prepare(
+            "SELECT name, signature FROM symbols
+             WHERE kind = 'struct_field'
+             ORDER BY line",
+        )
+        .expect("prepare should succeed");
+    let rows: Vec<(String, Option<String>)> = stmt
+        .query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })
+        .expect("query_map should succeed")
+        .collect::<Result<_, _>>()
+        .expect("collect should succeed");
+
+    assert_eq!(
+        rows,
+        vec![
+            ("id".to_string(), Some("u64".to_string())),
+            ("name".to_string(), Some("String".to_string())),
+        ]
+    );
+}
+
+#[test]
+fn tuple_struct_fields_use_positional_names() {
+    let (_dir, mut tethys) = workspace_with_files(&[("src/lib.rs", "pub struct GitRef(String);")]);
+    tethys.index().expect("index failed");
+
+    let conn = open_db(&tethys);
+    let (name, signature): (String, Option<String>) = conn
+        .query_row(
+            "SELECT s.name, s.signature
+             FROM symbols s
+             JOIN symbols parent ON parent.name = 'GitRef' AND parent.kind = 'struct'
+             WHERE s.kind = 'struct_field'",
+            [],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+        )
+        .expect("tuple field should be persisted");
+    assert_eq!(name, "0");
+    assert_eq!(signature.as_deref(), Some("String"));
+}
+
+#[test]
+fn gate_4_external_error_query_matches_violation() {
+    // The canonical Gate 4 violation pattern from PR #64: a pub enum variant
+    // carrying an external crate's error via #[source].
+    let (_dir, mut tethys) = workspace_with_files(&[(
+        "src/lib.rs",
+        r"
+pub enum AgentError {
+    NativeManifestParseFailed {
+        path: String,
+        #[source]
+        source: serde_json::Error,
+    },
+    Ok,
+}
+",
+    )]);
+    tethys.index().expect("index failed");
+
+    let conn = open_db(&tethys);
+    // Gate 4: a `#[source]` attribute attached to a struct_field whose
+    // signature mentions an external crate's error path, parent symbol is
+    // a variant of a public enum.
+    let mut stmt = conn
+        .prepare(
+            "SELECT s.name, s.parent_name_legacy, s.signature
+             FROM (
+                 SELECT s.name AS name,
+                        (SELECT s2.name FROM symbols s2 WHERE s2.id = s.parent_symbol_id) AS parent_name_legacy,
+                        s.signature AS signature,
+                        s.id AS id
+                 FROM symbols s
+                 WHERE s.kind = 'struct_field'
+                   AND s.signature LIKE '%serde_json::%'
+             ) s
+             JOIN attributes a ON a.symbol_id = s.id
+             WHERE a.name = 'source'",
+        )
+        .expect("prepare should succeed");
+    let rows: Vec<(String, Option<String>, Option<String>)> = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        })
+        .expect("query_map should succeed")
+        .collect::<Result<_, _>>()
+        .expect("collect should succeed");
+
+    assert_eq!(rows.len(), 1, "Gate 4 query should find one violation");
+    let (name, _, signature) = &rows[0];
+    assert_eq!(name, "source");
+    assert!(
+        signature
+            .as_deref()
+            .is_some_and(|s| s.contains("serde_json::Error")),
+        "signature should include serde_json::Error; got {:?}",
+        signature
+    );
+}

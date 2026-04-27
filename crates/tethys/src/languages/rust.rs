@@ -61,6 +61,13 @@ mod node_kinds {
     // Attribute nodes
     pub const ATTRIBUTE_ITEM: &str = "attribute_item";
 
+    // Sub-symbol nodes (variants, fields)
+    pub const ENUM_VARIANT_LIST: &str = "enum_variant_list";
+    pub const ENUM_VARIANT: &str = "enum_variant";
+    pub const FIELD_DECLARATION_LIST: &str = "field_declaration_list";
+    pub const FIELD_DECLARATION: &str = "field_declaration";
+    pub const ORDERED_FIELD_DECLARATION_LIST: &str = "ordered_field_declaration_list";
+
     // Expression nodes (for reference extraction)
     pub const CALL_EXPRESSION: &str = "call_expression";
     pub const STRUCT_EXPRESSION: &str = "struct_expression";
@@ -668,12 +675,16 @@ fn extract_symbols_recursive(
         }
         STRUCT_ITEM => {
             if let Some(sym) = extract_simple_definition(node, content, SymbolKind::Struct) {
+                let parent = sym.name.clone();
                 symbols.push(sym);
+                symbols.extend(extract_struct_fields(node, &parent, content));
             }
         }
         ENUM_ITEM => {
             if let Some(sym) = extract_simple_definition(node, content, SymbolKind::Enum) {
+                let parent = sym.name.clone();
                 symbols.push(sym);
+                symbols.extend(extract_enum_variants(node, &parent, content));
             }
         }
         TRAIT_ITEM => {
@@ -835,6 +846,207 @@ fn extract_macro(node: &tree_sitter::Node, content: &[u8]) -> Option<ExtractedSy
         is_test: false, // Macros are never tests
         attributes,
     })
+}
+
+/// Walk a struct's body and emit a `struct_field` row per field.
+///
+/// Returns an empty Vec for unit structs (no body field). Dispatches between
+/// named-field structs (`field_declaration_list`) and tuple structs
+/// (`ordered_field_declaration_list`).
+fn extract_struct_fields(
+    struct_item: &tree_sitter::Node,
+    parent_name: &str,
+    content: &[u8],
+) -> Vec<ExtractedSymbol> {
+    let Some(body) = struct_item.child_by_field_name("body") else {
+        return Vec::new();
+    };
+    extract_fields_from_body(&body, parent_name, content)
+}
+
+/// Dispatches a body list to the appropriate extractor.
+///
+/// Used for both struct bodies and struct-shaped enum variant bodies.
+fn extract_fields_from_body(
+    body: &tree_sitter::Node,
+    parent_name: &str,
+    content: &[u8],
+) -> Vec<ExtractedSymbol> {
+    use node_kinds::{FIELD_DECLARATION_LIST, ORDERED_FIELD_DECLARATION_LIST};
+    match body.kind() {
+        FIELD_DECLARATION_LIST => extract_named_fields(body, parent_name, content),
+        ORDERED_FIELD_DECLARATION_LIST => extract_tuple_fields(body, parent_name, content),
+        _ => Vec::new(),
+    }
+}
+
+/// Extract named fields (`pub name: T,`) into `struct_field` rows.
+///
+/// The field's type text lands in `signature`. Attributes preceding the field
+/// (e.g. `#[source]`) are attached via the standard preceding-sibling walk.
+fn extract_named_fields(
+    list: &tree_sitter::Node,
+    parent_name: &str,
+    content: &[u8],
+) -> Vec<ExtractedSymbol> {
+    let mut out = Vec::new();
+    let mut cursor = list.walk();
+    for child in list.children(&mut cursor) {
+        if child.kind() != node_kinds::FIELD_DECLARATION {
+            continue;
+        }
+        let Some(name_node) = child.child_by_field_name("name") else {
+            continue;
+        };
+        let Some(type_node) = child.child_by_field_name("type") else {
+            continue;
+        };
+        let Some(name) = node_text(&name_node, content) else {
+            continue;
+        };
+        let Some(type_text) = node_text(&type_node, content) else {
+            continue;
+        };
+
+        out.push(ExtractedSymbol {
+            name,
+            kind: SymbolKind::StructField,
+            line: child.start_position().row as u32 + 1,
+            column: child.start_position().column as u32 + 1,
+            span: Some(node_span(&child)),
+            signature: Some(type_text),
+            signature_details: None,
+            visibility: extract_visibility(&child, content),
+            parent_name: Some(parent_name.to_string()),
+            is_test: false,
+            attributes: extract_preceding_attributes(&child, content),
+        });
+    }
+    out
+}
+
+/// Extract tuple fields (`pub T,`) into `struct_field` rows with positional names.
+///
+/// Tree-sitter-rust emits the type nodes directly as children of
+/// `ordered_field_declaration_list` — there is no `ordered_field_declaration`
+/// wrapper. We walk in source order and treat each named non-modifier child
+/// as a type node, carrying the most-recent `visibility_modifier` forward.
+fn extract_tuple_fields(
+    list: &tree_sitter::Node,
+    parent_name: &str,
+    content: &[u8],
+) -> Vec<ExtractedSymbol> {
+    let mut out = Vec::new();
+    let mut cursor = list.walk();
+    let mut index: u32 = 0;
+    let mut pending_visibility = Visibility::Private;
+    for child in list.children(&mut cursor) {
+        if !child.is_named() {
+            continue;
+        }
+        match child.kind() {
+            node_kinds::VISIBILITY_MODIFIER => {
+                pending_visibility = parse_visibility_modifier_node(&child, content);
+            }
+            node_kinds::ATTRIBUTE_ITEM => {
+                // Picked up by extract_preceding_attributes against the next type node.
+            }
+            _ => {
+                let Some(type_text) = node_text(&child, content) else {
+                    pending_visibility = Visibility::Private;
+                    continue;
+                };
+                out.push(ExtractedSymbol {
+                    name: index.to_string(),
+                    kind: SymbolKind::StructField,
+                    line: child.start_position().row as u32 + 1,
+                    column: child.start_position().column as u32 + 1,
+                    span: Some(node_span(&child)),
+                    signature: Some(type_text),
+                    signature_details: None,
+                    visibility: pending_visibility,
+                    parent_name: Some(parent_name.to_string()),
+                    is_test: false,
+                    attributes: extract_preceding_attributes(&child, content),
+                });
+                index += 1;
+                pending_visibility = Visibility::Private;
+            }
+        }
+    }
+    out
+}
+
+/// Parse a standalone `visibility_modifier` node into our `Visibility` enum.
+///
+/// Mirrors the matching done by `extract_visibility`, but takes the modifier
+/// node directly rather than its parent.
+fn parse_visibility_modifier_node(node: &tree_sitter::Node, content: &[u8]) -> Visibility {
+    let Some(text) = node_text(node, content) else {
+        return Visibility::Private;
+    };
+    match text.as_str() {
+        "pub" => Visibility::Public,
+        s if s.starts_with("pub(crate)") => Visibility::Crate,
+        s if s.starts_with("pub(super)") | s.starts_with("pub(in") => Visibility::Module,
+        _ => Visibility::Public,
+    }
+}
+
+/// Walk an enum's body and emit one `enum_variant` row per variant, plus
+/// `struct_field` rows for each variant's inner fields.
+///
+/// Variant fields use a qualified `parent_name` (`Enum::Variant`) so the
+/// `#[source]` attribute on a variant field can be located via SQL by
+/// joining `attributes` to `symbols` and filtering on the parent.
+fn extract_enum_variants(
+    enum_item: &tree_sitter::Node,
+    parent_name: &str,
+    content: &[u8],
+) -> Vec<ExtractedSymbol> {
+    let Some(body) = enum_item.child_by_field_name("body") else {
+        return Vec::new();
+    };
+    if body.kind() != node_kinds::ENUM_VARIANT_LIST {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut cursor = body.walk();
+    for child in body.children(&mut cursor) {
+        if child.kind() != node_kinds::ENUM_VARIANT {
+            continue;
+        }
+        let Some(name_node) = child.child_by_field_name("name") else {
+            continue;
+        };
+        let Some(name) = node_text(&name_node, content) else {
+            continue;
+        };
+
+        let signature = child
+            .child_by_field_name("body")
+            .and_then(|b| node_text(&b, content));
+
+        out.push(ExtractedSymbol {
+            name: name.clone(),
+            kind: SymbolKind::EnumVariant,
+            line: child.start_position().row as u32 + 1,
+            column: child.start_position().column as u32 + 1,
+            span: Some(node_span(&child)),
+            signature,
+            signature_details: None,
+            visibility: Visibility::Public, // variants inherit the enum's visibility
+            parent_name: Some(parent_name.to_string()),
+            is_test: false,
+            attributes: extract_preceding_attributes(&child, content),
+        });
+
+        if let Some(variant_body) = child.child_by_field_name("body") {
+            let qualified = format!("{parent_name}::{name}");
+            out.extend(extract_fields_from_body(&variant_body, &qualified, content));
+        }
+    }
+    out
 }
 
 /// Find the type name being implemented in an impl block.
@@ -1157,9 +1369,11 @@ mod tests {
         let tree = parse_rust(code);
         let symbols = extract_symbols(&tree, code.as_bytes());
 
-        assert_eq!(symbols.len(), 1);
-        assert_eq!(symbols[0].name, "User");
-        assert_eq!(symbols[0].kind, SymbolKind::Struct);
+        let struct_sym = symbols
+            .iter()
+            .find(|s| s.kind == SymbolKind::Struct)
+            .expect("struct should be extracted");
+        assert_eq!(struct_sym.name, "User");
     }
 
     #[test]
@@ -1168,9 +1382,11 @@ mod tests {
         let tree = parse_rust(code);
         let symbols = extract_symbols(&tree, code.as_bytes());
 
-        assert_eq!(symbols.len(), 1);
-        assert_eq!(symbols[0].name, "Status");
-        assert_eq!(symbols[0].kind, SymbolKind::Enum);
+        let enum_sym = symbols
+            .iter()
+            .find(|s| s.kind == SymbolKind::Enum)
+            .expect("enum should be extracted");
+        assert_eq!(enum_sym.name, "Status");
     }
 
     #[test]
@@ -1650,5 +1866,164 @@ pub enum E { A, B }
             "function without attributes should have empty Vec, got {:?}",
             symbols[0].attributes,
         );
+    }
+
+    #[test]
+    fn extracts_enum_variants_with_parent_name() {
+        let code = r"
+pub enum Status {
+    Active,
+    Pending(String),
+    Failed { reason: String },
+}
+";
+        let tree = parse_rust(code);
+        let symbols = extract_symbols(&tree, code.as_bytes());
+
+        let variant_names: Vec<&str> = symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::EnumVariant)
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(variant_names, vec!["Active", "Pending", "Failed"]);
+
+        for variant in symbols.iter().filter(|s| s.kind == SymbolKind::EnumVariant) {
+            assert_eq!(
+                variant.parent_name.as_deref(),
+                Some("Status"),
+                "variant {} should have parent_name=Status",
+                variant.name,
+            );
+        }
+    }
+
+    #[test]
+    fn enum_variant_signature_captures_payload() {
+        let code = r"
+pub enum E {
+    Unit,
+    Tuple(String),
+    Record { x: i32 },
+}
+";
+        let tree = parse_rust(code);
+        let symbols = extract_symbols(&tree, code.as_bytes());
+
+        let unit = symbols
+            .iter()
+            .find(|s| s.name == "Unit" && s.kind == SymbolKind::EnumVariant)
+            .expect("Unit variant should be extracted");
+        assert!(
+            unit.signature.is_none(),
+            "unit variant has no payload, got {:?}",
+            unit.signature,
+        );
+
+        let tuple = symbols
+            .iter()
+            .find(|s| s.name == "Tuple" && s.kind == SymbolKind::EnumVariant)
+            .expect("Tuple variant should be extracted");
+        assert!(
+            tuple
+                .signature
+                .as_deref()
+                .is_some_and(|s| s.contains("String")),
+            "tuple variant signature should contain payload type; got {:?}",
+            tuple.signature,
+        );
+
+        let record = symbols
+            .iter()
+            .find(|s| s.name == "Record" && s.kind == SymbolKind::EnumVariant)
+            .expect("Record variant should be extracted");
+        assert!(
+            record
+                .signature
+                .as_deref()
+                .is_some_and(|s| s.contains("x: i32")),
+            "record variant signature should contain field; got {:?}",
+            record.signature,
+        );
+    }
+
+    #[test]
+    fn extracts_struct_fields_with_parent_name_and_type() {
+        let code = r"
+pub struct User {
+    pub id: u64,
+    name: String,
+}
+";
+        let tree = parse_rust(code);
+        let symbols = extract_symbols(&tree, code.as_bytes());
+
+        let fields: Vec<&ExtractedSymbol> = symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::StructField)
+            .collect();
+        assert_eq!(fields.len(), 2);
+
+        let id = fields
+            .iter()
+            .find(|s| s.name == "id")
+            .expect("field id should exist");
+        assert_eq!(id.parent_name.as_deref(), Some("User"));
+        assert_eq!(id.signature.as_deref(), Some("u64"));
+        assert_eq!(id.visibility, Visibility::Public);
+
+        let name = fields
+            .iter()
+            .find(|s| s.name == "name")
+            .expect("field name should exist");
+        assert_eq!(name.signature.as_deref(), Some("String"));
+        assert_eq!(name.visibility, Visibility::Private);
+    }
+
+    #[test]
+    fn tuple_struct_fields_use_position_as_name() {
+        let code = "pub struct GitRef(String);";
+        let tree = parse_rust(code);
+        let symbols = extract_symbols(&tree, code.as_bytes());
+
+        let fields: Vec<&ExtractedSymbol> = symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::StructField)
+            .collect();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].name, "0");
+        assert_eq!(fields[0].signature.as_deref(), Some("String"));
+        assert_eq!(fields[0].parent_name.as_deref(), Some("GitRef"));
+    }
+
+    #[test]
+    fn variant_field_source_attribute_attaches_to_field() {
+        let code = r"
+pub enum E {
+    Bad {
+        path: String,
+        #[source]
+        cause: std::io::Error,
+    },
+}
+";
+        let tree = parse_rust(code);
+        let symbols = extract_symbols(&tree, code.as_bytes());
+
+        let cause = symbols
+            .iter()
+            .find(|s| s.name == "cause" && s.kind == SymbolKind::StructField)
+            .expect("variant field 'cause' should be extracted");
+
+        assert_eq!(cause.parent_name.as_deref(), Some("E::Bad"));
+        assert!(
+            cause
+                .signature
+                .as_deref()
+                .is_some_and(|s| s.contains("io::Error")),
+            "field signature should contain io::Error; got {:?}",
+            cause.signature,
+        );
+        let attr_names: Vec<&str> = cause.attributes.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(attr_names, vec!["source"]);
     }
 }

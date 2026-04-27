@@ -82,10 +82,11 @@ pub fn create_user(name: &str, age: u32) -> User {
     let stats = tethys.index().expect("index failed");
 
     assert_eq!(stats.files_indexed, 1);
-    // Should find: User (struct), new (method), greet (method), create_user (function)
+    // Should find: User (struct), name + age (struct_field), new (method),
+    // greet (method), create_user (function) = 6 symbols total.
     assert_eq!(
-        stats.symbols_found, 4,
-        "expected 4 symbols (User, new, greet, create_user), found {}",
+        stats.symbols_found, 6,
+        "expected 6 symbols (User, name, age, new, greet, create_user), found {}",
         stats.symbols_found
     );
 }

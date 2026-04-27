@@ -199,6 +199,15 @@ pub enum SymbolKind {
     TypeAlias,
     /// Macro (Rust only)
     Macro,
+    /// Variant of an `enum` (`parent_name` set to the enum's name).
+    EnumVariant,
+    /// Field of a struct, tuple struct, or struct-variant of an enum.
+    ///
+    /// For named-field structs and struct variants, `name` is the field
+    /// identifier. For tuple structs and tuple variants, `name` is the
+    /// positional index ("0", "1", ...). The field's type lands in
+    /// `signature`.
+    StructField,
 }
 
 impl SymbolKind {
@@ -218,6 +227,8 @@ impl SymbolKind {
             Self::Module => "module",
             Self::TypeAlias => "type_alias",
             Self::Macro => "macro",
+            Self::EnumVariant => "enum_variant",
+            Self::StructField => "struct_field",
         }
     }
 }
