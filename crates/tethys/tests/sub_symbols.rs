@@ -185,3 +185,147 @@ pub enum AgentError {
         signature
     );
 }
+
+// ─── Schema-population contract tests ────────────────────────────────────
+//
+// These lock the per-kind promises about which columns are non-NULL after
+// indexing. The motivating failure: `signature` is declared on every symbols
+// row but is only *populated* for some kinds. The pre-existing baseline left
+// `signature` NULL on every `struct` and `enum` row despite the schema
+// suggesting otherwise — exactly the silent-zero-results failure mode the
+// broken Gate 4 grep had.
+//
+// If you add a new SymbolKind that promises to populate `signature`, add it
+// to `signature_non_null_for_promised_kinds`. If the new kind is NULL by
+// design, document the reason in code and don't add it here.
+
+#[test]
+fn signature_non_null_for_promised_kinds() {
+    let (_dir, mut tethys) = workspace_with_files(&[(
+        "src/lib.rs",
+        r"
+pub fn free_fn() -> i32 { 0 }
+
+pub struct S {
+    pub field: u64,
+}
+
+impl S {
+    pub fn method(&self) -> u64 { self.field }
+}
+
+pub enum E {
+    Tuple(String),
+    Record { x: i32 },
+}
+",
+    )]);
+    tethys.index().expect("index failed");
+
+    let conn = open_db(&tethys);
+    for kind in ["function", "method", "struct_field"] {
+        let null_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM symbols
+                 WHERE kind = ?1 AND signature IS NULL",
+                [kind],
+                |r| r.get(0),
+            )
+            .expect("count query should succeed");
+        assert_eq!(
+            null_count, 0,
+            "kind={} promises non-NULL signature; found {} rows with NULL",
+            kind, null_count,
+        );
+    }
+
+    // Non-unit enum variants must have populated signature.
+    let null_non_unit: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM symbols
+             WHERE kind = 'enum_variant'
+               AND name IN ('Tuple', 'Record')
+               AND signature IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count query should succeed");
+    assert_eq!(
+        null_non_unit, 0,
+        "non-unit enum variants must have signature populated",
+    );
+}
+
+#[test]
+fn unit_variant_signature_is_explicitly_null() {
+    let (_dir, mut tethys) = workspace_with_files(&[(
+        "src/lib.rs",
+        r"
+pub enum Status { Active, Inactive }
+",
+    )]);
+    tethys.index().expect("index failed");
+
+    let conn = open_db(&tethys);
+    let signatures: Vec<(String, Option<String>)> = conn
+        .prepare(
+            "SELECT name, signature FROM symbols
+             WHERE kind = 'enum_variant'
+             ORDER BY line",
+        )
+        .expect("prepare should succeed")
+        .query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })
+        .expect("query_map should succeed")
+        .collect::<Result<_, _>>()
+        .expect("collect should succeed");
+
+    assert_eq!(
+        signatures,
+        vec![("Active".to_string(), None), ("Inactive".to_string(), None),],
+        "unit variants must have NULL signature (not empty string, not '()')",
+    );
+}
+
+#[test]
+fn derive_attribute_landing_on_struct_is_locked() {
+    // Locks the contract that `#[derive(...)]` attached to a struct lands
+    // as one row in the attributes table with name='derive' and the comma-
+    // separated arg list. Drift here is the same shape as the original
+    // signature drift that motivated this whole sub-symbol extraction.
+    let (_dir, mut tethys) = workspace_with_files(&[(
+        "src/lib.rs",
+        r"
+#[derive(Clone, Debug, PartialEq)]
+pub struct Locked { x: u8 }
+",
+    )]);
+    tethys.index().expect("index failed");
+
+    let conn = open_db(&tethys);
+    let row_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM attributes a
+             JOIN symbols s ON s.id = a.symbol_id
+             WHERE s.name = 'Locked' AND s.kind = 'struct' AND a.name = 'derive'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count query should succeed");
+    assert_eq!(
+        row_count, 1,
+        "exactly one derive attribute row expected for struct Locked",
+    );
+
+    let args: Option<String> = conn
+        .query_row(
+            "SELECT a.args FROM attributes a
+             JOIN symbols s ON s.id = a.symbol_id
+             WHERE s.name = 'Locked' AND a.name = 'derive'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("args query should succeed");
+    assert_eq!(args.as_deref(), Some("Clone, Debug, PartialEq"));
+}
