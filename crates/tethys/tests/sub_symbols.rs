@@ -106,6 +106,37 @@ fn tuple_struct_fields_use_positional_names() {
 }
 
 #[test]
+fn pending_visibility_survives_intervening_comment_in_tuple_fields() {
+    // A comment between a `pub` modifier and the type node must not reset
+    // pending_visibility. Locks the contract that the comment branch in
+    // extract_tuple_fields is a no-op rather than a "boundary" between
+    // fields.
+    let (_dir, mut tethys) = workspace_with_files(&[(
+        "src/lib.rs",
+        r"
+pub struct Note(/* describes the value */ pub i32);
+",
+    )]);
+    tethys.index().expect("index failed");
+
+    let conn = open_db(&tethys);
+    let visibility: String = conn
+        .query_row(
+            "SELECT s.visibility
+             FROM symbols s
+             JOIN symbols parent ON parent.name = 'Note' AND parent.kind = 'struct'
+             WHERE s.kind = 'struct_field'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("tuple field should be persisted");
+    assert_eq!(
+        visibility, "public",
+        "pending_visibility set by `pub` must survive the intervening block comment",
+    );
+}
+
+#[test]
 fn tuple_field_comments_are_not_emitted_as_fake_fields() {
     // Regression for the catch-all match arm in extract_tuple_fields:
     // line/block comments inside an ordered_field_declaration_list used to
@@ -174,41 +205,31 @@ pub enum AgentError {
 
     let conn = open_db(&tethys);
     // Gate 4: a `#[source]` attribute attached to a struct_field whose
-    // signature mentions an external crate's error path, parent symbol is
-    // a variant of a public enum.
+    // signature mentions an external crate's error path.
+    //
+    // TODO: once parent_symbol_id resolution lands, extend this query to
+    //       resolve the variant + enum names through the FK and assert that
+    //       parent is a variant of a public enum.
     let mut stmt = conn
         .prepare(
-            "SELECT s.name, s.parent_name_legacy, s.signature
-             FROM (
-                 SELECT s.name AS name,
-                        (SELECT s2.name FROM symbols s2 WHERE s2.id = s.parent_symbol_id) AS parent_name_legacy,
-                        s.signature AS signature,
-                        s.id AS id
-                 FROM symbols s
-                 WHERE s.kind = 'struct_field'
-                   AND s.signature LIKE '%serde_json::%'
-             ) s
+            "SELECT s.name, s.signature
+             FROM symbols s
              JOIN attributes a ON a.symbol_id = s.id
-             WHERE a.name = 'source'",
+             WHERE s.kind = 'struct_field'
+               AND s.signature LIKE '%serde_json::%'
+               AND a.name = 'source'",
         )
         .expect("prepare should succeed");
-    let rows: Vec<(String, Option<String>, Option<String>)> = stmt
+    let rows: Vec<(String, Option<String>)> = stmt
         .query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, Option<String>>(1)?,
-                r.get::<_, Option<String>>(2)?,
-            ))
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
         })
         .expect("query_map should succeed")
         .collect::<Result<_, _>>()
         .expect("collect should succeed");
 
     assert_eq!(rows.len(), 1, "Gate 4 query should find one violation");
-    // TODO: extend this test to assert the resolved parent name once
-    //       parent_symbol_id resolution lands — until then the legacy
-    //       column resolves to NULL and is intentionally not checked.
-    let (name, _parent_name_legacy, signature) = &rows[0];
+    let (name, signature) = &rows[0];
     assert_eq!(name, "source");
     assert!(
         signature
