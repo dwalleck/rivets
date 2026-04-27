@@ -21,7 +21,7 @@ use crate::types::{Cycle, FileId, ReferenceKind, SymbolId};
 ///
 /// Prevents runaway recursion in deeply nested or cyclic dependency graphs.
 /// Can be overridden by passing an explicit `max_depth` parameter.
-const DEFAULT_MAX_DEPTH: u32 = 50;
+pub(crate) const DEFAULT_MAX_DEPTH: u32 = 50;
 
 impl SymbolGraphOps for Index {
     fn get_callers(&self, symbol_id: SymbolId) -> Result<Vec<CallerInfo>> {

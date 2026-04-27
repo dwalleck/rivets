@@ -161,7 +161,8 @@ fn get_impact_max_depth_limits_transitive_traversal() {
     tethys.index().expect("index failed");
 
     // Call graph: main.rs -> {auth.rs, cache.rs} -> db.rs
-    // db.rs's direct dependents are auth and cache; main is a 2-hop transitive dependent.
+    // db.rs's direct dependents are auth and cache (2). main is a 2-hop
+    // transitive dependent reached only when depth allows it.
     let depth_1 = tethys
         .get_impact(std::path::Path::new("src/db.rs"), Some(1))
         .expect("get_impact depth=1 failed");
@@ -169,16 +170,54 @@ fn get_impact_max_depth_limits_transitive_traversal() {
         .get_impact(std::path::Path::new("src/db.rs"), None)
         .expect("get_impact default depth failed");
 
+    assert_eq!(
+        depth_1.direct_dependents.len(),
+        2,
+        "db.rs has two direct dependents (auth, cache)"
+    );
+    assert!(
+        depth_1.transitive_dependents.is_empty(),
+        "depth=1 should not traverse past direct dependents, got {:?}",
+        depth_1.transitive_dependents
+    );
+    assert_eq!(
+        unbounded.direct_dependents.len(),
+        2,
+        "unbounded has the same direct dependents"
+    );
+    assert!(
+        unbounded.transitive_dependents.len() >= depth_1.transitive_dependents.len(),
+        "unbounded ({}) should find at least as many transitive dependents as depth=1 ({})",
+        unbounded.transitive_dependents.len(),
+        depth_1.transitive_dependents.len()
+    );
+}
+
+#[test]
+fn get_symbol_impact_max_depth_limits_transitive_traversal() {
+    let (_dir, mut tethys) = workspace_with_call_graph();
+    tethys.index().expect("index failed");
+
+    // Connection sits at the leaf of the call graph; depth=1 must not return
+    // more callers than an unbounded query, and direct callers must match.
+    let depth_1 = tethys
+        .get_symbol_impact("Connection", Some(1))
+        .expect("get_symbol_impact depth=1 failed");
+    let unbounded = tethys
+        .get_symbol_impact("Connection", None)
+        .expect("get_symbol_impact default depth failed");
+
     let depth_1_total = depth_1.direct_dependents.len() + depth_1.transitive_dependents.len();
     let unbounded_total = unbounded.direct_dependents.len() + unbounded.transitive_dependents.len();
 
     assert!(
         depth_1_total <= unbounded_total,
-        "depth=1 ({depth_1_total}) should not return more dependents than unbounded ({unbounded_total})"
+        "depth=1 ({depth_1_total}) should not return more callers than unbounded ({unbounded_total})"
     );
-    assert!(
-        depth_1_total >= 1,
-        "depth=1 should still find direct dependents (auth/cache), got {depth_1_total}"
+    assert_eq!(
+        depth_1.direct_dependents.len(),
+        unbounded.direct_dependents.len(),
+        "direct_dependents must be invariant under max_depth"
     );
 }
 

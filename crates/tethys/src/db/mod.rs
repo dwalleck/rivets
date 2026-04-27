@@ -29,6 +29,7 @@ mod schema;
 mod symbols;
 
 // Re-export helper functions and SQL constants used by other modules
+pub(crate) use graph::DEFAULT_MAX_DEPTH;
 pub(crate) use helpers::{
     FILES_COLUMNS, REFS_COLUMNS, SYMBOLS_COLUMNS, parse_language, parse_symbol_kind, row_to_import,
     row_to_indexed_file, row_to_reference, row_to_symbol,

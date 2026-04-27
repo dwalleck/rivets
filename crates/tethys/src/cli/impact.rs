@@ -13,7 +13,7 @@ pub fn run(
     workspace: &Path,
     target: &str,
     is_symbol: bool,
-    depth: Option<u32>,
+    depth: Option<usize>,
     lsp: bool,
 ) -> Result<(), tethys::Error> {
     ensure_lsp_if_requested(lsp)?;
