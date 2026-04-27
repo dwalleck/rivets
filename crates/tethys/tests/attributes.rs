@@ -140,6 +140,40 @@ pub enum AgentError {
 }
 
 #[test]
+fn reindex_replaces_attributes_not_duplicates_them() {
+    // Locks the schema's `ON DELETE CASCADE` promise on the attributes
+    // table: re-indexing the same source must not accumulate attribute rows
+    // across runs. If symbol deletion ever stops cascading (e.g. a future
+    // change deletes by file_id without touching the symbol primary key),
+    // duplicate rows would silently pile up across re-index cycles.
+    let (_dir, mut tethys) = workspace_with_files(&[(
+        "src/lib.rs",
+        r"
+#[derive(Clone, Debug)]
+pub struct Foo { x: i32 }
+",
+    )]);
+    tethys.index().expect("first index failed");
+    tethys.index().expect("re-index failed");
+
+    let conn = open_db(&tethys);
+    let derive_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM attributes a
+             JOIN symbols s ON s.id = a.symbol_id
+             WHERE s.name = 'Foo' AND a.name = 'derive'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count query should succeed");
+    assert_eq!(
+        derive_count, 1,
+        "re-indexing must not duplicate attribute rows; got {} (CASCADE may not be firing)",
+        derive_count
+    );
+}
+
+#[test]
 fn attribute_attaches_across_intervening_comment() {
     // Regression for the brittle prev_sibling walk: a comment line between
     // an attribute and the item it annotates used to terminate the walk and

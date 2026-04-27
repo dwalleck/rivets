@@ -206,11 +206,12 @@ pub enum AgentError {
     assert_eq!(rows.len(), 1, "Gate 4 query should find one violation");
     let (name, parent_name_legacy, signature) = &rows[0];
     assert_eq!(name, "source");
-    // parent_symbol_id resolution isn't implemented yet (a pre-existing gap
-    // tracked separately), so the parent_name_legacy subquery resolves to
-    // NULL in the indexed database. Asserting that explicitly here documents
-    // the current limitation in code — if a future change starts populating
-    // parent_symbol_id, this assertion will fail and prompt updating Gate 4.
+    // TODO: update Gate 4 query (and this assertion) when parent_symbol_id
+    //       resolution lands. The subquery currently joins on
+    //       s.parent_symbol_id, which isn't populated yet, so
+    //       parent_name_legacy resolves to NULL. This assertion is
+    //       deliberately strict: it should fire as a loud reminder when the
+    //       gap closes, not silently accept a freshly-resolved value.
     assert!(
         parent_name_legacy.is_none(),
         "parent_name_legacy expected to be NULL until parent_symbol_id resolution lands; got {:?}",

@@ -61,6 +61,10 @@ mod node_kinds {
     // Attribute nodes
     pub const ATTRIBUTE_ITEM: &str = "attribute_item";
 
+    // Comment nodes
+    pub const LINE_COMMENT: &str = "line_comment";
+    pub const BLOCK_COMMENT: &str = "block_comment";
+
     // Sub-symbol nodes (variants, fields)
     pub const ENUM_VARIANT_LIST: &str = "enum_variant_list";
     pub const ENUM_VARIANT: &str = "enum_variant";
@@ -953,7 +957,7 @@ fn extract_tuple_fields(
             // also preserves pending_visibility so a `pub` modifier on the
             // line above a doc comment still attaches to the type that
             // follows.
-            node_kinds::ATTRIBUTE_ITEM | "line_comment" | "block_comment" => {}
+            node_kinds::ATTRIBUTE_ITEM | node_kinds::LINE_COMMENT | node_kinds::BLOCK_COMMENT => {}
             _ => {
                 let Some(type_text) = node_text(&child, content) else {
                     pending_visibility = Visibility::Private;
@@ -980,10 +984,10 @@ fn extract_tuple_fields(
     out
 }
 
-/// Parse a standalone `visibility_modifier` node into our `Visibility` enum.
+/// Parse a `visibility_modifier` node into our `Visibility` enum.
 ///
-/// Mirrors the matching done by `extract_visibility`, but takes the modifier
-/// node directly rather than its parent.
+/// This is the single source of truth for visibility-text matching;
+/// `extract_visibility` finds the modifier child and delegates here.
 ///
 /// Unrecognized forms (e.g. `pub(self)`, hypothetical future syntax) fall
 /// through to `Private`. Defaulting to `Public` would silently over-expose
@@ -997,7 +1001,7 @@ fn parse_visibility_modifier_node(node: &tree_sitter::Node, content: &[u8]) -> V
     match text.as_str() {
         "pub" => Visibility::Public,
         s if s.starts_with("pub(crate)") => Visibility::Crate,
-        s if s.starts_with("pub(super)") | s.starts_with("pub(in") => Visibility::Module,
+        s if s.starts_with("pub(super)") || s.starts_with("pub(in") => Visibility::Module,
         _ => Visibility::Private,
     }
 }
@@ -1076,27 +1080,17 @@ fn find_impl_type(node: &tree_sitter::Node, content: &[u8]) -> Option<String> {
     None
 }
 
-/// Extract visibility from a node (looks for `visibility_modifier` child).
+/// Extract visibility from an item-level node (struct, enum, fn, ...).
 ///
-/// Unrecognized forms (e.g. `pub(self)` — semantically private — or any
-/// hypothetical future syntax we don't enumerate) fall through to `Private`.
-/// Defaulting to `Public` would silently over-expose symbols whose visibility
-/// we can't read; matches the same conservatism as
-/// `parse_visibility_modifier_node`.
+/// Locates the `visibility_modifier` child and delegates the actual text
+/// matching to [`parse_visibility_modifier_node`], which is the single source
+/// of truth for visibility-string interpretation. Items with no modifier
+/// fall through to `Private`.
 fn extract_visibility(node: &tree_sitter::Node, content: &[u8]) -> Visibility {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if child.kind() == node_kinds::VISIBILITY_MODIFIER {
-            let Some(text) = node_text(&child, content) else {
-                return Visibility::Private;
-            };
-            return match text.as_str() {
-                "pub" => Visibility::Public,
-                s if s.starts_with("pub(crate)") => Visibility::Crate,
-                s if s.starts_with("pub(super)") => Visibility::Module,
-                s if s.starts_with("pub(in") => Visibility::Module,
-                _ => Visibility::Private,
-            };
+            return parse_visibility_modifier_node(&child, content);
         }
     }
     Visibility::Private
@@ -1160,7 +1154,9 @@ fn extract_preceding_attributes(
                     attrs.push(attr);
                 }
             }
-            "line_comment" | "block_comment" | node_kinds::VISIBILITY_MODIFIER => {}
+            node_kinds::LINE_COMMENT
+            | node_kinds::BLOCK_COMMENT
+            | node_kinds::VISIBILITY_MODIFIER => {}
             _ if !sibling.is_named() => {}
             _ => break,
         }
