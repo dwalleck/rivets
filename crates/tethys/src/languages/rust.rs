@@ -7,7 +7,10 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use super::LanguageSupport;
-use super::common::{ExtractedReference, ExtractedReferenceKind, ExtractedSymbol, ImportStatement};
+use super::common::{
+    ExtractedAttribute, ExtractedReference, ExtractedReferenceKind, ExtractedSymbol,
+    ImportStatement,
+};
 use super::tree_sitter_utils::{node_span, node_text};
 use crate::types::{FunctionSignature, Parameter, Span, SymbolKind, Visibility};
 
@@ -752,7 +755,8 @@ fn extract_function(
     let visibility = extract_visibility(node, content);
     let signature = extract_function_signature(node, content);
     let signature_details = extract_signature_details(node, content);
-    let is_test = has_test_attribute(node, content);
+    let attributes = extract_preceding_attributes(node, content);
+    let is_test = has_test_attribute(&attributes);
 
     Some(ExtractedSymbol {
         name,
@@ -765,6 +769,7 @@ fn extract_function(
         visibility,
         parent_name: parent_name.map(String::from),
         is_test,
+        attributes,
     })
 }
 
@@ -787,6 +792,7 @@ fn extract_simple_definition(
         return None;
     };
     let visibility = extract_visibility(node, content);
+    let attributes = extract_preceding_attributes(node, content);
 
     Some(ExtractedSymbol {
         name,
@@ -799,6 +805,7 @@ fn extract_simple_definition(
         visibility,
         parent_name: None,
         is_test: false, // Simple definitions (struct, enum, etc.) are never tests
+        attributes,
     })
 }
 
@@ -813,6 +820,8 @@ fn extract_macro(node: &tree_sitter::Node, content: &[u8]) -> Option<ExtractedSy
         return None;
     };
 
+    let attributes = extract_preceding_attributes(node, content);
+
     Some(ExtractedSymbol {
         name,
         kind: SymbolKind::Macro,
@@ -824,6 +833,7 @@ fn extract_macro(node: &tree_sitter::Node, content: &[u8]) -> Option<ExtractedSy
         visibility: Visibility::Public, // Default to Public; tree-sitter doesn't expose macro_export
         parent_name: None,
         is_test: false, // Macros are never tests
+        attributes,
     })
 }
 
@@ -884,39 +894,98 @@ const TEST_ATTRIBUTES: &[&str] = &[
     "proptest",
 ];
 
-/// Check if a node has a test attribute.
+/// Walk preceding sibling `attribute_item` nodes and return them in source order.
 ///
-/// In tree-sitter-rust, attributes are SIBLING nodes that precede the item they annotate,
-/// not children. For example:
+/// In tree-sitter-rust, attributes are SIBLING nodes that precede the item they
+/// annotate, not children:
 ///
 /// ```text
 /// source_file
-///   attribute_item ← sibling before function_item
-///   function_item  ← the node we're checking
+///   attribute_item   ← #[derive(Clone)]
+///   attribute_item   ← #[non_exhaustive]
+///   struct_item      ← node we're attaching attributes to
 /// ```
 ///
-/// We look at preceding siblings for `attribute_item` nodes containing test-related attributes.
-fn has_test_attribute(node: &tree_sitter::Node, content: &[u8]) -> bool {
-    // Look at preceding siblings for attribute items
+/// The walk runs backwards (`prev_sibling`) and stops at the first non-attribute
+/// node (another item, comment, etc.). Results are reversed before returning so
+/// the caller sees them in source order — earliest first.
+fn extract_preceding_attributes(
+    node: &tree_sitter::Node,
+    content: &[u8],
+) -> Vec<ExtractedAttribute> {
+    let mut attrs = Vec::new();
     let mut prev = node.prev_sibling();
     while let Some(sibling) = prev {
-        if sibling.kind() == node_kinds::ATTRIBUTE_ITEM {
-            if let Some(text) = node_text(&sibling, content) {
-                // Extract attribute name from #[...] format
-                let trimmed = text.trim_start_matches("#[").trim_end_matches(']');
-                // Handle attributes with arguments like #[tokio::test(flavor = "multi_thread")]
-                let attr_name = trimmed.split('(').next().unwrap_or(trimmed).trim();
-                if TEST_ATTRIBUTES.contains(&attr_name) {
-                    return true;
-                }
-            }
-        } else {
-            // Stop at non-attribute siblings (e.g., other functions, comments)
+        if sibling.kind() != node_kinds::ATTRIBUTE_ITEM {
             break;
+        }
+        if let Some(attr) = extract_attribute(&sibling, content) {
+            attrs.push(attr);
         }
         prev = sibling.prev_sibling();
     }
-    false
+    attrs.reverse();
+    attrs
+}
+
+/// Parse a single `attribute_item` node into its name and (optional) raw args text.
+///
+/// Tree shape (verified against tree-sitter-rust 0.23):
+/// ```text
+/// attribute_item
+///   #
+///   [
+///   attribute
+///     identifier | scoped_identifier   ← attribute name (e.g. "derive", "tauri::command")
+///     token_tree [field=arguments]?    ← raw text including outer parens
+///   ]
+/// ```
+///
+/// Outer parens are stripped from `args` so `LIKE` queries can match the
+/// content directly without anchoring around `(...)`. Marker attributes like
+/// `#[source]` have no `token_tree` child and return `args == None`.
+fn extract_attribute(attr_item: &tree_sitter::Node, content: &[u8]) -> Option<ExtractedAttribute> {
+    let mut item_cursor = attr_item.walk();
+    let attribute = attr_item
+        .children(&mut item_cursor)
+        .find(|c| c.kind() == "attribute")?;
+
+    let mut name: Option<String> = None;
+    let mut args: Option<String> = None;
+    let mut attr_cursor = attribute.walk();
+    for child in attribute.children(&mut attr_cursor) {
+        match child.kind() {
+            "identifier" | "scoped_identifier" if name.is_none() => {
+                name = node_text(&child, content);
+            }
+            "token_tree" => {
+                let raw = node_text(&child, content)?;
+                args = Some(strip_outer_parens(&raw).to_string());
+            }
+            _ => {}
+        }
+    }
+
+    Some(ExtractedAttribute {
+        name: name?,
+        args,
+        line: attr_item.start_position().row as u32 + 1,
+    })
+}
+
+fn strip_outer_parens(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    trimmed
+        .strip_prefix('(')
+        .and_then(|s| s.strip_suffix(')'))
+        .unwrap_or(trimmed)
+}
+
+/// Returns true if any of the supplied attributes is a recognized test marker.
+fn has_test_attribute(attrs: &[ExtractedAttribute]) -> bool {
+    attrs
+        .iter()
+        .any(|a| TEST_ATTRIBUTES.contains(&a.name.as_str()))
 }
 
 /// Extract function signature (just the declaration line without body).
@@ -1507,6 +1576,79 @@ fn outer() {
             span.start_line(),
             3,
             "containing span should point to inner() function, not outer()"
+        );
+    }
+
+    #[test]
+    fn extracts_attributes_on_struct() {
+        let code = r#"
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct Foo { x: i32 }
+"#;
+        let tree = parse_rust(code);
+        let symbols = extract_symbols(&tree, code.as_bytes());
+
+        let foo = symbols
+            .iter()
+            .find(|s| s.name == "Foo")
+            .expect("struct Foo should be extracted");
+
+        let names: Vec<&str> = foo.attributes.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, vec!["derive", "cfg_attr"]);
+
+        assert_eq!(
+            foo.attributes[0].args.as_deref(),
+            Some("Clone, Debug"),
+            "derive args should be the comma list",
+        );
+        assert!(
+            foo.attributes[1]
+                .args
+                .as_deref()
+                .is_some_and(|a| a.contains("specta::Type")),
+            "cfg_attr args should contain specta::Type; got {:?}",
+            foo.attributes[1].args,
+        );
+    }
+
+    #[test]
+    fn marker_attribute_has_no_args() {
+        let code = r"
+#[non_exhaustive]
+pub enum E { A, B }
+";
+        let tree = parse_rust(code);
+        let symbols = extract_symbols(&tree, code.as_bytes());
+
+        let e = symbols
+            .iter()
+            .find(|s| s.name == "E")
+            .expect("enum E should be extracted");
+
+        let non_exhaustive = e
+            .attributes
+            .iter()
+            .find(|a| a.name == "non_exhaustive")
+            .expect("non_exhaustive attribute should be extracted");
+        assert!(
+            non_exhaustive.args.is_none(),
+            "marker attributes have no args; got {:?}",
+            non_exhaustive.args,
+        );
+    }
+
+    #[test]
+    fn function_without_attributes_has_empty_vec() {
+        let code = "fn plain() {}";
+        let tree = parse_rust(code);
+        let symbols = extract_symbols(&tree, code.as_bytes());
+
+        assert_eq!(symbols.len(), 1);
+        assert!(
+            symbols[0].attributes.is_empty(),
+            "function without attributes should have empty Vec, got {:?}",
+            symbols[0].attributes,
         );
     }
 }
