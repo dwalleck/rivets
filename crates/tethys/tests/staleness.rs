@@ -186,6 +186,76 @@ fn needs_update_returns_true_after_addition() {
 }
 
 #[test]
+fn detects_changes_in_nested_subdirectories() {
+    let (dir, mut tethys) = workspace_with_files(&[
+        ("src/lib.rs", "fn root() {}"),
+        ("src/sub/mod.rs", "fn submod() {}"),
+        ("src/sub/deeper/leaf.rs", "fn leaf() {}"),
+    ]);
+    tethys.index().expect("index failed");
+
+    write_and_advance_mtime(
+        &dir.path().join("src/sub/deeper/leaf.rs"),
+        "fn leaf_renamed() {}",
+    );
+    fs::write(dir.path().join("src/sub/added.rs"), "fn added() {}")
+        .expect("failed to write nested added file");
+
+    let report = tethys.get_stale_files().expect("staleness check failed");
+
+    assert!(
+        report
+            .modified
+            .iter()
+            .any(|p| p.ends_with("sub/deeper/leaf.rs")),
+        "expected sub/deeper/leaf.rs in modified, got {:?}",
+        report.modified
+    );
+    assert!(
+        report.added.iter().any(|p| p.ends_with("sub/added.rs")),
+        "expected sub/added.rs in added, got {:?}",
+        report.added
+    );
+    assert_eq!(
+        report.modified.len(),
+        1,
+        "expected exactly 1 modified file, got {}: {:?}",
+        report.modified.len(),
+        report.modified
+    );
+    assert_eq!(
+        report.added.len(),
+        1,
+        "expected exactly 1 added file, got {}: {:?}",
+        report.added.len(),
+        report.added
+    );
+    assert!(
+        report.deleted.is_empty(),
+        "expected no deleted files, got {:?}",
+        report.deleted
+    );
+    assert!(
+        tethys.needs_update().expect("needs_update failed"),
+        "needs_update should agree with the report's nested-change detection"
+    );
+
+    // Re-index, then confirm the nested changes have been absorbed and the
+    // workspace looks clean again. Locks in the full detect → reindex → clean
+    // cycle at depth, mirroring how callers will actually use this API.
+    tethys
+        .index()
+        .expect("re-index after nested changes failed");
+    let post = tethys
+        .get_stale_files()
+        .expect("post-reindex staleness check failed");
+    assert!(
+        post.is_empty(),
+        "post-reindex report should be empty, got {post:?}"
+    );
+}
+
+#[test]
 fn needs_update_returns_true_after_deletion() {
     let (dir, mut tethys) = workspace_with_files(&[
         ("src/lib.rs", "fn hello() {}"),

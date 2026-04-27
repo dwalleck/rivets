@@ -48,6 +48,10 @@ impl Tethys {
     ///
     /// Stops at the first detected change rather than allocating the full
     /// [`StalenessReport`] returned by [`get_stale_files`](Self::get_stale_files).
+    /// The indexed-file lookup map is still loaded eagerly via `list_all_files`
+    /// (tracked by `rivets-o3s8`); the early-exit savings come from skipping
+    /// per-file metadata reads after the first change and from not allocating
+    /// the report's three `Vec`s.
     ///
     /// The iteration shape is duplicated with `get_stale_files` deliberately:
     /// the early-exit version cannot reuse the report-building loop without
@@ -273,17 +277,17 @@ mod tests {
         let path = dir.join(name);
         fs::write(&path, content).expect("failed to write file");
         let metadata = fs::metadata(&path).expect("metadata after write");
-        let mtime = metadata
-            .modified()
-            .expect("modified time")
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("post-epoch mtime")
-            .as_nanos();
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "ns since epoch fits in i64 until year 2262"
-        )]
-        let mtime = mtime as i64;
+        // Share the production mtime extraction so any future change (different
+        // sentinel, rounding, etc.) is reflected here automatically. Assert the
+        // sentinel did NOT fire so test-setup failures stay loud rather than
+        // pretending the indexed value is `i64::MIN`.
+        let mtime = super::mtime_ns(&metadata, &path);
+        assert_ne!(
+            mtime,
+            i64::MIN,
+            "test setup: filesystem must expose a real mtime for {}",
+            path.display()
+        );
         (path, mtime, metadata.len())
     }
 

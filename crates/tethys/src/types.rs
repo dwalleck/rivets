@@ -994,6 +994,12 @@ pub struct IndexUpdate {
 /// Each variant of staleness is reported separately so callers can distinguish
 /// re-indexing work from index cleanup work.
 ///
+/// Returned `PathBuf`s are workspace-relative and contain forward-slash byte
+/// content on all platforms (matches `IndexedFile::path`). Note that
+/// `Path::display()` on Windows may render the same `PathBuf` with backslashes
+/// because `Display` is defined on the OS-native form — use `to_string_lossy()`
+/// or compare against the stored bytes if separator-form matters to a caller.
+///
 /// Marked `#[non_exhaustive]` so additional staleness categories (e.g.
 /// permission-denied, content-hash mismatch) can be added without breaking
 /// external pattern matches.
@@ -1009,10 +1015,18 @@ pub struct StalenessReport {
 }
 
 impl StalenessReport {
-    /// Returns true if any files need re-indexing or cleanup.
+    /// Returns `true` when all three buckets (modified, added, deleted) are
+    /// empty — i.e. the index matches the filesystem and no work is required.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.modified.is_empty() && self.added.is_empty() && self.deleted.is_empty()
+    }
+
+    /// Returns `true` if any files need re-indexing or cleanup. See
+    /// [`is_empty`](Self::is_empty).
     #[must_use]
     pub fn is_stale(&self) -> bool {
-        !self.modified.is_empty() || !self.added.is_empty() || !self.deleted.is_empty()
+        !self.is_empty()
     }
 
     /// Total number of files across all staleness categories.
