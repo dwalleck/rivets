@@ -997,19 +997,15 @@ pub struct StalenessReport {
 }
 
 impl StalenessReport {
-    /// Returns true when no files need re-indexing or cleanup.
-    ///
-    /// Mirrors the Rust convention for "collection has no elements" and pairs
-    /// with [`is_stale`](Self::is_stale) for natural call-site reading.
+    /// Returns `true` when all three buckets (modified, added, deleted) are
+    /// empty — i.e. the index matches the filesystem and no work is required.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.modified.is_empty() && self.added.is_empty() && self.deleted.is_empty()
     }
 
-    /// Returns true if any files need re-indexing or cleanup.
-    ///
-    /// Equivalent to `!self.is_empty()`; provided as a domain-specific alias
-    /// since callers typically branch on staleness, not emptiness.
+    /// Returns `true` if any files need re-indexing or cleanup. See
+    /// [`is_empty`](Self::is_empty).
     #[must_use]
     pub fn is_stale(&self) -> bool {
         !self.is_empty()

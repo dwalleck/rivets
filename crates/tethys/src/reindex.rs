@@ -48,11 +48,10 @@ impl Tethys {
     ///
     /// Stops at the first detected change rather than allocating the full
     /// [`StalenessReport`] returned by [`get_stale_files`](Self::get_stale_files).
-    ///
-    /// Note: the indexed-file lookup map (built once via `list_all_files`) is
-    /// still loaded eagerly, so for very large workspaces the savings come
-    /// from skipping `Vec` report allocation and the per-file metadata reads
-    /// after the first change — not from skipping the DB query itself.
+    /// The indexed-file lookup map is still loaded eagerly via `list_all_files`
+    /// (tracked by `rivets-o3s8`); the early-exit savings come from skipping
+    /// per-file metadata reads after the first change and from not allocating
+    /// the report's three `Vec`s.
     ///
     /// The iteration shape is duplicated with `get_stale_files` deliberately:
     /// the early-exit version cannot reuse the report-building loop without
@@ -273,10 +272,6 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use tempfile::TempDir;
-
-    // `mtime_ns` itself is exercised through this helper rather than a direct
-    // unit test — its only failure modes (OS metadata.modified() failure,
-    // pre-epoch mtime) require a filesystem mock to reproduce portably.
 
     fn write_and_stat(dir: &Path, name: &str, content: &str) -> (std::path::PathBuf, i64, u64) {
         let path = dir.join(name);
