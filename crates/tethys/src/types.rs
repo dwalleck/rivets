@@ -970,6 +970,35 @@ pub struct IndexUpdate {
     pub errors: Vec<IndexError>,
 }
 
+/// Result of comparing the index against the filesystem.
+///
+/// Returned by [`Tethys::get_stale_files`](crate::Tethys::get_stale_files).
+/// Each variant of staleness is reported separately so callers can distinguish
+/// re-indexing work from index cleanup work.
+#[derive(Debug, Clone, Default)]
+pub struct StalenessReport {
+    /// Files on disk whose mtime or size differs from the indexed value.
+    pub modified: Vec<PathBuf>,
+    /// Source files on disk that have not been indexed.
+    pub added: Vec<PathBuf>,
+    /// Files in the index that are no longer on disk.
+    pub deleted: Vec<PathBuf>,
+}
+
+impl StalenessReport {
+    /// Returns true if any files need re-indexing or cleanup.
+    #[must_use]
+    pub fn is_stale(&self) -> bool {
+        !self.modified.is_empty() || !self.added.is_empty() || !self.deleted.is_empty()
+    }
+
+    /// Total number of files across all staleness categories.
+    #[must_use]
+    pub fn total(&self) -> usize {
+        self.modified.len() + self.added.len() + self.deleted.len()
+    }
+}
+
 /// Result of impact analysis.
 ///
 /// Shows which files/symbols would be affected by changes to a target.

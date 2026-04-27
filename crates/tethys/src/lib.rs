@@ -54,7 +54,7 @@ pub use types::{
     Import, IndexOptions, IndexStats, IndexUpdate, IndexedFile, Language, LspCompletedSession,
     LspOutcome, LspSessionResult, PanicKind, PanicPoint, Parameter, ParameterKind,
     ReachabilityDirection, ReachabilityResult, ReachablePath, Reference, ReferenceKind, Span,
-    Symbol, SymbolId, SymbolKind, UnresolvedRefForLsp, Visibility,
+    StalenessReport, Symbol, SymbolId, SymbolKind, UnresolvedRefForLsp, Visibility,
 };
 
 use std::borrow::Cow;
@@ -175,7 +175,7 @@ impl Tethys {
     /// attempting canonicalization when the initial `strip_prefix` fails on
     /// absolute paths. Returns `Cow::Borrowed` for the common fast path,
     /// `Cow::Owned` only when canonicalization was needed.
-    fn relative_path<'a>(&self, path: &'a Path) -> Cow<'a, Path> {
+    pub(crate) fn relative_path<'a>(&self, path: &'a Path) -> Cow<'a, Path> {
         if let Ok(relative) = path.strip_prefix(&self.workspace_root) {
             return Cow::Borrowed(relative);
         }
