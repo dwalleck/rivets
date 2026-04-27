@@ -84,9 +84,9 @@ enum Commands {
         #[arg(short, long)]
         symbol: bool,
 
-        /// Maximum depth for transitive analysis (not yet implemented)
+        /// Maximum depth for transitive analysis (defaults to 50 if omitted)
         #[arg(short, long)]
-        depth: Option<u32>,
+        depth: Option<usize>,
 
         /// Use LSP (rust-analyzer) for enhanced reference resolution
         #[arg(long)]

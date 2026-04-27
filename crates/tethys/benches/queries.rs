@@ -222,7 +222,7 @@ fn bench_get_symbol_impact_depth(c: &mut Criterion) {
             b.iter(|| {
                 let impact = workspace
                     .tethys
-                    .get_symbol_impact("depth0_func")
+                    .get_symbol_impact("depth0_func", None)
                     .expect("get_symbol_impact failed");
                 black_box(impact)
             });
@@ -250,7 +250,7 @@ fn bench_get_symbol_impact_mixed(c: &mut Criterion) {
             b.iter(|| {
                 let impact = workspace
                     .tethys
-                    .get_symbol_impact("core_compute")
+                    .get_symbol_impact("core_compute", None)
                     .expect("get_symbol_impact failed");
                 black_box(impact)
             });
@@ -281,7 +281,7 @@ fn bench_get_file_impact(c: &mut Criterion) {
                 b.iter(|| {
                     let impact = workspace
                         .tethys
-                        .get_impact(&target_file)
+                        .get_impact(&target_file, None)
                         .expect("get_impact failed");
                     black_box(impact)
                 });
