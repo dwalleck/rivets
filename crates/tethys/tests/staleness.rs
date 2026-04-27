@@ -186,6 +186,33 @@ fn needs_update_returns_true_after_addition() {
 }
 
 #[test]
+fn detects_changes_in_nested_subdirectories() {
+    let (dir, mut tethys) = workspace_with_files(&[
+        ("src/lib.rs", "fn root() {}"),
+        ("src/sub/mod.rs", "fn submod() {}"),
+        ("src/sub/deeper/leaf.rs", "fn leaf() {}"),
+    ]);
+    tethys.index().expect("index failed");
+
+    write_and_advance_mtime(
+        &dir.path().join("src/sub/deeper/leaf.rs"),
+        "fn leaf_renamed() {}",
+    );
+    fs::write(dir.path().join("src/sub/added.rs"), "fn added() {}")
+        .expect("failed to write nested added file");
+
+    let report = tethys.get_stale_files().expect("staleness check failed");
+
+    assert_eq!(report.modified.len(), 1, "modified leaf detected");
+    assert_eq!(report.added.len(), 1, "added nested file detected");
+    assert!(report.deleted.is_empty());
+    assert!(
+        tethys.needs_update().expect("needs_update failed"),
+        "needs_update agrees with nested-change detection"
+    );
+}
+
+#[test]
 fn needs_update_returns_true_after_deletion() {
     let (dir, mut tethys) = workspace_with_files(&[
         ("src/lib.rs", "fn hello() {}"),
