@@ -60,6 +60,8 @@ mod node_kinds {
 
     // Attribute nodes
     pub const ATTRIBUTE_ITEM: &str = "attribute_item";
+    pub const ATTRIBUTE: &str = "attribute";
+    pub const TOKEN_TREE: &str = "token_tree";
 
     // Comment nodes
     pub const LINE_COMMENT: &str = "line_comment";
@@ -960,7 +962,11 @@ fn extract_tuple_fields(
             node_kinds::ATTRIBUTE_ITEM | node_kinds::LINE_COMMENT | node_kinds::BLOCK_COMMENT => {}
             _ => {
                 let Some(type_text) = node_text(&child, content) else {
-                    pending_visibility = Visibility::Private;
+                    tracing::debug!(
+                        node_kind = child.kind(),
+                        line = child.start_position().row + 1,
+                        "Failed to extract tuple-field type text; skipping field but preserving pending visibility"
+                    );
                     continue;
                 };
                 out.push(ExtractedSymbol {
@@ -1186,17 +1192,17 @@ fn extract_attribute(attr_item: &tree_sitter::Node, content: &[u8]) -> Option<Ex
     let mut item_cursor = attr_item.walk();
     let attribute = attr_item
         .children(&mut item_cursor)
-        .find(|c| c.kind() == "attribute")?;
+        .find(|c| c.kind() == node_kinds::ATTRIBUTE)?;
 
     let mut name: Option<String> = None;
     let mut args: Option<String> = None;
     let mut attr_cursor = attribute.walk();
     for child in attribute.children(&mut attr_cursor) {
         match child.kind() {
-            "identifier" | "scoped_identifier" if name.is_none() => {
+            node_kinds::IDENTIFIER | node_kinds::SCOPED_IDENTIFIER if name.is_none() => {
                 name = node_text(&child, content);
             }
-            "token_tree" => {
+            node_kinds::TOKEN_TREE => {
                 let raw = node_text(&child, content)?;
                 args = Some(strip_outer_parens(&raw).to_string());
             }

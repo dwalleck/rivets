@@ -159,7 +159,17 @@ impl Index {
             tx.last_insert_rowid()
         };
 
-        // Insert all symbols, capturing generated IDs
+        // Insert all symbols, capturing generated IDs.
+        //
+        // The attributes INSERT is hoisted into a prepared statement so it
+        // is parsed once per file rather than once per attribute. Symbols
+        // can carry multiple attributes (`#[derive(...)]`, `#[source]`,
+        // etc.), and on a large workspace this multiplies quickly.
+        let mut insert_attribute_stmt = tx.prepare(
+            "INSERT INTO attributes (symbol_id, name, args, line)
+             VALUES (?1, ?2, ?3, ?4)",
+        )?;
+
         let mut symbol_ids = Vec::with_capacity(symbols.len());
         for sym in symbols {
             tx.execute(
@@ -186,13 +196,12 @@ impl Index {
             symbol_ids.push(SymbolId::from(symbol_id));
 
             for attr in sym.attributes {
-                tx.execute(
-                    "INSERT INTO attributes (symbol_id, name, args, line)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    params![symbol_id, attr.name, attr.args, attr.line],
-                )?;
+                insert_attribute_stmt
+                    .execute(params![symbol_id, attr.name, attr.args, attr.line])?;
             }
         }
+        // Drop the borrow on `tx` before committing.
+        drop(insert_attribute_stmt);
 
         tx.commit()?;
         Ok((FileId::from(file_id), symbol_ids))

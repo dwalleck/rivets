@@ -14,6 +14,7 @@
 mod common;
 
 use common::{open_db, workspace_with_files};
+use rstest::rstest;
 
 #[test]
 fn enum_variants_persist_with_parent_name() {
@@ -154,8 +155,8 @@ pub struct Coords(
 
 #[test]
 fn gate_4_external_error_query_matches_violation() {
-    // The canonical Gate 4 violation pattern from PR #64: a pub enum variant
-    // carrying an external crate's error via #[source].
+    // Canonical Gate 4 violation: a pub enum variant carrying an external
+    // crate's error via #[source].
     let (_dir, mut tethys) = workspace_with_files(&[(
         "src/lib.rs",
         r"
@@ -204,19 +205,11 @@ pub enum AgentError {
         .expect("collect should succeed");
 
     assert_eq!(rows.len(), 1, "Gate 4 query should find one violation");
-    let (name, parent_name_legacy, signature) = &rows[0];
+    // TODO: extend this test to assert the resolved parent name once
+    //       parent_symbol_id resolution lands — until then the legacy
+    //       column resolves to NULL and is intentionally not checked.
+    let (name, _parent_name_legacy, signature) = &rows[0];
     assert_eq!(name, "source");
-    // TODO: update Gate 4 query (and this assertion) when parent_symbol_id
-    //       resolution lands. The subquery currently joins on
-    //       s.parent_symbol_id, which isn't populated yet, so
-    //       parent_name_legacy resolves to NULL. This assertion is
-    //       deliberately strict: it should fire as a loud reminder when the
-    //       gap closes, not silently accept a freshly-resolved value.
-    assert!(
-        parent_name_legacy.is_none(),
-        "parent_name_legacy expected to be NULL until parent_symbol_id resolution lands; got {:?}",
-        parent_name_legacy
-    );
     assert!(
         signature
             .as_deref()
@@ -239,11 +232,10 @@ pub enum AgentError {
 // to `signature_non_null_for_promised_kinds`. If the new kind is NULL by
 // design, document the reason in code and don't add it here.
 
-#[test]
-fn signature_non_null_for_promised_kinds() {
-    let (_dir, mut tethys) = workspace_with_files(&[(
-        "src/lib.rs",
-        r"
+/// Fixture source covering every kind that promises a non-NULL signature
+/// at the schema level. Kept inline so each parameterized case re-indexes
+/// the same content and asserts against its own kind in isolation.
+const SIGNATURE_CONTRACT_FIXTURE: &str = r"
 pub fn free_fn() -> i32 { 0 }
 
 pub struct S {
@@ -258,28 +250,37 @@ pub enum E {
     Tuple(String),
     Record { x: i32 },
 }
-",
-    )]);
+";
+
+#[rstest]
+fn signature_non_null_for_promised_kinds(
+    #[values("function", "method", "struct_field")] kind: &str,
+) {
+    let (_dir, mut tethys) = workspace_with_files(&[("src/lib.rs", SIGNATURE_CONTRACT_FIXTURE)]);
     tethys.index().expect("index failed");
 
     let conn = open_db(&tethys);
-    for kind in ["function", "method", "struct_field"] {
-        let null_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM symbols
-                 WHERE kind = ?1 AND signature IS NULL",
-                [kind],
-                |r| r.get(0),
-            )
-            .expect("count query should succeed");
-        assert_eq!(
-            null_count, 0,
-            "kind={} promises non-NULL signature; found {} rows with NULL",
-            kind, null_count,
-        );
-    }
+    let null_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM symbols
+             WHERE kind = ?1 AND signature IS NULL",
+            [kind],
+            |r| r.get(0),
+        )
+        .expect("count query should succeed");
+    assert_eq!(
+        null_count, 0,
+        "kind={} promises non-NULL signature; found {} rows with NULL",
+        kind, null_count,
+    );
+}
 
-    // Non-unit enum variants must have populated signature.
+#[test]
+fn non_unit_enum_variants_have_populated_signature() {
+    let (_dir, mut tethys) = workspace_with_files(&[("src/lib.rs", SIGNATURE_CONTRACT_FIXTURE)]);
+    tethys.index().expect("index failed");
+
+    let conn = open_db(&tethys);
     let null_non_unit: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM symbols

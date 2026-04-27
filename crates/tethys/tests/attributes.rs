@@ -107,10 +107,10 @@ fn symbol_without_attributes_has_no_rows() {
 
 #[test]
 fn attribute_attaches_through_visibility_modifier_on_tuple_field() {
-    // Regression for the data-loss case flagged on PR #58: a tuple-style
-    // variant carrying both `#[source]` and an explicit `pub` modifier used
-    // to drop the attribute because the previous-sibling walk terminated on
-    // the `visibility_modifier` before it ever reached the `attribute_item`.
+    // A tuple-style variant carrying both `#[source]` and an explicit `pub`
+    // modifier used to silently drop the attribute: the previous-sibling
+    // walk terminated on the `visibility_modifier` before it ever reached
+    // the `attribute_item`.
     let (_dir, mut tethys) = workspace_with_files(&[(
         "src/lib.rs",
         r"
