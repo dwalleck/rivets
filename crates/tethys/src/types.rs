@@ -976,6 +976,12 @@ pub struct IndexUpdate {
 /// Each variant of staleness is reported separately so callers can distinguish
 /// re-indexing work from index cleanup work.
 ///
+/// Returned `PathBuf`s are workspace-relative and contain forward-slash byte
+/// content on all platforms (matches `IndexedFile::path`). Note that
+/// `Path::display()` on Windows may render the same `PathBuf` with backslashes
+/// because `Display` is defined on the OS-native form — use `to_string_lossy()`
+/// or compare against the stored bytes if separator-form matters to a caller.
+///
 /// Marked `#[non_exhaustive]` so additional staleness categories (e.g.
 /// permission-denied, content-hash mismatch) can be added without breaking
 /// external pattern matches.
@@ -991,10 +997,22 @@ pub struct StalenessReport {
 }
 
 impl StalenessReport {
+    /// Returns true when no files need re-indexing or cleanup.
+    ///
+    /// Mirrors the Rust convention for "collection has no elements" and pairs
+    /// with [`is_stale`](Self::is_stale) for natural call-site reading.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.modified.is_empty() && self.added.is_empty() && self.deleted.is_empty()
+    }
+
     /// Returns true if any files need re-indexing or cleanup.
+    ///
+    /// Equivalent to `!self.is_empty()`; provided as a domain-specific alias
+    /// since callers typically branch on staleness, not emptiness.
     #[must_use]
     pub fn is_stale(&self) -> bool {
-        !self.modified.is_empty() || !self.added.is_empty() || !self.deleted.is_empty()
+        !self.is_empty()
     }
 
     /// Total number of files across all staleness categories.
