@@ -948,9 +948,12 @@ fn extract_tuple_fields(
             node_kinds::VISIBILITY_MODIFIER => {
                 pending_visibility = parse_visibility_modifier_node(&child, content);
             }
-            node_kinds::ATTRIBUTE_ITEM => {
-                // Picked up by extract_preceding_attributes against the next type node.
-            }
+            // Attributes are picked up by extract_preceding_attributes against
+            // the next type node. Comments aren't fields; skipping them here
+            // also preserves pending_visibility so a `pub` modifier on the
+            // line above a doc comment still attaches to the type that
+            // follows.
+            node_kinds::ATTRIBUTE_ITEM | "line_comment" | "block_comment" => {}
             _ => {
                 let Some(type_text) = node_text(&child, content) else {
                     pending_visibility = Visibility::Private;
@@ -981,6 +984,12 @@ fn extract_tuple_fields(
 ///
 /// Mirrors the matching done by `extract_visibility`, but takes the modifier
 /// node directly rather than its parent.
+///
+/// Unrecognized forms (e.g. `pub(self)`, hypothetical future syntax) fall
+/// through to `Private`. Defaulting to `Public` would silently over-expose
+/// symbols whose visibility we can't read — exactly the silent-wrong-data
+/// failure mode the schema-population contract tests in this crate guard
+/// against.
 fn parse_visibility_modifier_node(node: &tree_sitter::Node, content: &[u8]) -> Visibility {
     let Some(text) = node_text(node, content) else {
         return Visibility::Private;
@@ -989,7 +998,7 @@ fn parse_visibility_modifier_node(node: &tree_sitter::Node, content: &[u8]) -> V
         "pub" => Visibility::Public,
         s if s.starts_with("pub(crate)") => Visibility::Crate,
         s if s.starts_with("pub(super)") | s.starts_with("pub(in") => Visibility::Module,
-        _ => Visibility::Public,
+        _ => Visibility::Private,
     }
 }
 
@@ -1068,11 +1077,16 @@ fn find_impl_type(node: &tree_sitter::Node, content: &[u8]) -> Option<String> {
 }
 
 /// Extract visibility from a node (looks for `visibility_modifier` child).
+///
+/// Unrecognized forms (e.g. `pub(self)` — semantically private — or any
+/// hypothetical future syntax we don't enumerate) fall through to `Private`.
+/// Defaulting to `Public` would silently over-expose symbols whose visibility
+/// we can't read; matches the same conservatism as
+/// `parse_visibility_modifier_node`.
 fn extract_visibility(node: &tree_sitter::Node, content: &[u8]) -> Visibility {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if child.kind() == node_kinds::VISIBILITY_MODIFIER {
-            // If we can't extract visibility text, default to private (safest)
             let Some(text) = node_text(&child, content) else {
                 return Visibility::Private;
             };
@@ -1081,7 +1095,7 @@ fn extract_visibility(node: &tree_sitter::Node, content: &[u8]) -> Visibility {
                 s if s.starts_with("pub(crate)") => Visibility::Crate,
                 s if s.starts_with("pub(super)") => Visibility::Module,
                 s if s.starts_with("pub(in") => Visibility::Module,
-                _ => Visibility::Public,
+                _ => Visibility::Private,
             };
         }
     }
@@ -1118,9 +1132,21 @@ const TEST_ATTRIBUTES: &[&str] = &[
 ///   struct_item      ← node we're attaching attributes to
 /// ```
 ///
-/// The walk runs backwards (`prev_sibling`) and stops at the first non-attribute
-/// node (another item, comment, etc.). Results are reversed before returning so
-/// the caller sees them in source order — earliest first.
+/// The walk runs backwards through `prev_sibling()`, collecting every
+/// `attribute_item` it encounters. It transparently steps over:
+///
+/// - **Comments** (`line_comment`, `block_comment`) — including doc comments
+///   like `///`, which sit between attributes and items in idiomatic Rust.
+/// - **Visibility modifiers** (`visibility_modifier`) — emitted as a separate
+///   sibling between `#[source]` and the type node in tuple fields like
+///   `Foo(#[source] pub SomeError)`.
+/// - **Anonymous tokens** (commas, parens, braces) — interior punctuation in
+///   `field_declaration_list` and `ordered_field_declaration_list`.
+///
+/// The walk terminates at any other named node (a previous item, a previous
+/// field, etc.), so attributes from the *previous* sibling never bleed into
+/// this node. Results are reversed before returning so the caller sees them
+/// in source order — earliest first.
 fn extract_preceding_attributes(
     node: &tree_sitter::Node,
     content: &[u8],
@@ -1128,11 +1154,15 @@ fn extract_preceding_attributes(
     let mut attrs = Vec::new();
     let mut prev = node.prev_sibling();
     while let Some(sibling) = prev {
-        if sibling.kind() != node_kinds::ATTRIBUTE_ITEM {
-            break;
-        }
-        if let Some(attr) = extract_attribute(&sibling, content) {
-            attrs.push(attr);
+        match sibling.kind() {
+            node_kinds::ATTRIBUTE_ITEM => {
+                if let Some(attr) = extract_attribute(&sibling, content) {
+                    attrs.push(attr);
+                }
+            }
+            "line_comment" | "block_comment" | node_kinds::VISIBILITY_MODIFIER => {}
+            _ if !sibling.is_named() => {}
+            _ => break,
         }
         prev = sibling.prev_sibling();
     }

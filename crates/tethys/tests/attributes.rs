@@ -10,28 +10,9 @@
     clippy::uninlined_format_args
 )]
 
-use std::fs;
+mod common;
 
-use rusqlite::Connection;
-use tempfile::TempDir;
-use tethys::Tethys;
-
-fn workspace_with_files(files: &[(&str, &str)]) -> (TempDir, Tethys) {
-    let dir = tempfile::tempdir().expect("failed to create temp dir");
-    for (path, content) in files {
-        let full_path = dir.path().join(path);
-        if let Some(parent) = full_path.parent() {
-            fs::create_dir_all(parent).expect("failed to create parent dirs");
-        }
-        fs::write(&full_path, content).expect("failed to write file");
-    }
-    let tethys = Tethys::new(dir.path()).expect("failed to create Tethys");
-    (dir, tethys)
-}
-
-fn open_db(tethys: &Tethys) -> Connection {
-    Connection::open(tethys.db_path()).expect("opening tethys.db should succeed")
-}
+use common::{open_db, workspace_with_files};
 
 #[test]
 fn attributes_table_exists_after_indexing() {
@@ -122,4 +103,67 @@ fn symbol_without_attributes_has_no_rows() {
         )
         .expect("count query should succeed");
     assert_eq!(count, 0, "Plain has no attributes; expected zero rows");
+}
+
+#[test]
+fn attribute_attaches_through_visibility_modifier_on_tuple_field() {
+    // Regression for the data-loss case flagged on PR #58: a tuple-style
+    // variant carrying both `#[source]` and an explicit `pub` modifier used
+    // to drop the attribute because the previous-sibling walk terminated on
+    // the `visibility_modifier` before it ever reached the `attribute_item`.
+    let (_dir, mut tethys) = workspace_with_files(&[(
+        "src/lib.rs",
+        r"
+pub enum AgentError {
+    Failed(#[source] pub serde_json::Error),
+}
+",
+    )]);
+    tethys.index().expect("index failed");
+
+    let conn = open_db(&tethys);
+    let row_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM attributes a
+             JOIN symbols s ON s.id = a.symbol_id
+             WHERE s.kind = 'struct_field'
+               AND s.signature LIKE '%serde_json::Error%'
+               AND a.name = 'source'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count query should succeed");
+    assert_eq!(
+        row_count, 1,
+        "exactly one #[source] attribute row expected on the pub tuple field",
+    );
+}
+
+#[test]
+fn attribute_attaches_across_intervening_comment() {
+    // Regression for the brittle prev_sibling walk: a comment line between
+    // an attribute and the item it annotates used to terminate the walk and
+    // silently drop the attribute. Both orderings (comment-then-attribute
+    // and attribute-then-comment) should now resolve correctly.
+    let (_dir, mut tethys) = workspace_with_files(&[(
+        "src/lib.rs",
+        r"
+#[derive(Clone)]
+// hand-written note between the attribute and the struct
+pub struct Sandwich;
+",
+    )]);
+    tethys.index().expect("index failed");
+
+    let conn = open_db(&tethys);
+    let args: Option<String> = conn
+        .query_row(
+            "SELECT a.args FROM attributes a
+             JOIN symbols s ON s.id = a.symbol_id
+             WHERE s.name = 'Sandwich' AND a.name = 'derive'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("derive attribute should attach across the intervening comment");
+    assert_eq!(args.as_deref(), Some("Clone"));
 }

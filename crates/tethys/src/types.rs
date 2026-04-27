@@ -1720,6 +1720,8 @@ mod tests {
             SymbolKind::Module,
             SymbolKind::TypeAlias,
             SymbolKind::Macro,
+            SymbolKind::EnumVariant,
+            SymbolKind::StructField,
         ];
         for kind in variants {
             let db_str = kind.as_str();
@@ -1833,6 +1835,8 @@ mod tests {
                 Just(SymbolKind::Module),
                 Just(SymbolKind::TypeAlias),
                 Just(SymbolKind::Macro),
+                Just(SymbolKind::EnumVariant),
+                Just(SymbolKind::StructField),
             ]
         }
 

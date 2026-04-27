@@ -11,28 +11,9 @@
     clippy::uninlined_format_args
 )]
 
-use std::fs;
+mod common;
 
-use rusqlite::Connection;
-use tempfile::TempDir;
-use tethys::Tethys;
-
-fn workspace_with_files(files: &[(&str, &str)]) -> (TempDir, Tethys) {
-    let dir = tempfile::tempdir().expect("failed to create temp dir");
-    for (path, content) in files {
-        let full_path = dir.path().join(path);
-        if let Some(parent) = full_path.parent() {
-            fs::create_dir_all(parent).expect("failed to create parent dirs");
-        }
-        fs::write(&full_path, content).expect("failed to write file");
-    }
-    let tethys = Tethys::new(dir.path()).expect("failed to create Tethys");
-    (dir, tethys)
-}
-
-fn open_db(tethys: &Tethys) -> Connection {
-    Connection::open(tethys.db_path()).expect("opening tethys.db should succeed")
-}
+use common::{open_db, workspace_with_files};
 
 #[test]
 fn enum_variants_persist_with_parent_name() {
@@ -124,6 +105,54 @@ fn tuple_struct_fields_use_positional_names() {
 }
 
 #[test]
+fn tuple_field_comments_are_not_emitted_as_fake_fields() {
+    // Regression for the catch-all match arm in extract_tuple_fields:
+    // line/block comments inside an ordered_field_declaration_list used to
+    // fall through to the type-extraction branch and emit fake struct_field
+    // rows whose `signature` was the comment text. Comments should be
+    // skipped entirely without resetting pending_visibility.
+    let (_dir, mut tethys) = workspace_with_files(&[(
+        "src/lib.rs",
+        r"
+pub struct Coords(
+    // x coordinate in pixels
+    pub i32,
+    /* y coordinate in pixels */
+    pub i32,
+);
+",
+    )]);
+    tethys.index().expect("index failed");
+
+    let conn = open_db(&tethys);
+    let mut stmt = conn
+        .prepare(
+            "SELECT s.name, s.signature
+             FROM symbols s
+             JOIN symbols parent ON parent.name = 'Coords' AND parent.kind = 'struct'
+             WHERE s.kind = 'struct_field'
+             ORDER BY s.line",
+        )
+        .expect("prepare should succeed");
+    let rows: Vec<(String, Option<String>)> = stmt
+        .query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })
+        .expect("query_map should succeed")
+        .collect::<Result<_, _>>()
+        .expect("collect should succeed");
+
+    assert_eq!(
+        rows,
+        vec![
+            ("0".to_string(), Some("i32".to_string())),
+            ("1".to_string(), Some("i32".to_string())),
+        ],
+        "tuple-field walk should skip comments, not emit them as positional fields",
+    );
+}
+
+#[test]
 fn gate_4_external_error_query_matches_violation() {
     // The canonical Gate 4 violation pattern from PR #64: a pub enum variant
     // carrying an external crate's error via #[source].
@@ -175,8 +204,18 @@ pub enum AgentError {
         .expect("collect should succeed");
 
     assert_eq!(rows.len(), 1, "Gate 4 query should find one violation");
-    let (name, _, signature) = &rows[0];
+    let (name, parent_name_legacy, signature) = &rows[0];
     assert_eq!(name, "source");
+    // parent_symbol_id resolution isn't implemented yet (a pre-existing gap
+    // tracked separately), so the parent_name_legacy subquery resolves to
+    // NULL in the indexed database. Asserting that explicitly here documents
+    // the current limitation in code — if a future change starts populating
+    // parent_symbol_id, this assertion will fail and prompt updating Gate 4.
+    assert!(
+        parent_name_legacy.is_none(),
+        "parent_name_legacy expected to be NULL until parent_symbol_id resolution lands; got {:?}",
+        parent_name_legacy
+    );
     assert!(
         signature
             .as_deref()
