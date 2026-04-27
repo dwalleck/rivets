@@ -110,7 +110,7 @@ fn get_impact_returns_file_dependents() {
     tethys.index().expect("index failed");
 
     let impact = tethys
-        .get_impact(std::path::Path::new("src/db.rs"))
+        .get_impact(std::path::Path::new("src/db.rs"), None)
         .expect("get_impact failed");
 
     // db.rs should have auth.rs and cache.rs as direct dependents
@@ -126,7 +126,7 @@ fn get_impact_returns_transitive_dependents() {
     tethys.index().expect("index failed");
 
     let impact = tethys
-        .get_impact(std::path::Path::new("src/db.rs"))
+        .get_impact(std::path::Path::new("src/db.rs"), None)
         .expect("get_impact failed");
 
     // db.rs's transitive dependents should include files that depend on auth.rs and cache.rs
@@ -145,13 +145,40 @@ fn get_impact_returns_empty_for_leaf_with_no_dependents() {
 
     // main.rs is at the top of the dependency tree - nothing depends on it
     let impact = tethys
-        .get_impact(std::path::Path::new("src/main.rs"))
+        .get_impact(std::path::Path::new("src/main.rs"), None)
         .expect("get_impact failed");
 
     assert!(
         impact.direct_dependents.is_empty(),
         "main.rs should have no direct dependents, got: {:?}",
         impact.direct_dependents
+    );
+}
+
+#[test]
+fn get_impact_max_depth_limits_transitive_traversal() {
+    let (_dir, mut tethys) = workspace_with_call_graph();
+    tethys.index().expect("index failed");
+
+    // Call graph: main.rs -> {auth.rs, cache.rs} -> db.rs
+    // db.rs's direct dependents are auth and cache; main is a 2-hop transitive dependent.
+    let depth_1 = tethys
+        .get_impact(std::path::Path::new("src/db.rs"), Some(1))
+        .expect("get_impact depth=1 failed");
+    let unbounded = tethys
+        .get_impact(std::path::Path::new("src/db.rs"), None)
+        .expect("get_impact default depth failed");
+
+    let depth_1_total = depth_1.direct_dependents.len() + depth_1.transitive_dependents.len();
+    let unbounded_total = unbounded.direct_dependents.len() + unbounded.transitive_dependents.len();
+
+    assert!(
+        depth_1_total <= unbounded_total,
+        "depth=1 ({depth_1_total}) should not return more dependents than unbounded ({unbounded_total})"
+    );
+    assert!(
+        depth_1_total >= 1,
+        "depth=1 should still find direct dependents (auth/cache), got {depth_1_total}"
     );
 }
 
@@ -458,7 +485,7 @@ fn get_impact_returns_error_for_nonexistent_file() {
     let (_dir, mut tethys) = workspace_with_call_graph();
     tethys.index().expect("index failed");
 
-    let result = tethys.get_impact(std::path::Path::new("src/nonexistent.rs"));
+    let result = tethys.get_impact(std::path::Path::new("src/nonexistent.rs"), None);
 
     assert!(
         result.is_err(),
@@ -512,7 +539,7 @@ fn graph_operations_work_after_reindex() {
 
     // Graph operations should still work
     let impact = tethys
-        .get_impact(std::path::Path::new("src/db.rs"))
+        .get_impact(std::path::Path::new("src/db.rs"), None)
         .expect("get_impact failed after reindex");
 
     assert!(
@@ -753,7 +780,7 @@ fn get_symbol_impact_returns_error_for_nonexistent_symbol() {
     let (_dir, mut tethys) = workspace_with_call_graph();
     tethys.index().expect("index failed");
 
-    let result = tethys.get_symbol_impact("NoSuchSymbol");
+    let result = tethys.get_symbol_impact("NoSuchSymbol", None);
 
     assert!(
         result.is_err(),
@@ -773,7 +800,7 @@ fn get_symbol_impact_returns_empty_for_uncalled_symbol() {
 
     // process is never called by other symbols
     let impact = tethys
-        .get_symbol_impact("process")
+        .get_symbol_impact("process", None)
         .expect("get_symbol_impact for process should succeed");
 
     assert!(
@@ -795,7 +822,7 @@ fn get_symbol_impact_finds_direct_dependents() {
 
     // validate is called by process directly
     let impact = tethys
-        .get_symbol_impact("validate")
+        .get_symbol_impact("validate", None)
         .expect("get_symbol_impact for validate should succeed");
 
     assert!(
@@ -810,7 +837,7 @@ fn get_symbol_impact_target_points_to_correct_file() {
     tethys.index().expect("index failed");
 
     let impact = tethys
-        .get_symbol_impact("validate")
+        .get_symbol_impact("validate", None)
         .expect("get_symbol_impact for validate should succeed");
 
     assert!(
@@ -827,7 +854,7 @@ fn get_symbol_impact_cross_file_resolved() {
 
     // Connection's callers are cross-file - now resolved in Pass 2
     let impact = tethys
-        .get_symbol_impact("Connection")
+        .get_symbol_impact("Connection", None)
         .expect("get_symbol_impact for Connection should succeed");
 
     assert!(
@@ -879,7 +906,7 @@ fn transitive_callers_via_call_edges() {
     // Helper::check is called by validate, which is called by process
     // So Helper::check should have process as a transitive caller
     let impact = tethys
-        .get_symbol_impact("Helper::check")
+        .get_symbol_impact("Helper::check", None)
         .expect("get_symbol_impact for Helper::check should succeed");
 
     let total = impact.direct_dependents.len() + impact.transitive_dependents.len();

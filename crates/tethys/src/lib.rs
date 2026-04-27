@@ -28,7 +28,7 @@
 //! let symbols = tethys.search_symbols("authenticate")?;
 //!
 //! // Get impact analysis
-//! let impact = tethys.get_impact(Path::new("src/auth.rs"))?;
+//! let impact = tethys.get_impact(Path::new("src/auth.rs"), None)?;
 //! println!("{} direct dependents", impact.direct_dependents.len());
 //! # Ok::<(), tethys::Error>(())
 //! ```
@@ -343,13 +343,18 @@ impl Tethys {
     }
 
     /// Get impact analysis: direct and transitive dependents of a file.
-    pub fn get_impact(&self, path: &Path) -> Result<Impact> {
+    ///
+    /// `max_depth` limits transitive traversal depth. Pass `None` to use the
+    /// default limit (50).
+    pub fn get_impact(&self, path: &Path, max_depth: Option<u32>) -> Result<Impact> {
         let file_id = self
             .db
             .get_file_id(&self.relative_path(path))?
             .ok_or_else(|| Error::NotFound(format!("file: {}", path.display())))?;
 
-        let file_impact = self.db.get_transitive_dependents(file_id, Some(50))?;
+        let file_impact = self
+            .db
+            .get_transitive_dependents(file_id, Some(max_depth.unwrap_or(50)))?;
 
         // Convert FileImpact to public Impact type
         Ok(Impact {
@@ -400,13 +405,22 @@ impl Tethys {
     }
 
     /// Get impact analysis: direct and transitive callers of a symbol.
-    pub fn get_symbol_impact(&self, qualified_name: &str) -> Result<Impact> {
+    ///
+    /// `max_depth` limits transitive traversal depth. Pass `None` to use the
+    /// default limit (50).
+    pub fn get_symbol_impact(
+        &self,
+        qualified_name: &str,
+        max_depth: Option<u32>,
+    ) -> Result<Impact> {
         let symbol = self
             .db
             .get_symbol_by_qualified_name(qualified_name)?
             .ok_or_else(|| Error::NotFound(format!("symbol: {qualified_name}")))?;
 
-        let impact = self.db.get_transitive_callers(symbol.id, Some(50))?;
+        let impact = self
+            .db
+            .get_transitive_callers(symbol.id, Some(max_depth.unwrap_or(50)))?;
 
         let direct_dependents = self.convert_callers_to_dependents(impact.direct_callers)?;
         let transitive_dependents =
