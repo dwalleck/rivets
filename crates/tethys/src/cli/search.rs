@@ -111,6 +111,8 @@ fn parse_kind(s: &str) -> Option<SymbolKind> {
         "module" | "mod" => Some(SymbolKind::Module),
         "type_alias" | "type" => Some(SymbolKind::TypeAlias),
         "macro" => Some(SymbolKind::Macro),
+        "enum_variant" | "variant" => Some(SymbolKind::EnumVariant),
+        "struct_field" | "field" => Some(SymbolKind::StructField),
         _ => None,
     }
 }
@@ -129,5 +131,7 @@ fn format_kind(kind: SymbolKind) -> &'static str {
         SymbolKind::Module => "module",
         SymbolKind::TypeAlias => "type alias",
         SymbolKind::Macro => "macro",
+        SymbolKind::EnumVariant => "enum variant",
+        SymbolKind::StructField => "struct field",
     }
 }

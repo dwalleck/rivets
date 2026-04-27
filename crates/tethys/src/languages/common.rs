@@ -30,6 +30,30 @@ pub struct ExtractedSymbol {
     /// - Rust: `#[test]`, `#[tokio::test]`, `#[rstest]`
     /// - C#: `[Test]`, `[Fact]`, `[Theory]`, `[TestMethod]`
     pub is_test: bool,
+    /// Attributes attached to this symbol (e.g. `#[derive(Clone)]`, `#[source]`).
+    ///
+    /// Empty when no attributes precede the symbol. Currently populated by the
+    /// Rust extractor only; C# extraction will follow.
+    pub attributes: Vec<ExtractedAttribute>,
+}
+
+/// An attribute attached to a symbol.
+///
+/// Stores the attribute path's leading identifier as `name` (e.g. `derive`,
+/// `source`, `cfg_attr`, `tauri::command`) and the raw text inside the
+/// outermost parens as `args`. Marker attributes like `#[source]` have
+/// `args == None`.
+///
+/// `args` is intentionally kept as raw text rather than a structured nested
+/// representation: the rules that consume attributes (e.g. "does any
+/// `cfg_attr` mention `specta::Type`") match by substring on the args, and
+/// tree-sitter does not surface nested attributes as structured children
+/// inside `cfg_attr(...)` anyway.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractedAttribute {
+    pub name: String,
+    pub args: Option<String>,
+    pub line: u32,
 }
 
 /// An extracted reference (usage of a symbol) from source code.

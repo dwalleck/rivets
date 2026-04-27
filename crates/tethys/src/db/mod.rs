@@ -70,6 +70,8 @@ pub struct SymbolData<'a> {
     pub parent_symbol_id: Option<crate::types::SymbolId>,
     /// Whether this symbol is a test function.
     pub is_test: bool,
+    /// Attributes to persist alongside the symbol row.
+    pub attributes: &'a [crate::languages::common::ExtractedAttribute],
 }
 
 /// `SQLite` database wrapper for Tethys index.

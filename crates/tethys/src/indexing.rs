@@ -533,31 +533,35 @@ impl Tethys {
         };
         let size_bytes = metadata.len();
 
-        // Convert extracted symbols to owned versions
+        // Convert extracted symbols to owned versions.
+        //
+        // Consume `extracted` via into_iter so name, signature, and attributes
+        // can be moved into OwnedSymbolData rather than cloned. The attributes
+        // Vec in particular can be large (one row per #[...] on the symbol).
         let symbols: Vec<OwnedSymbolData> = extracted
-            .iter()
+            .into_iter()
             .map(|sym| {
-                let qualified_name = if let Some(parent) = &sym.parent_name {
-                    format!("{}::{}", parent, sym.name)
-                } else {
-                    sym.name.clone()
+                let qualified_name = match &sym.parent_name {
+                    Some(parent) => format!("{}::{}", parent, sym.name),
+                    None => sym.name.clone(),
                 };
                 // NOTE: module_path is left empty here because parse_file_static runs in
                 // parallel threads without access to the crate list. The module_path is
                 // computed later during write_parsed_file (batch mode) or post-indexing
                 // for streaming mode. Streaming mode currently does not populate module_path.
                 let owned = OwnedSymbolData {
-                    name: sym.name.clone(),
+                    name: sym.name,
                     module_path: String::new(),
                     qualified_name,
                     kind: sym.kind,
                     line: sym.line,
                     column: sym.column,
                     span: sym.span,
-                    signature: sym.signature.clone(),
+                    signature: sym.signature,
                     visibility: sym.visibility,
                     parent_symbol_id: None,
                     is_test: sym.is_test,
+                    attributes: sym.attributes,
                 };
                 owned.debug_assert_valid();
                 owned

@@ -98,4 +98,19 @@ CREATE TABLE IF NOT EXISTS call_edges (
 
 CREATE INDEX IF NOT EXISTS idx_call_edges_callee ON call_edges(callee_symbol_id);
 CREATE INDEX IF NOT EXISTS idx_call_edges_caller ON call_edges(caller_symbol_id);
+
+-- Attributes attached to symbols (e.g. #[derive(Clone)], #[source], #[cfg_attr(...)]).
+-- args holds the raw text inside the outermost parens with parens stripped, or NULL
+-- for marker attributes like #[source]. name holds the attribute path's leading
+-- identifier (e.g. 'derive', 'source', 'cfg_attr', 'tauri::command').
+CREATE TABLE IF NOT EXISTS attributes (
+    id INTEGER PRIMARY KEY,
+    symbol_id INTEGER NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    args TEXT,
+    line INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_attributes_symbol ON attributes(symbol_id);
+CREATE INDEX IF NOT EXISTS idx_attributes_name ON attributes(name);
 ";

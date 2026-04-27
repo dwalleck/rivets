@@ -763,6 +763,8 @@ fn extract_type_declaration(
         visibility,
         parent_name: parent_name.map(String::from),
         is_test: false, // Type declarations (class, struct, etc.) are never tests
+        // TODO: C# attribute extraction (follow-up)
+        attributes: Vec::new(),
     })
 }
 
@@ -790,6 +792,8 @@ fn extract_namespace(node: &tree_sitter::Node, content: &[u8]) -> Option<Extract
         visibility: Visibility::Public, // Namespaces are implicitly public
         parent_name: None,
         is_test: false, // Namespaces are never tests
+        // TODO: C# attribute extraction (follow-up)
+        attributes: Vec::new(),
     })
 }
 
@@ -825,6 +829,8 @@ fn extract_method(
         visibility,
         parent_name: parent_name.map(String::from),
         is_test,
+        // TODO: C# attribute extraction (follow-up)
+        attributes: Vec::new(),
     })
 }
 
@@ -859,6 +865,8 @@ fn extract_constructor(
         visibility,
         parent_name: parent_name.map(String::from),
         is_test: false, // Constructors are never tests
+        // TODO: C# attribute extraction (follow-up)
+        attributes: Vec::new(),
     })
 }
 

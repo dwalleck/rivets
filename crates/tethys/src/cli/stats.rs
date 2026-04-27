@@ -103,6 +103,8 @@ fn print_symbol_stats(stats: &DatabaseStats) {
             SymbolKind::Module => "Modules",
             SymbolKind::TypeAlias => "Type Aliases",
             SymbolKind::Macro => "Macros",
+            SymbolKind::EnumVariant => "Enum Variants",
+            SymbolKind::StructField => "Struct Fields",
         };
         println!("    {}: {}", kind_name.dimmed(), count);
     }

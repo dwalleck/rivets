@@ -59,6 +59,8 @@ pub(crate) fn parse_symbol_kind(s: &str) -> rusqlite::Result<SymbolKind> {
         "module" => Ok(SymbolKind::Module),
         "type_alias" => Ok(SymbolKind::TypeAlias),
         "macro" => Ok(SymbolKind::Macro),
+        "enum_variant" => Ok(SymbolKind::EnumVariant),
+        "struct_field" => Ok(SymbolKind::StructField),
         unknown => Err(rusqlite::Error::FromSqlConversionFailure(
             0,
             rusqlite::types::Type::Text,
