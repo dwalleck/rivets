@@ -198,8 +198,9 @@ fn get_symbol_impact_max_depth_limits_transitive_traversal() {
     let (_dir, mut tethys) = workspace_with_call_graph();
     tethys.index().expect("index failed");
 
-    // Connection sits at the leaf of the call graph; depth=1 must not return
-    // more callers than an unbounded query, and direct callers must match.
+    // Connection sits at the leaf of the call graph. Depth=1 must stop at
+    // direct callers (no transitive hops), and direct callers must be
+    // invariant under max_depth.
     let depth_1 = tethys
         .get_symbol_impact("Connection", Some(1))
         .expect("get_symbol_impact depth=1 failed");
@@ -207,17 +208,21 @@ fn get_symbol_impact_max_depth_limits_transitive_traversal() {
         .get_symbol_impact("Connection", None)
         .expect("get_symbol_impact default depth failed");
 
-    let depth_1_total = depth_1.direct_dependents.len() + depth_1.transitive_dependents.len();
-    let unbounded_total = unbounded.direct_dependents.len() + unbounded.transitive_dependents.len();
-
     assert!(
-        depth_1_total <= unbounded_total,
-        "depth=1 ({depth_1_total}) should not return more callers than unbounded ({unbounded_total})"
+        depth_1.transitive_dependents.is_empty(),
+        "depth=1 should not traverse past direct callers, got {:?}",
+        depth_1.transitive_dependents
     );
     assert_eq!(
         depth_1.direct_dependents.len(),
         unbounded.direct_dependents.len(),
         "direct_dependents must be invariant under max_depth"
+    );
+    assert!(
+        unbounded.transitive_dependents.len() >= depth_1.transitive_dependents.len(),
+        "unbounded ({}) should find at least as many transitive callers as depth=1 ({})",
+        unbounded.transitive_dependents.len(),
+        depth_1.transitive_dependents.len()
     );
 }
 

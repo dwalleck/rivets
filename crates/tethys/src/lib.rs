@@ -78,6 +78,22 @@ pub struct Tethys {
     crates: Vec<CrateInfo>,
 }
 
+/// Convert a `usize` depth to `u32`, saturating at `u32::MAX` with a `warn!`.
+///
+/// The DB layer's recursive CTE bounds depth as a `u32`, so requests beyond
+/// that range cannot be honored exactly. Saturating (rather than truncating)
+/// keeps the requested behavior monotone, and the log makes the cap discoverable.
+fn saturating_depth_to_u32(depth: usize) -> u32 {
+    u32::try_from(depth).unwrap_or_else(|_| {
+        warn!(
+            requested = depth,
+            cap = u32::MAX,
+            "max_depth exceeds u32::MAX; saturating to u32::MAX"
+        );
+        u32::MAX
+    })
+}
+
 #[expect(
     clippy::missing_errors_doc,
     reason = "error docs deferred to avoid churn during active development"
@@ -344,18 +360,17 @@ impl Tethys {
 
     /// Get impact analysis: direct and transitive dependents of a file.
     ///
-    /// `max_depth` limits transitive traversal depth. `None` falls back to
-    /// [`DEFAULT_MAX_DEPTH`](db::DEFAULT_MAX_DEPTH); there is currently no way
-    /// to request unbounded traversal through this method.
+    /// `max_depth` limits transitive traversal depth. `None` falls back to the
+    /// crate-wide default of 50. There is currently no way to request unbounded
+    /// traversal through this method. Values larger than `u32::MAX` are capped
+    /// (with a `warn!` log) since the underlying SQL CTE depth is a `u32`.
     pub fn get_impact(&self, path: &Path, max_depth: Option<usize>) -> Result<Impact> {
         let file_id = self
             .db
             .get_file_id(&self.relative_path(path))?
             .ok_or_else(|| Error::NotFound(format!("file: {}", path.display())))?;
 
-        let depth = max_depth.map_or(db::DEFAULT_MAX_DEPTH, |d| {
-            u32::try_from(d).unwrap_or(u32::MAX)
-        });
+        let depth = max_depth.map_or(db::DEFAULT_MAX_DEPTH, saturating_depth_to_u32);
         let file_impact = self.db.get_transitive_dependents(file_id, Some(depth))?;
 
         // Convert FileImpact to public Impact type
@@ -408,9 +423,10 @@ impl Tethys {
 
     /// Get impact analysis: direct and transitive callers of a symbol.
     ///
-    /// `max_depth` limits transitive traversal depth. `None` falls back to
-    /// [`DEFAULT_MAX_DEPTH`](db::DEFAULT_MAX_DEPTH); there is currently no way
-    /// to request unbounded traversal through this method.
+    /// `max_depth` limits transitive traversal depth. `None` falls back to the
+    /// crate-wide default of 50. There is currently no way to request unbounded
+    /// traversal through this method. Values larger than `u32::MAX` are capped
+    /// (with a `warn!` log) since the underlying SQL CTE depth is a `u32`.
     pub fn get_symbol_impact(
         &self,
         qualified_name: &str,
@@ -421,9 +437,7 @@ impl Tethys {
             .get_symbol_by_qualified_name(qualified_name)?
             .ok_or_else(|| Error::NotFound(format!("symbol: {qualified_name}")))?;
 
-        let depth = max_depth.map_or(db::DEFAULT_MAX_DEPTH, |d| {
-            u32::try_from(d).unwrap_or(u32::MAX)
-        });
+        let depth = max_depth.map_or(db::DEFAULT_MAX_DEPTH, saturating_depth_to_u32);
         let impact = self.db.get_transitive_callers(symbol.id, Some(depth))?;
 
         let direct_dependents = self.convert_callers_to_dependents(impact.direct_callers)?;
