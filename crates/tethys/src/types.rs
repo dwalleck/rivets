@@ -975,7 +975,7 @@ pub struct IndexUpdate {
 /// Returned by [`Tethys::get_stale_files`](crate::Tethys::get_stale_files).
 /// Each variant of staleness is reported separately so callers can distinguish
 /// re-indexing work from index cleanup work.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StalenessReport {
     /// Files on disk whose mtime or size differs from the indexed value.
     pub modified: Vec<PathBuf>,

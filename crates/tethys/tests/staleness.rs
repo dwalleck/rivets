@@ -1,8 +1,9 @@
 //! Integration tests for staleness detection (`get_stale_files`, `needs_update`).
 
 use std::fs;
+use std::path::Path;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tethys::Tethys;
 
@@ -17,6 +18,35 @@ fn workspace_with_files(files: &[(&str, &str)]) -> (TempDir, Tethys) {
     }
     let tethys = Tethys::new(dir.path()).expect("failed to create Tethys");
     (dir, tethys)
+}
+
+/// Overwrite a file and wait until the OS reports a fresh mtime, retrying as needed.
+///
+/// Filesystem mtime resolution varies (1ns on ext4, 100ns on NTFS, up to 2s on FAT32),
+/// so a fixed sleep can be flaky on coarse filesystems or under CI load. This helper
+/// rewrites until the OS observably advances mtime, or panics with a clear diagnostic.
+fn write_and_advance_mtime(path: &Path, content: &str) {
+    let before = fs::metadata(path)
+        .expect("path should exist before mtime advance")
+        .modified()
+        .expect("filesystem should expose mtime");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        fs::write(path, content).expect("failed to overwrite file");
+        let after = fs::metadata(path)
+            .expect("path should exist while waiting on mtime")
+            .modified()
+            .expect("filesystem should expose mtime");
+        if after != before {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!(
+        "mtime did not advance within 2s for {} (filesystem may not track modification time)",
+        path.display()
+    );
 }
 
 #[test]
@@ -41,13 +71,10 @@ fn get_stale_files_detects_modified_files() {
     let (dir, mut tethys) = workspace_with_files(&[("src/lib.rs", "fn hello() {}")]);
     tethys.index().expect("index failed");
 
-    // Wait briefly so mtime resolution distinguishes the two writes
-    thread::sleep(Duration::from_millis(50));
-    fs::write(
-        dir.path().join("src/lib.rs"),
+    write_and_advance_mtime(
+        &dir.path().join("src/lib.rs"),
         "fn hello() { println!(\"hi\"); }",
-    )
-    .expect("failed to overwrite file");
+    );
 
     let report = tethys.get_stale_files().expect("staleness check failed");
 
@@ -98,9 +125,7 @@ fn get_stale_files_reports_combined_changes() {
     ]);
     tethys.index().expect("index failed");
 
-    thread::sleep(Duration::from_millis(50));
-    fs::write(dir.path().join("src/lib.rs"), "fn hello() { let _x = 1; }")
-        .expect("failed to overwrite file");
+    write_and_advance_mtime(&dir.path().join("src/lib.rs"), "fn hello() { let _x = 1; }");
     fs::remove_file(dir.path().join("src/helper.rs")).expect("failed to delete file");
     fs::write(dir.path().join("src/new.rs"), "fn new_fn() {}").expect("failed to write new file");
 
@@ -126,8 +151,68 @@ fn needs_update_returns_true_after_modification() {
     let (dir, mut tethys) = workspace_with_files(&[("src/lib.rs", "fn hello() {}")]);
     tethys.index().expect("index failed");
 
-    thread::sleep(Duration::from_millis(50));
-    fs::write(dir.path().join("src/lib.rs"), "fn changed() {}").expect("failed to overwrite file");
+    write_and_advance_mtime(&dir.path().join("src/lib.rs"), "fn changed() {}");
 
     assert!(tethys.needs_update().expect("needs_update failed"));
+}
+
+#[test]
+fn get_stale_files_ignores_non_source_files() {
+    let (dir, mut tethys) = workspace_with_files(&[("src/lib.rs", "fn hello() {}")]);
+    tethys.index().expect("index failed");
+
+    // Drop a handful of non-source files alongside the indexed one.
+    fs::write(dir.path().join("README.md"), "# project").expect("failed to write README");
+    fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"\n")
+        .expect("failed to write Cargo.toml");
+    fs::write(dir.path().join("src/data.json"), "{}").expect("failed to write JSON");
+
+    let report = tethys.get_stale_files().expect("staleness check failed");
+
+    assert!(
+        !report.is_stale(),
+        "non-source files should not appear in any staleness bucket, got {report:?}"
+    );
+}
+
+#[test]
+fn needs_update_matches_get_stale_files_for_unchanged_workspace() {
+    let (_dir, mut tethys) = workspace_with_files(&[("src/lib.rs", "fn hello() {}")]);
+    tethys.index().expect("index failed");
+
+    let report_says_stale = tethys
+        .get_stale_files()
+        .expect("staleness check failed")
+        .is_stale();
+    let needs_update = tethys.needs_update().expect("needs_update failed");
+
+    assert_eq!(
+        needs_update, report_says_stale,
+        "needs_update must agree with get_stale_files().is_stale()"
+    );
+}
+
+#[test]
+fn needs_update_matches_get_stale_files_after_changes() {
+    let (dir, mut tethys) = workspace_with_files(&[
+        ("src/lib.rs", "fn hello() {}"),
+        ("src/other.rs", "fn other() {}"),
+    ]);
+    tethys.index().expect("index failed");
+
+    write_and_advance_mtime(&dir.path().join("src/lib.rs"), "fn hello() { let _x = 1; }");
+    fs::remove_file(dir.path().join("src/other.rs")).expect("failed to delete file");
+    fs::write(dir.path().join("src/new.rs"), "fn new_fn() {}").expect("failed to write new file");
+
+    let report_says_stale = tethys
+        .get_stale_files()
+        .expect("staleness check failed")
+        .is_stale();
+    let needs_update = tethys.needs_update().expect("needs_update failed");
+
+    assert!(report_says_stale, "report should report changes");
+    assert_eq!(
+        needs_update, report_says_stale,
+        "needs_update must agree with get_stale_files().is_stale()"
+    );
 }

@@ -4,14 +4,14 @@
 //! and full rebuilds.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use tracing::{debug, warn};
 
 use crate::Tethys;
 use crate::error::Result;
-use crate::types::{IndexOptions, IndexStats, IndexUpdate, Language, StalenessReport};
+use crate::types::{IndexOptions, IndexStats, IndexUpdate, StalenessReport};
 
 #[expect(
     clippy::missing_errors_doc,
@@ -34,10 +34,29 @@ impl Tethys {
 
     /// Check if any indexed files have changed since last update.
     ///
-    /// Equivalent to `get_stale_files().map(|r| r.is_stale())` but does not
-    /// allocate the full report.
+    /// Stops at the first detected change rather than allocating the full
+    /// [`StalenessReport`] returned by [`get_stale_files`](Self::get_stale_files).
     pub fn needs_update(&self) -> Result<bool> {
-        self.get_stale_files().map(|report| report.is_stale())
+        let mut indexed_map = self.load_indexed_map()?;
+
+        // discover_files already emits warn! for each skipped directory; the Vec
+        // is unused here because needs_update has no recovery action for skips.
+        let disk_files = self.discover_files(&mut Vec::new())?;
+
+        for file_path in disk_files {
+            let relative = self.relative_path(&file_path);
+            match indexed_map.remove(relative.as_ref()) {
+                None => return Ok(true),
+                Some((indexed_mtime, indexed_size)) => {
+                    if file_changed(&file_path, indexed_mtime, indexed_size) {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+
+        // Anything still in the map is on disk no longer — i.e. deleted.
+        Ok(!indexed_map.is_empty())
     }
 
     /// Compare indexed files against the filesystem to find what needs re-indexing.
@@ -52,50 +71,31 @@ impl Tethys {
     /// development workflows; use [`rebuild`](Self::rebuild) when full
     /// consistency is required.
     pub fn get_stale_files(&self) -> Result<StalenessReport> {
-        let indexed_files = self.db.list_all_files()?;
-        let mut indexed_map: HashMap<PathBuf, (i64, u64)> = indexed_files
-            .into_iter()
-            .map(|f| (f.path, (f.mtime_ns, f.size_bytes)))
-            .collect();
+        let mut indexed_map = self.load_indexed_map()?;
 
         let mut modified = Vec::new();
         let mut added = Vec::new();
         let mut deleted = Vec::new();
 
-        let mut skip_log = Vec::new();
-        let disk_files = self.discover_files(&mut skip_log)?;
+        // discover_files already emits warn! for each skipped directory; the Vec
+        // is unused here because the staleness report does not surface skips.
+        let disk_files = self.discover_files(&mut Vec::new())?;
 
         for file_path in disk_files {
-            let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if Language::from_extension(ext).is_none() {
-                continue;
-            }
+            let relative = self.relative_path(&file_path);
 
-            let relative = self.relative_path(&file_path).to_path_buf();
-
-            if let Some((indexed_mtime, indexed_size)) = indexed_map.remove(&relative) {
+            if let Some((indexed_mtime, indexed_size)) = indexed_map.remove(relative.as_ref()) {
                 match std::fs::metadata(&file_path) {
                     Ok(metadata) => {
                         let size = metadata.len();
-                        let mtime = metadata
-                            .modified()
-                            .ok()
-                            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                            .map_or(0, |d| {
-                                // Safety: nanoseconds since epoch fit in i64 until year 2262
-                                #[allow(clippy::cast_possible_truncation)]
-                                {
-                                    d.as_nanos() as i64
-                                }
-                            });
-
+                        let mtime = mtime_ns(&metadata, &file_path);
                         if mtime != indexed_mtime || size != indexed_size {
-                            modified.push(relative);
+                            modified.push(relative.into_owned());
                         }
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                         // File was deleted between discovery and metadata check
-                        deleted.push(relative);
+                        deleted.push(relative.into_owned());
                     }
                     Err(e) => {
                         warn!(
@@ -103,11 +103,11 @@ impl Tethys {
                             error = %e,
                             "Failed to read metadata during staleness check, treating as modified"
                         );
-                        modified.push(relative);
+                        modified.push(relative.into_owned());
                     }
                 }
             } else {
-                added.push(relative);
+                added.push(relative.into_owned());
             }
         }
 
@@ -125,6 +125,15 @@ impl Tethys {
             added,
             deleted,
         })
+    }
+
+    fn load_indexed_map(&self) -> Result<HashMap<PathBuf, (i64, u64)>> {
+        Ok(self
+            .db
+            .list_all_files()?
+            .into_iter()
+            .map(|f| (f.path, (f.mtime_ns, f.size_bytes)))
+            .collect())
     }
 
     /// Rebuild the entire index from scratch.
@@ -145,4 +154,61 @@ impl Tethys {
         self.db.reset()?;
         self.index_with_options(options)
     }
+}
+
+/// Returns whether a file's mtime or size differ from the indexed values.
+///
+/// Errors are conservatively reported as `true` (treat as changed) so callers
+/// can re-index the file rather than skipping it. `NotFound` is also `true`
+/// because a missing file always invalidates the indexed entry.
+fn file_changed(file_path: &Path, indexed_mtime: i64, indexed_size: u64) -> bool {
+    match std::fs::metadata(file_path) {
+        Ok(metadata) => {
+            let size = metadata.len();
+            let mtime = mtime_ns(&metadata, file_path);
+            mtime != indexed_mtime || size != indexed_size
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(e) => {
+            warn!(
+                path = %file_path.display(),
+                error = %e,
+                "Failed to read metadata during staleness check, treating as modified"
+            );
+            true
+        }
+    }
+}
+
+/// Convert a file's modification time to nanoseconds since UNIX epoch.
+///
+/// Returns 0 with a warning when the OS does not expose a usable mtime, so the
+/// comparison stays deterministic but the fallback is observable in logs.
+fn mtime_ns(metadata: &std::fs::Metadata, file_path: &Path) -> i64 {
+    let modified = match metadata.modified() {
+        Ok(t) => t,
+        Err(e) => {
+            warn!(
+                path = %file_path.display(),
+                error = %e,
+                "Could not read mtime, defaulting to 0"
+            );
+            return 0;
+        }
+    };
+    let duration = match modified.duration_since(UNIX_EPOCH) {
+        Ok(d) => d,
+        Err(e) => {
+            warn!(
+                path = %file_path.display(),
+                error = %e,
+                "mtime predates UNIX epoch, defaulting to 0"
+            );
+            return 0;
+        }
+    };
+    // Nanoseconds since epoch fit in i64 until year 2262.
+    #[allow(clippy::cast_possible_truncation)]
+    let ns = duration.as_nanos() as i64;
+    ns
 }
