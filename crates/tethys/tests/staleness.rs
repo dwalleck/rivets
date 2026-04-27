@@ -50,6 +50,24 @@ fn write_and_advance_mtime(path: &Path, content: &str) {
 }
 
 #[test]
+fn empty_workspace_is_not_stale() {
+    let dir = tempfile::tempdir().expect("failed to create temp dir");
+    let mut tethys = Tethys::new(dir.path()).expect("failed to create Tethys");
+    tethys.index().expect("index failed");
+
+    assert!(
+        !tethys.needs_update().expect("needs_update failed"),
+        "empty workspace should not need update"
+    );
+    let report = tethys.get_stale_files().expect("staleness check failed");
+    assert!(
+        !report.is_stale(),
+        "empty workspace should produce empty report, got {report:?}"
+    );
+    assert_eq!(report.total(), 0);
+}
+
+#[test]
 fn get_stale_files_empty_after_fresh_index() {
     let (_dir, mut tethys) = workspace_with_files(&[("src/lib.rs", "fn hello() {}")]);
     tethys.index().expect("index failed");

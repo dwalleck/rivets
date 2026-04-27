@@ -52,7 +52,9 @@ impl Tethys {
     /// The iteration shape is duplicated with `get_stale_files` deliberately:
     /// the early-exit version cannot reuse the report-building loop without
     /// allocating, which would defeat the purpose of having two methods. The
-    /// shared change-classification logic lives in `classify_indexed_file`.
+    /// only logic that risks drift — change classification — is factored into
+    /// the shared `classify_indexed_file` helper, so semantic changes (e.g.
+    /// adding content-hash comparison) only need to land in one place.
     pub fn needs_update(&self) -> Result<bool> {
         let mut indexed_map = self.load_indexed_map()?;
 
@@ -112,15 +114,18 @@ impl Tethys {
             if let Some((indexed_mtime, indexed_size)) = indexed_map.remove(&lookup) {
                 match classify_indexed_file(&file_path, indexed_mtime, indexed_size) {
                     FileChange::Unchanged => {}
-                    FileChange::Modified => modified.push(lookup),
-                    FileChange::Deleted => deleted.push(lookup),
+                    FileChange::Modified => modified.push(PathBuf::from(lookup)),
+                    FileChange::Deleted => deleted.push(PathBuf::from(lookup)),
                 }
             } else {
-                added.push(lookup);
+                added.push(PathBuf::from(lookup));
             }
         }
 
-        deleted.extend(indexed_map.into_keys());
+        // `deleted` has two sources: TOCTOU NotFound during the walk above
+        // (file disappeared between discovery and metadata read), and entries
+        // still in indexed_map here that were never encountered on disk at all.
+        deleted.extend(indexed_map.into_keys().map(PathBuf::from));
 
         debug!(
             modified = modified.len(),
@@ -138,32 +143,31 @@ impl Tethys {
 
     /// Build the indexed-file lookup map keyed by normalized workspace-relative path.
     ///
+    /// Keys are `String` rather than `PathBuf` because they are normalized
+    /// forward-slash strings — not OS paths. Using the `String` type makes
+    /// that intent explicit and avoids re-wrapping during construction.
+    ///
     /// `IndexedFile::path` is stored normalized (forward slashes) by the DB
     /// layer; we re-normalize defensively so the contract holds even if a
     /// future code path inserts a path that bypassed `normalize_path`.
-    fn load_indexed_map(&self) -> Result<HashMap<PathBuf, (i64, u64)>> {
+    fn load_indexed_map(&self) -> Result<HashMap<String, (i64, u64)>> {
         Ok(self
             .db
             .list_all_files()?
             .into_iter()
-            .map(|f| {
-                (
-                    PathBuf::from(normalize_path(&f.path)),
-                    (f.mtime_ns, f.size_bytes),
-                )
-            })
+            .map(|f| (normalize_path(&f.path), (f.mtime_ns, f.size_bytes)))
             .collect())
     }
 
     /// Compute the lookup key for a discovered disk path.
     ///
     /// Strips the workspace prefix and normalizes separators to match the
-    /// forward-slash form stored by the DB layer (critical on Windows, where
-    /// `entry.path()` yields backslash-separated paths but the DB stores
-    /// forward slashes).
-    fn lookup_key(&self, file_path: &Path) -> PathBuf {
+    /// forward-slash string form used by [`load_indexed_map`] (critical on
+    /// Windows, where `entry.path()` yields backslash-separated paths but
+    /// the DB stores forward slashes).
+    fn lookup_key(&self, file_path: &Path) -> String {
         let relative = self.relative_path(file_path);
-        PathBuf::from(normalize_path(relative.as_ref()))
+        normalize_path(relative.as_ref())
     }
 
     /// Rebuild the entire index from scratch.
