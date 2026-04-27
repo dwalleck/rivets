@@ -48,12 +48,18 @@ impl Tethys {
     ///
     /// Stops at the first detected change rather than allocating the full
     /// [`StalenessReport`] returned by [`get_stale_files`](Self::get_stale_files).
+    ///
+    /// The iteration shape is duplicated with `get_stale_files` deliberately:
+    /// the early-exit version cannot reuse the report-building loop without
+    /// allocating, which would defeat the purpose of having two methods. The
+    /// shared change-classification logic lives in `classify_indexed_file`.
     pub fn needs_update(&self) -> Result<bool> {
         let mut indexed_map = self.load_indexed_map()?;
 
-        // discover_files already emits warn! for each skipped directory; the Vec
-        // is unused here because needs_update has no recovery action for skips.
-        let disk_files = self.discover_files(&mut Vec::new())?;
+        // discover_files already emits warn! for each skipped directory; this
+        // sink Vec is required by the API but its contents are unused.
+        let mut skipped_dirs = Vec::new();
+        let disk_files = self.discover_files(&mut skipped_dirs)?;
 
         for file_path in disk_files {
             let lookup = self.lookup_key(&file_path);
@@ -95,9 +101,10 @@ impl Tethys {
         let mut added = Vec::new();
         let mut deleted = Vec::new();
 
-        // discover_files already emits warn! for each skipped directory; the Vec
-        // is unused here because the staleness report does not surface skips.
-        let disk_files = self.discover_files(&mut Vec::new())?;
+        // discover_files already emits warn! for each skipped directory; this
+        // sink Vec is required by the API but its contents are unused.
+        let mut skipped_dirs = Vec::new();
+        let disk_files = self.discover_files(&mut skipped_dirs)?;
 
         for file_path in disk_files {
             let lookup = self.lookup_key(&file_path);
@@ -209,8 +216,15 @@ fn classify_indexed_file(file_path: &Path, indexed_mtime: i64, indexed_size: u64
 
 /// Convert a file's modification time to nanoseconds since UNIX epoch.
 ///
-/// Returns 0 with a warning when the OS does not expose a usable mtime, so the
-/// comparison stays deterministic but the fallback is observable in logs.
+/// Returns [`i64::MIN`] with a warning when the OS does not expose a usable
+/// mtime. `i64::MIN` is unrepresentable as a real epoch nanosecond timestamp,
+/// so it never silently matches a stored `0` (which the indexer also writes
+/// on failure) — falling back here always biases toward "Modified", forcing a
+/// re-index rather than a silent skip.
+///
+/// The error branches (OS `metadata.modified()` failure, pre-epoch mtime) are
+/// intentionally untested; reproducing them portably requires a filesystem
+/// mock.
 fn mtime_ns(metadata: &std::fs::Metadata, file_path: &Path) -> i64 {
     let modified = match metadata.modified() {
         Ok(t) => t,
@@ -218,9 +232,9 @@ fn mtime_ns(metadata: &std::fs::Metadata, file_path: &Path) -> i64 {
             warn!(
                 path = %file_path.display(),
                 error = %e,
-                "Could not read mtime, defaulting to 0"
+                "Could not read mtime, using i64::MIN sentinel to force re-index"
             );
-            return 0;
+            return i64::MIN;
         }
     };
     let duration = match modified.duration_since(UNIX_EPOCH) {
@@ -229,9 +243,9 @@ fn mtime_ns(metadata: &std::fs::Metadata, file_path: &Path) -> i64 {
             warn!(
                 path = %file_path.display(),
                 error = %e,
-                "mtime predates UNIX epoch, defaulting to 0"
+                "mtime predates UNIX epoch, using i64::MIN sentinel to force re-index"
             );
-            return 0;
+            return i64::MIN;
         }
     };
     #[expect(
@@ -246,6 +260,7 @@ fn mtime_ns(metadata: &std::fs::Metadata, file_path: &Path) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{FileChange, classify_indexed_file};
+    use rstest::rstest;
     use std::fs;
     use std::path::Path;
     use tempfile::TempDir;
@@ -268,37 +283,25 @@ mod tests {
         (path, mtime, metadata.len())
     }
 
-    #[test]
-    fn classify_unchanged_when_mtime_and_size_match() {
+    /// `mtime_delta` and `size_delta` shift the *indexed* values relative to
+    /// the real on-disk values: `0` means the indexed value matches reality,
+    /// any non-zero value simulates the DB holding a stale entry.
+    #[rstest]
+    #[case::matches(0, 0, FileChange::Unchanged)]
+    #[case::stale_indexed_size(0, 1, FileChange::Modified)]
+    #[case::stale_indexed_mtime(1, 0, FileChange::Modified)]
+    #[case::both_stale(1, 1, FileChange::Modified)]
+    fn classify_existing_file(
+        #[case] mtime_delta: i64,
+        #[case] size_delta: u64,
+        #[case] expected: FileChange,
+    ) {
         let dir = TempDir::new().expect("tempdir");
         let (path, mtime, size) = write_and_stat(dir.path(), "a.rs", "fn a() {}");
 
         assert_eq!(
-            classify_indexed_file(&path, mtime, size),
-            FileChange::Unchanged
-        );
-    }
-
-    #[test]
-    fn classify_modified_when_size_differs() {
-        let dir = TempDir::new().expect("tempdir");
-        let (path, mtime, size) = write_and_stat(dir.path(), "a.rs", "fn a() {}");
-
-        // Same mtime, wrong size — pure size-change branch.
-        assert_eq!(
-            classify_indexed_file(&path, mtime, size + 1),
-            FileChange::Modified
-        );
-    }
-
-    #[test]
-    fn classify_modified_when_mtime_differs() {
-        let dir = TempDir::new().expect("tempdir");
-        let (path, mtime, size) = write_and_stat(dir.path(), "a.rs", "fn a() {}");
-
-        assert_eq!(
-            classify_indexed_file(&path, mtime + 1, size),
-            FileChange::Modified
+            classify_indexed_file(&path, mtime + mtime_delta, size + size_delta),
+            expected
         );
     }
 
