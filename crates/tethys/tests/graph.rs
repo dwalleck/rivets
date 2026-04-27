@@ -186,12 +186,9 @@ fn get_impact_max_depth_limits_transitive_traversal() {
         "unbounded has the same direct dependents"
     );
 
-    // We deliberately do not pin unbounded.transitive_dependents to a specific
-    // count: the existing resolver does not always surface multi-hop transitive
-    // dependents through plain struct imports for this fixture (see the
-    // conservative `>= 2` assertion in `get_impact_returns_transitive_dependents`
-    // for the same reason). Asserting the depth-1 cutoff is the part this test
-    // is responsible for; broader transitive coverage is exercised elsewhere.
+    // Full transitive traversal correctness is covered by
+    // `get_impact_returns_transitive_dependents`. This test's responsibility
+    // is only verifying the depth-1 cutoff.
 }
 
 #[test]

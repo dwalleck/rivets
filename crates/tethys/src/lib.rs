@@ -80,9 +80,11 @@ pub struct Tethys {
 
 /// Convert a `usize` depth to `u32`, saturating at `u32::MAX` with a `warn!`.
 ///
-/// The DB layer's recursive CTE bounds depth as a `u32`, so requests beyond
-/// that range cannot be honored exactly. Saturating (rather than truncating)
-/// keeps the requested behavior monotone, and the log makes the cap discoverable.
+/// The public API takes `usize` for consistency with [`Tethys::get_forward_reachable`]
+/// and [`Tethys::get_backward_reachable`], while the DB layer's recursive CTE
+/// binds depth as `u32`. This helper bridges the gap. Saturating (rather than
+/// truncating) keeps the requested behavior monotone, and the log makes the
+/// cap discoverable.
 fn saturating_depth_to_u32(depth: usize) -> u32 {
     u32::try_from(depth).unwrap_or_else(|_| {
         warn!(

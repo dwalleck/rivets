@@ -21,7 +21,7 @@ pub fn run(
     let tethys = Tethys::new(workspace)?;
 
     if transitive {
-        // `callers` does not expose --depth yet; always use the default.
+        // `callers` does not expose --depth yet (rivets-3yxn).
         let impact = tethys.get_symbol_impact(symbol, None)?;
 
         if impact.direct_dependents.is_empty() && impact.transitive_dependents.is_empty() {
