@@ -21,8 +21,7 @@ pub fn run(
     let tethys = Tethys::new(workspace)?;
 
     if transitive {
-        // Use get_symbol_impact for transitive callers. The `callers` command
-        // does not expose a --depth flag yet, so always use the default depth.
+        // `callers` does not expose --depth yet; always use the default.
         let impact = tethys.get_symbol_impact(symbol, None)?;
 
         if impact.direct_dependents.is_empty() && impact.transitive_dependents.is_empty() {
