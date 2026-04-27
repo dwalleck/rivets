@@ -200,6 +200,13 @@ pub enum SymbolKind {
     /// Macro (Rust only)
     Macro,
     /// Variant of an `enum` (`parent_name` set to the enum's name).
+    ///
+    /// `signature` holds the variant's body text verbatim, including the
+    /// surrounding `(...)` for tuple variants or `{...}` for struct variants
+    /// (e.g. `(String)`, `{ reason: String }`). Unit variants store `NULL`.
+    /// Note that this differs from how attribute `args` are persisted —
+    /// attribute outer parens *are* stripped — so SQL consumers matching
+    /// on `signature` need to account for the surrounding delimiters.
     EnumVariant,
     /// Field of a struct, tuple struct, or struct-variant of an enum.
     ///

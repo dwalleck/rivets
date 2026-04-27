@@ -967,6 +967,9 @@ fn extract_tuple_fields(
                         line = child.start_position().row + 1,
                         "Failed to extract tuple-field type text; skipping field but preserving pending visibility"
                     );
+                    // pending_visibility is intentionally preserved across
+                    // this skip so a `pub` set on the prior iteration still
+                    // attaches to the next type node we successfully read.
                     continue;
                 };
                 out.push(ExtractedSymbol {
