@@ -182,7 +182,16 @@ impl Index {
                     sym.is_test
                 ],
             )?;
-            symbol_ids.push(SymbolId::from(tx.last_insert_rowid()));
+            let symbol_id = tx.last_insert_rowid();
+            symbol_ids.push(SymbolId::from(symbol_id));
+
+            for attr in sym.attributes {
+                tx.execute(
+                    "INSERT INTO attributes (symbol_id, name, args, line)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![symbol_id, attr.name, attr.args, attr.line],
+                )?;
+            }
         }
 
         tx.commit()?;

@@ -36,7 +36,7 @@
 use std::path::PathBuf;
 
 use crate::db::SymbolData;
-use crate::languages::common::{ExtractedReference, ImportStatement};
+use crate::languages::common::{ExtractedAttribute, ExtractedReference, ImportStatement};
 use crate::types::{Language, Span, SymbolId, SymbolKind, Visibility};
 
 /// Parsed file data ready for database insertion.
@@ -81,6 +81,8 @@ pub struct OwnedSymbolData {
     pub parent_symbol_id: Option<SymbolId>,
     /// Whether this symbol is a test function.
     pub is_test: bool,
+    /// Attributes attached to this symbol (e.g. `#[derive(Clone)]`, `#[source]`).
+    pub attributes: Vec<ExtractedAttribute>,
 }
 
 impl ParsedFileData {
@@ -137,6 +139,7 @@ impl OwnedSymbolData {
             visibility: self.visibility,
             parent_symbol_id: self.parent_symbol_id,
             is_test: self.is_test,
+            attributes: &self.attributes,
         }
     }
 }
@@ -159,6 +162,7 @@ mod tests {
             visibility: Visibility::Public,
             parent_symbol_id: None,
             is_test: false,
+            attributes: Vec::new(),
         };
 
         let borrowed = owned.as_symbol_data();
@@ -201,6 +205,7 @@ mod tests {
             visibility: Visibility::Public,
             parent_symbol_id: None,
             is_test: true,
+            attributes: Vec::new(),
         };
 
         assert_eq!(owned.name, "test_fn");

@@ -558,6 +558,7 @@ impl Tethys {
                     visibility: sym.visibility,
                     parent_symbol_id: None,
                     is_test: sym.is_test,
+                    attributes: sym.attributes.clone(),
                 };
                 owned.debug_assert_valid();
                 owned

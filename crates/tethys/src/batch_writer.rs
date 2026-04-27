@@ -440,6 +440,7 @@ mod tests {
                 visibility: Visibility::Public,
                 parent_symbol_id: None,
                 is_test: false,
+                attributes: Vec::new(),
             }],
             references: vec![],
             imports: vec![],

@@ -34,13 +34,6 @@ pub struct ExtractedSymbol {
     ///
     /// Empty when no attributes precede the symbol. Currently populated by the
     /// Rust extractor only; C# extraction will follow.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "populated by parsers, will be persisted by indexing.rs in a follow-up commit"
-        )
-    )]
     pub attributes: Vec<ExtractedAttribute>,
 }
 
