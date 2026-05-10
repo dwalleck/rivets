@@ -84,10 +84,28 @@ fn run_detail(tethys: &Tethys, name: &str, json: bool) -> Result<(), tethys::Err
     }
 }
 
-#[allow(clippy::unnecessary_wraps)] // return type needed after Task 17 adds DB calls
-fn print_not_found_stderr(_tethys: &Tethys, _name: &str) -> Result<(), tethys::Error> {
-    // Suggestions land in Task 17.
-    eprintln!("error: package not found");
+const MAX_SUGGESTIONS: usize = 5;
+
+fn collect_suggestions(name: &str, all_names: &[String]) -> Vec<String> {
+    let needle = name.to_lowercase();
+    all_names
+        .iter()
+        .filter(|n| n.to_lowercase().contains(&needle))
+        .take(MAX_SUGGESTIONS)
+        .cloned()
+        .collect()
+}
+
+fn print_not_found_stderr(tethys: &Tethys, name: &str) -> Result<(), tethys::Error> {
+    eprintln!("{}: no package named '{}' found", "error".red().bold(), name);
+
+    let pkgs = tethys.get_packages()?;
+    let names: Vec<String> = pkgs.into_iter().map(|p| p.name).collect();
+    let suggestions = collect_suggestions(name, &names);
+    if !suggestions.is_empty() {
+        eprintln!();
+        eprintln!("Did you mean: {}?", suggestions.join(", "));
+    }
     Ok(())
 }
 
@@ -455,5 +473,36 @@ mod detail_tests {
         assert_eq!(v["outgoing"][0]["name"], "rivets");
         assert_eq!(v["outgoing"][0]["dep_count"], 5);
         assert_eq!(v["incoming"].as_array().unwrap().len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod suggestion_tests {
+    use super::*;
+
+    #[test]
+    fn suggestions_for_substring_match_only() {
+        let names = vec![
+            "auth-server".to_string(),
+            "auth-client".to_string(),
+            "billing".to_string(),
+        ];
+        let s = collect_suggestions("auth", &names);
+        assert!(s.contains(&"auth-server".to_string()));
+        assert!(s.contains(&"auth-client".to_string()));
+        assert!(!s.contains(&"billing".to_string()));
+    }
+
+    #[test]
+    fn suggestions_empty_when_nothing_matches() {
+        let names = vec!["alpha".to_string(), "beta".to_string()];
+        assert!(collect_suggestions("zzz", &names).is_empty());
+    }
+
+    #[test]
+    fn suggestions_capped_at_five() {
+        let names: Vec<_> = (0..10).map(|i| format!("auth-{i}")).collect();
+        let s = collect_suggestions("auth", &names);
+        assert_eq!(s.len(), 5);
     }
 }
