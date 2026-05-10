@@ -440,6 +440,25 @@ impl Tethys {
         // Update query planner statistics after bulk writes
         self.db.analyze()?;
 
+        let architecture = match self.run_architecture_phase() {
+            Ok(arch) => {
+                tracing::debug!(
+                    packages = arch.packages_recorded,
+                    files = arch.files_assigned,
+                    edges = arch.package_deps_recorded,
+                    "architecture phase complete"
+                );
+                Some(arch)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "architecture phase failed; index data is otherwise valid"
+                );
+                None
+            }
+        };
+
         Ok(IndexStats {
             files_indexed,
             symbols_found,
@@ -450,7 +469,7 @@ impl Tethys {
             errors,
             unresolved_dependencies,
             lsp_sessions,
-            architecture: None,
+            architecture,
         })
     }
 
@@ -1298,6 +1317,53 @@ impl Tethys {
             "target" | "node_modules" | "vendor" | "bin" | "obj" | "build" | "dist" | "__pycache__"
         )
     }
+
+    /// Final indexing phase: rebuild `arch_*` tables from current files + `file_deps`.
+    /// Returns `ArchStats`, or propagates DB errors. Skips files outside any crate.
+    pub(crate) fn run_architecture_phase(&self) -> Result<crate::types::ArchStats> {
+        use crate::db::PackageInsert;
+        use crate::types::PackageSource;
+
+        let package_paths: Vec<String> = self
+            .crates
+            .iter()
+            .map(|c| {
+                self.relative_path(&c.path)
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+
+        let packages: Vec<PackageInsert<'_>> = self
+            .crates
+            .iter()
+            .zip(package_paths.iter())
+            .map(|(c, p)| PackageInsert {
+                name: c.name.as_str(),
+                path: p.as_str(),
+                source: PackageSource::Manifest,
+            })
+            .collect();
+
+        let mut file_to_package: Vec<(crate::types::FileId, &str)> = Vec::new();
+        for file in self.db.list_all_files()? {
+            let abs = if file.path.is_absolute() {
+                file.path.clone()
+            } else {
+                self.workspace_root.join(&file.path)
+            };
+            if let Some(info) = self.get_crate_for_file(&abs) {
+                file_to_package.push((file.id, info.name.as_str()));
+            } else {
+                tracing::trace!(
+                    file = %file.path.display(),
+                    "file outside any crate, skipping from architecture phase"
+                );
+            }
+        }
+
+        self.db.repopulate_architecture(&packages, &file_to_package)
+    }
 }
 
 #[cfg(test)]
@@ -1487,5 +1553,65 @@ mod tests {
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].alias, Some("Map".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod arch_phase_tests {
+    use crate::Tethys;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn make_workspace_with_two_crates() -> (TempDir, Tethys) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[workspace]
+members = ["crate_a", "crate_b"]
+resolver = "2"
+"#,
+        ).expect("write workspace toml");
+
+        fs::create_dir_all(root.join("crate_a/src")).expect("mkdir a");
+        fs::write(
+            root.join("crate_a/Cargo.toml"),
+            r#"[package]
+name = "crate_a"
+version = "0.1.0"
+edition = "2021"
+"#,
+        ).expect("write a toml");
+        fs::write(
+            root.join("crate_a/src/lib.rs"),
+            "pub fn hello() -> String { String::from(\"hi\") }\n",
+        ).expect("write a lib");
+
+        fs::create_dir_all(root.join("crate_b/src")).expect("mkdir b");
+        fs::write(
+            root.join("crate_b/Cargo.toml"),
+            r#"[package]
+name = "crate_b"
+version = "0.1.0"
+edition = "2021"
+"#,
+        ).expect("write b toml");
+        fs::write(
+            root.join("crate_b/src/lib.rs"),
+            "pub fn world() -> u32 { 42 }\n",
+        ).expect("write b lib");
+
+        let tethys = Tethys::new(root).expect("Tethys::new");
+        (dir, tethys)
+    }
+
+    #[test]
+    fn architecture_phase_records_packages() {
+        let (_dir, mut tethys) = make_workspace_with_two_crates();
+        let stats = tethys.index().expect("index");
+        let arch = stats.architecture.expect("architecture stats present");
+        assert_eq!(arch.packages_recorded, 2);
+        assert!(arch.files_assigned >= 2);
     }
 }

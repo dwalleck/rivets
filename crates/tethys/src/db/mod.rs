@@ -30,7 +30,6 @@ mod schema;
 mod symbols;
 
 // Re-export helper functions and SQL constants used by other modules
-#[allow(unused_imports)] // consumed by Tasks 5-8
 pub(crate) use architecture::PackageInsert;
 pub(crate) use files::normalize_path;
 pub(crate) use graph::DEFAULT_MAX_DEPTH;

@@ -16,7 +16,6 @@ use crate::types::{
 };
 
 /// Insert payload for `repopulate_architecture`.
-#[allow(dead_code)] // consumed by Tasks 5-8; used in tests
 pub struct PackageInsert<'a> {
     pub name: &'a str,
     pub path: &'a str,
@@ -37,7 +36,6 @@ impl Index {
     /// Returns an error if `packages` contains duplicate names (violates the
     /// UNIQUE constraint on `arch_packages.name`). Callers must de-duplicate
     /// before calling.
-    #[allow(dead_code)] // called from tests; wired into pipeline in Task 10
     pub fn repopulate_architecture(
         &self,
         packages: &[PackageInsert<'_>],
