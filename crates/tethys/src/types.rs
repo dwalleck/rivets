@@ -2196,7 +2196,6 @@ impl PackageSource {
 
 /// A discovered package. Identified by `name` (UNIQUE per workspace).
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
 pub struct Package {
     pub id: PackageId,
     pub name: String,

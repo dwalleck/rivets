@@ -10,7 +10,7 @@ use tracing::trace;
 
 use super::Index;
 use crate::error::Result;
-use crate::types::{ArchStats, FileId, PackageId, PackageSource};
+use crate::types::{ArchStats, FileId, Package, PackageId, PackageSource};
 
 /// Insert payload for `repopulate_architecture`.
 #[allow(dead_code)] // consumed by Tasks 5-8; used in tests
@@ -109,6 +109,87 @@ impl Index {
             files_assigned,
             package_deps_recorded,
         })
+    }
+
+    /// Return every package row, ordered alphabetically by name for determinism.
+    /// Unknown `source` values produce a `warn!` and are skipped.
+    #[allow(dead_code)] // called from tests; wired into pipeline in Task 11
+    pub fn get_packages(&self) -> Result<Vec<Package>> {
+        use std::path::PathBuf;
+
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, path, source FROM arch_packages ORDER BY name ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, name, path, source_str) = row?;
+            let Some(source) = PackageSource::parse(&source_str) else {
+                tracing::warn!(
+                    package_name = %name,
+                    source = %source_str,
+                    "skipping package with unknown source value"
+                );
+                continue;
+            };
+            out.push(Package {
+                id: PackageId::from(id),
+                name,
+                path: PathBuf::from(path),
+                source,
+            });
+        }
+        Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod get_packages_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn seeded_index() -> (TempDir, Index) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("idx.db");
+        let index = Index::open(&path).expect("open");
+        let packages = [
+            PackageInsert { name: "z_crate", path: "crates/z", source: PackageSource::Manifest },
+            PackageInsert { name: "a_crate", path: "crates/a", source: PackageSource::Manifest },
+        ];
+        index.repopulate_architecture(&packages, &[]).expect("repopulate");
+        (dir, index)
+    }
+
+    #[test]
+    fn get_packages_returns_alphabetical_by_name() {
+        let (_dir, index) = seeded_index();
+        let pkgs = index.get_packages().expect("get_packages");
+        assert_eq!(pkgs.len(), 2);
+        assert_eq!(pkgs[0].name, "a_crate");
+        assert_eq!(pkgs[1].name, "z_crate");
+    }
+
+    #[test]
+    fn get_packages_decodes_source_field() {
+        let (_dir, index) = seeded_index();
+        let pkgs = index.get_packages().expect("get_packages");
+        assert!(pkgs.iter().all(|p| p.source == PackageSource::Manifest));
+    }
+
+    #[test]
+    fn get_packages_empty_for_fresh_index() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let index = Index::open(&dir.path().join("idx.db")).expect("open");
+        assert!(index.get_packages().expect("get_packages").is_empty());
     }
 }
 
