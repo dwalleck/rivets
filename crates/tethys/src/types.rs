@@ -2232,7 +2232,6 @@ pub enum CouplingSort {
 
 /// One package together with how many cross-package edges contribute to a relationship.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
 pub struct PackageDependency {
     pub package: Package,
     pub dep_count: u32,
@@ -2240,7 +2239,6 @@ pub struct PackageDependency {
 
 /// Detailed coupling for a single package, with incoming and outgoing edges.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
 pub struct CouplingDetail {
     pub metrics: CouplingMetrics,
     /// Packages that depend on this one.

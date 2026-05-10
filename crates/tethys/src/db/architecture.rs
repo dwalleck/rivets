@@ -10,7 +10,10 @@ use tracing::trace;
 
 use super::Index;
 use crate::error::Result;
-use crate::types::{ArchStats, CouplingMetrics, CouplingSort, FileId, Package, PackageId, PackageSource};
+use crate::types::{
+    ArchStats, CouplingDetail, CouplingMetrics, CouplingSort, FileId, Package, PackageDependency,
+    PackageId, PackageSource,
+};
 
 /// Insert payload for `repopulate_architecture`.
 #[allow(dead_code)] // consumed by Tasks 5-8; used in tests
@@ -255,6 +258,208 @@ mod get_packages_tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let index = Index::open(&dir.path().join("idx.db")).expect("open");
         assert!(index.get_packages().expect("get_packages").is_empty());
+    }
+}
+
+/// Direction used by [`Index::fetch_neighbors`] to query either dependents or
+/// dependencies of a package.
+#[derive(Clone, Copy)]
+enum Direction {
+    Outgoing,
+    Incoming,
+}
+
+impl Index {
+    /// Detailed coupling for one package by exact name.
+    /// Returns `Ok(None)` when no package matches; `Result::Err` only on DB failure.
+    ///
+    /// Incoming and outgoing lists are sorted by `dep_count` descending, then by name ascending.
+    #[allow(dead_code)] // called from tests; wired into pipeline in Task 11
+    pub fn get_package_coupling(&self, name: &str) -> Result<Option<CouplingDetail>> {
+        use std::path::PathBuf;
+
+        // Scope the connection lock so it is dropped before fetch_neighbors
+        // acquires it again (the Mutex is not re-entrant).
+        let row: Option<(i64, String, String, String, i64, i64, f64)> = {
+            let conn = self.connection()?;
+            conn.query_row(
+                "SELECT p.id, p.name, p.path, p.source,
+                        c.afferent, c.efferent, c.instability
+                 FROM arch_coupling c
+                 JOIN arch_packages p ON p.id = c.package_id
+                 WHERE p.name = ?1",
+                params![name],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, i64>(4)?,
+                        r.get::<_, i64>(5)?,
+                        r.get::<_, f64>(6)?,
+                    ))
+                },
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })?
+        };
+
+        let Some((id, pkg_name, pkg_path, source_str, ca, ce, instability)) = row else {
+            return Ok(None);
+        };
+        let Some(source) = PackageSource::parse(&source_str) else {
+            tracing::warn!(
+                package_name = %pkg_name,
+                source = %source_str,
+                "package coupling has unknown source"
+            );
+            return Ok(None);
+        };
+
+        let target = Package {
+            id: PackageId::from(id),
+            name: pkg_name,
+            path: PathBuf::from(pkg_path),
+            source,
+        };
+
+        // Connection lock is released above; re-acquire for neighbor queries.
+        let outgoing = self.fetch_neighbors(target.id, Direction::Outgoing)?;
+        let incoming = self.fetch_neighbors(target.id, Direction::Incoming)?;
+
+        Ok(Some(CouplingDetail {
+            metrics: CouplingMetrics {
+                package: target,
+                afferent: u32::try_from(ca).unwrap_or(u32::MAX),
+                efferent: u32::try_from(ce).unwrap_or(u32::MAX),
+                instability,
+            },
+            incoming,
+            outgoing,
+        }))
+    }
+
+    /// Fetch neighboring packages in the requested direction.
+    ///
+    /// Column names in the SQL JOIN (`source_pkg` / `target_pkg`) are chosen
+    /// from a fixed match on `Direction` — no user input ever reaches the SQL,
+    /// so there is no injection risk.
+    fn fetch_neighbors(
+        &self,
+        package_id: PackageId,
+        dir: Direction,
+    ) -> Result<Vec<PackageDependency>> {
+        use std::path::PathBuf;
+
+        let (this, other) = match dir {
+            Direction::Outgoing => ("source_pkg", "target_pkg"),
+            Direction::Incoming => ("target_pkg", "source_pkg"),
+        };
+        let sql = format!(
+            "SELECT p.id, p.name, p.path, p.source, d.dep_count
+             FROM arch_package_deps d
+             JOIN arch_packages p ON p.id = d.{other}
+             WHERE d.{this} = ?1
+             ORDER BY d.dep_count DESC, p.name ASC"
+        );
+
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![package_id.as_i64()], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, name, path, source_str, dep_count) = row?;
+            let Some(source) = PackageSource::parse(&source_str) else { continue };
+            out.push(PackageDependency {
+                package: Package {
+                    id: PackageId::from(id),
+                    name,
+                    path: PathBuf::from(path),
+                    source,
+                },
+                dep_count: u32::try_from(dep_count).unwrap_or(u32::MAX),
+            });
+        }
+        Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod package_coupling_tests {
+    use super::*;
+    use crate::types::Language;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    fn seeded_index() -> (TempDir, Index) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut index = Index::open(&dir.path().join("idx.db")).expect("open");
+
+        let f_a = index.upsert_file(Path::new("a/lib.rs"), Language::Rust, 0, 0, None).expect("a");
+        let f_b = index.upsert_file(Path::new("b/lib.rs"), Language::Rust, 0, 0, None).expect("b");
+        let f_c = index.upsert_file(Path::new("c/lib.rs"), Language::Rust, 0, 0, None).expect("c");
+
+        index.insert_file_dependency(f_a, f_b).expect("a→b");
+        index.insert_file_dependency(f_a, f_c).expect("a→c");
+        index.insert_file_dependency(f_b, f_c).expect("b→c");
+
+        let packages = [
+            PackageInsert { name: "a", path: "a", source: PackageSource::Manifest },
+            PackageInsert { name: "b", path: "b", source: PackageSource::Manifest },
+            PackageInsert { name: "c", path: "c", source: PackageSource::Manifest },
+        ];
+        let mappings = [(f_a, "a"), (f_b, "b"), (f_c, "c")];
+        index.repopulate_architecture(&packages, &mappings).expect("repopulate");
+        (dir, index)
+    }
+
+    #[test]
+    fn package_coupling_returns_outgoing_and_incoming() {
+        let (_dir, index) = seeded_index();
+        let detail = index.get_package_coupling("b").expect("query").expect("found");
+
+        assert_eq!(detail.metrics.package.name, "b");
+        assert_eq!((detail.metrics.afferent, detail.metrics.efferent), (1, 1));
+
+        let in_names: Vec<_> = detail.incoming.iter().map(|d| d.package.name.as_str()).collect();
+        assert_eq!(in_names, ["a"]);
+
+        let out_names: Vec<_> = detail.outgoing.iter().map(|d| d.package.name.as_str()).collect();
+        assert_eq!(out_names, ["c"]);
+    }
+
+    #[test]
+    fn package_coupling_none_for_missing_package() {
+        let (_dir, index) = seeded_index();
+        assert!(index.get_package_coupling("does-not-exist").expect("query").is_none());
+    }
+
+    #[test]
+    fn package_coupling_for_isolated_package_returns_empty_lists() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let index = Index::open(&dir.path().join("idx.db")).expect("open");
+        let packages = [PackageInsert {
+            name: "lonely", path: "lonely", source: PackageSource::Manifest,
+        }];
+        index.repopulate_architecture(&packages, &[]).expect("repopulate");
+
+        let detail = index.get_package_coupling("lonely").expect("query").expect("found");
+        assert!(detail.incoming.is_empty());
+        assert!(detail.outgoing.is_empty());
+        assert!(detail.metrics.instability.abs() < 1e-9);
     }
 }
 
