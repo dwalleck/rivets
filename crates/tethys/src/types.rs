@@ -2133,21 +2133,13 @@ mod tests {
 
 // === Architecture types ===
 
-// These architecture types have no consumers yet; consumers land in Tasks 4-17
-// of docs/plans/2026-05-10-tethys-architecture-analysis.md. `#[allow(dead_code)]`
-// is required here instead of `#[expect(dead_code)]` because `pub` items in a
-// library crate do not trigger the dead_code lint in the test binary target
-// (they are part of the public API surface), so `#[expect]` would fire an
-// "unfulfilled lint expectation" error under `cargo clippy --all-targets`.
-
 /// Internal numeric ID for a package row. Mirrors `FileId` / `SymbolId` pattern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[allow(dead_code)]
 pub struct PackageId(i64);
 
 impl PackageId {
+    /// Return the underlying `i64` value.
     #[must_use]
-    #[allow(dead_code)]
     pub fn as_i64(self) -> i64 {
         self.0
     }
@@ -2167,7 +2159,6 @@ impl std::fmt::Display for PackageId {
 
 /// How a package was discovered. v1 only emits `Manifest`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum PackageSource {
     /// Discovered via Cargo.toml.
     Manifest,
@@ -2178,7 +2169,6 @@ pub enum PackageSource {
 impl PackageSource {
     /// Stable string form used in SQL storage.
     #[must_use]
-    #[allow(dead_code)]
     pub fn as_str(self) -> &'static str {
         match self {
             PackageSource::Manifest => "manifest",
@@ -2189,7 +2179,6 @@ impl PackageSource {
     /// Inverse of `as_str`. Returns `None` for unknown values, which lets the
     /// caller decide whether to skip the row or surface a warning.
     #[must_use]
-    #[allow(dead_code)]
     pub fn parse(s: &str) -> Option<PackageSource> {
         match s {
             "manifest" => Some(PackageSource::Manifest),
@@ -2202,15 +2191,20 @@ impl PackageSource {
 /// A discovered package. Identified by `name` (UNIQUE per workspace).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Package {
+    /// Database row ID.
     pub id: PackageId,
+    /// Package name as declared in `Cargo.toml`.
     pub name: String,
+    /// Path to the package root, relative to the workspace root.
     pub path: std::path::PathBuf,
+    /// How this package was discovered.
     pub source: PackageSource,
 }
 
 /// Coupling metrics for a single package.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CouplingMetrics {
+    /// The package these metrics describe.
     pub package: Package,
     /// Afferent coupling: distinct packages depending on this one.
     pub afferent: u32,
@@ -2222,7 +2216,6 @@ pub struct CouplingMetrics {
 
 /// Sort key for `get_coupling_metrics`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(dead_code)]
 pub enum CouplingSort {
     /// Most unstable first.
     #[default]
@@ -2238,13 +2231,16 @@ pub enum CouplingSort {
 /// One package together with how many cross-package edges contribute to a relationship.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PackageDependency {
+    /// The related package.
     pub package: Package,
+    /// Number of file-level dependency edges between the two packages.
     pub dep_count: u32,
 }
 
 /// Detailed coupling for a single package, with incoming and outgoing edges.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CouplingDetail {
+    /// Coupling metrics for the queried package.
     pub metrics: CouplingMetrics,
     /// Packages that depend on this one.
     pub incoming: Vec<PackageDependency>,

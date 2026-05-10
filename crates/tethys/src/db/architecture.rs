@@ -114,7 +114,6 @@ impl Index {
 
     /// Return every package row, ordered alphabetically by name for determinism.
     /// Unknown `source` values produce a `warn!` and are skipped.
-    #[allow(dead_code)] // called from tests; wired into pipeline in Task 11
     pub fn get_packages(&self) -> Result<Vec<Package>> {
         use std::path::PathBuf;
 
@@ -158,7 +157,6 @@ impl Index {
     /// The ORDER BY fragment is chosen from a fixed set of SQL strings derived
     /// from `CouplingSort` — no user input ever reaches the SQL, so there is
     /// no injection risk.
-    #[allow(dead_code)] // called from tests; wired into pipeline in Task 11
     pub fn get_coupling_metrics(&self, sort: CouplingSort) -> Result<Vec<CouplingMetrics>> {
         use std::path::PathBuf;
 
@@ -272,7 +270,6 @@ impl Index {
     /// Returns `Ok(None)` when no package matches; `Result::Err` only on DB failure.
     ///
     /// Incoming and outgoing lists are sorted by `dep_count` descending, then by name ascending.
-    #[allow(dead_code)] // called from tests; wired into pipeline in Task 11
     pub fn get_package_coupling(&self, name: &str) -> Result<Option<CouplingDetail>> {
         use std::path::PathBuf;
 
