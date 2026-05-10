@@ -21,7 +21,6 @@ pub struct PackageInsert<'a> {
 }
 
 impl Index {
-    #[allow(dead_code)] // called from tests; wired into pipeline in Task 10
     /// Rebuild every `arch_*` table from the supplied package list and file
     /// mappings, plus the current state of `file_deps`. Single transaction.
     ///
@@ -30,6 +29,12 @@ impl Index {
     /// `file_to_package_name` entries whose name is not present in `packages`
     /// are silently skipped (logged at `trace!`); this lets callers feed
     /// best-effort name lookups without pre-filtering.
+    ///
+    /// # Errors
+    /// Returns an error if `packages` contains duplicate names (violates the
+    /// UNIQUE constraint on `arch_packages.name`). Callers must de-duplicate
+    /// before calling.
+    #[allow(dead_code)] // called from tests; wired into pipeline in Task 10
     pub fn repopulate_architecture(
         &self,
         packages: &[PackageInsert<'_>],
@@ -42,16 +47,15 @@ impl Index {
         tx.execute("DELETE FROM arch_packages", [])?;
 
         // 2. Insert packages.
-        let mut packages_recorded: usize = 0;
         {
             let mut stmt = tx.prepare(
                 "INSERT INTO arch_packages (name, path, source) VALUES (?1, ?2, ?3)",
             )?;
             for pkg in packages {
                 stmt.execute(params![pkg.name, pkg.path, pkg.source.as_str()])?;
-                packages_recorded += 1;
             }
         }
+        let packages_recorded = packages.len();
 
         // 3. Read back name → id map (needed to translate file mappings).
         let mut name_to_id: HashMap<String, PackageId> = HashMap::new();
