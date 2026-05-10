@@ -27,21 +27,34 @@ tethys impact src/auth/mod.rs
 
 # Find tests affected by changed files (great for CI)
 tethys affected-tests src/auth/login.rs src/auth/session.rs --names-only
+
+# View per-crate coupling metrics
+tethys coupling
+
+# Sort alphabetically
+tethys coupling --sort name
+
+# Drill into one package
+tethys coupling --package my-crate
+
+# JSON for tooling
+tethys coupling --json
 ```
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `index` | Index source files in the workspace |
-| `search` | Search for symbols by name |
-| `callers` | Show callers of a symbol (with `--transitive` for call chains) |
-| `impact` | Analyze impact of changes to a file or symbol |
-| `cycles` | Detect circular dependencies |
-| `stats` | Show index statistics |
-| `reachable` | Analyze symbol reachability (forward/backward traversal) |
 | `affected-tests` | Find tests affected by file changes |
+| `callers` | Show callers of a symbol (with `--transitive` for call chains) |
+| `coupling` | Per-crate coupling metrics (Ca, Ce, instability) |
+| `cycles` | Detect circular dependencies |
+| `impact` | Analyze impact of changes to a file or symbol |
+| `index` | Index source files in the workspace |
 | `panic-points` | Find `.unwrap()` and `.expect()` calls |
+| `reachable` | Analyze symbol reachability (forward/backward traversal) |
+| `search` | Search for symbols by name |
+| `stats` | Show index statistics |
 
 ## Language Support
 
