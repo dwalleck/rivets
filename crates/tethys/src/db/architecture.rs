@@ -677,3 +677,81 @@ mod repopulate_tests {
         assert_eq!(stats.files_assigned, 0, "unknown name skipped");
     }
 }
+
+#[cfg(test)]
+mod instability_property_tests {
+    use proptest::prelude::*;
+    use rusqlite::Connection;
+
+    /// Build an in-memory DB with `n` packages and the listed cross-package edges,
+    /// then query `arch_coupling`. Edges are (`source_index`, `target_index`) pairs.
+    fn instability_for(n: usize, edges: &[(usize, usize)]) -> Vec<(u32, u32, f64)> {
+        let conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch(crate::db::SCHEMA).expect("schema");
+
+        for i in 0..n {
+            conn.execute(
+                "INSERT INTO arch_packages (id, name, path, source) VALUES (?1, ?2, ?3, 'manifest')",
+                rusqlite::params![i64::try_from(i + 1).unwrap(), format!("p{i}"), format!("p{i}")],
+            )
+            .expect("insert pkg");
+        }
+        for (src, tgt) in edges {
+            if src == tgt {
+                continue;
+            }
+            // INSERT OR IGNORE to dedupe (src, tgt) pairs (PK constraint).
+            conn.execute(
+                "INSERT OR IGNORE INTO arch_package_deps (source_pkg, target_pkg, dep_count)
+                 VALUES (?1, ?2, 1)",
+                rusqlite::params![
+                    i64::try_from(src + 1).unwrap(),
+                    i64::try_from(tgt + 1).unwrap()
+                ],
+            )
+            .expect("insert dep");
+        }
+
+        let mut stmt = conn
+            .prepare("SELECT afferent, efferent, instability FROM arch_coupling")
+            .expect("prepare");
+        let rows: Vec<(u32, u32, f64)> = stmt
+            .query_map([], |r| {
+                Ok((
+                    u32::try_from(r.get::<_, i64>(0)?).unwrap_or(u32::MAX),
+                    u32::try_from(r.get::<_, i64>(1)?).unwrap_or(u32::MAX),
+                    r.get::<_, f64>(2)?,
+                ))
+            })
+            .expect("query")
+            .map(|r| r.expect("row"))
+            .collect();
+        rows
+    }
+
+    proptest! {
+        /// For every package and every random edge set, instability stays in [0, 1].
+        #[test]
+        fn instability_within_unit_interval(
+            n in 1usize..8,
+            edges in prop::collection::vec((0usize..8, 0usize..8), 0..30),
+        ) {
+            let edges: Vec<_> = edges.into_iter()
+                .filter(|(s, t)| *s < n && *t < n)
+                .collect();
+            for (_ca, _ce, i) in instability_for(n, &edges) {
+                prop_assert!((0.0..=1.0).contains(&i), "instability out of range: {i}");
+            }
+        }
+
+        /// A package with no edges has instability exactly 0.
+        #[test]
+        fn isolated_package_has_zero_instability(n in 1usize..6) {
+            let rows = instability_for(n, &[]);
+            for (ca, ce, i) in rows {
+                prop_assert_eq!((ca, ce), (0, 0));
+                prop_assert!((i - 0.0_f64).abs() < 1e-9);
+            }
+        }
+    }
+}
