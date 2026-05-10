@@ -8,7 +8,7 @@ use std::path::Path;
 
 use clap::ValueEnum;
 use colored::Colorize;
-use tethys::{CouplingMetrics, CouplingSort, PackageSource, Tethys};
+use tethys::{CouplingDetail, CouplingMetrics, CouplingSort, PackageSource, Tethys};
 
 /// CLI sort flag, converted to the API's `CouplingSort` via `From`.
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -65,8 +65,109 @@ fn run_table(tethys: &Tethys, sort: SortFlag, json: bool) -> Result<(), tethys::
     }
 }
 
-#[allow(dead_code, clippy::unnecessary_wraps)] // implemented in Task 16
-fn run_detail(_tethys: &Tethys, _name: &str, _json: bool) -> Result<(), tethys::Error> {
+fn run_detail(tethys: &Tethys, name: &str, json: bool) -> Result<(), tethys::Error> {
+    let detail = tethys.get_package_coupling(name)?;
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    match (detail, json) {
+        (Some(d), true) => write_detail_json(&mut out, &d).map_err(tethys::Error::Io),
+        (Some(d), false) => write_detail_text(&mut out, &d).map_err(tethys::Error::Io),
+        (None, true) => {
+            writeln!(out, "null").map_err(tethys::Error::Io)?;
+            print_not_found_stderr(tethys, name)?;
+            std::process::exit(1);
+        }
+        (None, false) => {
+            print_not_found_stderr(tethys, name)?;
+            std::process::exit(1);
+        }
+    }
+}
+
+#[allow(clippy::unnecessary_wraps)] // return type needed after Task 17 adds DB calls
+fn print_not_found_stderr(_tethys: &Tethys, _name: &str) -> Result<(), tethys::Error> {
+    // Suggestions land in Task 17.
+    eprintln!("error: package not found");
+    Ok(())
+}
+
+pub(crate) fn write_detail_text<W: Write>(out: &mut W, d: &CouplingDetail) -> io::Result<()> {
+    writeln!(out)?;
+    writeln!(out, "Package: {}", d.metrics.package.name.cyan().bold())?;
+    writeln!(out, "  Path:    {}", d.metrics.package.path.display())?;
+    writeln!(
+        out,
+        "  Source:  {}",
+        match d.metrics.package.source {
+            PackageSource::Manifest => "manifest",
+            PackageSource::Directory => "directory",
+        }
+    )?;
+    writeln!(out)?;
+    writeln!(out, "  {}", "Coupling".white().bold())?;
+    writeln!(out, "    Afferent (Ca):   {}", d.metrics.afferent)?;
+    writeln!(out, "    Efferent (Ce):   {}", d.metrics.efferent)?;
+    let bar = render_bar(d.metrics.instability);
+    let color = instability_color(d.metrics.instability);
+    writeln!(
+        out,
+        "    Instability:     {bar}  {value:.2}",
+        bar = color(&bar),
+        value = d.metrics.instability
+    )?;
+    writeln!(out)?;
+
+    if !d.outgoing.is_empty() {
+        writeln!(out, "  {}", "Depends on (outgoing):".white().bold())?;
+        for dep in &d.outgoing {
+            let label = if dep.dep_count == 1 { "edge" } else { "edges" };
+            writeln!(
+                out,
+                "    {:<18} {} {}",
+                dep.package.name, dep.dep_count, label
+            )?;
+        }
+        writeln!(out)?;
+    }
+    if !d.incoming.is_empty() {
+        writeln!(out, "  {}", "Depended on by (incoming):".white().bold())?;
+        for dep in &d.incoming {
+            let label = if dep.dep_count == 1 { "edge" } else { "edges" };
+            writeln!(
+                out,
+                "    {:<18} {} {}",
+                dep.package.name, dep.dep_count, label
+            )?;
+        }
+        writeln!(out)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn write_detail_json<W: Write>(out: &mut W, d: &CouplingDetail) -> io::Result<()> {
+    let value = serde_json::json!({
+        "package": {
+            "name": d.metrics.package.name,
+            "path": d.metrics.package.path.to_string_lossy(),
+            "source": match d.metrics.package.source {
+                PackageSource::Manifest => "manifest",
+                PackageSource::Directory => "directory",
+            },
+        },
+        "afferent": d.metrics.afferent,
+        "efferent": d.metrics.efferent,
+        "instability": round_to_4(d.metrics.instability),
+        "outgoing": d.outgoing.iter().map(|p| serde_json::json!({
+            "name": p.package.name,
+            "dep_count": p.dep_count,
+        })).collect::<Vec<_>>(),
+        "incoming": d.incoming.iter().map(|p| serde_json::json!({
+            "name": p.package.name,
+            "dep_count": p.dep_count,
+        })).collect::<Vec<_>>(),
+    });
+    serde_json::to_writer_pretty(&mut *out, &value).map_err(io::Error::other)?;
+    writeln!(out)?;
     Ok(())
 }
 
@@ -288,5 +389,71 @@ mod table_tests {
         write_table_text(&mut buf, &[], SortFlag::Instability).expect("write");
         let s = String::from_utf8(buf).expect("utf-8");
         assert!(s.contains("No packages discovered"));
+    }
+}
+
+#[cfg(test)]
+mod detail_tests {
+    use super::*;
+    use tethys::{CouplingDetail, CouplingMetrics, Package, PackageDependency, PackageId, PackageSource};
+
+    fn pkg(name: &str) -> Package {
+        Package {
+            id: PackageId::from(1),
+            name: name.into(),
+            path: name.into(),
+            source: PackageSource::Manifest,
+        }
+    }
+
+    fn sample_detail() -> CouplingDetail {
+        CouplingDetail {
+            metrics: CouplingMetrics {
+                package: pkg("rivets-mcp"),
+                afferent: 3,
+                efferent: 1,
+                instability: 0.25,
+            },
+            outgoing: vec![PackageDependency {
+                package: pkg("rivets"),
+                dep_count: 5,
+            }],
+            incoming: vec![
+                PackageDependency { package: pkg("cli-binary"), dep_count: 3 },
+                PackageDependency { package: pkg("rivets-test"), dep_count: 2 },
+                PackageDependency { package: pkg("rivets-bench"), dep_count: 1 },
+            ],
+        }
+    }
+
+    #[test]
+    fn detail_text_includes_metrics_and_neighbors() {
+        let mut buf = Vec::new();
+        write_detail_text(&mut buf, &sample_detail()).expect("write");
+        let s = String::from_utf8(buf).expect("utf-8");
+
+        assert!(s.contains("rivets-mcp"));
+        assert!(s.contains("Afferent (Ca):   3"));
+        assert!(s.contains("Efferent (Ce):   1"));
+        assert!(s.contains("0.25"));
+        assert!(s.contains("rivets"));
+        assert!(s.contains("cli-binary"));
+        assert!(s.contains("5 edges"));
+    }
+
+    #[test]
+    fn detail_json_serializes_full_shape() {
+        let mut buf = Vec::new();
+        write_detail_json(&mut buf, &sample_detail()).expect("write");
+        let s = String::from_utf8(buf).expect("utf-8");
+        let v: serde_json::Value = serde_json::from_str(&s).expect("parse");
+
+        assert_eq!(v["package"]["name"], "rivets-mcp");
+        assert_eq!(v["afferent"], 3);
+        assert_eq!(v["efferent"], 1);
+        assert_eq!(v["instability"], 0.25);
+        assert_eq!(v["outgoing"][0]["name"], "rivets");
+        assert_eq!(v["outgoing"][0]["dep_count"], 5);
+        assert_eq!(v["incoming"].as_array().unwrap().len(), 3);
     }
 }
