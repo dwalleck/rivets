@@ -2125,3 +2125,147 @@ mod tests {
         assert!(!stats.has_lsp_errors());
     }
 }
+
+// === Architecture types ===
+
+/// Internal numeric ID for a package row. Mirrors `FileId` / `SymbolId` pattern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PackageId(i64);
+
+impl PackageId {
+    #[must_use]
+    pub fn as_i64(self) -> i64 {
+        self.0
+    }
+}
+
+impl From<i64> for PackageId {
+    fn from(id: i64) -> Self {
+        Self(id)
+    }
+}
+
+impl std::fmt::Display for PackageId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// How a package was discovered. v1 only emits `Manifest`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageSource {
+    /// Discovered via Cargo.toml.
+    Manifest,
+    /// Directory-fallback for files outside any manifest. Reserved for future use.
+    Directory,
+}
+
+impl PackageSource {
+    /// Stable string form used in SQL storage.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PackageSource::Manifest => "manifest",
+            PackageSource::Directory => "directory",
+        }
+    }
+
+    /// Inverse of `as_str`. Returns `None` for unknown values, which lets the
+    /// caller decide whether to skip the row or surface a warning.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<PackageSource> {
+        match s {
+            "manifest" => Some(PackageSource::Manifest),
+            "directory" => Some(PackageSource::Directory),
+            _ => None,
+        }
+    }
+}
+
+/// A discovered package. Identified by `name` (UNIQUE per workspace).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Package {
+    pub id: PackageId,
+    pub name: String,
+    pub path: std::path::PathBuf,
+    pub source: PackageSource,
+}
+
+/// Coupling metrics for a single package.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CouplingMetrics {
+    pub package: Package,
+    /// Afferent coupling: distinct packages depending on this one.
+    pub afferent: u32,
+    /// Efferent coupling: distinct packages this one depends on.
+    pub efferent: u32,
+    /// Ce / (Ca + Ce). 0.0 when both are zero.
+    pub instability: f64,
+}
+
+/// Sort key for `get_coupling_metrics`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CouplingSort {
+    /// Most unstable first.
+    #[default]
+    Instability,
+    /// Most depended-on first.
+    Afferent,
+    /// Most dependent first.
+    Efferent,
+    /// Alphabetical.
+    Name,
+}
+
+/// One package together with how many cross-package edges contribute to a relationship.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PackageDependency {
+    pub package: Package,
+    pub dep_count: u32,
+}
+
+/// Detailed coupling for a single package, with incoming and outgoing edges.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CouplingDetail {
+    pub metrics: CouplingMetrics,
+    /// Packages that depend on this one.
+    pub incoming: Vec<PackageDependency>,
+    /// Packages this one depends on.
+    pub outgoing: Vec<PackageDependency>,
+}
+
+/// Statistics emitted by the architecture indexing phase.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ArchStats {
+    pub packages_recorded: usize,
+    pub files_assigned: usize,
+    pub package_deps_recorded: usize,
+}
+
+#[cfg(test)]
+mod arch_type_tests {
+    use super::*;
+
+    #[test]
+    fn package_id_roundtrip() {
+        let id: PackageId = 42i64.into();
+        assert_eq!(id.as_i64(), 42);
+    }
+
+    #[test]
+    fn package_source_as_str_round_trips_through_parse() {
+        for variant in [PackageSource::Manifest, PackageSource::Directory] {
+            assert_eq!(PackageSource::parse(variant.as_str()), Some(variant));
+        }
+    }
+
+    #[test]
+    fn package_source_parse_returns_none_for_unknown() {
+        assert_eq!(PackageSource::parse("git"), None);
+    }
+
+    #[test]
+    fn coupling_sort_default_is_instability() {
+        assert_eq!(CouplingSort::default(), CouplingSort::Instability);
+    }
+}
