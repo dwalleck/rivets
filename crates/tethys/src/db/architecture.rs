@@ -10,7 +10,7 @@ use tracing::trace;
 
 use super::Index;
 use crate::error::Result;
-use crate::types::{ArchStats, FileId, Package, PackageId, PackageSource};
+use crate::types::{ArchStats, CouplingMetrics, CouplingSort, FileId, Package, PackageId, PackageSource};
 
 /// Insert payload for `repopulate_architecture`.
 #[allow(dead_code)] // consumed by Tasks 5-8; used in tests
@@ -150,6 +150,71 @@ impl Index {
         }
         Ok(out)
     }
+
+    /// Coupling metrics for every package, sorted per the requested key.
+    /// Sort is delegated to `SQLite` via `ORDER BY`.
+    ///
+    /// The ORDER BY fragment is chosen from a fixed set of SQL strings derived
+    /// from `CouplingSort` — no user input ever reaches the SQL, so there is
+    /// no injection risk.
+    #[allow(dead_code)] // called from tests; wired into pipeline in Task 11
+    pub fn get_coupling_metrics(&self, sort: CouplingSort) -> Result<Vec<CouplingMetrics>> {
+        use std::path::PathBuf;
+
+        let order_clause = match sort {
+            CouplingSort::Instability => "c.instability DESC, p.name ASC",
+            CouplingSort::Afferent => "c.afferent DESC, p.name ASC",
+            CouplingSort::Efferent => "c.efferent DESC, p.name ASC",
+            CouplingSort::Name => "p.name ASC",
+        };
+
+        let sql = format!(
+            "SELECT p.id, p.name, p.path, p.source,
+                    c.afferent, c.efferent, c.instability
+             FROM arch_coupling c
+             JOIN arch_packages p ON p.id = c.package_id
+             ORDER BY {order_clause}"
+        );
+
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, f64>(6)?,
+            ))
+        })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, name, path, source_str, ca, ce, instability) = row?;
+            let Some(source) = PackageSource::parse(&source_str) else {
+                tracing::warn!(
+                    package_name = %name,
+                    source = %source_str,
+                    "skipping coupling row with unknown source"
+                );
+                continue;
+            };
+            out.push(CouplingMetrics {
+                package: Package {
+                    id: PackageId::from(id),
+                    name,
+                    path: PathBuf::from(path),
+                    source,
+                },
+                afferent: u32::try_from(ca).unwrap_or(u32::MAX),
+                efferent: u32::try_from(ce).unwrap_or(u32::MAX),
+                instability,
+            });
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -190,6 +255,95 @@ mod get_packages_tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let index = Index::open(&dir.path().join("idx.db")).expect("open");
         assert!(index.get_packages().expect("get_packages").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod coupling_metrics_tests {
+    use super::*;
+    use crate::types::{CouplingSort, Language};
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    /// Three-crate fixture: a → b, a → c, b → c.
+    fn seeded_index() -> (TempDir, Index) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut index = Index::open(&dir.path().join("idx.db")).expect("open");
+
+        let f_a = index.upsert_file(Path::new("a/lib.rs"), Language::Rust, 0, 0, None).expect("a");
+        let f_b = index.upsert_file(Path::new("b/lib.rs"), Language::Rust, 0, 0, None).expect("b");
+        let f_c = index.upsert_file(Path::new("c/lib.rs"), Language::Rust, 0, 0, None).expect("c");
+
+        index.insert_file_dependency(f_a, f_b).expect("a→b");
+        index.insert_file_dependency(f_a, f_c).expect("a→c");
+        index.insert_file_dependency(f_b, f_c).expect("b→c");
+
+        let packages = [
+            PackageInsert { name: "a", path: "a", source: PackageSource::Manifest },
+            PackageInsert { name: "b", path: "b", source: PackageSource::Manifest },
+            PackageInsert { name: "c", path: "c", source: PackageSource::Manifest },
+        ];
+        let mappings = [(f_a, "a"), (f_b, "b"), (f_c, "c")];
+        index.repopulate_architecture(&packages, &mappings).expect("repopulate");
+
+        (dir, index)
+    }
+
+    fn metrics_for<'a>(rows: &'a [CouplingMetrics], name: &str) -> &'a CouplingMetrics {
+        rows.iter()
+            .find(|m| m.package.name == name)
+            .unwrap_or_else(|| panic!("no row for {name}"))
+    }
+
+    #[test]
+    fn coupling_metrics_match_expected_ca_ce_instability() {
+        let (_dir, index) = seeded_index();
+        let rows = index.get_coupling_metrics(CouplingSort::Name).expect("metrics");
+
+        let a = metrics_for(&rows, "a");
+        assert_eq!((a.afferent, a.efferent), (0, 2));
+        assert!((a.instability - 1.0).abs() < 1e-9);
+
+        let b = metrics_for(&rows, "b");
+        assert_eq!((b.afferent, b.efferent), (1, 1));
+        assert!((b.instability - 0.5).abs() < 1e-9);
+
+        let c = metrics_for(&rows, "c");
+        assert_eq!((c.afferent, c.efferent), (2, 0));
+        assert!((c.instability - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn sort_by_instability_descending() {
+        let (_dir, index) = seeded_index();
+        let rows = index.get_coupling_metrics(CouplingSort::Instability).expect("metrics");
+        assert_eq!(rows[0].package.name, "a");
+        assert_eq!(rows[1].package.name, "b");
+        assert_eq!(rows[2].package.name, "c");
+    }
+
+    #[test]
+    fn sort_by_name_ascending() {
+        let (_dir, index) = seeded_index();
+        let rows = index.get_coupling_metrics(CouplingSort::Name).expect("metrics");
+        assert_eq!(rows[0].package.name, "a");
+        assert_eq!(rows[1].package.name, "b");
+        assert_eq!(rows[2].package.name, "c");
+    }
+
+    #[test]
+    fn isolated_package_has_zero_instability() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let index = Index::open(&dir.path().join("idx.db")).expect("open");
+        let packages = [PackageInsert {
+            name: "lonely", path: "lonely", source: PackageSource::Manifest,
+        }];
+        index.repopulate_architecture(&packages, &[]).expect("repopulate");
+
+        let rows = index.get_coupling_metrics(CouplingSort::Name).expect("metrics");
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].afferent, rows[0].efferent), (0, 0));
+        assert!(rows[0].instability.abs() < 1e-9);
     }
 }
 

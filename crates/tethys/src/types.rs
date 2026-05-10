@@ -2205,7 +2205,6 @@ pub struct Package {
 
 /// Coupling metrics for a single package.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
 pub struct CouplingMetrics {
     pub package: Package,
     /// Afferent coupling: distinct packages depending on this one.
