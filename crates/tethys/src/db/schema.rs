@@ -113,4 +113,94 @@ CREATE TABLE IF NOT EXISTS attributes (
 
 CREATE INDEX IF NOT EXISTS idx_attributes_symbol ON attributes(symbol_id);
 CREATE INDEX IF NOT EXISTS idx_attributes_name ON attributes(name);
+
+-- === Architecture analysis ===
+
+-- One row per discovered package. v1: only source = 'manifest'.
+CREATE TABLE IF NOT EXISTS arch_packages (
+    id     INTEGER PRIMARY KEY,
+    name   TEXT NOT NULL UNIQUE,
+    path   TEXT NOT NULL,
+    source TEXT NOT NULL CHECK(source IN ('manifest','directory'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_arch_packages_path ON arch_packages(path);
+
+-- File → package assignment. PK enforces one package per file.
+CREATE TABLE IF NOT EXISTS arch_file_packages (
+    file_id    INTEGER PRIMARY KEY REFERENCES files(id)         ON DELETE CASCADE,
+    package_id INTEGER NOT NULL    REFERENCES arch_packages(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_arch_fp_pkg ON arch_file_packages(package_id);
+
+-- Cross-package dependency edges, rolled up from file_deps.
+CREATE TABLE IF NOT EXISTS arch_package_deps (
+    source_pkg INTEGER NOT NULL REFERENCES arch_packages(id) ON DELETE CASCADE,
+    target_pkg INTEGER NOT NULL REFERENCES arch_packages(id) ON DELETE CASCADE,
+    dep_count  INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (source_pkg, target_pkg),
+    CHECK (source_pkg <> target_pkg)
+);
+
+CREATE INDEX IF NOT EXISTS idx_arch_pkgdep_tgt ON arch_package_deps(target_pkg);
+
+-- Coupling metrics view. LEFT JOINs keep packages with zero edges visible.
+CREATE VIEW IF NOT EXISTS arch_coupling AS
+SELECT
+    p.id   AS package_id,
+    p.name AS package_name,
+    COALESCE(ca.afferent, 0) AS afferent,
+    COALESCE(ce.efferent, 0) AS efferent,
+    CASE
+        WHEN COALESCE(ca.afferent, 0) + COALESCE(ce.efferent, 0) = 0 THEN 0.0
+        ELSE CAST(COALESCE(ce.efferent, 0) AS REAL)
+             / (COALESCE(ca.afferent, 0) + COALESCE(ce.efferent, 0))
+    END AS instability
+FROM arch_packages p
+LEFT JOIN (
+    SELECT target_pkg AS pkg, COUNT(*) AS afferent
+    FROM arch_package_deps GROUP BY target_pkg
+) ca ON ca.pkg = p.id
+LEFT JOIN (
+    SELECT source_pkg AS pkg, COUNT(*) AS efferent
+    FROM arch_package_deps GROUP BY source_pkg
+) ce ON ce.pkg = p.id;
 ";
+
+#[cfg(test)]
+mod schema_tests {
+    use super::SCHEMA;
+    use rusqlite::Connection;
+
+    #[test]
+    fn schema_creates_arch_objects() {
+        let conn = Connection::open_in_memory().expect("open in-memory");
+        conn.execute_batch(SCHEMA).expect("apply schema");
+
+        let count_object = |name: &str, kind: &str| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type = ?1 AND name = ?2",
+                rusqlite::params![kind, name],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("query schema")
+        };
+
+        assert_eq!(count_object("arch_packages", "table"), 1);
+        assert_eq!(count_object("arch_file_packages", "table"), 1);
+        assert_eq!(count_object("arch_package_deps", "table"), 1);
+        assert_eq!(count_object("arch_coupling", "view"), 1);
+    }
+
+    #[test]
+    fn arch_coupling_view_handles_empty_state() {
+        let conn = Connection::open_in_memory().expect("open in-memory");
+        conn.execute_batch(SCHEMA).expect("apply schema");
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM arch_coupling", [], |row| row.get(0))
+            .expect("query view");
+        assert_eq!(count, 0, "empty arch_packages → empty view");
+    }
+}
