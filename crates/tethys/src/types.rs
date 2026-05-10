@@ -851,7 +851,7 @@ impl Default for IndexOptions {
 ///
 /// Returned by [`Tethys::index()`], [`Tethys::index_with_options()`],
 /// [`Tethys::rebuild()`], and [`Tethys::rebuild_with_options()`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct IndexStats {
     /// Number of files successfully indexed
     pub files_indexed: usize,
@@ -873,6 +873,9 @@ pub struct IndexStats {
     /// Results from LSP resolution sessions (one per language attempted).
     /// Empty when `IndexOptions::use_lsp` was not set.
     pub lsp_sessions: Vec<LspSessionResult>,
+    /// Statistics from the architecture-analysis phase, when it ran successfully.
+    /// `None` when the phase was skipped or failed.
+    pub architecture: Option<ArchStats>,
 }
 
 impl IndexStats {
@@ -2104,6 +2107,7 @@ mod tests {
                     outcome: LspOutcome::Completed(make_completed_session(3, 1, 0, Some(0))),
                 },
             ],
+            architecture: None,
         };
         assert_eq!(stats.total_lsp_resolved(), 10);
     }
@@ -2120,6 +2124,7 @@ mod tests {
             errors: vec![],
             unresolved_dependencies: vec![],
             lsp_sessions: vec![],
+            architecture: None,
         };
         assert_eq!(stats.total_lsp_resolved(), 0);
         assert!(!stats.has_lsp_errors());
@@ -2249,11 +2254,24 @@ pub struct CouplingDetail {
 
 /// Statistics emitted by the architecture indexing phase.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[allow(dead_code)]
 pub struct ArchStats {
+    /// Number of packages (crates) inserted into `arch_packages`.
     pub packages_recorded: usize,
+    /// Number of files mapped to a package in `arch_file_packages`.
     pub files_assigned: usize,
+    /// Number of cross-package dependency edges inserted into `arch_package_deps`.
     pub package_deps_recorded: usize,
+}
+
+#[cfg(test)]
+mod arch_stats_in_index_stats {
+    use super::*;
+
+    #[test]
+    fn index_stats_default_has_no_architecture() {
+        let stats = IndexStats::default();
+        assert!(stats.architecture.is_none());
+    }
 }
 
 #[cfg(test)]

@@ -450,6 +450,7 @@ impl Tethys {
             errors,
             unresolved_dependencies,
             lsp_sessions,
+            architecture: None,
         })
     }
 
