@@ -245,6 +245,47 @@ impl Index {
 }
 
 #[cfg(test)]
+mod list_all_files_tests {
+    use crate::db::Index;
+    use crate::types::Language;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    fn temp_index() -> (TempDir, Index) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("idx.db");
+        let index = Index::open(&path).expect("open index");
+        (dir, index)
+    }
+
+    #[test]
+    fn list_all_files_returns_every_indexed_file() {
+        let (_dir, mut index) = temp_index();
+
+        for p in ["a.rs", "b.rs", "c.rs"] {
+            index
+                .upsert_file(Path::new(p), Language::Rust, 0, 0, None)
+                .expect("insert file");
+        }
+
+        let mut files = index.list_all_files().expect("list_all_files");
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+
+        assert_eq!(files.len(), 3);
+        assert_eq!(files[0].path.to_str().unwrap(), "a.rs");
+        assert_eq!(files[1].path.to_str().unwrap(), "b.rs");
+        assert_eq!(files[2].path.to_str().unwrap(), "c.rs");
+    }
+
+    #[test]
+    fn list_all_files_returns_empty_for_fresh_index() {
+        let (_dir, index) = temp_index();
+        let files = index.list_all_files().expect("list_all_files");
+        assert!(files.is_empty());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
