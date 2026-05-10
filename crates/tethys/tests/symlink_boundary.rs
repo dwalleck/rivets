@@ -14,7 +14,9 @@
 //! - The indexed path uses the logical (in-workspace) path
 //! - Circular symlinks are handled by the OS (ELOOP)
 
+#[cfg(unix)]
 use std::fs;
+#[cfg(unix)]
 use tethys::Tethys;
 
 // === Symlink pointing outside workspace ===
