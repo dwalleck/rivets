@@ -4,6 +4,7 @@ mod display;
 
 pub mod affected_tests;
 pub mod callers;
+pub mod coupling;
 pub mod cycles;
 pub mod impact;
 pub mod index;
