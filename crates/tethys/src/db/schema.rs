@@ -146,17 +146,14 @@ CREATE TABLE IF NOT EXISTS arch_package_deps (
 CREATE INDEX IF NOT EXISTS idx_arch_pkgdep_tgt ON arch_package_deps(target_pkg);
 
 -- Coupling metrics view. LEFT JOINs keep packages with zero edges visible.
+-- Instability is NOT computed here; it is a method on CouplingMetrics in Rust,
+-- keeping the formula in a single place.
 CREATE VIEW IF NOT EXISTS arch_coupling AS
 SELECT
     p.id   AS package_id,
     p.name AS package_name,
     COALESCE(ca.afferent, 0) AS afferent,
-    COALESCE(ce.efferent, 0) AS efferent,
-    CASE
-        WHEN COALESCE(ca.afferent, 0) + COALESCE(ce.efferent, 0) = 0 THEN 0.0
-        ELSE CAST(COALESCE(ce.efferent, 0) AS REAL)
-             / (COALESCE(ca.afferent, 0) + COALESCE(ce.efferent, 0))
-    END AS instability
+    COALESCE(ce.efferent, 0) AS efferent
 FROM arch_packages p
 LEFT JOIN (
     SELECT target_pkg AS pkg, COUNT(*) AS afferent

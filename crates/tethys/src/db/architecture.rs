@@ -139,31 +139,21 @@ impl Index {
     }
 
     /// Coupling metrics for every package, sorted per the requested key.
-    /// Sort is delegated to `SQLite` via `ORDER BY`.
     ///
-    /// The ORDER BY fragment is chosen from a fixed set of SQL strings derived
-    /// from `CouplingSort` — no user input ever reaches the SQL, so there is
-    /// no injection risk.
+    /// Rows are fetched unsorted from the DB then sorted in Rust using
+    /// `CouplingMetrics::instability()`. This keeps the instability formula
+    /// in a single place (`CouplingMetrics::instability`) rather than
+    /// duplicated between Rust and a SQL `ORDER BY` expression.
     pub fn get_coupling_metrics(&self, sort: CouplingSort) -> Result<Vec<CouplingMetrics>> {
         use std::path::PathBuf;
 
-        let order_clause = match sort {
-            CouplingSort::Instability => "c.instability DESC, p.name ASC",
-            CouplingSort::Afferent => "c.afferent DESC, p.name ASC",
-            CouplingSort::Efferent => "c.efferent DESC, p.name ASC",
-            CouplingSort::Name => "p.name ASC",
-        };
-
-        let sql = format!(
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
             "SELECT p.id, p.name, p.path, p.source,
                     c.afferent, c.efferent
              FROM arch_coupling c
-             JOIN arch_packages p ON p.id = c.package_id
-             ORDER BY {order_clause}"
-        );
-
-        let conn = self.connection()?;
-        let mut stmt = conn.prepare(&sql)?;
+             JOIN arch_packages p ON p.id = c.package_id",
+        )?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
@@ -186,22 +176,8 @@ impl Index {
                 );
                 continue;
             };
-            let afferent = u32::try_from(ca).unwrap_or_else(|_| {
-                tracing::warn!(
-                    package_name = %name,
-                    ca_value = ca,
-                    "afferent coupling exceeds u32::MAX; clamping"
-                );
-                u32::MAX
-            });
-            let efferent = u32::try_from(ce).unwrap_or_else(|_| {
-                tracing::warn!(
-                    package_name = %name,
-                    ce_value = ce,
-                    "efferent coupling exceeds u32::MAX; clamping"
-                );
-                u32::MAX
-            });
+            let afferent = saturating_coupling_to_u32(ca, &name, "afferent");
+            let efferent = saturating_coupling_to_u32(ce, &name, "efferent");
             out.push(CouplingMetrics {
                 package: Package {
                     id: PackageId::from(id),
@@ -213,8 +189,53 @@ impl Index {
                 efferent,
             });
         }
+
+        // Sort entirely in Rust so the instability formula lives in exactly one place.
+        match sort {
+            CouplingSort::Instability => {
+                out.sort_by(|a, b| {
+                    b.instability()
+                        .partial_cmp(&a.instability())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.package.name.cmp(&b.package.name))
+                });
+            }
+            CouplingSort::Afferent => {
+                out.sort_by(|a, b| {
+                    b.afferent
+                        .cmp(&a.afferent)
+                        .then_with(|| a.package.name.cmp(&b.package.name))
+                });
+            }
+            CouplingSort::Efferent => {
+                out.sort_by(|a, b| {
+                    b.efferent
+                        .cmp(&a.efferent)
+                        .then_with(|| a.package.name.cmp(&b.package.name))
+                });
+            }
+            CouplingSort::Name => {
+                out.sort_by(|a, b| a.package.name.cmp(&b.package.name));
+            }
+        }
+
         Ok(out)
     }
+}
+
+/// Convert an `i64` from the DB to a `u32`, saturating at `u32::MAX` with a
+/// `warn!` log when the value doesn't fit. Mirrors `lib.rs::saturating_depth_to_u32`.
+fn saturating_coupling_to_u32(value: i64, package_name: &str, field: &str) -> u32 {
+    u32::try_from(value).unwrap_or_else(|_| {
+        tracing::warn!(
+            package_name = %package_name,
+            field = %field,
+            requested = value,
+            cap = u32::MAX,
+            "coupling value exceeds u32::MAX; saturating"
+        );
+        u32::MAX
+    })
 }
 
 #[cfg(test)]
@@ -330,22 +351,8 @@ impl Index {
             source,
         };
 
-        let afferent = u32::try_from(ca).unwrap_or_else(|_| {
-            tracing::warn!(
-                package_name = %target.name,
-                ca_value = ca,
-                "afferent coupling exceeds u32::MAX; clamping"
-            );
-            u32::MAX
-        });
-        let efferent = u32::try_from(ce).unwrap_or_else(|_| {
-            tracing::warn!(
-                package_name = %target.name,
-                ce_value = ce,
-                "efferent coupling exceeds u32::MAX; clamping"
-            );
-            u32::MAX
-        });
+        let afferent = saturating_coupling_to_u32(ca, &target.name, "afferent");
+        let efferent = saturating_coupling_to_u32(ce, &target.name, "efferent");
 
         // Connection lock is released above; re-acquire for neighbor queries.
         let outgoing = self.fetch_neighbors(target.id, Direction::Outgoing)?;
@@ -410,14 +417,7 @@ impl Index {
                 );
                 continue;
             };
-            let dep_count_u32 = u32::try_from(dep_count).unwrap_or_else(|_| {
-                tracing::warn!(
-                    package_name = %name,
-                    dep_count_value = dep_count,
-                    "dep_count exceeds u32::MAX; clamping"
-                );
-                u32::MAX
-            });
+            let dep_count_u32 = saturating_coupling_to_u32(dep_count, &name, "dep_count");
             out.push(PackageDependency {
                 package: Package {
                     id: PackageId::from(id),
@@ -889,6 +889,10 @@ mod instability_property_tests {
 
     /// Build an in-memory DB with `n` packages and the listed cross-package edges,
     /// then query `arch_coupling`. Edges are (`source_index`, `target_index`) pairs.
+    ///
+    /// Returns `(afferent, efferent, instability)` triples where `instability` is
+    /// computed in Rust via the same formula as `CouplingMetrics::instability()` —
+    /// not from the view, which no longer stores the computed column.
     fn instability_for(n: usize, edges: &[(usize, usize)]) -> Vec<(u32, u32, f64)> {
         let conn = Connection::open_in_memory().expect("open");
         conn.execute_batch(crate::db::SCHEMA).expect("schema");
@@ -917,18 +921,25 @@ mod instability_property_tests {
         }
 
         let mut stmt = conn
-            .prepare("SELECT afferent, efferent, instability FROM arch_coupling")
+            .prepare("SELECT afferent, efferent FROM arch_coupling")
             .expect("prepare");
         let rows: Vec<(u32, u32, f64)> = stmt
             .query_map([], |r| {
                 Ok((
                     u32::try_from(r.get::<_, i64>(0)?).unwrap_or(u32::MAX),
                     u32::try_from(r.get::<_, i64>(1)?).unwrap_or(u32::MAX),
-                    r.get::<_, f64>(2)?,
                 ))
             })
             .expect("query")
-            .map(|r| r.expect("row"))
+            .map(|r| {
+                let (ca, ce) = r.expect("row");
+                let instability = if ca + ce == 0 {
+                    0.0
+                } else {
+                    f64::from(ce) / f64::from(ca + ce)
+                };
+                (ca, ce, instability)
+            })
             .collect();
         rows
     }
