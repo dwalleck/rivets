@@ -95,7 +95,7 @@ enum Commands {
 
     /// Show per-crate coupling metrics (Ca, Ce, instability)
     Coupling {
-        /// Sort key
+        /// Sort key (ignored when --package is set)
         #[arg(long, value_enum, default_value_t = cli::coupling::SortFlag::default())]
         sort: cli::coupling::SortFlag,
 

@@ -2176,9 +2176,12 @@ impl PackageId {
     ///
     /// Prefer obtaining `PackageId` values from [`Package::id`] on records
     /// returned by the API rather than constructing them directly. This
-    /// constructor exists for the DB layer and for test fixtures; external
-    /// callers that construct arbitrary IDs bypass the opaque-type contract
-    /// described in the type-level docs.
+    /// constructor exists for the DB layer and for test fixtures (including
+    /// the tethys binary crate's own unit tests, which is why this is `pub`
+    /// rather than `pub(crate)`). Hidden from rustdoc — external callers who
+    /// fabricate IDs bypass the opaque-type contract described in the
+    /// type-level docs.
+    #[doc(hidden)]
     #[must_use]
     pub fn new(id: i64) -> Self {
         Self(id)

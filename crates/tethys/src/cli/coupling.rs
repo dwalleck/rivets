@@ -203,10 +203,11 @@ const BAR_WIDTH: usize = 10;
 /// Render an N-character bar where the filled portion uses round-half-up of `value * N`.
 fn render_bar(value: f64) -> String {
     let clamped = value.clamp(0.0, 1.0);
-    #[allow(
+    #[expect(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
+        clippy::cast_sign_loss,
+        reason = "BAR_WIDTH fits in f64 exactly; clamped*BAR_WIDTH+0.5 ∈ [0, BAR_WIDTH+0.5], non-negative and within usize range"
     )]
     let fill = (clamped * BAR_WIDTH as f64 + 0.5) as usize;
     let fill = fill.min(BAR_WIDTH);
@@ -254,13 +255,6 @@ pub(crate) fn write_table_text<W: Write>(
     writeln!(out)?;
     writeln!(out, "{}", "Tethys Coupling Metrics".cyan().bold())?;
     writeln!(out)?;
-    writeln!(
-        out,
-        "  {}",
-        "PACKAGE              Ca   Ce   INSTABILITY"
-            .white()
-            .dimmed()
-    )?;
 
     let max_name_len = metrics
         .iter()
@@ -268,6 +262,15 @@ pub(crate) fn write_table_text<W: Write>(
         .max()
         .unwrap_or(0)
         .max(20);
+
+    let header = format!(
+        "{:<width$}  {:>3}  {:>3}   INSTABILITY",
+        "PACKAGE",
+        "Ca",
+        "Ce",
+        width = max_name_len
+    );
+    writeln!(out, "  {}", header.white().dimmed())?;
 
     for m in metrics {
         let instability = m.instability();
@@ -337,6 +340,7 @@ fn round_to_4(v: f64) -> f64 {
 #[cfg(test)]
 mod table_tests {
     use super::*;
+    use rstest::rstest;
     use tethys::{CouplingMetrics, Package, PackageId, PackageSource};
 
     fn pkg(name: &str) -> Package {
@@ -348,13 +352,21 @@ mod table_tests {
         }
     }
 
-    #[test]
-    fn render_bar_uses_round_half_up() {
-        assert_eq!(render_bar(0.00), "░░░░░░░░░░");
-        assert_eq!(render_bar(0.25), "███░░░░░░░", "0.25 rounds up to 3");
-        assert_eq!(render_bar(0.50), "█████░░░░░");
-        assert_eq!(render_bar(0.75), "████████░░", "0.75 rounds up to 8");
-        assert_eq!(render_bar(1.00), "██████████");
+    #[rstest]
+    #[case::zero(0.00, "░░░░░░░░░░")]
+    #[case::quarter_rounds_up(0.25, "███░░░░░░░")]
+    #[case::half(0.50, "█████░░░░░")]
+    #[case::three_quarters_rounds_up(0.75, "████████░░")]
+    #[case::full(1.00, "██████████")]
+    fn render_bar_uses_round_half_up(#[case] value: f64, #[case] expected: &str) {
+        assert_eq!(render_bar(value), expected);
+    }
+
+    #[rstest]
+    #[case::negative_clamps_to_zero(-0.5, "░░░░░░░░░░")]
+    #[case::above_one_clamps_to_full(1.5, "██████████")]
+    fn render_bar_clamps_out_of_range(#[case] value: f64, #[case] expected: &str) {
+        assert_eq!(render_bar(value), expected);
     }
 
     #[test]
@@ -410,6 +422,49 @@ mod table_tests {
         write_table_text(&mut buf, &[], SortFlag::Instability).expect("write");
         let s = String::from_utf8(buf).expect("utf-8");
         assert!(s.contains("No packages discovered"));
+    }
+
+    #[test]
+    fn table_text_header_aligns_with_long_package_names() {
+        let long_name = "a-really-rather-long-package-name-41chars";
+        assert_eq!(
+            long_name.len(),
+            41,
+            "test setup: name length must exceed 20"
+        );
+
+        let metrics = vec![CouplingMetrics {
+            package: pkg(long_name),
+            afferent: 7,
+            efferent: 9,
+        }];
+
+        let mut buf = Vec::new();
+        write_table_text(&mut buf, &metrics, SortFlag::Instability).expect("write");
+        let s = String::from_utf8(buf).expect("utf-8");
+
+        let header_line = s
+            .lines()
+            .find(|l| l.contains("PACKAGE"))
+            .expect("header line");
+        let data_line = s
+            .lines()
+            .find(|l| l.contains(long_name))
+            .expect("data line");
+
+        let afferent_label_end = header_line.find("Ca").expect("Ca in header") + 1;
+        let afferent_value_col = data_line.find('7').expect("ca=7 in data row");
+        assert_eq!(
+            afferent_value_col, afferent_label_end,
+            "ca digit ({afferent_value_col}) must align with the 'a' of 'Ca' ({afferent_label_end})"
+        );
+
+        let efferent_label_end = header_line.find("Ce").expect("Ce in header") + 1;
+        let efferent_value_col = data_line.find('9').expect("ce=9 in data row");
+        assert_eq!(
+            efferent_value_col, efferent_label_end,
+            "ce digit ({efferent_value_col}) must align with the 'e' of 'Ce' ({efferent_label_end})"
+        );
     }
 }
 
