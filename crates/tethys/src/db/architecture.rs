@@ -169,7 +169,7 @@ impl Index {
 
         let sql = format!(
             "SELECT p.id, p.name, p.path, p.source,
-                    c.afferent, c.efferent, c.instability
+                    c.afferent, c.efferent
              FROM arch_coupling c
              JOIN arch_packages p ON p.id = c.package_id
              ORDER BY {order_clause}"
@@ -185,13 +185,12 @@ impl Index {
                 row.get::<_, String>(3)?,
                 row.get::<_, i64>(4)?,
                 row.get::<_, i64>(5)?,
-                row.get::<_, f64>(6)?,
             ))
         })?;
 
         let mut out = Vec::new();
         for row in rows {
-            let (id, name, path, source_str, ca, ce, instability) = row?;
+            let (id, name, path, source_str, ca, ce) = row?;
             let Some(source) = PackageSource::parse(&source_str) else {
                 tracing::warn!(
                     package_name = %name,
@@ -225,7 +224,6 @@ impl Index {
                 },
                 afferent,
                 efferent,
-                instability,
             });
         }
         Ok(out)
@@ -301,11 +299,11 @@ impl Index {
 
         // Scope the connection lock so it is dropped before fetch_neighbors
         // acquires it again (the Mutex is not re-entrant).
-        let row: Option<(i64, String, String, String, i64, i64, f64)> = {
+        let row: Option<(i64, String, String, String, i64, i64)> = {
             let conn = self.connection()?;
             conn.query_row(
                 "SELECT p.id, p.name, p.path, p.source,
-                        c.afferent, c.efferent, c.instability
+                        c.afferent, c.efferent
                  FROM arch_coupling c
                  JOIN arch_packages p ON p.id = c.package_id
                  WHERE p.name = ?1",
@@ -318,7 +316,6 @@ impl Index {
                         r.get::<_, String>(3)?,
                         r.get::<_, i64>(4)?,
                         r.get::<_, i64>(5)?,
-                        r.get::<_, f64>(6)?,
                     ))
                 },
             )
@@ -329,7 +326,7 @@ impl Index {
             })?
         };
 
-        let Some((id, pkg_name, pkg_path, source_str, ca, ce, instability)) = row else {
+        let Some((id, pkg_name, pkg_path, source_str, ca, ce)) = row else {
             return Ok(None);
         };
         let Some(source) = PackageSource::parse(&source_str) else {
@@ -372,7 +369,6 @@ impl Index {
                 package: target,
                 afferent,
                 efferent,
-                instability,
             },
             incoming,
             outgoing,
@@ -554,7 +550,7 @@ mod package_coupling_tests {
             .expect("found");
         assert!(detail.incoming.is_empty());
         assert!(detail.outgoing.is_empty());
-        assert!(detail.metrics.instability.abs() < 1e-9);
+        assert!(detail.metrics.instability().abs() < 1e-9);
     }
 }
 
@@ -624,15 +620,15 @@ mod coupling_metrics_tests {
 
         let a = metrics_for(&rows, "a");
         assert_eq!((a.afferent, a.efferent), (0, 2));
-        assert!((a.instability - 1.0).abs() < 1e-9);
+        assert!((a.instability() - 1.0).abs() < 1e-9);
 
         let b = metrics_for(&rows, "b");
         assert_eq!((b.afferent, b.efferent), (1, 1));
-        assert!((b.instability - 0.5).abs() < 1e-9);
+        assert!((b.instability() - 0.5).abs() < 1e-9);
 
         let c = metrics_for(&rows, "c");
         assert_eq!((c.afferent, c.efferent), (2, 0));
-        assert!((c.instability - 0.0).abs() < 1e-9);
+        assert!((c.instability() - 0.0).abs() < 1e-9);
     }
 
     #[test]
@@ -675,7 +671,7 @@ mod coupling_metrics_tests {
             .expect("metrics");
         assert_eq!(rows.len(), 1);
         assert_eq!((rows[0].afferent, rows[0].efferent), (0, 0));
-        assert!(rows[0].instability.abs() < 1e-9);
+        assert!(rows[0].instability().abs() < 1e-9);
     }
 }
 

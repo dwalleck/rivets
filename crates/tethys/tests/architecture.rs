@@ -99,15 +99,15 @@ fn coupling_metrics_match_expected_values() {
 
     let a = by_name("crate_a");
     assert_eq!((a.afferent, a.efferent), (0, 2), "crate_a Ca=0, Ce=2");
-    assert!((a.instability - 1.0).abs() < 1e-9);
+    assert!((a.instability() - 1.0).abs() < 1e-9);
 
     let b = by_name("crate_b");
     assert_eq!((b.afferent, b.efferent), (1, 1), "crate_b Ca=1, Ce=1");
-    assert!((b.instability - 0.5).abs() < 1e-9);
+    assert!((b.instability() - 0.5).abs() < 1e-9);
 
     let c = by_name("crate_c");
     assert_eq!((c.afferent, c.efferent), (2, 0), "crate_c Ca=2, Ce=0");
-    assert!((c.instability - 0.0).abs() < 1e-9);
+    assert!((c.instability() - 0.0).abs() < 1e-9);
 }
 
 #[test]

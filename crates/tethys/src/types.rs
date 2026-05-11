@@ -2169,6 +2169,7 @@ impl std::fmt::Display for PackageId {
 
 /// How a package was discovered. v1 only emits `Manifest`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PackageSource {
     /// Discovered via Cargo.toml.
     Manifest,
@@ -2220,8 +2221,20 @@ pub struct CouplingMetrics {
     pub afferent: u32,
     /// Efferent coupling: distinct packages this one depends on.
     pub efferent: u32,
-    /// Ce / (Ca + Ce). 0.0 when both are zero.
-    pub instability: f64,
+}
+
+impl CouplingMetrics {
+    /// Instability score: Ce / (Ca + Ce). Returns 0.0 when both Ca and Ce are zero.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn instability(&self) -> f64 {
+        let denom = u64::from(self.afferent) + u64::from(self.efferent);
+        if denom == 0 {
+            0.0
+        } else {
+            f64::from(self.efferent) / denom as f64
+        }
+    }
 }
 
 /// Sort key for `get_coupling_metrics`.

@@ -8,7 +8,7 @@ use std::path::Path;
 
 use clap::ValueEnum;
 use colored::Colorize;
-use tethys::{CouplingDetail, CouplingMetrics, CouplingSort, PackageSource, Tethys};
+use tethys::{CouplingDetail, CouplingMetrics, CouplingSort, Tethys};
 
 /// CLI sort flag, converted to the API's `CouplingSort` via `From`.
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -122,25 +122,18 @@ pub(crate) fn write_detail_text<W: Write>(out: &mut W, d: &CouplingDetail) -> io
     writeln!(out)?;
     writeln!(out, "Package: {}", d.metrics.package.name.cyan().bold())?;
     writeln!(out, "  Path:    {}", d.metrics.package.path.display())?;
-    writeln!(
-        out,
-        "  Source:  {}",
-        match d.metrics.package.source {
-            PackageSource::Manifest => "manifest",
-            PackageSource::Directory => "directory",
-        }
-    )?;
+    writeln!(out, "  Source:  {}", d.metrics.package.source.as_str())?;
     writeln!(out)?;
     writeln!(out, "  {}", "Coupling".white().bold())?;
     writeln!(out, "    Afferent (Ca):   {}", d.metrics.afferent)?;
     writeln!(out, "    Efferent (Ce):   {}", d.metrics.efferent)?;
-    let bar = render_bar(d.metrics.instability);
-    let color = instability_color(d.metrics.instability);
+    let bar = render_bar(d.metrics.instability());
+    let color = instability_color(d.metrics.instability());
     writeln!(
         out,
         "    Instability:     {bar}  {value:.2}",
         bar = color(&bar),
-        value = d.metrics.instability
+        value = d.metrics.instability()
     )?;
     writeln!(out)?;
 
@@ -176,14 +169,11 @@ pub(crate) fn write_detail_json<W: Write>(out: &mut W, d: &CouplingDetail) -> io
         "package": {
             "name": d.metrics.package.name,
             "path": d.metrics.package.path.to_string_lossy(),
-            "source": match d.metrics.package.source {
-                PackageSource::Manifest => "manifest",
-                PackageSource::Directory => "directory",
-            },
+            "source": d.metrics.package.source.as_str(),
         },
         "afferent": d.metrics.afferent,
         "efferent": d.metrics.efferent,
-        "instability": round_to_4(d.metrics.instability),
+        "instability": round_to_4(d.metrics.instability()),
         "outgoing": d.outgoing.iter().map(|p| serde_json::json!({
             "name": p.package.name,
             "dep_count": p.dep_count,
@@ -272,8 +262,8 @@ pub(crate) fn write_table_text<W: Write>(
         .max(20);
 
     for m in metrics {
-        let bar = render_bar(m.instability);
-        let color = instability_color(m.instability);
+        let bar = render_bar(m.instability());
+        let color = instability_color(m.instability());
         writeln!(
             out,
             "  {name:width$}  {ca:>3}  {ce:>3}   {bar}  {value:>4}",
@@ -282,7 +272,7 @@ pub(crate) fn write_table_text<W: Write>(
             ca = m.afferent,
             ce = m.efferent,
             bar = color(&bar),
-            value = format!("{:.2}", m.instability),
+            value = format!("{:.2}", m.instability()),
         )?;
     }
 
@@ -312,13 +302,10 @@ pub(crate) fn write_table_json<W: Write>(
         "packages": metrics.iter().map(|m| serde_json::json!({
             "name": m.package.name,
             "path": m.package.path.to_string_lossy(),
-            "source": match m.package.source {
-                PackageSource::Manifest => "manifest",
-                PackageSource::Directory => "directory",
-            },
+            "source": m.package.source.as_str(),
             "afferent": m.afferent,
             "efferent": m.efferent,
-            "instability": round_to_4(m.instability),
+            "instability": round_to_4(m.instability()),
         })).collect::<Vec<_>>(),
     });
     serde_json::to_writer_pretty(&mut *out, &value).map_err(io::Error::other)?;
@@ -369,13 +356,11 @@ mod table_tests {
                 package: pkg("alpha"),
                 afferent: 0,
                 efferent: 1,
-                instability: 1.0,
             },
             CouplingMetrics {
                 package: pkg("beta"),
                 afferent: 2,
                 efferent: 1,
-                instability: 0.33,
             },
         ];
 
@@ -396,7 +381,6 @@ mod table_tests {
             package: pkg("alpha"),
             afferent: 0,
             efferent: 1,
-            instability: 1.0,
         }];
         let mut buf = Vec::new();
         write_table_json(&mut buf, &metrics, SortFlag::Instability).expect("write json");
@@ -443,7 +427,6 @@ mod detail_tests {
                 package: pkg("rivets-mcp"),
                 afferent: 3,
                 efferent: 1,
-                instability: 0.25,
             },
             outgoing: vec![PackageDependency {
                 package: pkg("rivets"),
