@@ -552,7 +552,10 @@ mod run_detail_tests {
             "error message should describe the missing package, got: {msg}"
         );
         // Text-mode stdout should be empty (suggestions go to stderr).
-        assert!(buf.is_empty(), "text-mode stdout must be empty on not-found");
+        assert!(
+            buf.is_empty(),
+            "text-mode stdout must be empty on not-found"
+        );
     }
 
     #[test]

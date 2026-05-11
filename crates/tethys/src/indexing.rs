@@ -26,8 +26,7 @@ use crate::lsp;
 use crate::parallel::{OwnedSymbolData, ParsedFileData};
 use crate::resolver::resolve_module_path;
 use crate::types::{
-    ArchPhaseResult, FileId, Import, IndexOptions, IndexStats, Language, Span, SymbolId,
-    SymbolKind,
+    ArchPhaseResult, FileId, Import, IndexOptions, IndexStats, Language, Span, SymbolId, SymbolKind,
 };
 
 /// A dependency that couldn't be resolved because the target file wasn't indexed yet.
@@ -1562,8 +1561,8 @@ mod tests {
 
 #[cfg(test)]
 mod arch_phase_tests {
-    use crate::types::ArchPhaseResult;
     use crate::Tethys;
+    use crate::types::ArchPhaseResult;
     use std::fs;
     use tempfile::TempDir;
 
