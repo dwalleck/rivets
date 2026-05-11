@@ -1631,10 +1631,15 @@ edition = "2021"
         let dir = tempfile::tempdir().expect("temp dir");
         let mut tethys = Tethys::new(dir.path()).expect("Tethys::new");
         let stats = tethys.index().expect("index");
-        let arch = stats.architecture.expect("architecture should be Some even for non-Rust workspace");
+        let arch = stats
+            .architecture
+            .expect("architecture should be Some even for non-Rust workspace");
         assert_eq!(arch.packages_recorded, 0);
         assert_eq!(arch.files_assigned, 0);
         assert_eq!(arch.package_deps_recorded, 0);
-        assert!(stats.arch_phase_error.is_none(), "no phase error for non-Rust workspace");
+        assert!(
+            stats.arch_phase_error.is_none(),
+            "no phase error for non-Rust workspace"
+        );
     }
 }

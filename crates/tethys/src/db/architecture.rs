@@ -584,8 +584,7 @@ mod package_coupling_tests {
         assert_eq!(detail.outgoing.len(), 1, "single edge to b");
         assert_eq!(detail.outgoing[0].package.name, "b");
         assert_eq!(
-            detail.outgoing[0].dep_count,
-            2,
+            detail.outgoing[0].dep_count, 2,
             "two file-edges roll up to dep_count=2"
         );
     }
@@ -615,7 +614,10 @@ mod package_coupling_tests {
             .repopulate_architecture(&packages, &mappings)
             .expect("repopulate");
 
-        assert_eq!(stats.package_deps_recorded, 0, "intra-package dep filtered out");
+        assert_eq!(
+            stats.package_deps_recorded, 0,
+            "intra-package dep filtered out"
+        );
 
         let detail = index
             .get_package_coupling("a")

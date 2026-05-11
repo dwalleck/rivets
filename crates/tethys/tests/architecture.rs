@@ -136,7 +136,11 @@ fn coupling_sort_orders_match_spec() {
         .iter()
         .map(|m| m.package.name.as_str())
         .collect();
-    assert_eq!(afferent_names, ["crate_c", "crate_b", "crate_a"], "Ca descending");
+    assert_eq!(
+        afferent_names,
+        ["crate_c", "crate_b", "crate_a"],
+        "Ca descending"
+    );
 
     let efferent_sorted = tethys
         .get_coupling_metrics(CouplingSort::Efferent)
@@ -145,7 +149,11 @@ fn coupling_sort_orders_match_spec() {
         .iter()
         .map(|m| m.package.name.as_str())
         .collect();
-    assert_eq!(efferent_names, ["crate_a", "crate_b", "crate_c"], "Ce descending");
+    assert_eq!(
+        efferent_names,
+        ["crate_a", "crate_b", "crate_c"],
+        "Ce descending"
+    );
 }
 
 #[test]

@@ -476,7 +476,13 @@ mod detail_tests {
         assert_eq!(v["instability"], 0.25);
         assert_eq!(v["outgoing"][0]["name"], "rivets");
         assert_eq!(v["outgoing"][0]["dep_count"], 5);
-        assert_eq!(v["incoming"].as_array().expect("incoming is a JSON array").len(), 3);
+        assert_eq!(
+            v["incoming"]
+                .as_array()
+                .expect("incoming is a JSON array")
+                .len(),
+            3
+        );
     }
 }
 
