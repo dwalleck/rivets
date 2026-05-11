@@ -201,6 +201,10 @@ pub(crate) fn write_detail_json<W: Write>(out: &mut W, d: &CouplingDetail) -> io
 
 const BAR_WIDTH: usize = 10;
 
+/// Minimum width of the PACKAGE column in the table view, so the header is never
+/// pinched against the Ca column on very short workspace names.
+const MIN_PACKAGE_COL_WIDTH: usize = 20;
+
 /// Render an N-character bar where the filled portion uses round-half-up of `value * N`.
 fn render_bar(value: f64) -> String {
     let clamped = value.clamp(0.0, 1.0);
@@ -262,7 +266,7 @@ pub(crate) fn write_table_text<W: Write>(
         .map(|m| m.package.name.len())
         .max()
         .unwrap_or(0)
-        .max(20);
+        .max(MIN_PACKAGE_COL_WIDTH);
 
     let header = format!(
         "{:<width$}  {:>3}  {:>3}   INSTABILITY",

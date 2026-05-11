@@ -95,11 +95,11 @@ enum Commands {
 
     /// Show per-crate coupling metrics (Ca, Ce, instability)
     Coupling {
-        /// Sort key (ignored when --package is set)
-        #[arg(long, value_enum, default_value_t = cli::coupling::SortFlag::default())]
+        /// Sort key (cannot be combined with --package)
+        #[arg(long, value_enum, default_value_t = cli::coupling::SortFlag::default(), conflicts_with = "package")]
         sort: cli::coupling::SortFlag,
 
-        /// Show detail for a single package by exact name (ignores --sort)
+        /// Show detail for a single package by exact name
         #[arg(long)]
         package: Option<String>,
 

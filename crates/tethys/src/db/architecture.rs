@@ -1272,15 +1272,33 @@ mod repopulate_tests {
 
 #[cfg(test)]
 mod instability_property_tests {
+    use crate::types::{CouplingMetrics, Package, PackageId, PackageSource};
     use proptest::prelude::*;
     use rusqlite::Connection;
+    use std::path::PathBuf;
+
+    /// Compute instability via the canonical `CouplingMetrics::instability()` so
+    /// the proptest never drifts from the production formula.
+    fn instability_of(afferent: u32, efferent: u32) -> f64 {
+        CouplingMetrics {
+            package: Package {
+                id: PackageId::new(0),
+                name: String::new(),
+                path: PathBuf::new(),
+                source: PackageSource::Manifest,
+            },
+            afferent,
+            efferent,
+        }
+        .instability()
+    }
 
     /// Build an in-memory DB with `n` packages and the listed cross-package edges,
     /// then query `arch_coupling`. Edges are (`source_index`, `target_index`) pairs.
     ///
-    /// Returns `(afferent, efferent, instability)` triples where `instability` is
-    /// computed in Rust via the same formula as `CouplingMetrics::instability()` —
-    /// not from the view, which no longer stores the computed column.
+    /// Returns `(afferent, efferent, instability)` triples; instability is routed
+    /// through `CouplingMetrics::instability()` so this helper can't silently drift
+    /// from the production formula.
     fn instability_for(n: usize, edges: &[(usize, usize)]) -> Vec<(u32, u32, f64)> {
         let conn = Connection::open_in_memory().expect("open");
         // Match the prod Index::open setup so FK constraints (e.g. arch_file_packages
@@ -1325,12 +1343,7 @@ mod instability_property_tests {
             .expect("query")
             .map(|r| {
                 let (ca, ce) = r.expect("row");
-                let instability = if ca + ce == 0 {
-                    0.0
-                } else {
-                    f64::from(ce) / f64::from(ca + ce)
-                };
-                (ca, ce, instability)
+                (ca, ce, instability_of(ca, ce))
             })
             .collect();
         rows
