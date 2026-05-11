@@ -145,10 +145,11 @@ impl Index {
 
     /// Coupling metrics for every package, sorted per the requested key.
     ///
-    /// Rows are fetched unsorted from the DB then sorted in Rust using
-    /// `CouplingMetrics::instability()`. This keeps the instability formula
-    /// in a single place (`CouplingMetrics::instability`) rather than
-    /// duplicated between Rust and a SQL `ORDER BY` expression.
+    /// Rows are fetched unsorted from the DB. For [`CouplingSort::Instability`],
+    /// the Rust-side sort calls [`CouplingMetrics::instability`], keeping the
+    /// formula in a single canonical location. The other three sort variants
+    /// (`Afferent`, `Efferent`, `Name`) compare the stored `afferent`/`efferent`
+    /// integer fields and the `name` string directly.
     pub fn get_coupling_metrics(&self, sort: CouplingSort) -> Result<Vec<CouplingMetrics>> {
         use std::path::PathBuf;
 

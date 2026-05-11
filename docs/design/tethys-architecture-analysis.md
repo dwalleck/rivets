@@ -592,8 +592,10 @@ Four deliberate divergences occurred between this design spec and the shipped im
 2. **`arch_coupling` view omits the `instability` column.**
    Rationale: the view previously included a `CASE`/`CAST` expression computing instability in SQL. Removing it makes `CouplingMetrics::instability()` the single source of truth for the formula, avoiding drift between the SQL and Rust implementations.
 
-3. **Sorting happens in Rust (`Vec::sort_by`), not via SQL `ORDER BY`.**
-   Rationale: once the view dropped the `instability` column, SQLite could no longer sort by it. Rust-side sorting also makes the sort key consistent with the method, and the performance difference is negligible for realistic workspace sizes.
+3. **Sorting in `get_coupling_metrics` moved from SQL to Rust.**
+   The full-list endpoint `get_coupling_metrics` no longer sorts via SQL `ORDER BY` because the view dropped its `instability` column (see Deviation #2). The Rust-side `Vec::sort_by` call uses `CouplingMetrics::instability()` for the `Instability` variant and direct field comparisons for the other three (`Afferent`, `Efferent`, `Name`).
+
+   The detail endpoint `fetch_neighbors` (powering `get_package_coupling`) was unaffected: it sorts by stored columns (`dep_count DESC, name ASC`) which are still available in SQL, so it retains its `ORDER BY` clause.
 
 4. **`IndexStats::arch_phase: Option<ArchPhaseResult>` replaces `architecture: Option<ArchStats>`.**
    Rationale: the original design implied two parallel optional fields whose invariant ("both None or both Some") was prose-enforced. The `ArchPhaseResult` enum (`Completed(ArchStats)` | `Failed(String)`) makes it structurally impossible to have a success result and an error simultaneously, eliminating the need for prose documentation of the invariant.
