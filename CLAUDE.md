@@ -85,6 +85,12 @@ cargo run -- <subcommand>    # Run rivets CLI
 
 - `unsafe_code = "forbid"` - No unsafe code anywhere
 - `clippy::pedantic = "warn"` - Pedantic lints enabled workspace-wide
+- **CI runs `cargo clippy --all-targets --all-features -- -D warnings`** — every pedantic warning is a build break. Common surprise sources: `clippy::doc_markdown` (backtick bare identifiers like `SQLite`, `CrateInfo`), `clippy::unnecessary_wraps` (`Result<(), E>` that always returns `Ok(())`), `clippy::similar_names` (e.g. `by_ca` / `by_ce`), `clippy::missing_docs` (public struct fields need `///`).
+
+### Lint Suppression Gotchas
+
+- **Dead code on `pub` items pending a consumer**: use `#[allow(dead_code)]`, NOT `#[expect(dead_code)]`. `pub` items in a library crate don't trigger `dead_code` in the test binary target (they're considered API surface), so `#[expect]` fires as "unfulfilled" under `-D warnings`. See `crates/tethys/src/graph/mod.rs` and `graph/types.rs` for the established pattern.
+- **`pub(crate)` in a lib crate is NOT visible to the bin crate's tests in the same package.** Lib and bin are separate compilation units. If a constructor needs to be reachable from `#[cfg(test)]` blocks in a bin module of a lib+bin package (e.g. `tethys`), keep it `pub` with a doc comment explaining the intent, not `pub(crate)`.
 
 ### Crate-specific
 
@@ -177,6 +183,13 @@ Cargo workspace with 4 crates:
 - `src/domain/` - Core domain types (Issue, Priority, Status, etc.)
 - `src/storage/` - Persistence layer (JSONL-backed)
 - `src/output/` - CLI output formatting
+
+## Documentation Conventions
+
+- Design specs: `docs/design/<feature>.md` (no date prefix)
+- Implementation plans: `docs/plans/YYYY-MM-DD-<feature>.md`
+- Long-lived research/comparison docs live next to the crate they discuss (e.g., `crates/tethys/KIROGRAPH-COMPARISON.md`), not in `docs/`.
+- The `docs/superpowers/` paths some plugin skills (brainstorming, writing-plans) suggest by default do NOT match this convention — override them when invoking those skills.
 
 ## Extended Guidelines (from GitHub Awesome Copilot)
 
