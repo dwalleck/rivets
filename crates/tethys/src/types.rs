@@ -2311,7 +2311,9 @@ pub struct ArchStats {
     pub packages_recorded: usize,
     /// Number of files mapped to a package in `arch_file_packages`.
     pub files_assigned: usize,
-    /// Number of cross-package dependency edges inserted into `arch_package_deps`.
+    /// Number of distinct cross-package dependency pairs inserted into
+    /// `arch_package_deps`. This is a count of unique (source, target) edges
+    /// in the package graph, not a sum of underlying file-edge weights.
     pub package_deps_recorded: usize,
 }
 

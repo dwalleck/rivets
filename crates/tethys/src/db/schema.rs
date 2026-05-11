@@ -148,6 +148,11 @@ CREATE INDEX IF NOT EXISTS idx_arch_pkgdep_tgt ON arch_package_deps(target_pkg);
 -- Coupling metrics view. LEFT JOINs keep packages with zero edges visible.
 -- Instability is NOT computed here; it is a method on CouplingMetrics in Rust,
 -- keeping the formula in a single place.
+--
+-- Ca/Ce use COUNT(*) over arch_package_deps. Because that table's PRIMARY KEY
+-- is (source_pkg, target_pkg), each row is one distinct package-pair, so
+-- COUNT(*) ≡ COUNT(DISTINCT source_pkg|target_pkg) here — matching Martin's
+-- definition of Ca/Ce as counts of distinct dependent packages.
 CREATE VIEW IF NOT EXISTS arch_coupling AS
 SELECT
     p.id   AS package_id,

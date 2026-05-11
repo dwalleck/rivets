@@ -141,12 +141,19 @@ fn write_deps_section<W: Write>(
         return Ok(());
     }
     writeln!(out, "  {}", title.white().bold())?;
+    let name_width = deps
+        .iter()
+        .map(|d| d.package.name.len())
+        .max()
+        .unwrap_or(0)
+        .max(MIN_PACKAGE_COL_WIDTH);
     for dep in deps {
         let label = if dep.dep_count == 1 { "edge" } else { "edges" };
         writeln!(
             out,
-            "    {:<18} {} {}",
-            dep.package.name, dep.dep_count, label
+            "    {name:<name_width$} {count} {label}",
+            name = dep.package.name,
+            count = dep.dep_count,
         )?;
     }
     writeln!(out)
@@ -529,6 +536,51 @@ mod detail_tests {
         assert!(s.contains("rivets"));
         assert!(s.contains("cli-binary"));
         assert!(s.contains("5 edges"));
+    }
+
+    #[test]
+    fn detail_text_widens_dep_name_column_for_long_names() {
+        let long_name = "a-really-rather-long-package-name-41chars";
+        assert!(long_name.len() > 18, "test setup precondition");
+
+        let detail = CouplingDetail {
+            metrics: CouplingMetrics {
+                package: pkg("target"),
+                afferent: 0,
+                efferent: 2,
+            },
+            outgoing: vec![
+                PackageDependency {
+                    package: pkg(long_name),
+                    dep_count: 7,
+                },
+                PackageDependency {
+                    package: pkg("short"),
+                    dep_count: 99,
+                },
+            ],
+            incoming: vec![],
+        };
+
+        let mut buf = Vec::new();
+        write_detail_text(&mut buf, &detail).expect("write");
+        let s = String::from_utf8(buf).expect("utf-8");
+
+        let long_line = s
+            .lines()
+            .find(|l| l.contains(long_name))
+            .expect("long-name dep line");
+        let short_line = s
+            .lines()
+            .find(|l| l.contains("short"))
+            .expect("short dep line");
+
+        let long_count_col = long_line.find('7').expect("count on long line");
+        let short_count_col = short_line.find("99").expect("count on short line");
+        assert_eq!(
+            long_count_col, short_count_col,
+            "dep_count column must align across names of different length"
+        );
     }
 
     #[test]
