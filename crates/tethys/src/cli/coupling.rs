@@ -38,7 +38,8 @@ impl From<SortFlag> for CouplingSort {
 /// Run the coupling command.
 ///
 /// # Errors
-/// Propagates any `tethys::Error` from indexing or DB queries.
+/// Propagates any `tethys::Error` from `Tethys::new` (workspace initialization)
+/// or the underlying DB queries (`get_coupling_metrics`, `get_package_coupling`).
 pub fn run(
     workspace: &Path,
     sort: SortFlag,
@@ -127,13 +128,13 @@ pub(crate) fn write_detail_text<W: Write>(out: &mut W, d: &CouplingDetail) -> io
     writeln!(out, "  {}", "Coupling".white().bold())?;
     writeln!(out, "    Afferent (Ca):   {}", d.metrics.afferent)?;
     writeln!(out, "    Efferent (Ce):   {}", d.metrics.efferent)?;
-    let bar = render_bar(d.metrics.instability());
-    let color = instability_color(d.metrics.instability());
+    let instability = d.metrics.instability();
+    let bar = render_bar(instability);
     writeln!(
         out,
         "    Instability:     {bar}  {value:.2}",
-        bar = color(&bar),
-        value = d.metrics.instability()
+        bar = instability_color(instability, &bar),
+        value = instability
     )?;
     writeln!(out)?;
 
@@ -205,15 +206,13 @@ fn render_bar(value: f64) -> String {
     format!("{filled}{empty}")
 }
 
-fn instability_color(value: f64) -> impl Fn(&str) -> colored::ColoredString + Copy {
-    move |s: &str| {
-        if value <= 0.40 {
-            s.green()
-        } else if value <= 0.70 {
-            s.yellow()
-        } else {
-            s.red()
-        }
+fn instability_color(value: f64, s: &str) -> colored::ColoredString {
+    if value <= 0.40 {
+        s.green()
+    } else if value <= 0.70 {
+        s.yellow()
+    } else {
+        s.red()
     }
 }
 
@@ -262,8 +261,8 @@ pub(crate) fn write_table_text<W: Write>(
         .max(20);
 
     for m in metrics {
-        let bar = render_bar(m.instability());
-        let color = instability_color(m.instability());
+        let instability = m.instability();
+        let bar = render_bar(instability);
         writeln!(
             out,
             "  {name:width$}  {ca:>3}  {ce:>3}   {bar}  {value:>4}",
@@ -271,8 +270,8 @@ pub(crate) fn write_table_text<W: Write>(
             width = max_name_len,
             ca = m.afferent,
             ce = m.efferent,
-            bar = color(&bar),
-            value = format!("{:.2}", m.instability()),
+            bar = instability_color(instability, &bar),
+            value = format!("{:.2}", instability),
         )?;
     }
 

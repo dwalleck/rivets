@@ -47,39 +47,26 @@ impl Index {
         // 1. Wipe. Cascade clears the two child tables.
         tx.execute("DELETE FROM arch_packages", [])?;
 
-        // 2. Insert packages.
+        // 2. Insert packages; capture last_insert_rowid() instead of selecting
+        //    back — avoids a round-trip query and keeps the mapping close to insertion.
+        let mut name_to_id: HashMap<&str, PackageId> = HashMap::with_capacity(packages.len());
         {
             let mut stmt =
                 tx.prepare("INSERT INTO arch_packages (name, path, source) VALUES (?1, ?2, ?3)")?;
             for pkg in packages {
                 stmt.execute(params![pkg.name, pkg.path, pkg.source.as_str()])?;
+                name_to_id.insert(pkg.name, PackageId::from(tx.last_insert_rowid()));
             }
         }
         let packages_recorded = packages.len();
 
-        // 3. Read back name → id map (needed to translate file mappings).
-        let mut name_to_id: HashMap<String, PackageId> = HashMap::new();
-        {
-            let mut stmt = tx.prepare("SELECT id, name FROM arch_packages")?;
-            let rows = stmt.query_map([], |row| {
-                Ok((
-                    PackageId::from(row.get::<_, i64>(0)?),
-                    row.get::<_, String>(1)?,
-                ))
-            })?;
-            for row in rows {
-                let (id, name) = row?;
-                name_to_id.insert(name, id);
-            }
-        }
-
-        // 4. Insert file → package mappings, skipping unknown names.
+        // 3. Insert file → package mappings, skipping unknown names.
         let mut files_assigned: usize = 0;
         {
             let mut stmt =
                 tx.prepare("INSERT INTO arch_file_packages (file_id, package_id) VALUES (?1, ?2)")?;
             for (file_id, name) in file_to_package_name {
-                if let Some(pkg_id) = name_to_id.get(*name) {
+                if let Some(pkg_id) = name_to_id.get(name) {
                     stmt.execute(params![file_id.as_i64(), pkg_id.as_i64()])?;
                     files_assigned += 1;
                 } else {
@@ -92,7 +79,7 @@ impl Index {
             }
         }
 
-        // 5. Roll up cross-package edges.
+        // 4. Roll up cross-package edges.
         let package_deps_recorded = tx.execute(
             "INSERT INTO arch_package_deps (source_pkg, target_pkg, dep_count)
              SELECT sp.package_id, tp.package_id, COUNT(*)
