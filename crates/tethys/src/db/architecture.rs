@@ -313,9 +313,30 @@ impl std::fmt::Display for Direction {
 
 impl Index {
     /// Detailed coupling for one package by exact name.
-    /// Returns `Ok(None)` when no package matches; `Result::Err` only on DB failure.
     ///
-    /// Incoming and outgoing lists are sorted by `dep_count` descending, then by name ascending.
+    /// Returns `Ok(None)` when no package matches. Returns `Err` on a DB failure
+    /// or if the matched package row has an unrecognised `source` value (which
+    /// represents corruption or a schema-version mismatch for the target — see
+    /// the asymmetric behaviour note below).
+    ///
+    /// Incoming and outgoing lists are sorted by `dep_count` descending, then
+    /// by name ascending.
+    ///
+    /// # Error asymmetry between target and neighbours
+    ///
+    /// Corrupt-source handling is deliberately asymmetric:
+    ///
+    /// - For the **target package** (this method): an unrecognised `source` is
+    ///   `Err`, because the caller asked for this specific package and silently
+    ///   returning `Ok(None)` would lie about its existence.
+    /// - For **neighbour packages** (in `fetch_neighbors`): an unrecognised
+    ///   `source` is logged at `warn!` and the neighbour is omitted from the
+    ///   returned list. One corrupt neighbour does not abort the whole detail
+    ///   query.
+    ///
+    /// A consequence: in the presence of corruption, the `incoming` /
+    /// `outgoing` lists may be silently truncated. Callers that need strict
+    /// integrity should monitor the `warn!` log channel from this module.
     pub fn get_package_coupling(&self, name: &str) -> Result<Option<CouplingDetail>> {
         use std::path::PathBuf;
 
@@ -383,11 +404,13 @@ impl Index {
         }))
     }
 
-    /// Fetch neighboring packages in the requested direction.
+    /// Fetch neighbouring packages in the requested direction.
     ///
-    /// Column names in the SQL JOIN (`source_pkg` / `target_pkg`) are chosen
-    /// from a fixed match on `Direction` — no user input ever reaches the SQL,
-    /// so there is no injection risk.
+    /// The two queries are spelled out as separate `const` strings rather than
+    /// assembled at runtime via `format!`. This makes the column-name choice
+    /// visible to a reader without relying on a "no user input reaches SQL"
+    /// comment, and makes the safety property structural rather than
+    /// behavioural.
     fn fetch_neighbors(
         &self,
         package_id: PackageId,
@@ -395,20 +418,29 @@ impl Index {
     ) -> Result<Vec<PackageDependency>> {
         use std::path::PathBuf;
 
-        let (this, other) = match dir {
-            Direction::Outgoing => ("source_pkg", "target_pkg"),
-            Direction::Incoming => ("target_pkg", "source_pkg"),
+        /// SQL for "packages this package depends on" (outgoing edges).
+        const OUTGOING_SQL: &str = "
+            SELECT p.id, p.name, p.path, p.source, d.dep_count
+            FROM arch_package_deps d
+            JOIN arch_packages p ON p.id = d.target_pkg
+            WHERE d.source_pkg = ?1
+            ORDER BY d.dep_count DESC, p.name ASC";
+
+        /// SQL for "packages that depend on this package" (incoming edges).
+        const INCOMING_SQL: &str = "
+            SELECT p.id, p.name, p.path, p.source, d.dep_count
+            FROM arch_package_deps d
+            JOIN arch_packages p ON p.id = d.source_pkg
+            WHERE d.target_pkg = ?1
+            ORDER BY d.dep_count DESC, p.name ASC";
+
+        let sql = match dir {
+            Direction::Outgoing => OUTGOING_SQL,
+            Direction::Incoming => INCOMING_SQL,
         };
-        let sql = format!(
-            "SELECT p.id, p.name, p.path, p.source, d.dep_count
-             FROM arch_package_deps d
-             JOIN arch_packages p ON p.id = d.{other}
-             WHERE d.{this} = ?1
-             ORDER BY d.dep_count DESC, p.name ASC"
-        );
 
         let conn = self.connection()?;
-        let mut stmt = conn.prepare(&sql)?;
+        let mut stmt = conn.prepare(sql)?;
         let rows = stmt.query_map(params![package_id.as_i64()], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
