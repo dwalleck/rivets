@@ -16,7 +16,9 @@
 //! - `file_deps` - File dependency CRUD operations
 //! - `panic_points` - Panic point CRUD operations
 //! - `graph` - Graph traversal operations (`SymbolGraphOps`, `FileGraphOps`)
+//! - `architecture` - Architecture analysis (packages, coupling metrics)
 
+mod architecture;
 mod call_edges;
 mod file_deps;
 mod files;
@@ -29,6 +31,7 @@ mod schema;
 mod symbols;
 
 // Re-export helper functions and SQL constants used by other modules
+pub(crate) use architecture::PackageInsert;
 pub(crate) use files::normalize_path;
 pub(crate) use graph::DEFAULT_MAX_DEPTH;
 pub(crate) use helpers::{
@@ -93,6 +96,13 @@ impl Index {
         }
 
         let conn = Connection::open(path)?;
+
+        // Wait up to 30s on a busy lock instead of erroring immediately. This
+        // helps any multi-process scenario that writes to the same workspace
+        // DB — most concretely the nextest process-per-test runner and the
+        // architecture phase's longer DELETE-cascade-rebuild transaction
+        // (rivets-byie), which is what made the need visible.
+        conn.busy_timeout(std::time::Duration::from_secs(30))?;
 
         // Enable WAL mode and foreign keys
         conn.pragma_update(None, "journal_mode", "WAL")?;

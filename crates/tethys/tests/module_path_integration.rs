@@ -31,59 +31,52 @@ fn get_workspace_with_crates() -> Option<(PathBuf, Vec<CrateInfo>)> {
     Some((workspace, crates))
 }
 
-/// Test that indexing the tethys crate itself produces correct module paths.
-#[test]
-fn index_tethys_crate_has_module_paths() {
-    let Some((workspace, _crates)) = get_workspace_with_crates() else {
-        return;
-    };
+/// Assert a single symbol in `tethys` has the expected module path.
+fn assert_symbol_has_module_path(
+    tethys: &Tethys,
+    name: &str,
+    kind: SymbolKind,
+    expected_module_path: &str,
+) {
+    let symbols = tethys.search_symbols(name).expect("search should succeed");
 
-    let mut tethys = Tethys::new(&workspace).expect("new should succeed");
-    // Use rebuild to ensure fresh database with new module_path computation
-    let _stats = tethys.rebuild().expect("rebuild should succeed");
-
-    // Query for a known symbol in tethys itself
-    let symbols = tethys
-        .search_symbols("CrateInfo")
-        .expect("search should succeed");
-
-    let crate_info_symbol = symbols
+    let symbol = symbols
         .iter()
-        .find(|s| s.name == "CrateInfo" && s.kind == SymbolKind::Struct)
-        .expect("CrateInfo struct should be indexed");
+        .find(|s| s.name == name && s.kind == kind)
+        .unwrap_or_else(|| panic!("{name} ({kind:?}) should be indexed"));
 
-    // CrateInfo is in crates/tethys/src/types.rs -> crate::types
     assert_eq!(
-        crate_info_symbol.module_path, "crate::types",
-        "CrateInfo should have module_path 'crate::types'"
+        symbol.module_path, expected_module_path,
+        "{name} should have module_path '{expected_module_path}'"
     );
 }
 
-/// Test that symbols in nested modules have correct paths.
+/// Index the rivets workspace and verify that known symbols are
+/// assigned the correct module path.
+///
+/// This is intentionally one test (rather than one-test-per-symbol). All
+/// assertions share a single `tethys.index()` call. Splitting into multiple
+/// `#[test]` functions causes nextest to spawn separate processes that race
+/// on the same workspace `SQLite` DB — historically that surfaced as
+/// `DatabaseBusy` and FK-constraint failures on Linux and macOS CI runners.
 #[test]
-fn nested_module_paths_are_correct() {
+fn indexing_rivets_workspace_assigns_correct_module_paths() {
     let Some((workspace, _crates)) = get_workspace_with_crates() else {
         return;
     };
 
     let mut tethys = Tethys::new(&workspace).expect("new should succeed");
-    // Use rebuild to ensure fresh database with new module_path computation
-    let _stats = tethys.rebuild().expect("rebuild should succeed");
+    let _stats = tethys.index().expect("index should succeed");
 
-    // Query for discover_crates which is in cargo.rs
-    let symbols = tethys
-        .search_symbols("discover_crates")
-        .expect("search should succeed");
+    // `CrateInfo` is in `crates/tethys/src/types.rs` → `crate::types`.
+    assert_symbol_has_module_path(&tethys, "CrateInfo", SymbolKind::Struct, "crate::types");
 
-    let discover_symbol = symbols
-        .iter()
-        .find(|s| s.name == "discover_crates" && s.kind == SymbolKind::Function)
-        .expect("discover_crates should be indexed");
-
-    // discover_crates is in crates/tethys/src/cargo.rs -> crate::cargo
-    assert_eq!(
-        discover_symbol.module_path, "crate::cargo",
-        "discover_crates should have module_path 'crate::cargo'"
+    // `discover_crates` is in `crates/tethys/src/cargo.rs` → `crate::cargo`.
+    assert_symbol_has_module_path(
+        &tethys,
+        "discover_crates",
+        SymbolKind::Function,
+        "crate::cargo",
     );
 }
 

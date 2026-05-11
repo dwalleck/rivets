@@ -1,9 +1,10 @@
 //! `tethys index` command implementation.
 
+use std::io::{self, Write};
 use std::path::Path;
 
 use colored::Colorize;
-use tethys::{IndexOptions, Tethys};
+use tethys::{ArchPhaseResult, IndexOptions, Tethys};
 
 use super::ensure_lsp_if_requested;
 
@@ -94,24 +95,76 @@ pub fn run(
         );
     }
 
-    for session in &stats.lsp_sessions {
+    // Indexing already succeeded by this point. The arch-phase warning is a
+    // diagnostic, not data — send it to stderr so callers piping `tethys index`
+    // stdout into another tool don't see warnings mixed into the data stream.
+    // Also swallow BrokenPipe so a closed downstream pipe doesn't fail the
+    // command (the primary work is already done).
+    print_arch_phase_result(&mut io::stderr().lock(), stats.arch_phase.as_ref())
+        .or_else(super::ignore_broken_pipe)
+        .map_err(tethys::Error::Io)?;
+    print_lsp_session_errors(&stats.lsp_sessions);
+
+    Ok(())
+}
+
+/// Print architecture-phase outcome to `out`, if any. Success path is silent.
+///
+/// Takes a `Write` sink so callers can unit-test all three output paths
+/// (Failed → warning, Completed → silent, None → silent) without capturing
+/// stdout.
+fn print_arch_phase_result<W: Write>(
+    out: &mut W,
+    arch_phase: Option<&ArchPhaseResult>,
+) -> io::Result<()> {
+    match arch_phase {
+        Some(ArchPhaseResult::Completed(arch)) => {
+            // Keep the success case silent — rivets-tuph tracks surfacing
+            // the package count in `tethys index` output. We don't want to
+            // drop the no-output behavior callers may scrape.
+            tracing::debug!(
+                packages = arch.packages_recorded,
+                files = arch.files_assigned,
+                "architecture phase summary"
+            );
+        }
+        Some(ArchPhaseResult::Failed(err)) => {
+            writeln!(out)?;
+            writeln!(
+                out,
+                "  {}: architecture phase failed — coupling metrics unavailable",
+                "Warning".yellow().bold()
+            )?;
+            writeln!(out, "  {}", err.dimmed())?;
+        }
+        None => {
+            // Phase didn't run (e.g., default state) — nothing to print.
+        }
+    }
+    Ok(())
+}
+
+/// Print LSP session errors, if any. Diagnostics go to stderr so they don't
+/// pollute stdout for callers that pipe `tethys index` output into another tool.
+fn print_lsp_session_errors(sessions: &[tethys::LspSessionResult]) {
+    for session in sessions {
         if session.has_errors() {
-            println!();
+            eprintln!();
             match &session.outcome {
                 tethys::LspOutcome::ServerUnavailable {
                     reason,
                     install_hint,
                 } => {
-                    println!(
+                    eprintln!(
                         "{}: {} - {reason}",
                         "LSP error".red(),
                         session.language.as_str()
                     );
-                    println!("  {}: {install_hint}", "hint".dimmed());
+                    eprintln!("  {}: {install_hint}", "hint".dimmed());
                 }
                 tethys::LspOutcome::Completed(s) => {
                     for err in &s.errors {
-                        println!(
+                        eprintln!(
                             "{}: {} - {err}",
                             "LSP error".red(),
                             session.language.as_str()
@@ -122,6 +175,44 @@ pub fn run(
             }
         }
     }
+}
 
-    Ok(())
+#[cfg(test)]
+mod arch_phase_print_tests {
+    use super::*;
+    use tethys::{ArchPhaseResult, ArchStats};
+
+    #[test]
+    fn failed_path_writes_warning_with_error_text() {
+        // No color override needed: the sink is a Vec<u8>, not a TTY.
+        // colored strips ANSI codes when stdout is not a terminal, so
+        // `.contains("Warning")` matches the plain-text output regardless.
+        let mut buf: Vec<u8> = Vec::new();
+        let result = ArchPhaseResult::Failed("simulated db corruption".into());
+        print_arch_phase_result(&mut buf, Some(&result)).expect("write");
+        let out = String::from_utf8(buf).expect("utf-8");
+        assert!(out.contains("Warning"), "should include the Warning label");
+        assert!(
+            out.contains("simulated db corruption"),
+            "should include the error Display form"
+        );
+    }
+
+    #[test]
+    fn completed_path_writes_nothing() {
+        let mut buf: Vec<u8> = Vec::new();
+        let result = ArchPhaseResult::Completed(ArchStats::default());
+        print_arch_phase_result(&mut buf, Some(&result)).expect("write");
+        assert!(
+            buf.is_empty(),
+            "completed path should be silent (rivets-tuph tracks surfacing the package count)"
+        );
+    }
+
+    #[test]
+    fn none_writes_nothing() {
+        let mut buf: Vec<u8> = Vec::new();
+        print_arch_phase_result(&mut buf, None).expect("write");
+        assert!(buf.is_empty());
+    }
 }

@@ -50,11 +50,13 @@ mod types;
 pub use cargo::discover_crates;
 pub use error::{Error, IndexError, IndexErrorKind, Result};
 pub use types::{
-    CrateInfo, Cycle, DatabaseStats, Dependent, FileAnalysis, FileId, FunctionSignature, Impact,
-    Import, IndexOptions, IndexStats, IndexUpdate, IndexedFile, Language, LspCompletedSession,
-    LspOutcome, LspSessionResult, PanicKind, PanicPoint, Parameter, ParameterKind,
-    ReachabilityDirection, ReachabilityResult, ReachablePath, Reference, ReferenceKind, Span,
-    StalenessReport, Symbol, SymbolId, SymbolKind, UnresolvedRefForLsp, Visibility,
+    ArchPhaseResult, ArchStats, CouplingDetail, CouplingMetrics, CouplingSort, CrateInfo, Cycle,
+    DatabaseStats, Dependent, FileAnalysis, FileId, FunctionSignature, Impact, Import,
+    IndexOptions, IndexStats, IndexUpdate, IndexedFile, Language, LspCompletedSession, LspOutcome,
+    LspSessionResult, Package, PackageDependency, PackageId, PackageSource, PanicKind, PanicPoint,
+    Parameter, ParameterKind, ReachabilityDirection, ReachabilityResult, ReachablePath, Reference,
+    ReferenceKind, Span, StalenessReport, Symbol, SymbolId, SymbolKind, UnresolvedRefForLsp,
+    Visibility,
 };
 
 use std::borrow::Cow;
@@ -900,6 +902,97 @@ impl Tethys {
     /// ```
     pub fn count_panic_points(&self) -> Result<(usize, usize)> {
         self.db.count_panic_points()
+    }
+
+    // === Architecture ===
+
+    /// List all packages discovered during the last index run.
+    /// Empty for non-Rust workspaces or before any index has run.
+    ///
+    /// # Errors
+    /// Returns an error if the database query fails.
+    pub fn get_packages(&self) -> Result<Vec<types::Package>> {
+        self.db.get_packages()
+    }
+
+    /// Coupling metrics for every package, sorted per the requested key.
+    ///
+    /// # Errors
+    /// Returns an error if the database query fails.
+    pub fn get_coupling_metrics(
+        &self,
+        sort: types::CouplingSort,
+    ) -> Result<Vec<types::CouplingMetrics>> {
+        self.db.get_coupling_metrics(sort)
+    }
+
+    /// Detailed coupling for one package by exact name.
+    /// Returns `Ok(None)` when no package matches.
+    ///
+    /// # Errors
+    /// Returns an error if the database query fails or if the matched
+    /// package row has a corrupt `source` column.
+    pub fn get_package_coupling(&self, name: &str) -> Result<Option<types::CouplingDetail>> {
+        self.db.get_package_coupling(name)
+    }
+}
+
+#[cfg(test)]
+mod arch_api_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn workspace_with_two_crates() -> (TempDir, Tethys) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"a\", \"b\"]\nresolver = \"2\"\n",
+        )
+        .expect("workspace toml");
+        for name in ["a", "b"] {
+            fs::create_dir_all(root.join(format!("{name}/src"))).expect("mkdir");
+            fs::write(
+                root.join(format!("{name}/Cargo.toml")),
+                format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+            )
+            .expect("crate toml");
+            fs::write(root.join(format!("{name}/src/lib.rs")), "pub fn x() {}\n")
+                .expect("crate lib");
+        }
+        let mut tethys = Tethys::new(root).expect("Tethys::new");
+        tethys.index().expect("index");
+        (dir, tethys)
+    }
+
+    #[test]
+    fn get_packages_returns_each_crate() {
+        let (_dir, tethys) = workspace_with_two_crates();
+        let mut pkgs = tethys.get_packages().expect("packages");
+        pkgs.sort_by(|x, y| x.name.cmp(&y.name));
+        let names: Vec<_> = pkgs.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["a", "b"]);
+    }
+
+    #[test]
+    fn get_coupling_metrics_returns_one_row_per_crate() {
+        let (_dir, tethys) = workspace_with_two_crates();
+        let rows = tethys
+            .get_coupling_metrics(CouplingSort::Name)
+            .expect("metrics");
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn get_package_coupling_unknown_returns_none() {
+        let (_dir, tethys) = workspace_with_two_crates();
+        assert!(
+            tethys
+                .get_package_coupling("missing")
+                .expect("query")
+                .is_none()
+        );
     }
 }
 

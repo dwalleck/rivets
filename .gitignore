@@ -29,3 +29,9 @@ Thumbs.db
 
 # Git worktrees
 .worktrees/
+
+# Claude Code session settings (local)
+.claude/
+
+# Tethys SQLite index (regenerable from source)
+.rivets/index/

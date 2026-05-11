@@ -93,6 +93,22 @@ enum Commands {
         lsp: bool,
     },
 
+    /// Show per-crate coupling metrics (Ca, Ce, instability)
+    Coupling {
+        /// Sort key (cannot be combined with --package)
+        #[arg(long, value_enum, default_value_t = cli::coupling::SortFlag::default(), conflicts_with = "package")]
+        sort: cli::coupling::SortFlag,
+
+        /// Show detail for a single package by exact name
+        #[arg(long)]
+        package: Option<String>,
+
+        /// Output as JSON. With --package, a missing name prints `null` to
+        /// stdout, an error to stderr, and exits non-zero.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Detect circular dependencies
     Cycles,
 
@@ -193,6 +209,11 @@ fn main() -> ExitCode {
             depth,
             lsp,
         } => cli::impact::run(&workspace, &target, symbol, depth, lsp),
+        Commands::Coupling {
+            sort,
+            package,
+            json,
+        } => cli::coupling::run(&workspace, sort, package, json),
         Commands::Cycles => cli::cycles::run(&workspace),
         Commands::Stats => cli::stats::run(&workspace),
         Commands::Reachable {

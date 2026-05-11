@@ -847,11 +847,25 @@ impl Default for IndexOptions {
     }
 }
 
+/// Outcome of the architecture-analysis indexing phase.
+///
+/// `None` on `IndexStats::arch_phase` means the phase has not yet run
+/// (e.g., `IndexStats::default()`); `Some(...)` means it ran with one
+/// of these results.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArchPhaseResult {
+    /// The phase completed successfully. Stats may have zero counts on
+    /// non-Rust workspaces — that is a successful outcome, not a failure.
+    Completed(ArchStats),
+    /// The phase failed. The string carries the Display form of the error.
+    Failed(String),
+}
+
 /// Statistics from a full index operation.
 ///
-/// Returned by [`Tethys::index()`], [`Tethys::index_with_options()`],
-/// [`Tethys::rebuild()`], and [`Tethys::rebuild_with_options()`].
-#[derive(Debug, Clone)]
+/// Returned by [`crate::Tethys::index()`], [`crate::Tethys::index_with_options()`],
+/// [`crate::Tethys::rebuild()`], and [`crate::Tethys::rebuild_with_options()`].
+#[derive(Debug, Clone, Default)]
 pub struct IndexStats {
     /// Number of files successfully indexed
     pub files_indexed: usize,
@@ -873,6 +887,14 @@ pub struct IndexStats {
     /// Results from LSP resolution sessions (one per language attempted).
     /// Empty when `IndexOptions::use_lsp` was not set.
     pub lsp_sessions: Vec<LspSessionResult>,
+    /// Outcome of the architecture-analysis phase.
+    ///
+    /// `None` means the phase did not run (the default state, before indexing).
+    /// `Some(ArchPhaseResult::Completed(stats))` means the phase succeeded;
+    /// the inner `ArchStats` may have zero counts on non-Rust workspaces.
+    /// `Some(ArchPhaseResult::Failed(err))` means the phase errored — index
+    /// data is otherwise valid.
+    pub arch_phase: Option<ArchPhaseResult>,
 }
 
 impl IndexStats {
@@ -2090,6 +2112,7 @@ mod tests {
             symbols_found: 50,
             references_found: 100,
             duration: Duration::from_secs(1),
+            arch_phase: None,
             files_skipped: 0,
             directories_skipped: vec![],
             errors: vec![],
@@ -2120,8 +2143,250 @@ mod tests {
             errors: vec![],
             unresolved_dependencies: vec![],
             lsp_sessions: vec![],
+            arch_phase: None,
         };
         assert_eq!(stats.total_lsp_resolved(), 0);
         assert!(!stats.has_lsp_errors());
+    }
+}
+
+// === Architecture types ===
+
+/// Internal numeric ID for a package row. Mirrors the `FileId` / `SymbolId` pattern.
+///
+/// This is the database rowid for `arch_packages` and is stable only within
+/// a single index lifetime — `tethys index --rebuild` (or any other path
+/// that clears `arch_packages`) reassigns these values. External consumers
+/// that need stable cross-run identity should use [`Package::name`] instead,
+/// which is enforced unique per workspace at the schema level.
+///
+/// `PackageId` is part of the public API for symmetry with `FileId` /
+/// `SymbolId`, but no public method takes one as input. Treat it as opaque.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PackageId(i64);
+
+impl PackageId {
+    /// Return the underlying `i64` value.
+    #[must_use]
+    pub fn as_i64(self) -> i64 {
+        self.0
+    }
+
+    /// Construct a `PackageId` from a raw database rowid.
+    ///
+    /// Prefer obtaining `PackageId` values from [`Package::id`] on records
+    /// returned by the API rather than constructing them directly. This
+    /// constructor exists for the DB layer and for test fixtures (including
+    /// the tethys binary crate's own unit tests, which is why this is `pub`
+    /// rather than `pub(crate)`). Hidden from rustdoc — external callers who
+    /// fabricate IDs bypass the opaque-type contract described in the
+    /// type-level docs.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn new(id: i64) -> Self {
+        Self(id)
+    }
+}
+
+impl std::fmt::Display for PackageId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// How a package was discovered. v1 only emits `Manifest`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PackageSource {
+    /// Discovered via Cargo.toml.
+    Manifest,
+    /// Directory-fallback for files outside any manifest. Reserved for future use.
+    Directory,
+}
+
+impl PackageSource {
+    /// Stable string form used in SQL storage.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PackageSource::Manifest => "manifest",
+            PackageSource::Directory => "directory",
+        }
+    }
+
+    /// Inverse of `as_str`. Returns `None` for unknown values, which lets the
+    /// caller decide whether to skip the row or surface a warning.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<PackageSource> {
+        match s {
+            "manifest" => Some(PackageSource::Manifest),
+            "directory" => Some(PackageSource::Directory),
+            _ => None,
+        }
+    }
+}
+
+/// A discovered package. Identified by `name` (UNIQUE per workspace).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Package {
+    /// Database row ID.
+    pub id: PackageId,
+    /// Package name as declared in `Cargo.toml`.
+    pub name: String,
+    /// Path to the package root, relative to the workspace root.
+    pub path: std::path::PathBuf,
+    /// How this package was discovered.
+    pub source: PackageSource,
+}
+
+/// Coupling metrics for a single package.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CouplingMetrics {
+    /// The package these metrics describe.
+    pub package: Package,
+    /// Afferent coupling: distinct packages depending on this one.
+    pub afferent: u32,
+    /// Efferent coupling: distinct packages this one depends on.
+    pub efferent: u32,
+}
+
+impl CouplingMetrics {
+    /// Instability score: Ce / (Ca + Ce). Returns 0.0 when both Ca and Ce are zero.
+    ///
+    /// Martin's original formula is undefined at 0/0. We treat an isolated
+    /// package (no incoming or outgoing edges) as maximally stable (I=0):
+    /// with no consumers, there is no churn pressure on it. The alternative
+    /// of NaN propagates poorly through sort and JSON output; the alternative
+    /// of 1.0 would treat truly disconnected code as "maximally unstable",
+    /// which is the opposite of the everyday meaning.
+    #[must_use]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "denom is the sum of two u32 counts, so its maximum value is \
+                  2 × u32::MAX ≈ 8.6 billion. f64 can represent all integers \
+                  up to 2^53 ≈ 9 quadrillion exactly, so this cast never loses \
+                  precision in practice. The lint fires on the cast syntax alone."
+    )]
+    pub fn instability(&self) -> f64 {
+        let denom = u64::from(self.afferent) + u64::from(self.efferent);
+        if denom == 0 {
+            0.0
+        } else {
+            f64::from(self.efferent) / denom as f64
+        }
+    }
+}
+
+/// Sort key for `get_coupling_metrics`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CouplingSort {
+    /// Most unstable first.
+    #[default]
+    Instability,
+    /// Most depended-on first.
+    Afferent,
+    /// Most dependent first.
+    Efferent,
+    /// Alphabetical.
+    Name,
+}
+
+/// One package together with how many cross-package edges contribute to a relationship.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PackageDependency {
+    /// The related package.
+    pub package: Package,
+    /// Number of file-level dependency edges between the two packages.
+    pub dep_count: u32,
+}
+
+/// Detailed coupling for a single package, with incoming and outgoing edges.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CouplingDetail {
+    /// Coupling metrics for the queried package.
+    pub metrics: CouplingMetrics,
+    /// Packages that depend on this one.
+    pub incoming: Vec<PackageDependency>,
+    /// Packages this one depends on.
+    pub outgoing: Vec<PackageDependency>,
+}
+
+/// Statistics emitted by the architecture indexing phase.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ArchStats {
+    /// Number of packages (crates) inserted into `arch_packages`.
+    pub packages_recorded: usize,
+    /// Number of files mapped to a package in `arch_file_packages`.
+    pub files_assigned: usize,
+    /// Number of distinct cross-package dependency pairs inserted into
+    /// `arch_package_deps`. This is a count of unique (source, target) edges
+    /// in the package graph, not a sum of underlying file-edge weights.
+    pub package_deps_recorded: usize,
+}
+
+#[cfg(test)]
+mod arch_stats_in_index_stats {
+    use super::*;
+
+    #[test]
+    fn index_stats_default_arch_phase_is_none() {
+        let stats = IndexStats::default();
+        assert!(stats.arch_phase.is_none());
+    }
+}
+
+#[cfg(test)]
+mod arch_type_tests {
+    use super::*;
+    use rstest::rstest;
+
+    #[test]
+    fn package_id_roundtrip() {
+        let id = PackageId::new(42);
+        assert_eq!(id.as_i64(), 42);
+    }
+
+    #[test]
+    fn package_source_as_str_round_trips_through_parse() {
+        for variant in [PackageSource::Manifest, PackageSource::Directory] {
+            assert_eq!(PackageSource::parse(variant.as_str()), Some(variant));
+        }
+    }
+
+    #[test]
+    fn package_source_parse_returns_none_for_unknown() {
+        assert_eq!(PackageSource::parse("git"), None);
+    }
+
+    #[test]
+    fn coupling_sort_default_is_instability() {
+        assert_eq!(CouplingSort::default(), CouplingSort::Instability);
+    }
+
+    fn metrics(name: &str, afferent: u32, efferent: u32) -> CouplingMetrics {
+        CouplingMetrics {
+            package: Package {
+                id: PackageId::new(1),
+                name: name.into(),
+                path: name.into(),
+                source: PackageSource::Manifest,
+            },
+            afferent,
+            efferent,
+        }
+    }
+
+    #[rstest]
+    #[case::isolated_is_zero_not_nan(0, 0, 0.0_f64)]
+    #[case::pure_efferent_is_one(0, 3, 1.0_f64)]
+    #[case::pure_afferent_is_zero(3, 0, 0.0_f64)]
+    fn instability_boundary_cases(
+        #[case] afferent: u32,
+        #[case] efferent: u32,
+        #[case] expected: f64,
+    ) {
+        let i = metrics("p", afferent, efferent).instability();
+        assert_eq!(i.to_bits(), expected.to_bits());
+        assert!(!i.is_nan());
     }
 }

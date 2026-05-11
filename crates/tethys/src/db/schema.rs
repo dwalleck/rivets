@@ -113,4 +113,110 @@ CREATE TABLE IF NOT EXISTS attributes (
 
 CREATE INDEX IF NOT EXISTS idx_attributes_symbol ON attributes(symbol_id);
 CREATE INDEX IF NOT EXISTS idx_attributes_name ON attributes(name);
+
+-- === Architecture analysis ===
+
+-- One row per discovered package. v1: only source = 'manifest'.
+CREATE TABLE IF NOT EXISTS arch_packages (
+    id     INTEGER PRIMARY KEY,
+    name   TEXT NOT NULL UNIQUE,
+    path   TEXT NOT NULL,
+    source TEXT NOT NULL CHECK(source IN ('manifest','directory'))
+);
+
+-- No index on arch_packages(path): every read goes through `id` (FK joins
+-- from arch_file_packages and arch_package_deps) or `name` (UNIQUE already
+-- has an implicit index). Adding one would be pure write-side overhead.
+
+-- File → package assignment. PK enforces one package per file.
+CREATE TABLE IF NOT EXISTS arch_file_packages (
+    file_id    INTEGER PRIMARY KEY REFERENCES files(id)         ON DELETE CASCADE,
+    package_id INTEGER NOT NULL    REFERENCES arch_packages(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_arch_fp_pkg ON arch_file_packages(package_id);
+
+-- Cross-package dependency edges, rolled up from file_deps.
+CREATE TABLE IF NOT EXISTS arch_package_deps (
+    source_pkg INTEGER NOT NULL REFERENCES arch_packages(id) ON DELETE CASCADE,
+    target_pkg INTEGER NOT NULL REFERENCES arch_packages(id) ON DELETE CASCADE,
+    dep_count  INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (source_pkg, target_pkg),
+    CHECK (source_pkg <> target_pkg)
+);
+
+CREATE INDEX IF NOT EXISTS idx_arch_pkgdep_tgt ON arch_package_deps(target_pkg);
+
+-- Coupling metrics view. LEFT JOINs keep packages with zero edges visible.
+-- Instability is NOT computed here; it is a method on CouplingMetrics in Rust,
+-- keeping the formula in a single place.
+--
+-- Ca/Ce use COUNT(*) over arch_package_deps. Because that table's PRIMARY KEY
+-- is (source_pkg, target_pkg), each row is one distinct package-pair, so
+-- COUNT(*) ≡ COUNT(DISTINCT source_pkg|target_pkg) here — matching Martin's
+-- definition of Ca/Ce as counts of distinct dependent packages.
+--
+-- arch_package_deps.dep_count carries the finer-grained file-edge weight
+-- (how many cross-file deps roll up into that package pair). The view does
+-- NOT sum dep_count; only fetch_neighbors uses it, for ranking the
+-- detail-view edge counts.
+CREATE VIEW IF NOT EXISTS arch_coupling AS
+SELECT
+    p.id   AS package_id,
+    p.name AS package_name,
+    COALESCE(ca.afferent, 0) AS afferent,
+    COALESCE(ce.efferent, 0) AS efferent
+FROM arch_packages p
+LEFT JOIN (
+    SELECT target_pkg AS pkg, COUNT(*) AS afferent
+    FROM arch_package_deps GROUP BY target_pkg
+) ca ON ca.pkg = p.id
+LEFT JOIN (
+    SELECT source_pkg AS pkg, COUNT(*) AS efferent
+    FROM arch_package_deps GROUP BY source_pkg
+) ce ON ce.pkg = p.id;
 ";
+
+#[cfg(test)]
+mod schema_tests {
+    use super::SCHEMA;
+    use rusqlite::Connection;
+
+    fn open_test_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory");
+        // Match Index::open's pragma setup so FK semantics are uniform in tests.
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("enable fks");
+        conn.execute_batch(SCHEMA).expect("apply schema");
+        conn
+    }
+
+    #[test]
+    fn schema_creates_arch_objects() {
+        let conn = open_test_conn();
+
+        let count_object = |name: &str, kind: &str| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type = ?1 AND name = ?2",
+                rusqlite::params![kind, name],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("query schema")
+        };
+
+        assert_eq!(count_object("arch_packages", "table"), 1);
+        assert_eq!(count_object("arch_file_packages", "table"), 1);
+        assert_eq!(count_object("arch_package_deps", "table"), 1);
+        assert_eq!(count_object("arch_coupling", "view"), 1);
+    }
+
+    #[test]
+    fn arch_coupling_view_handles_empty_state() {
+        let conn = open_test_conn();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM arch_coupling", [], |row| row.get(0))
+            .expect("query view");
+        assert_eq!(count, 0, "empty arch_packages → empty view");
+    }
+}

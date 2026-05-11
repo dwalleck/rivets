@@ -26,7 +26,7 @@ use crate::lsp;
 use crate::parallel::{OwnedSymbolData, ParsedFileData};
 use crate::resolver::resolve_module_path;
 use crate::types::{
-    FileId, Import, IndexOptions, IndexStats, Language, Span, SymbolId, SymbolKind,
+    ArchPhaseResult, FileId, Import, IndexOptions, IndexStats, Language, Span, SymbolId, SymbolKind,
 };
 
 /// A dependency that couldn't be resolved because the target file wasn't indexed yet.
@@ -440,6 +440,25 @@ impl Tethys {
         // Update query planner statistics after bulk writes
         self.db.analyze()?;
 
+        let arch_phase = match self.run_architecture_phase() {
+            Ok(arch) => {
+                tracing::debug!(
+                    packages = arch.packages_recorded,
+                    files = arch.files_assigned,
+                    edges = arch.package_deps_recorded,
+                    "architecture phase complete"
+                );
+                Some(ArchPhaseResult::Completed(arch))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "architecture phase failed; index data is otherwise valid"
+                );
+                Some(ArchPhaseResult::Failed(e.to_string()))
+            }
+        };
+
         Ok(IndexStats {
             files_indexed,
             symbols_found,
@@ -450,6 +469,7 @@ impl Tethys {
             errors,
             unresolved_dependencies,
             lsp_sessions,
+            arch_phase,
         })
     }
 
@@ -1297,6 +1317,74 @@ impl Tethys {
             "target" | "node_modules" | "vendor" | "bin" | "obj" | "build" | "dist" | "__pycache__"
         )
     }
+
+    /// Final indexing phase: rebuild `arch_*` tables from current files + `file_deps`.
+    /// Returns `ArchStats`, or propagates DB errors. Skips files outside any crate.
+    /// Returns `ArchStats::default()` (all zeros) when no Rust crates were discovered.
+    pub(crate) fn run_architecture_phase(&self) -> Result<crate::types::ArchStats> {
+        use crate::db::PackageInsert;
+        use crate::types::PackageSource;
+
+        // Non-Rust workspaces have no crates; succeed with all-zero stats
+        // rather than returning Err. The upstream call site wraps Ok(_) into
+        // Some(ArchPhaseResult::Completed) and Err(_) into Failed, so this
+        // path produces Some(Completed(zeros)) — distinct from a real phase
+        // failure (Some(Failed)) and from "phase didn't run" (None).
+        if self.crates.is_empty() {
+            return Ok(crate::types::ArchStats::default());
+        }
+
+        // Materialize the relative paths first so `PackageInsert<'_>` can borrow
+        // them as `&str` — `Cow::into_owned` drops the borrow that `PackageInsert`
+        // requires, so we need an owning backing vec that outlives `packages`.
+        let package_paths: Vec<String> = self
+            .crates
+            .iter()
+            .map(|c| self.relative_path(&c.path).to_string_lossy().into_owned())
+            .collect();
+
+        let packages: Vec<PackageInsert<'_>> = self
+            .crates
+            .iter()
+            .zip(package_paths.iter())
+            .map(|(c, p)| PackageInsert {
+                name: c.name.as_str(),
+                path: p.as_str(),
+                source: PackageSource::Manifest,
+            })
+            .collect();
+
+        // Map each file to its containing crate by walking the file's ancestor
+        // directories and checking against a pre-built crate-path index. This is
+        // O(files * depth) vs the public `get_crate_for_file`'s O(files * crates)
+        // linear scan + per-file `canonicalize()` syscall. Safe to skip the
+        // canonicalize here because both `workspace_root` (lib.rs:113) and each
+        // `CrateInfo::path` (cargo.rs:121) are canonicalized at construction time.
+        let crate_index: HashMap<&Path, &crate::types::CrateInfo> =
+            self.crates.iter().map(|c| (c.path.as_path(), c)).collect();
+
+        let mut file_to_package: Vec<(crate::types::FileId, &str)> = Vec::new();
+        for file in self.db.list_all_files()? {
+            let abs = if file.path.is_absolute() {
+                file.path.clone()
+            } else {
+                self.workspace_root.join(&file.path)
+            };
+            // `Path::ancestors()` yields the path itself first, then progressively
+            // shorter parents, so `find_map` returns the longest-prefix match —
+            // matching `get_crate_for_file`'s nested-crate semantics.
+            if let Some(info) = abs.ancestors().find_map(|p| crate_index.get(p).copied()) {
+                file_to_package.push((file.id, info.name.as_str()));
+            } else {
+                tracing::trace!(
+                    file = %file.path.display(),
+                    "file outside any crate, skipping from architecture phase"
+                );
+            }
+        }
+
+        self.db.repopulate_architecture(&packages, &file_to_package)
+    }
 }
 
 #[cfg(test)]
@@ -1486,5 +1574,135 @@ mod tests {
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].alias, Some("Map".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod arch_phase_tests {
+    use crate::Tethys;
+    use crate::types::ArchPhaseResult;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn make_workspace_with_two_crates() -> (TempDir, Tethys) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[workspace]
+members = ["crate_a", "crate_b"]
+resolver = "2"
+"#,
+        )
+        .expect("write workspace toml");
+
+        fs::create_dir_all(root.join("crate_a/src")).expect("mkdir a");
+        fs::write(
+            root.join("crate_a/Cargo.toml"),
+            r#"[package]
+name = "crate_a"
+version = "0.1.0"
+edition = "2021"
+"#,
+        )
+        .expect("write a toml");
+        fs::write(
+            root.join("crate_a/src/lib.rs"),
+            "pub fn hello() -> String { String::from(\"hi\") }\n",
+        )
+        .expect("write a lib");
+
+        fs::create_dir_all(root.join("crate_b/src")).expect("mkdir b");
+        fs::write(
+            root.join("crate_b/Cargo.toml"),
+            r#"[package]
+name = "crate_b"
+version = "0.1.0"
+edition = "2021"
+"#,
+        )
+        .expect("write b toml");
+        fs::write(
+            root.join("crate_b/src/lib.rs"),
+            "pub fn world() -> u32 { 42 }\n",
+        )
+        .expect("write b lib");
+
+        let tethys = Tethys::new(root).expect("Tethys::new");
+        (dir, tethys)
+    }
+
+    #[test]
+    fn architecture_phase_records_packages() {
+        let (_dir, mut tethys) = make_workspace_with_two_crates();
+        let stats = tethys.index().expect("index");
+        match stats.arch_phase {
+            Some(ArchPhaseResult::Completed(arch)) => {
+                assert_eq!(arch.packages_recorded, 2);
+                assert!(arch.files_assigned >= 2);
+            }
+            _ => panic!("expected arch_phase to be Some(Completed(...))"),
+        }
+    }
+
+    /// Workspaces with overlapping-prefix crate names (e.g. `foo` and `foo-utils`)
+    /// must map each file to the deepest matching crate, not the first prefix match.
+    /// The `HashMap` + ancestor-walk strategy gets this for free via exact-key lookup,
+    /// but exercising it here locks the contract in.
+    #[test]
+    fn architecture_phase_handles_overlapping_crate_prefixes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[workspace]
+members = ["foo", "foo-utils"]
+resolver = "2"
+"#,
+        )
+        .expect("workspace toml");
+
+        for name in ["foo", "foo-utils"] {
+            fs::create_dir_all(root.join(format!("{name}/src"))).expect("mkdir");
+            fs::write(
+                root.join(format!("{name}/Cargo.toml")),
+                format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+            )
+            .expect("crate toml");
+            fs::write(root.join(format!("{name}/src/lib.rs")), "pub fn x() {}\n").expect("lib");
+        }
+
+        let mut tethys = Tethys::new(root).expect("Tethys::new");
+        let stats = tethys.index().expect("index");
+        let Some(ArchPhaseResult::Completed(arch)) = stats.arch_phase else {
+            panic!("expected Completed arch_phase, got: {:?}", stats.arch_phase);
+        };
+        assert_eq!(arch.packages_recorded, 2);
+        assert_eq!(
+            arch.files_assigned, 2,
+            "each crate's lib.rs must be assigned to its own crate, not the prefix match"
+        );
+    }
+
+    #[test]
+    fn non_rust_workspace_yields_zero_arch_stats_not_none() {
+        // A directory with no Cargo.toml has no crates; discover_crates returns [].
+        // The phase should succeed with all-zero ArchStats and no error message.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut tethys = Tethys::new(dir.path()).expect("Tethys::new");
+        let stats = tethys.index().expect("index");
+        assert!(
+            matches!(
+                &stats.arch_phase,
+                Some(ArchPhaseResult::Completed(arch))
+                    if arch.packages_recorded == 0
+                        && arch.files_assigned == 0
+                        && arch.package_deps_recorded == 0
+            ),
+            "expected arch_phase to be Some(Completed(all-zeros)) for non-Rust workspace, got: {:?}",
+            stats.arch_phase
+        );
     }
 }

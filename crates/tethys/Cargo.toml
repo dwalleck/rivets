@@ -40,7 +40,7 @@ lsp-types = "0.97"
 percent-encoding = "2.3"
 
 # Cargo manifest parsing
-cargo_toml = "0.20"
+cargo_toml = "0.22"
 
 # CLI (for binary)
 clap.workspace = true
@@ -52,6 +52,7 @@ tempfile.workspace = true
 rstest.workspace = true
 proptest.workspace = true
 criterion = { version = "0.5", features = ["html_reports"] }
+tracing-test = "0.2"
 
 [[bench]]
 name = "indexing"
