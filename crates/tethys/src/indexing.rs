@@ -1331,6 +1331,9 @@ impl Tethys {
             return Ok(crate::types::ArchStats::default());
         }
 
+        // Materialize the relative paths first so `PackageInsert<'_>` can borrow
+        // them as `&str` — `Cow::into_owned` drops the borrow that `PackageInsert`
+        // requires, so we need an owning backing vec that outlives `packages`.
         let package_paths: Vec<String> = self
             .crates
             .iter()

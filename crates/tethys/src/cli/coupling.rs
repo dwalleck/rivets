@@ -175,6 +175,9 @@ pub(crate) fn write_detail_text<W: Write>(out: &mut W, d: &CouplingDetail) -> io
     Ok(())
 }
 
+// NOTE: the JSON shape is hand-rolled. The architecture types don't yet derive
+// `Serialize` (tracked: rivets-4srr) — until that lands, new fields on
+// `CouplingDetail` / `CouplingMetrics` / `Package` will NOT auto-propagate here.
 pub(crate) fn write_detail_json<W: Write>(out: &mut W, d: &CouplingDetail) -> io::Result<()> {
     let dep_json = |p: &PackageDependency| {
         serde_json::json!({
@@ -306,6 +309,7 @@ pub(crate) fn write_table_text<W: Write>(
     Ok(())
 }
 
+// NOTE: hand-rolled JSON shape — see comment on `write_detail_json` (rivets-4srr).
 pub(crate) fn write_table_json<W: Write>(
     out: &mut W,
     metrics: &[CouplingMetrics],
