@@ -200,6 +200,22 @@ impl Index {
                 );
                 continue;
             };
+            let afferent = u32::try_from(ca).unwrap_or_else(|_| {
+                tracing::warn!(
+                    package_name = %name,
+                    ca_value = ca,
+                    "afferent coupling exceeds u32::MAX; clamping"
+                );
+                u32::MAX
+            });
+            let efferent = u32::try_from(ce).unwrap_or_else(|_| {
+                tracing::warn!(
+                    package_name = %name,
+                    ce_value = ce,
+                    "efferent coupling exceeds u32::MAX; clamping"
+                );
+                u32::MAX
+            });
             out.push(CouplingMetrics {
                 package: Package {
                     id: PackageId::from(id),
@@ -207,8 +223,8 @@ impl Index {
                     path: PathBuf::from(path),
                     source,
                 },
-                afferent: u32::try_from(ca).unwrap_or(u32::MAX),
-                efferent: u32::try_from(ce).unwrap_or(u32::MAX),
+                afferent,
+                efferent,
                 instability,
             });
         }
@@ -269,7 +285,7 @@ mod get_packages_tests {
 
 /// Direction used by [`Index::fetch_neighbors`] to query either dependents or
 /// dependencies of a package.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Direction {
     Outgoing,
     Incoming,
@@ -317,12 +333,10 @@ impl Index {
             return Ok(None);
         };
         let Some(source) = PackageSource::parse(&source_str) else {
-            tracing::warn!(
-                package_name = %pkg_name,
-                source = %source_str,
-                "package coupling has unknown source"
-            );
-            return Ok(None);
+            return Err(crate::error::Error::Internal(format!(
+                "package '{pkg_name}' has unknown source value '{source_str}'; \
+                 possible schema version mismatch or external DB modification"
+            )));
         };
 
         let target = Package {
@@ -332,6 +346,23 @@ impl Index {
             source,
         };
 
+        let afferent = u32::try_from(ca).unwrap_or_else(|_| {
+            tracing::warn!(
+                package_name = %target.name,
+                ca_value = ca,
+                "afferent coupling exceeds u32::MAX; clamping"
+            );
+            u32::MAX
+        });
+        let efferent = u32::try_from(ce).unwrap_or_else(|_| {
+            tracing::warn!(
+                package_name = %target.name,
+                ce_value = ce,
+                "efferent coupling exceeds u32::MAX; clamping"
+            );
+            u32::MAX
+        });
+
         // Connection lock is released above; re-acquire for neighbor queries.
         let outgoing = self.fetch_neighbors(target.id, Direction::Outgoing)?;
         let incoming = self.fetch_neighbors(target.id, Direction::Incoming)?;
@@ -339,8 +370,8 @@ impl Index {
         Ok(Some(CouplingDetail {
             metrics: CouplingMetrics {
                 package: target,
-                afferent: u32::try_from(ca).unwrap_or(u32::MAX),
-                efferent: u32::try_from(ce).unwrap_or(u32::MAX),
+                afferent,
+                efferent,
                 instability,
             },
             incoming,
@@ -388,8 +419,22 @@ impl Index {
         for row in rows {
             let (id, name, path, source_str, dep_count) = row?;
             let Some(source) = PackageSource::parse(&source_str) else {
+                tracing::warn!(
+                    package_name = %name,
+                    source = %source_str,
+                    direction = ?dir,
+                    "neighbor package has unknown source value; omitting from results"
+                );
                 continue;
             };
+            let dep_count_u32 = u32::try_from(dep_count).unwrap_or_else(|_| {
+                tracing::warn!(
+                    package_name = %name,
+                    dep_count_value = dep_count,
+                    "dep_count exceeds u32::MAX; clamping"
+                );
+                u32::MAX
+            });
             out.push(PackageDependency {
                 package: Package {
                     id: PackageId::from(id),
@@ -397,7 +442,7 @@ impl Index {
                     path: PathBuf::from(path),
                     source,
                 },
-                dep_count: u32::try_from(dep_count).unwrap_or(u32::MAX),
+                dep_count: dep_count_u32,
             });
         }
         Ok(out)

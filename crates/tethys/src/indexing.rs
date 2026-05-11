@@ -440,7 +440,7 @@ impl Tethys {
         // Update query planner statistics after bulk writes
         self.db.analyze()?;
 
-        let architecture = match self.run_architecture_phase() {
+        let (architecture, arch_phase_error) = match self.run_architecture_phase() {
             Ok(arch) => {
                 tracing::debug!(
                     packages = arch.packages_recorded,
@@ -448,14 +448,14 @@ impl Tethys {
                     edges = arch.package_deps_recorded,
                     "architecture phase complete"
                 );
-                Some(arch)
+                (Some(arch), None)
             }
             Err(e) => {
                 tracing::warn!(
                     error = %e,
                     "architecture phase failed; index data is otherwise valid"
                 );
-                None
+                (None, Some(e.to_string()))
             }
         };
 
@@ -470,6 +470,7 @@ impl Tethys {
             unresolved_dependencies,
             lsp_sessions,
             architecture,
+            arch_phase_error,
         })
     }
 
@@ -1320,9 +1321,16 @@ impl Tethys {
 
     /// Final indexing phase: rebuild `arch_*` tables from current files + `file_deps`.
     /// Returns `ArchStats`, or propagates DB errors. Skips files outside any crate.
+    /// Returns `ArchStats::default()` (all zeros) when no Rust crates were discovered.
     pub(crate) fn run_architecture_phase(&self) -> Result<crate::types::ArchStats> {
         use crate::db::PackageInsert;
         use crate::types::PackageSource;
+
+        // Non-Rust workspaces have no crates; return zeros so callers can
+        // distinguish "no crates" (Some with zeros) from "phase failed" (None).
+        if self.crates.is_empty() {
+            return Ok(crate::types::ArchStats::default());
+        }
 
         let package_paths: Vec<String> = self
             .crates
@@ -1614,5 +1622,19 @@ edition = "2021"
         let arch = stats.architecture.expect("architecture stats present");
         assert_eq!(arch.packages_recorded, 2);
         assert!(arch.files_assigned >= 2);
+    }
+
+    #[test]
+    fn non_rust_workspace_yields_zero_arch_stats_not_none() {
+        // A directory with no Cargo.toml has no crates; discover_crates returns [].
+        // The phase should succeed with all-zero ArchStats and no error message.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut tethys = Tethys::new(dir.path()).expect("Tethys::new");
+        let stats = tethys.index().expect("index");
+        let arch = stats.architecture.expect("architecture should be Some even for non-Rust workspace");
+        assert_eq!(arch.packages_recorded, 0);
+        assert_eq!(arch.files_assigned, 0);
+        assert_eq!(arch.package_deps_recorded, 0);
+        assert!(stats.arch_phase_error.is_none(), "no phase error for non-Rust workspace");
     }
 }

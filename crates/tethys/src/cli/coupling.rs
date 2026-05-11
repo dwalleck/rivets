@@ -69,17 +69,20 @@ fn run_detail(tethys: &Tethys, name: &str, json: bool) -> Result<(), tethys::Err
     let detail = tethys.get_package_coupling(name)?;
     let stdout = io::stdout();
     let mut out = stdout.lock();
+
+    // For not-found cases we let main.rs print the standard "error: not found: ..." line
+    // and only print the suggestions here. This avoids a redundant eprintln! in this function.
     match (detail, json) {
         (Some(d), true) => write_detail_json(&mut out, &d).map_err(tethys::Error::Io),
         (Some(d), false) => write_detail_text(&mut out, &d).map_err(tethys::Error::Io),
         (None, true) => {
             writeln!(out, "null").map_err(tethys::Error::Io)?;
-            print_not_found_stderr(tethys, name)?;
-            std::process::exit(1);
+            print_not_found_suggestions(tethys, name);
+            Err(tethys::Error::NotFound(format!("package: {name}")))
         }
         (None, false) => {
-            print_not_found_stderr(tethys, name)?;
-            std::process::exit(1);
+            print_not_found_suggestions(tethys, name);
+            Err(tethys::Error::NotFound(format!("package: {name}")))
         }
     }
 }
@@ -96,21 +99,23 @@ fn collect_suggestions(name: &str, all_names: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn print_not_found_stderr(tethys: &Tethys, name: &str) -> Result<(), tethys::Error> {
-    eprintln!(
-        "{}: no package named '{}' found",
-        "error".red().bold(),
-        name
-    );
-
-    let pkgs = tethys.get_packages()?;
-    let names: Vec<String> = pkgs.into_iter().map(|p| p.name).collect();
-    let suggestions = collect_suggestions(name, &names);
-    if !suggestions.is_empty() {
-        eprintln!();
-        eprintln!("Did you mean: {}?", suggestions.join(", "));
+/// Print package name suggestions to stderr. Best-effort: errors from the
+/// suggestion fetch are logged at debug and silently ignored so that we never
+/// swallow the caller's primary `NotFound` error.
+fn print_not_found_suggestions(tethys: &Tethys, name: &str) {
+    match tethys.get_packages() {
+        Ok(pkgs) => {
+            let names: Vec<String> = pkgs.into_iter().map(|p| p.name).collect();
+            let suggestions = collect_suggestions(name, &names);
+            if !suggestions.is_empty() {
+                eprintln!();
+                eprintln!("Did you mean: {}?", suggestions.join(", "));
+            }
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "could not fetch packages for suggestion list");
+        }
     }
-    Ok(())
 }
 
 pub(crate) fn write_detail_text<W: Write>(out: &mut W, d: &CouplingDetail) -> io::Result<()> {

@@ -873,10 +873,17 @@ pub struct IndexStats {
     /// Results from LSP resolution sessions (one per language attempted).
     /// Empty when `IndexOptions::use_lsp` was not set.
     pub lsp_sessions: Vec<LspSessionResult>,
-    /// Statistics from the architecture-analysis phase. `Some` when the phase
-    /// completed successfully (the always-on default path); `None` only when
-    /// the phase failed (index data is otherwise valid and usable).
+    /// Statistics from the architecture-analysis phase.
+    ///
+    /// - `Some(stats)` when the phase completed successfully (including the case
+    ///   where there are zero Rust crates — `stats` will have all fields at zero).
+    /// - `None` only when the phase itself failed; see `arch_phase_error` for details.
     pub architecture: Option<ArchStats>,
+
+    /// Human-readable error from the architecture phase, set when `architecture`
+    /// is `None`. Both fields are `None` / `Some` together: if `architecture` is
+    /// `Some`, this is `None`; if `architecture` is `None`, this is `Some`.
+    pub arch_phase_error: Option<String>,
 }
 
 impl IndexStats {
@@ -2109,6 +2116,7 @@ mod tests {
                 },
             ],
             architecture: None,
+            arch_phase_error: None,
         };
         assert_eq!(stats.total_lsp_resolved(), 10);
     }
@@ -2126,6 +2134,7 @@ mod tests {
             unresolved_dependencies: vec![],
             lsp_sessions: vec![],
             architecture: None,
+            arch_phase_error: None,
         };
         assert_eq!(stats.total_lsp_resolved(), 0);
         assert!(!stats.has_lsp_errors());
