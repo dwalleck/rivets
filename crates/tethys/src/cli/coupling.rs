@@ -411,8 +411,11 @@ mod table_tests {
 
         assert!(s.contains("alpha"));
         assert!(s.contains("beta"));
-        assert!(s.contains("1.00"));
-        assert!(s.contains("0.33"));
+        // Exact-precision substrings (not just "0.3") so a future format change
+        // that drops to 1-decimal precision would fail the test instead of
+        // silently still matching a shorter prefix.
+        assert!(s.contains(" 1.00"));
+        assert!(s.contains(" 0.33"));
         assert!(s.contains("2 packages"));
     }
 
@@ -473,15 +476,23 @@ mod table_tests {
             .find(|l| l.contains(long_name))
             .expect("data line");
 
+        // Search only the post-name region of the data line so a numeric digit
+        // in a future package name can't sneak into the assertion.
+        let data_tail_start =
+            data_line.find(long_name).expect("name in data line") + long_name.len();
+        let data_tail = &data_line[data_tail_start..];
+
         let afferent_label_end = header_line.find("Ca").expect("Ca in header") + 1;
-        let afferent_value_col = data_line.find('7').expect("ca=7 in data row");
+        let afferent_value_col =
+            data_tail_start + data_tail.find('7').expect("ca=7 after name in data row");
         assert_eq!(
             afferent_value_col, afferent_label_end,
             "ca digit ({afferent_value_col}) must align with the 'a' of 'Ca' ({afferent_label_end})"
         );
 
         let efferent_label_end = header_line.find("Ce").expect("Ce in header") + 1;
-        let efferent_value_col = data_line.find('9').expect("ce=9 in data row");
+        let efferent_value_col =
+            data_tail_start + data_tail.find('9').expect("ce=9 after name in data row");
         assert_eq!(
             efferent_value_col, efferent_label_end,
             "ce digit ({efferent_value_col}) must align with the 'e' of 'Ce' ({efferent_label_end})"

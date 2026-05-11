@@ -103,7 +103,8 @@ enum Commands {
         #[arg(long)]
         package: Option<String>,
 
-        /// Output as JSON
+        /// Output as JSON. With --package, a missing name prints `null` to
+        /// stdout, an error to stderr, and exits non-zero.
         #[arg(long)]
         json: bool,
     },
