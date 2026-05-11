@@ -2329,6 +2329,7 @@ mod arch_stats_in_index_stats {
 #[cfg(test)]
 mod arch_type_tests {
     use super::*;
+    use rstest::rstest;
 
     #[test]
     fn package_id_roundtrip() {
@@ -2366,26 +2367,17 @@ mod arch_type_tests {
         }
     }
 
-    #[test]
-    fn instability_is_zero_and_not_nan_when_both_couplings_are_zero() {
-        let i = metrics("isolated", 0, 0).instability();
-        assert_eq!(
-            i.to_bits(),
-            0.0_f64.to_bits(),
-            "convention: instability of an isolated package is exactly 0.0, not NaN"
-        );
+    #[rstest]
+    #[case::isolated_is_zero_not_nan(0, 0, 0.0_f64)]
+    #[case::pure_efferent_is_one(0, 3, 1.0_f64)]
+    #[case::pure_afferent_is_zero(3, 0, 0.0_f64)]
+    fn instability_boundary_cases(
+        #[case] afferent: u32,
+        #[case] efferent: u32,
+        #[case] expected: f64,
+    ) {
+        let i = metrics("p", afferent, efferent).instability();
+        assert_eq!(i.to_bits(), expected.to_bits());
         assert!(!i.is_nan());
-    }
-
-    #[test]
-    fn instability_is_one_when_only_efferent() {
-        let i = metrics("pure-consumer", 0, 3).instability();
-        assert_eq!(i.to_bits(), 1.0_f64.to_bits());
-    }
-
-    #[test]
-    fn instability_is_zero_when_only_afferent() {
-        let i = metrics("pure-source", 3, 0).instability();
-        assert_eq!(i.to_bits(), 0.0_f64.to_bits());
     }
 }

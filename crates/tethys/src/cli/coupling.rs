@@ -8,7 +8,7 @@ use std::path::Path;
 
 use clap::ValueEnum;
 use colored::Colorize;
-use tethys::{CouplingDetail, CouplingMetrics, CouplingSort, Tethys};
+use tethys::{CouplingDetail, CouplingMetrics, CouplingSort, PackageDependency, Tethys};
 
 /// CLI sort flag, converted to the API's `CouplingSort` via `From`.
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -59,14 +59,13 @@ fn run_table(tethys: &Tethys, sort: SortFlag, json: bool) -> Result<(), tethys::
     let metrics = tethys.get_coupling_metrics(sort.into())?;
     let stdout = io::stdout();
     let mut out = stdout.lock();
-    let result = if json {
+    if json {
         write_table_json(&mut out, &metrics, sort)
     } else {
         write_table_text(&mut out, &metrics, sort)
-    };
-    result
-        .or_else(super::ignore_broken_pipe)
-        .map_err(tethys::Error::Io)
+    }
+    .or_else(super::ignore_broken_pipe)
+    .map_err(tethys::Error::Io)
 }
 
 fn run_detail(tethys: &Tethys, name: &str, json: bool) -> Result<(), tethys::Error> {
@@ -83,27 +82,23 @@ fn run_detail_to<W: Write>(
 ) -> Result<(), tethys::Error> {
     let detail = tethys.get_package_coupling(name)?;
 
-    // For not-found cases we let main.rs print the standard "error: not found: ..." line
-    // and only print the suggestions here. This avoids a redundant eprintln! in this function.
-    match (detail, json) {
-        (Some(d), true) => write_detail_json(out, &d)
-            .or_else(super::ignore_broken_pipe)
-            .map_err(tethys::Error::Io),
-        (Some(d), false) => write_detail_text(out, &d)
-            .or_else(super::ignore_broken_pipe)
-            .map_err(tethys::Error::Io),
-        (None, true) => {
-            writeln!(out, "null")
-                .or_else(super::ignore_broken_pipe)
-                .map_err(tethys::Error::Io)?;
-            print_not_found_suggestions(tethys, name);
-            Err(tethys::Error::NotFound(format!("package: {name}")))
-        }
-        (None, false) => {
-            print_not_found_suggestions(tethys, name);
-            Err(tethys::Error::NotFound(format!("package: {name}")))
-        }
+    // main.rs prints the standard "error: not found: ..." line for us; this
+    // function only adds the suggestion list so the user gets both.
+    let write_result = match (&detail, json) {
+        (Some(d), true) => write_detail_json(out, d),
+        (Some(d), false) => write_detail_text(out, d),
+        (None, true) => writeln!(out, "null"),
+        (None, false) => Ok(()),
+    };
+    write_result
+        .or_else(super::ignore_broken_pipe)
+        .map_err(tethys::Error::Io)?;
+
+    if detail.is_some() {
+        return Ok(());
     }
+    print_not_found_suggestions(tethys, name);
+    Err(tethys::Error::NotFound(format!("package: {name}")))
 }
 
 const MAX_SUGGESTIONS: usize = 5;
@@ -137,6 +132,26 @@ fn print_not_found_suggestions(tethys: &Tethys, name: &str) {
     }
 }
 
+fn write_deps_section<W: Write>(
+    out: &mut W,
+    title: &str,
+    deps: &[PackageDependency],
+) -> io::Result<()> {
+    if deps.is_empty() {
+        return Ok(());
+    }
+    writeln!(out, "  {}", title.white().bold())?;
+    for dep in deps {
+        let label = if dep.dep_count == 1 { "edge" } else { "edges" };
+        writeln!(
+            out,
+            "    {:<18} {} {}",
+            dep.package.name, dep.dep_count, label
+        )?;
+    }
+    writeln!(out)
+}
+
 pub(crate) fn write_detail_text<W: Write>(out: &mut W, d: &CouplingDetail) -> io::Result<()> {
     writeln!(out)?;
     writeln!(out, "Package: {}", d.metrics.package.name.cyan().bold())?;
@@ -150,40 +165,23 @@ pub(crate) fn write_detail_text<W: Write>(out: &mut W, d: &CouplingDetail) -> io
     let bar = render_bar(instability);
     writeln!(
         out,
-        "    Instability:     {bar}  {value:.2}",
-        bar = instability_color(instability, &bar),
-        value = instability
+        "    Instability:     {}  {instability:.2}",
+        instability_color(instability, &bar),
     )?;
     writeln!(out)?;
 
-    if !d.outgoing.is_empty() {
-        writeln!(out, "  {}", "Depends on (outgoing):".white().bold())?;
-        for dep in &d.outgoing {
-            let label = if dep.dep_count == 1 { "edge" } else { "edges" };
-            writeln!(
-                out,
-                "    {:<18} {} {}",
-                dep.package.name, dep.dep_count, label
-            )?;
-        }
-        writeln!(out)?;
-    }
-    if !d.incoming.is_empty() {
-        writeln!(out, "  {}", "Depended on by (incoming):".white().bold())?;
-        for dep in &d.incoming {
-            let label = if dep.dep_count == 1 { "edge" } else { "edges" };
-            writeln!(
-                out,
-                "    {:<18} {} {}",
-                dep.package.name, dep.dep_count, label
-            )?;
-        }
-        writeln!(out)?;
-    }
+    write_deps_section(out, "Depends on (outgoing):", &d.outgoing)?;
+    write_deps_section(out, "Depended on by (incoming):", &d.incoming)?;
     Ok(())
 }
 
 pub(crate) fn write_detail_json<W: Write>(out: &mut W, d: &CouplingDetail) -> io::Result<()> {
+    let dep_json = |p: &PackageDependency| {
+        serde_json::json!({
+            "name": p.package.name,
+            "dep_count": p.dep_count,
+        })
+    };
     let value = serde_json::json!({
         "package": {
             "name": d.metrics.package.name,
@@ -193,14 +191,8 @@ pub(crate) fn write_detail_json<W: Write>(out: &mut W, d: &CouplingDetail) -> io
         "afferent": d.metrics.afferent,
         "efferent": d.metrics.efferent,
         "instability": round_to_4(d.metrics.instability()),
-        "outgoing": d.outgoing.iter().map(|p| serde_json::json!({
-            "name": p.package.name,
-            "dep_count": p.dep_count,
-        })).collect::<Vec<_>>(),
-        "incoming": d.incoming.iter().map(|p| serde_json::json!({
-            "name": p.package.name,
-            "dep_count": p.dep_count,
-        })).collect::<Vec<_>>(),
+        "outgoing": d.outgoing.iter().map(&dep_json).collect::<Vec<_>>(),
+        "incoming": d.incoming.iter().map(&dep_json).collect::<Vec<_>>(),
     });
     serde_json::to_writer_pretty(&mut *out, &value).map_err(io::Error::other)?;
     writeln!(out)?;
@@ -286,13 +278,12 @@ pub(crate) fn write_table_text<W: Write>(
         let bar = render_bar(instability);
         writeln!(
             out,
-            "  {name:width$}  {ca:>3}  {ce:>3}   {bar}  {value:>4}",
+            "  {name:width$}  {ca:>3}  {ce:>3}   {bar}  {instability:>4.2}",
             name = m.package.name,
             width = max_name_len,
             ca = m.afferent,
             ce = m.efferent,
             bar = instability_color(instability, &bar),
-            value = format!("{:.2}", instability),
         )?;
     }
 
@@ -347,12 +338,10 @@ fn round_to_4(v: f64) -> f64 {
 }
 
 #[cfg(test)]
-mod table_tests {
-    use super::*;
-    use rstest::rstest;
-    use tethys::{CouplingMetrics, Package, PackageId, PackageSource};
+mod test_support {
+    use tethys::{Package, PackageId, PackageSource};
 
-    fn pkg(name: &str) -> Package {
+    pub(super) fn pkg(name: &str) -> Package {
         Package {
             id: PackageId::new(1),
             name: name.into(),
@@ -360,6 +349,14 @@ mod table_tests {
             source: PackageSource::Manifest,
         }
     }
+}
+
+#[cfg(test)]
+mod table_tests {
+    use super::test_support::pkg;
+    use super::*;
+    use rstest::rstest;
+    use tethys::CouplingMetrics;
 
     #[rstest]
     #[case::zero(0.00, "░░░░░░░░░░")]
@@ -479,19 +476,9 @@ mod table_tests {
 
 #[cfg(test)]
 mod detail_tests {
+    use super::test_support::pkg;
     use super::*;
-    use tethys::{
-        CouplingDetail, CouplingMetrics, Package, PackageDependency, PackageId, PackageSource,
-    };
-
-    fn pkg(name: &str) -> Package {
-        Package {
-            id: PackageId::new(1),
-            name: name.into(),
-            path: name.into(),
-            source: PackageSource::Manifest,
-        }
-    }
+    use tethys::{CouplingDetail, CouplingMetrics, PackageDependency};
 
     fn sample_detail() -> CouplingDetail {
         CouplingDetail {
@@ -622,6 +609,27 @@ mod run_detail_tests {
         (dir, tethys)
     }
 
+    fn single_crate_workspace(name: &str) -> (tempfile::TempDir, Tethys) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        fs::write(
+            root.join("Cargo.toml"),
+            format!("[workspace]\nmembers = [\"{name}\"]\nresolver = \"2\"\n"),
+        )
+        .expect("workspace toml");
+        fs::create_dir_all(root.join(format!("{name}/src"))).expect("mkdir");
+        fs::write(
+            root.join(format!("{name}/Cargo.toml")),
+            format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+        )
+        .expect("crate toml");
+        fs::write(root.join(format!("{name}/src/lib.rs")), "pub fn x() {}\n").expect("lib");
+
+        let mut tethys = Tethys::new(root).expect("new");
+        tethys.index().expect("index");
+        (dir, tethys)
+    }
+
     #[test]
     fn run_detail_text_mode_returns_not_found_err() {
         let (_dir, tethys) = empty_workspace();
@@ -659,26 +667,7 @@ mod run_detail_tests {
 
     #[test]
     fn run_detail_text_mode_succeeds_when_package_exists() {
-        // Build a minimal Cargo workspace with one crate and verify the happy path
-        // returns Ok and writes detail to stdout.
-        let dir = tempfile::tempdir().expect("temp dir");
-        let root = dir.path();
-        fs::write(
-            root.join("Cargo.toml"),
-            "[workspace]\nmembers = [\"only\"]\nresolver = \"2\"\n",
-        )
-        .expect("workspace toml");
-        fs::create_dir_all(root.join("only/src")).expect("mkdir");
-        fs::write(
-            root.join("only/Cargo.toml"),
-            "[package]\nname = \"only\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        )
-        .expect("crate toml");
-        fs::write(root.join("only/src/lib.rs"), "pub fn x() {}\n").expect("lib");
-
-        let mut tethys = Tethys::new(root).expect("new");
-        tethys.index().expect("index");
-
+        let (_dir, tethys) = single_crate_workspace("only");
         let mut buf: Vec<u8> = Vec::new();
         run_detail_to(&tethys, "only", false, &mut buf).expect("should succeed");
         let s = String::from_utf8(buf).expect("utf-8");
@@ -698,24 +687,7 @@ mod run_detail_tests {
 
     #[test]
     fn run_detail_text_swallows_broken_pipe_when_package_exists() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let root = dir.path();
-        fs::write(
-            root.join("Cargo.toml"),
-            "[workspace]\nmembers = [\"only\"]\nresolver = \"2\"\n",
-        )
-        .expect("workspace toml");
-        fs::create_dir_all(root.join("only/src")).expect("mkdir");
-        fs::write(
-            root.join("only/Cargo.toml"),
-            "[package]\nname = \"only\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        )
-        .expect("crate toml");
-        fs::write(root.join("only/src/lib.rs"), "pub fn x() {}\n").expect("lib");
-
-        let mut tethys = Tethys::new(root).expect("new");
-        tethys.index().expect("index");
-
+        let (_dir, tethys) = single_crate_workspace("only");
         let mut out = BrokenPipeWriter;
         run_detail_to(&tethys, "only", false, &mut out)
             .expect("BrokenPipe on stdout must not surface as a command failure");
