@@ -1351,6 +1351,15 @@ impl Tethys {
             })
             .collect();
 
+        // Map each file to its containing crate by walking the file's ancestor
+        // directories and checking against a pre-built crate-path index. This is
+        // O(files * depth) vs the public `get_crate_for_file`'s O(files * crates)
+        // linear scan + per-file `canonicalize()` syscall. Safe to skip the
+        // canonicalize here because both `workspace_root` (lib.rs:113) and each
+        // `CrateInfo::path` (cargo.rs:121) are canonicalized at construction time.
+        let crate_index: HashMap<&Path, &crate::types::CrateInfo> =
+            self.crates.iter().map(|c| (c.path.as_path(), c)).collect();
+
         let mut file_to_package: Vec<(crate::types::FileId, &str)> = Vec::new();
         for file in self.db.list_all_files()? {
             let abs = if file.path.is_absolute() {
@@ -1358,7 +1367,10 @@ impl Tethys {
             } else {
                 self.workspace_root.join(&file.path)
             };
-            if let Some(info) = self.get_crate_for_file(&abs) {
+            // `Path::ancestors()` yields the path itself first, then progressively
+            // shorter parents, so `find_map` returns the longest-prefix match —
+            // matching `get_crate_for_file`'s nested-crate semantics.
+            if let Some(info) = abs.ancestors().find_map(|p| crate_index.get(p).copied()) {
                 file_to_package.push((file.id, info.name.as_str()));
             } else {
                 tracing::trace!(
@@ -1629,6 +1641,46 @@ edition = "2021"
             }
             _ => panic!("expected arch_phase to be Some(Completed(...))"),
         }
+    }
+
+    /// Workspaces with overlapping-prefix crate names (e.g. `foo` and `foo-utils`)
+    /// must map each file to the deepest matching crate, not the first prefix match.
+    /// The `HashMap` + ancestor-walk strategy gets this for free via exact-key lookup,
+    /// but exercising it here locks the contract in.
+    #[test]
+    fn architecture_phase_handles_overlapping_crate_prefixes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[workspace]
+members = ["foo", "foo-utils"]
+resolver = "2"
+"#,
+        )
+        .expect("workspace toml");
+
+        for name in ["foo", "foo-utils"] {
+            fs::create_dir_all(root.join(format!("{name}/src"))).expect("mkdir");
+            fs::write(
+                root.join(format!("{name}/Cargo.toml")),
+                format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+            )
+            .expect("crate toml");
+            fs::write(root.join(format!("{name}/src/lib.rs")), "pub fn x() {}\n").expect("lib");
+        }
+
+        let mut tethys = Tethys::new(root).expect("Tethys::new");
+        let stats = tethys.index().expect("index");
+        let Some(ArchPhaseResult::Completed(arch)) = stats.arch_phase else {
+            panic!("expected Completed arch_phase, got: {:?}", stats.arch_phase);
+        };
+        assert_eq!(arch.packages_recorded, 2);
+        assert_eq!(
+            arch.files_assigned, 2,
+            "each crate's lib.rs must be assigned to its own crate, not the prefix match"
+        );
     }
 
     #[test]
