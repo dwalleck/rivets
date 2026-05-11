@@ -1,5 +1,6 @@
 //! `tethys index` command implementation.
 
+use std::io::{self, Write};
 use std::path::Path;
 
 use colored::Colorize;
@@ -94,14 +95,22 @@ pub fn run(
         );
     }
 
-    print_arch_phase_result(stats.arch_phase.as_ref());
+    print_arch_phase_result(&mut io::stdout().lock(), stats.arch_phase.as_ref())
+        .map_err(tethys::Error::Io)?;
     print_lsp_session_errors(&stats.lsp_sessions);
 
     Ok(())
 }
 
-/// Print architecture-phase outcome, if any. Success path is silent.
-fn print_arch_phase_result(arch_phase: Option<&ArchPhaseResult>) {
+/// Print architecture-phase outcome to `out`, if any. Success path is silent.
+///
+/// Takes a `Write` sink so callers can unit-test all three output paths
+/// (Failed → warning, Completed → silent, None → silent) without capturing
+/// stdout.
+fn print_arch_phase_result<W: Write>(
+    out: &mut W,
+    arch_phase: Option<&ArchPhaseResult>,
+) -> io::Result<()> {
     match arch_phase {
         Some(ArchPhaseResult::Completed(arch)) => {
             // Keep the success case silent — rivets-tuph tracks surfacing
@@ -114,17 +123,19 @@ fn print_arch_phase_result(arch_phase: Option<&ArchPhaseResult>) {
             );
         }
         Some(ArchPhaseResult::Failed(err)) => {
-            println!();
-            println!(
+            writeln!(out)?;
+            writeln!(
+                out,
                 "  {}: architecture phase failed — coupling metrics unavailable",
                 "Warning".yellow().bold()
-            );
-            println!("  {}", err.dimmed());
+            )?;
+            writeln!(out, "  {}", err.dimmed())?;
         }
         None => {
             // Phase didn't run (e.g., default state) — nothing to print.
         }
     }
+    Ok(())
 }
 
 /// Print LSP session errors, if any.
@@ -156,5 +167,43 @@ fn print_lsp_session_errors(sessions: &[tethys::LspSessionResult]) {
                 tethys::LspOutcome::NothingToResolve => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod arch_phase_print_tests {
+    use super::*;
+    use tethys::{ArchPhaseResult, ArchStats};
+
+    #[test]
+    fn failed_path_writes_warning_with_error_text() {
+        colored::control::set_override(false);
+        let mut buf: Vec<u8> = Vec::new();
+        let result = ArchPhaseResult::Failed("simulated db corruption".into());
+        print_arch_phase_result(&mut buf, Some(&result)).expect("write");
+        let out = String::from_utf8(buf).expect("utf-8");
+        assert!(out.contains("Warning"), "should include the Warning label");
+        assert!(
+            out.contains("simulated db corruption"),
+            "should include the error Display form"
+        );
+    }
+
+    #[test]
+    fn completed_path_writes_nothing_to_stdout() {
+        let mut buf: Vec<u8> = Vec::new();
+        let result = ArchPhaseResult::Completed(ArchStats::default());
+        print_arch_phase_result(&mut buf, Some(&result)).expect("write");
+        assert!(
+            buf.is_empty(),
+            "completed path should be silent on stdout (rivets-tuph follow-up)"
+        );
+    }
+
+    #[test]
+    fn none_writes_nothing() {
+        let mut buf: Vec<u8> = Vec::new();
+        print_arch_phase_result(&mut buf, None).expect("write");
+        assert!(buf.is_empty());
     }
 }

@@ -524,6 +524,24 @@ mod suggestion_tests {
         let s = collect_suggestions("auth", &names);
         assert_eq!(s.len(), 5);
     }
+
+    #[test]
+    fn suggestions_capped_at_five_returns_first_five_by_input_order() {
+        let names: Vec<_> = (0..10).map(|i| format!("auth-{i}")).collect();
+        let s = collect_suggestions("auth", &names);
+        assert_eq!(s.len(), 5);
+        assert_eq!(
+            s,
+            vec![
+                "auth-0".to_string(),
+                "auth-1".to_string(),
+                "auth-2".to_string(),
+                "auth-3".to_string(),
+                "auth-4".to_string()
+            ],
+            "with input in alphabetical order, cap should preserve order"
+        );
+    }
 }
 
 #[cfg(test)]
