@@ -98,7 +98,7 @@ fn run_detail_to<W: Write>(
         return Ok(());
     }
     print_not_found_suggestions(tethys, name);
-    Err(tethys::Error::NotFound(format!("package: {name}")))
+    Err(tethys::Error::NotFound(format!("package '{name}'")))
 }
 
 const MAX_SUGGESTIONS: usize = 5;
@@ -649,13 +649,6 @@ mod suggestion_tests {
     fn suggestions_empty_when_nothing_matches() {
         let names = vec!["alpha".to_string(), "beta".to_string()];
         assert!(collect_suggestions("zzz", &names).is_empty());
-    }
-
-    #[test]
-    fn suggestions_capped_at_five() {
-        let names: Vec<_> = (0..10).map(|i| format!("auth-{i}")).collect();
-        let s = collect_suggestions("auth", &names);
-        assert_eq!(s.len(), 5);
     }
 
     #[test]

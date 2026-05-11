@@ -927,14 +927,33 @@ mod package_coupling_tests {
              VALUES (1, 'broken', 'broken', 'totally-bogus');",
         )
         .expect("inject corrupt row");
+
+        // Verify the corrupt row actually landed — guards against a future SQLite
+        // version silently no-op'ing `PRAGMA ignore_check_constraints`, which would
+        // otherwise make this test pass for the wrong reason (target row absent,
+        // so any Err — even an unrelated one — satisfies the loose assertion).
+        let landed: String = raw
+            .query_row(
+                "SELECT source FROM arch_packages WHERE name = 'broken'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("corrupt row must exist after INSERT");
+        assert_eq!(landed, "totally-bogus", "PRAGMA bypass must have worked");
         drop(raw);
 
-        // Now query via Index — should return Err.
+        // Now query via Index — should return Err::Internal mentioning the bogus value.
         let index = Index::open(&db_path).expect("reopen");
-        let result = index.get_package_coupling("broken");
+        let err = index
+            .get_package_coupling("broken")
+            .expect_err("corrupt target source should return Err");
         assert!(
-            result.is_err(),
-            "corrupt target source should return Err, got {result:?}"
+            matches!(err, crate::Error::Internal(_)),
+            "expected Error::Internal for corrupt source, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("totally-bogus"),
+            "error message should name the corrupt value, got: {err}"
         );
     }
 
@@ -1000,6 +1019,17 @@ mod package_coupling_tests {
             bad_id = f_bad.as_i64(),
         ))
         .expect("seed");
+
+        // Verify the corrupt row landed — see the same-shaped guard in
+        // get_package_coupling_returns_err_for_corrupt_target_source for why.
+        let landed: String = raw
+            .query_row(
+                "SELECT source FROM arch_packages WHERE name = 'bad'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("corrupt neighbour row must exist after INSERT");
+        assert_eq!(landed, "totally-bogus", "PRAGMA bypass must have worked");
         drop(raw);
 
         let index = Index::open(&db_path).expect("reopen");
