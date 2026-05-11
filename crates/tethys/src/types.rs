@@ -873,8 +873,9 @@ pub struct IndexStats {
     /// Results from LSP resolution sessions (one per language attempted).
     /// Empty when `IndexOptions::use_lsp` was not set.
     pub lsp_sessions: Vec<LspSessionResult>,
-    /// Statistics from the architecture-analysis phase, when it ran successfully.
-    /// `None` when the phase was skipped or failed.
+    /// Statistics from the architecture-analysis phase. `Some` when the phase
+    /// completed successfully (the always-on default path); `None` only when
+    /// the phase failed (index data is otherwise valid and usable).
     pub architecture: Option<ArchStats>,
 }
 

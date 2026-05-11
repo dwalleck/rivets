@@ -16,6 +16,7 @@
 //! - `file_deps` - File dependency CRUD operations
 //! - `panic_points` - Panic point CRUD operations
 //! - `graph` - Graph traversal operations (`SymbolGraphOps`, `FileGraphOps`)
+//! - `architecture` - Architecture analysis (packages, coupling metrics)
 
 mod architecture;
 mod call_edges;

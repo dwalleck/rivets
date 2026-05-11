@@ -128,6 +128,24 @@ fn coupling_sort_orders_match_spec() {
         .expect("by name");
     let names_n: Vec<_> = by_name.iter().map(|m| m.package.name.as_str()).collect();
     assert_eq!(names_n, ["crate_a", "crate_b", "crate_c"]);
+
+    let afferent_sorted = tethys
+        .get_coupling_metrics(CouplingSort::Afferent)
+        .expect("by ca");
+    let afferent_names: Vec<_> = afferent_sorted
+        .iter()
+        .map(|m| m.package.name.as_str())
+        .collect();
+    assert_eq!(afferent_names, ["crate_c", "crate_b", "crate_a"], "Ca descending");
+
+    let efferent_sorted = tethys
+        .get_coupling_metrics(CouplingSort::Efferent)
+        .expect("by ce");
+    let efferent_names: Vec<_> = efferent_sorted
+        .iter()
+        .map(|m| m.package.name.as_str())
+        .collect();
+    assert_eq!(efferent_names, ["crate_a", "crate_b", "crate_c"], "Ce descending");
 }
 
 #[test]
