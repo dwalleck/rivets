@@ -52,6 +52,7 @@ tempfile.workspace = true
 rstest.workspace = true
 proptest.workspace = true
 criterion = { version = "0.5", features = ["html_reports"] }
+tracing-test = "0.2"
 
 [[bench]]
 name = "indexing"

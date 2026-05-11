@@ -485,6 +485,7 @@ mod package_coupling_tests {
     use crate::types::Language;
     use std::path::Path;
     use tempfile::TempDir;
+    use tracing_test::traced_test;
 
     fn seeded_index() -> (TempDir, Index) {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -791,6 +792,112 @@ mod package_coupling_tests {
     }
 
     #[test]
+    fn fetch_neighbors_sorts_incoming_by_dep_count_desc_then_name_asc() {
+        // Fixture: package "hub" has three packages depending on it with varying edge counts.
+        //   alpha → hub: 1 edge   (tied with gamma; alpha < gamma alphabetically)
+        //   beta  → hub: 3 edges  (highest dep_count → first)
+        //   gamma → hub: 1 edge   (tied with alpha)
+        //
+        // Expected incoming order: [beta, alpha, gamma].
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut index = Index::open(&dir.path().join("idx.db")).expect("open");
+
+        let f_hub = index
+            .upsert_file(Path::new("hub/lib.rs"), Language::Rust, 0, 0, None)
+            .expect("hub");
+        let f_alpha = index
+            .upsert_file(Path::new("alpha/lib.rs"), Language::Rust, 0, 0, None)
+            .expect("alpha");
+        let f_beta_1 = index
+            .upsert_file(Path::new("beta/a.rs"), Language::Rust, 0, 0, None)
+            .expect("beta 1");
+        let f_beta_2 = index
+            .upsert_file(Path::new("beta/b.rs"), Language::Rust, 0, 0, None)
+            .expect("beta 2");
+        let f_beta_3 = index
+            .upsert_file(Path::new("beta/c.rs"), Language::Rust, 0, 0, None)
+            .expect("beta 3");
+        let f_gamma = index
+            .upsert_file(Path::new("gamma/lib.rs"), Language::Rust, 0, 0, None)
+            .expect("gamma");
+
+        // alpha → hub: 1 edge
+        index
+            .insert_file_dependency(f_alpha, f_hub)
+            .expect("alpha→hub");
+        // beta → hub: 3 edges (three files in beta each reference hub)
+        index
+            .insert_file_dependency(f_beta_1, f_hub)
+            .expect("beta1→hub");
+        index
+            .insert_file_dependency(f_beta_2, f_hub)
+            .expect("beta2→hub");
+        index
+            .insert_file_dependency(f_beta_3, f_hub)
+            .expect("beta3→hub");
+        // gamma → hub: 1 edge
+        index
+            .insert_file_dependency(f_gamma, f_hub)
+            .expect("gamma→hub");
+
+        let packages = [
+            PackageInsert {
+                name: "hub",
+                path: "hub",
+                source: PackageSource::Manifest,
+            },
+            PackageInsert {
+                name: "alpha",
+                path: "alpha",
+                source: PackageSource::Manifest,
+            },
+            PackageInsert {
+                name: "beta",
+                path: "beta",
+                source: PackageSource::Manifest,
+            },
+            PackageInsert {
+                name: "gamma",
+                path: "gamma",
+                source: PackageSource::Manifest,
+            },
+        ];
+        let mappings = [
+            (f_hub, "hub"),
+            (f_alpha, "alpha"),
+            (f_beta_1, "beta"),
+            (f_beta_2, "beta"),
+            (f_beta_3, "beta"),
+            (f_gamma, "gamma"),
+        ];
+        index
+            .repopulate_architecture(&packages, &mappings)
+            .expect("repopulate");
+
+        let detail = index
+            .get_package_coupling("hub")
+            .expect("query")
+            .expect("found");
+        let names: Vec<_> = detail
+            .incoming
+            .iter()
+            .map(|d| d.package.name.as_str())
+            .collect();
+        let counts: Vec<_> = detail.incoming.iter().map(|d| d.dep_count).collect();
+
+        assert_eq!(
+            names,
+            ["beta", "alpha", "gamma"],
+            "dep_count DESC then name ASC"
+        );
+        assert_eq!(
+            counts,
+            [3, 1, 1],
+            "beta has 3 incoming, alpha and gamma have 1 each"
+        );
+    }
+
+    #[test]
     fn get_package_coupling_returns_err_for_corrupt_target_source() {
         use rusqlite::Connection;
 
@@ -819,6 +926,15 @@ mod package_coupling_tests {
         );
     }
 
+    /// The documented contract for `fetch_neighbors` is "silent skip + warn! log" when
+    /// a neighbour has a corrupt source value. This test verifies both halves: the
+    /// silent-skip (corrupt neighbour absent from the outgoing list) and the
+    /// observability (a warn! event mentioning the corrupt value was emitted).
+    ///
+    /// If someone removes the `warn!` call, the test will fail on the log assertion —
+    /// catching a regression where the behaviour silently becomes "completely silent"
+    /// rather than "silent + logged".
+    #[traced_test]
     #[test]
     fn fetch_neighbors_skips_neighbors_with_corrupt_source() {
         use rusqlite::Connection;
@@ -890,6 +1006,15 @@ mod package_coupling_tests {
             neighbour_names,
             ["valid"],
             "corrupt-source neighbour should be skipped from outgoing list"
+        );
+
+        // CONTRACT: fetch_neighbors must emit a warn! when skipping a corrupt neighbour.
+        // Removing that warn! would change the behaviour from "silent + logged" to
+        // "completely silent", which breaks the observability guarantee. If this assertion
+        // fails, restore the warn! call in fetch_neighbors rather than loosening the test.
+        assert!(
+            logs_contain("unknown source value"),
+            "expected a warn! log mentioning the corrupt source value"
         );
     }
 }
