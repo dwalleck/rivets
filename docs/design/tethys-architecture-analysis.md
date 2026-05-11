@@ -59,7 +59,7 @@ tethys coupling
 └─ SELECT ... FROM arch_coupling JOIN arch_packages ORDER BY <key>
 ```
 
-Reads always go through the `arch_coupling` SQL view, which derives Ca/Ce/instability from `arch_package_deps` on every query. This eliminates a class of staleness bug — the view cannot drift from the underlying edge table.
+Reads always go through the `arch_coupling` SQL view, which derives Ca/Ce from `arch_package_deps` on every query. This eliminates a class of staleness bug — the view cannot drift from the underlying edge table. Instability is computed in Rust via `CouplingMetrics::instability()` rather than in the view, keeping the formula in a single canonical location.
 
 ## Schema
 
@@ -96,18 +96,15 @@ CREATE TABLE IF NOT EXISTS arch_package_deps (
 
 CREATE INDEX IF NOT EXISTS idx_arch_pkgdep_tgt ON arch_package_deps(target_pkg);
 
--- Coupling metrics view. LEFT JOINs keep packages with zero edges (Ca=Ce=0 → I=0).
+-- Coupling metrics view. LEFT JOINs keep packages with zero edges visible.
+-- Instability is NOT computed here; it is a method on CouplingMetrics in Rust,
+-- keeping the formula in a single place.
 CREATE VIEW IF NOT EXISTS arch_coupling AS
 SELECT
     p.id   AS package_id,
     p.name AS package_name,
     COALESCE(ca.afferent, 0) AS afferent,
-    COALESCE(ce.efferent, 0) AS efferent,
-    CASE
-        WHEN COALESCE(ca.afferent, 0) + COALESCE(ce.efferent, 0) = 0 THEN 0.0
-        ELSE CAST(COALESCE(ce.efferent, 0) AS REAL)
-             / (COALESCE(ca.afferent, 0) + COALESCE(ce.efferent, 0))
-    END AS instability
+    COALESCE(ce.efferent, 0) AS efferent
 FROM arch_packages p
 LEFT JOIN (
     SELECT target_pkg AS pkg, COUNT(*) AS afferent
@@ -124,7 +121,7 @@ LEFT JOIN (
 - **Integer IDs** for `arch_packages.id` follow the existing tethys convention (`FileId`, `SymbolId` are integer newtypes). Crate `name` is the human identifier; `id` is internal.
 - **`arch_file_packages` uses `file_id` as PK** to enforce "one file → one package" at the schema level rather than relying on application logic.
 - **`CHECK (source_pkg <> target_pkg)`** is defense-in-depth. The INSERT statement filters intra-crate deps, but the constraint prevents any future writer from violating the invariant.
-- **`instability = 0` when both `Ca` and `Ce` are zero.** The standard formula is undefined at the origin; convention is to treat an isolated package as stable. Matches KiroGraph behavior and Martin's intent.
+- **`instability() = 0.0` when both `Ca` and `Ce` are zero.** The standard formula is undefined at the origin; convention is to treat an isolated package as stable. This zero-denominator convention is implemented in `CouplingMetrics::instability()` in Rust, not in the view. Matches KiroGraph behavior and Martin's intent.
 - **`LEFT JOIN` against subqueries** keeps packages with zero outgoing edges visible in `arch_coupling`. A naive `INNER JOIN ... GROUP BY` would silently drop isolated packages — and isolated packages are often the most diagnostically interesting (orphans, dead code, pre-extraction candidates).
 
 ## Indexing phase
@@ -276,11 +273,21 @@ pub struct Package {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CouplingMetrics {
-    pub package:     Package,
-    pub afferent:    u32,
-    pub efferent:    u32,
-    pub instability: f64,
+    pub package:  Package,
+    pub afferent: u32,
+    pub efferent: u32,
 }
+
+impl CouplingMetrics {
+    /// Instability score: Ce / (Ca + Ce).
+    /// Returns 0.0 when both Ca and Ce are zero (isolated-package convention).
+    pub fn instability(&self) -> f64 { ... }
+}
+```
+
+**Why a method, not a field:** Storing `instability` as a field independent of `afferent` and `efferent` creates an inconsistency surface — a caller could construct a `CouplingMetrics` where the three values are contradictory. Computing it on demand from the authoritative fields eliminates that class of bug entirely.
+
+```rust
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CouplingSort {
@@ -313,7 +320,8 @@ impl Tethys {
     pub fn get_packages(&self) -> Result<Vec<Package>>;
 
     /// Coupling metrics for every package, sorted per the requested key.
-    /// Sort delegated to SQLite via ORDER BY.
+    /// Rows are fetched unsorted from the DB then sorted in Rust via
+    /// `Vec::sort_by`, so the instability formula stays in a single place.
     pub fn get_coupling_metrics(&self, sort: CouplingSort) -> Result<Vec<CouplingMetrics>>;
 
     /// Detailed coupling for one package by exact name match.
@@ -334,11 +342,16 @@ impl Tethys {
 ```rust
 pub struct IndexStats {
     // ... existing fields
-    pub architecture: Option<ArchStats>,
+    pub arch_phase: Option<ArchPhaseResult>,
+}
+
+pub enum ArchPhaseResult {
+    Completed(ArchStats),
+    Failed(String),  // Display form of the error
 }
 ```
 
-`Option` is forward-looking: a future opt-out flag (e.g. `--no-architecture`) leaves the field as `None` without changing types.
+`arch_phase: Option<ArchPhaseResult>` collapses two originally-proposed parallel fields (`architecture: Option<ArchStats>` and an implied `arch_phase_error: Option<String>`) into one. The invariant "both None or both Some" was prose-enforced in the original design; the enum makes it structurally impossible to have a success result and an error simultaneously. `None` means the phase did not run (the default state before indexing).
 
 ## CLI
 
@@ -568,6 +581,22 @@ A test that runs the phase against the actual rivets workspace and asserts:
 - `Ca + Ce > 0` for at least the most-connected packages.
 
 A smoke test — exact metric values are not asserted because they will drift naturally as the codebase evolves; only structural properties are checked.
+
+## Deviations from this spec during implementation
+
+Four deliberate divergences occurred between this design spec and the shipped implementation:
+
+1. **`CouplingMetrics::instability` is a computed method, not a stored field.**
+   Rationale: storing instability independently of `afferent`/`efferent` creates an inconsistency surface where a struct can hold contradictory values. Computing it on demand from the authoritative fields eliminates that class of bug.
+
+2. **`arch_coupling` view omits the `instability` column.**
+   Rationale: the view previously included a `CASE`/`CAST` expression computing instability in SQL. Removing it makes `CouplingMetrics::instability()` the single source of truth for the formula, avoiding drift between the SQL and Rust implementations.
+
+3. **Sorting happens in Rust (`Vec::sort_by`), not via SQL `ORDER BY`.**
+   Rationale: once the view dropped the `instability` column, SQLite could no longer sort by it. Rust-side sorting also makes the sort key consistent with the method, and the performance difference is negligible for realistic workspace sizes.
+
+4. **`IndexStats::arch_phase: Option<ArchPhaseResult>` replaces `architecture: Option<ArchStats>`.**
+   Rationale: the original design implied two parallel optional fields whose invariant ("both None or both Some") was prose-enforced. The `ArchPhaseResult` enum (`Completed(ArchStats)` | `Failed(String)`) makes it structurally impossible to have a success result and an error simultaneously, eliminating the need for prose documentation of the invariant.
 
 ## References
 
