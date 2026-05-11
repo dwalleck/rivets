@@ -67,15 +67,24 @@ fn run_table(tethys: &Tethys, sort: SortFlag, json: bool) -> Result<(), tethys::
 }
 
 fn run_detail(tethys: &Tethys, name: &str, json: bool) -> Result<(), tethys::Error> {
-    let detail = tethys.get_package_coupling(name)?;
     let stdout = io::stdout();
     let mut out = stdout.lock();
+    run_detail_to(tethys, name, json, &mut out)
+}
+
+fn run_detail_to<W: Write>(
+    tethys: &Tethys,
+    name: &str,
+    json: bool,
+    out: &mut W,
+) -> Result<(), tethys::Error> {
+    let detail = tethys.get_package_coupling(name)?;
 
     // For not-found cases we let main.rs print the standard "error: not found: ..." line
     // and only print the suggestions here. This avoids a redundant eprintln! in this function.
     match (detail, json) {
-        (Some(d), true) => write_detail_json(&mut out, &d).map_err(tethys::Error::Io),
-        (Some(d), false) => write_detail_text(&mut out, &d).map_err(tethys::Error::Io),
+        (Some(d), true) => write_detail_json(out, &d).map_err(tethys::Error::Io),
+        (Some(d), false) => write_detail_text(out, &d).map_err(tethys::Error::Io),
         (None, true) => {
             writeln!(out, "null").map_err(tethys::Error::Io)?;
             print_not_found_suggestions(tethys, name);
@@ -514,5 +523,80 @@ mod suggestion_tests {
         let names: Vec<_> = (0..10).map(|i| format!("auth-{i}")).collect();
         let s = collect_suggestions("auth", &names);
         assert_eq!(s.len(), 5);
+    }
+}
+
+#[cfg(test)]
+mod run_detail_tests {
+    use super::*;
+    use std::fs;
+    use tethys::Tethys;
+
+    fn empty_workspace() -> (tempfile::TempDir, Tethys) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut tethys = Tethys::new(dir.path()).expect("new");
+        // No Cargo.toml → no packages indexed after index().
+        tethys.index().expect("index");
+        (dir, tethys)
+    }
+
+    #[test]
+    fn run_detail_text_mode_returns_not_found_err() {
+        let (_dir, tethys) = empty_workspace();
+        let mut buf: Vec<u8> = Vec::new();
+        let result = run_detail_to(&tethys, "no-such-pkg", false, &mut buf);
+        let err = result.expect_err("should return Err for missing package");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not found") && msg.contains("no-such-pkg"),
+            "error message should describe the missing package, got: {msg}"
+        );
+        // Text-mode stdout should be empty (suggestions go to stderr).
+        assert!(buf.is_empty(), "text-mode stdout must be empty on not-found");
+    }
+
+    #[test]
+    fn run_detail_json_mode_writes_null_then_returns_not_found_err() {
+        let (_dir, tethys) = empty_workspace();
+        let mut buf: Vec<u8> = Vec::new();
+        let result = run_detail_to(&tethys, "no-such-pkg", true, &mut buf);
+        let err = result.expect_err("should return Err for missing package");
+        assert!(
+            err.to_string().contains("no-such-pkg"),
+            "error should mention the package name"
+        );
+        let stdout = String::from_utf8(buf).expect("utf-8");
+        assert_eq!(
+            stdout, "null\n",
+            "json-mode stdout must be exactly 'null\\n' on not-found"
+        );
+    }
+
+    #[test]
+    fn run_detail_text_mode_succeeds_when_package_exists() {
+        // Build a minimal Cargo workspace with one crate and verify the happy path
+        // returns Ok and writes detail to stdout.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"only\"]\nresolver = \"2\"\n",
+        )
+        .expect("workspace toml");
+        fs::create_dir_all(root.join("only/src")).expect("mkdir");
+        fs::write(
+            root.join("only/Cargo.toml"),
+            "[package]\nname = \"only\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("crate toml");
+        fs::write(root.join("only/src/lib.rs"), "pub fn x() {}\n").expect("lib");
+
+        let mut tethys = Tethys::new(root).expect("new");
+        tethys.index().expect("index");
+
+        let mut buf: Vec<u8> = Vec::new();
+        run_detail_to(&tethys, "only", false, &mut buf).expect("should succeed");
+        let s = String::from_utf8(buf).expect("utf-8");
+        assert!(s.contains("only"), "output should mention package name");
     }
 }
