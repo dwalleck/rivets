@@ -272,9 +272,9 @@ mod list_all_files_tests {
         files.sort_by(|a, b| a.path.cmp(&b.path));
 
         assert_eq!(files.len(), 3);
-        assert_eq!(files[0].path.to_str().unwrap(), "a.rs");
-        assert_eq!(files[1].path.to_str().unwrap(), "b.rs");
-        assert_eq!(files[2].path.to_str().unwrap(), "c.rs");
+        assert_eq!(files[0].path.to_str().expect("path is valid UTF-8"), "a.rs");
+        assert_eq!(files[1].path.to_str().expect("path is valid UTF-8"), "b.rs");
+        assert_eq!(files[2].path.to_str().expect("path is valid UTF-8"), "c.rs");
     }
 
     #[test]

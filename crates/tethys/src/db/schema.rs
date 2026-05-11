@@ -124,7 +124,9 @@ CREATE TABLE IF NOT EXISTS arch_packages (
     source TEXT NOT NULL CHECK(source IN ('manifest','directory'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_arch_packages_path ON arch_packages(path);
+-- No index on arch_packages(path): every read goes through `id` (FK joins
+-- from arch_file_packages and arch_package_deps) or `name` (UNIQUE already
+-- has an implicit index). Adding one would be pure write-side overhead.
 
 -- File → package assignment. PK enforces one package per file.
 CREATE TABLE IF NOT EXISTS arch_file_packages (

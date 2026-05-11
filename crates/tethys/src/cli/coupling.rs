@@ -450,6 +450,15 @@ mod table_tests {
         assert!(s.contains("No packages discovered"));
     }
 
+    #[rstest]
+    #[case::instability(SortFlag::Instability, "instability")]
+    #[case::ca(SortFlag::Ca, "ca")]
+    #[case::ce(SortFlag::Ce, "ce")]
+    #[case::name(SortFlag::Name, "name")]
+    fn sort_key_str_covers_every_variant(#[case] sort: SortFlag, #[case] expected: &str) {
+        assert_eq!(sort_key_str(sort), expected);
+    }
+
     #[test]
     fn table_text_header_aligns_with_long_package_names() {
         let long_name = "a-really-rather-long-package-name-41chars";
