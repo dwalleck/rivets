@@ -100,25 +100,11 @@ pub fn run(
     // closes the pipe before we finish writing, that is not a command failure —
     // swallow BrokenPipe so the process exits cleanly.
     print_arch_phase_result(&mut io::stdout().lock(), stats.arch_phase.as_ref())
-        .or_else(ignore_broken_pipe)
+        .or_else(super::ignore_broken_pipe)
         .map_err(tethys::Error::Io)?;
     print_lsp_session_errors(&stats.lsp_sessions);
 
     Ok(())
-}
-
-/// Converts a `BrokenPipe` error into `Ok(())`, propagating all other errors.
-///
-/// Used to swallow pipe disconnects that occur during cosmetic trailing output.
-/// When the consumer closes the pipe (e.g. `tethys index | head`), the write
-/// fails with `BrokenPipe`, but the indexing operation already succeeded; the
-/// caller should exit 0, not report an I/O failure.
-fn ignore_broken_pipe(e: io::Error) -> io::Result<()> {
-    if e.kind() == io::ErrorKind::BrokenPipe {
-        Ok(())
-    } else {
-        Err(e)
-    }
 }
 
 /// Print architecture-phase outcome to `out`, if any. Success path is silent.

@@ -59,11 +59,14 @@ fn run_table(tethys: &Tethys, sort: SortFlag, json: bool) -> Result<(), tethys::
     let metrics = tethys.get_coupling_metrics(sort.into())?;
     let stdout = io::stdout();
     let mut out = stdout.lock();
-    if json {
-        write_table_json(&mut out, &metrics, sort).map_err(tethys::Error::Io)
+    let result = if json {
+        write_table_json(&mut out, &metrics, sort)
     } else {
-        write_table_text(&mut out, &metrics, sort).map_err(tethys::Error::Io)
-    }
+        write_table_text(&mut out, &metrics, sort)
+    };
+    result
+        .or_else(super::ignore_broken_pipe)
+        .map_err(tethys::Error::Io)
 }
 
 fn run_detail(tethys: &Tethys, name: &str, json: bool) -> Result<(), tethys::Error> {
@@ -83,10 +86,16 @@ fn run_detail_to<W: Write>(
     // For not-found cases we let main.rs print the standard "error: not found: ..." line
     // and only print the suggestions here. This avoids a redundant eprintln! in this function.
     match (detail, json) {
-        (Some(d), true) => write_detail_json(out, &d).map_err(tethys::Error::Io),
-        (Some(d), false) => write_detail_text(out, &d).map_err(tethys::Error::Io),
+        (Some(d), true) => write_detail_json(out, &d)
+            .or_else(super::ignore_broken_pipe)
+            .map_err(tethys::Error::Io),
+        (Some(d), false) => write_detail_text(out, &d)
+            .or_else(super::ignore_broken_pipe)
+            .map_err(tethys::Error::Io),
         (None, true) => {
-            writeln!(out, "null").map_err(tethys::Error::Io)?;
+            writeln!(out, "null")
+                .or_else(super::ignore_broken_pipe)
+                .map_err(tethys::Error::Io)?;
             print_not_found_suggestions(tethys, name);
             Err(tethys::Error::NotFound(format!("package: {name}")))
         }
@@ -674,5 +683,53 @@ mod run_detail_tests {
         run_detail_to(&tethys, "only", false, &mut buf).expect("should succeed");
         let s = String::from_utf8(buf).expect("utf-8");
         assert!(s.contains("only"), "output should mention package name");
+    }
+
+    struct BrokenPipeWriter;
+
+    impl Write for BrokenPipeWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "pipe closed"))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "pipe closed"))
+        }
+    }
+
+    #[test]
+    fn run_detail_text_swallows_broken_pipe_when_package_exists() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"only\"]\nresolver = \"2\"\n",
+        )
+        .expect("workspace toml");
+        fs::create_dir_all(root.join("only/src")).expect("mkdir");
+        fs::write(
+            root.join("only/Cargo.toml"),
+            "[package]\nname = \"only\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("crate toml");
+        fs::write(root.join("only/src/lib.rs"), "pub fn x() {}\n").expect("lib");
+
+        let mut tethys = Tethys::new(root).expect("new");
+        tethys.index().expect("index");
+
+        let mut out = BrokenPipeWriter;
+        run_detail_to(&tethys, "only", false, &mut out)
+            .expect("BrokenPipe on stdout must not surface as a command failure");
+    }
+
+    #[test]
+    fn run_detail_json_notfound_swallows_broken_pipe_and_still_returns_not_found() {
+        let (_dir, tethys) = empty_workspace();
+        let mut out = BrokenPipeWriter;
+        let err = run_detail_to(&tethys, "no-such-pkg", true, &mut out)
+            .expect_err("not-found should still surface even if stdout is closed");
+        assert!(
+            err.to_string().contains("no-such-pkg"),
+            "BrokenPipe on the `null` write must not mask the NotFound error: got {err}"
+        );
     }
 }

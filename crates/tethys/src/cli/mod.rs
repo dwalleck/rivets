@@ -13,8 +13,24 @@ pub mod reachable;
 pub mod search;
 pub mod stats;
 
+use std::io;
 use std::process::Command;
 use tethys::lsp::{LspError, LspProvider, RustAnalyzerProvider};
+
+/// Converts a `BrokenPipe` error into `Ok(())`, propagating all other errors.
+///
+/// Used to swallow pipe disconnects on cosmetic / final-output writes. When the
+/// downstream consumer closes the pipe (e.g. `tethys index | head`,
+/// `tethys coupling | head`), the write fails with `BrokenPipe`, but the
+/// command's primary work has already succeeded; the caller should exit 0
+/// rather than report an I/O failure.
+pub(crate) fn ignore_broken_pipe(e: io::Error) -> io::Result<()> {
+    if e.kind() == io::ErrorKind::BrokenPipe {
+        Ok(())
+    } else {
+        Err(e)
+    }
+}
 
 /// Check if the LSP server is available in PATH.
 ///
