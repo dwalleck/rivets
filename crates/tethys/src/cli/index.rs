@@ -196,7 +196,9 @@ mod arch_phase_print_tests {
 
     #[test]
     fn failed_path_writes_warning_with_error_text() {
-        colored::control::set_override(false);
+        // No color override needed: the sink is a Vec<u8>, not a TTY.
+        // colored strips ANSI codes when stdout is not a terminal, so
+        // `.contains("Warning")` matches the plain-text output regardless.
         let mut buf: Vec<u8> = Vec::new();
         let result = ArchPhaseResult::Failed("simulated db corruption".into());
         print_arch_phase_result(&mut buf, Some(&result)).expect("write");

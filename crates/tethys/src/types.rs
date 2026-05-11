@@ -2171,10 +2171,16 @@ impl PackageId {
     pub fn as_i64(self) -> i64 {
         self.0
     }
-}
 
-impl From<i64> for PackageId {
-    fn from(id: i64) -> Self {
+    /// Construct a `PackageId` from a raw database rowid.
+    ///
+    /// Prefer obtaining `PackageId` values from [`Package::id`] on records
+    /// returned by the API rather than constructing them directly. This
+    /// constructor exists for the DB layer and for test fixtures; external
+    /// callers that construct arbitrary IDs bypass the opaque-type contract
+    /// described in the type-level docs.
+    #[must_use]
+    pub fn new(id: i64) -> Self {
         Self(id)
     }
 }
@@ -2323,7 +2329,7 @@ mod arch_type_tests {
 
     #[test]
     fn package_id_roundtrip() {
-        let id: PackageId = 42i64.into();
+        let id = PackageId::new(42);
         assert_eq!(id.as_i64(), 42);
     }
 

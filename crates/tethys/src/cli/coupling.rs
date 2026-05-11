@@ -341,7 +341,7 @@ mod table_tests {
 
     fn pkg(name: &str) -> Package {
         Package {
-            id: PackageId::from(1),
+            id: PackageId::new(1),
             name: name.into(),
             path: name.into(),
             source: PackageSource::Manifest,
@@ -422,7 +422,7 @@ mod detail_tests {
 
     fn pkg(name: &str) -> Package {
         Package {
-            id: PackageId::from(1),
+            id: PackageId::new(1),
             name: name.into(),
             path: name.into(),
             source: PackageSource::Manifest,

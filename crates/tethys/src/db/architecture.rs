@@ -60,7 +60,7 @@ impl Index {
                 // uses INTEGER PRIMARY KEY — `last_insert_rowid()` returns that rowid.
                 // If the PK is ever migrated to a non-rowid type (e.g., UUID, text key,
                 // or WITHOUT ROWID), switch back to a SELECT-back approach.
-                name_to_id.insert(pkg.name, PackageId::from(tx.last_insert_rowid()));
+                name_to_id.insert(pkg.name, PackageId::new(tx.last_insert_rowid()));
             }
         }
         let packages_recorded = packages.len();
@@ -134,7 +134,7 @@ impl Index {
                 continue;
             };
             out.push(Package {
-                id: PackageId::from(id),
+                id: PackageId::new(id),
                 name,
                 path: PathBuf::from(path),
                 source,
@@ -186,7 +186,7 @@ impl Index {
             let efferent = saturating_coupling_to_u32(ce, &name, "efferent");
             out.push(CouplingMetrics {
                 package: Package {
-                    id: PackageId::from(id),
+                    id: PackageId::new(id),
                     name,
                     path: PathBuf::from(path),
                     source,
@@ -381,7 +381,7 @@ impl Index {
         };
 
         let target = Package {
-            id: PackageId::from(id),
+            id: PackageId::new(id),
             name: pkg_name,
             path: PathBuf::from(pkg_path),
             source,
@@ -467,7 +467,7 @@ impl Index {
             let dep_count_u32 = saturating_coupling_to_u32(dep_count, &name, "dep_count");
             out.push(PackageDependency {
                 package: Package {
-                    id: PackageId::from(id),
+                    id: PackageId::new(id),
                     name,
                     path: PathBuf::from(path),
                     source,
