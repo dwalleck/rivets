@@ -674,6 +674,223 @@ mod package_coupling_tests {
         assert_eq!(detail.metrics.afferent, 0);
         assert_eq!(detail.metrics.efferent, 0);
     }
+
+    #[test]
+    fn fetch_neighbors_sorts_by_dep_count_desc_then_name_asc() {
+        // Fixture: package "hub" has three outgoing neighbors with varying edge counts.
+        //   alpha  — 1 edge   (ties with gamma; alpha < gamma alphabetically)
+        //   beta   — 3 edges  (highest dep_count → first)
+        //   gamma  — 1 edge   (ties with alpha; gamma > alpha alphabetically)
+        //
+        // Expected outgoing order: [beta, alpha, gamma].
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut index = Index::open(&dir.path().join("idx.db")).expect("open");
+
+        let f_hub_a = index
+            .upsert_file(Path::new("hub/a.rs"), Language::Rust, 0, 0, None)
+            .expect("hub a");
+        let f_hub_b = index
+            .upsert_file(Path::new("hub/b.rs"), Language::Rust, 0, 0, None)
+            .expect("hub b");
+        let f_hub_c = index
+            .upsert_file(Path::new("hub/c.rs"), Language::Rust, 0, 0, None)
+            .expect("hub c");
+        let f_alpha = index
+            .upsert_file(Path::new("alpha/lib.rs"), Language::Rust, 0, 0, None)
+            .expect("alpha");
+        let f_beta_1 = index
+            .upsert_file(Path::new("beta/lib.rs"), Language::Rust, 0, 0, None)
+            .expect("beta 1");
+        let f_beta_2 = index
+            .upsert_file(Path::new("beta/helpers.rs"), Language::Rust, 0, 0, None)
+            .expect("beta 2");
+        let f_beta_3 = index
+            .upsert_file(Path::new("beta/util.rs"), Language::Rust, 0, 0, None)
+            .expect("beta 3");
+        let f_gamma = index
+            .upsert_file(Path::new("gamma/lib.rs"), Language::Rust, 0, 0, None)
+            .expect("gamma");
+
+        // hub → alpha: 1 file edge
+        index
+            .insert_file_dependency(f_hub_a, f_alpha)
+            .expect("hub→alpha");
+        // hub → beta: 3 file edges
+        index
+            .insert_file_dependency(f_hub_a, f_beta_1)
+            .expect("hub→beta1");
+        index
+            .insert_file_dependency(f_hub_b, f_beta_2)
+            .expect("hub→beta2");
+        index
+            .insert_file_dependency(f_hub_c, f_beta_3)
+            .expect("hub→beta3");
+        // hub → gamma: 1 file edge
+        index
+            .insert_file_dependency(f_hub_a, f_gamma)
+            .expect("hub→gamma");
+
+        let packages = [
+            PackageInsert {
+                name: "hub",
+                path: "hub",
+                source: PackageSource::Manifest,
+            },
+            PackageInsert {
+                name: "alpha",
+                path: "alpha",
+                source: PackageSource::Manifest,
+            },
+            PackageInsert {
+                name: "beta",
+                path: "beta",
+                source: PackageSource::Manifest,
+            },
+            PackageInsert {
+                name: "gamma",
+                path: "gamma",
+                source: PackageSource::Manifest,
+            },
+        ];
+        let mappings = [
+            (f_hub_a, "hub"),
+            (f_hub_b, "hub"),
+            (f_hub_c, "hub"),
+            (f_alpha, "alpha"),
+            (f_beta_1, "beta"),
+            (f_beta_2, "beta"),
+            (f_beta_3, "beta"),
+            (f_gamma, "gamma"),
+        ];
+        index
+            .repopulate_architecture(&packages, &mappings)
+            .expect("repopulate");
+
+        let detail = index
+            .get_package_coupling("hub")
+            .expect("query")
+            .expect("found");
+        let names: Vec<_> = detail
+            .outgoing
+            .iter()
+            .map(|d| d.package.name.as_str())
+            .collect();
+        let counts: Vec<_> = detail.outgoing.iter().map(|d| d.dep_count).collect();
+
+        assert_eq!(
+            names,
+            ["beta", "alpha", "gamma"],
+            "dep_count DESC then name ASC"
+        );
+        assert_eq!(
+            counts,
+            [3, 1, 1],
+            "beta has 3 edges, alpha and gamma have 1 each"
+        );
+    }
+
+    #[test]
+    fn get_package_coupling_returns_err_for_corrupt_target_source() {
+        use rusqlite::Connection;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db_path = dir.path().join("idx.db");
+
+        // Open via Index to apply schema, then drop and reopen raw to bypass CHECK.
+        {
+            let _ = Index::open(&db_path).expect("schema");
+        }
+        let raw = Connection::open(&db_path).expect("raw open");
+        raw.execute_batch(
+            "PRAGMA ignore_check_constraints = ON;
+             INSERT INTO arch_packages (id, name, path, source)
+             VALUES (1, 'broken', 'broken', 'totally-bogus');",
+        )
+        .expect("inject corrupt row");
+        drop(raw);
+
+        // Now query via Index — should return Err.
+        let index = Index::open(&db_path).expect("reopen");
+        let result = index.get_package_coupling("broken");
+        assert!(
+            result.is_err(),
+            "corrupt target source should return Err, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn fetch_neighbors_skips_neighbors_with_corrupt_source() {
+        use rusqlite::Connection;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db_path = dir.path().join("idx.db");
+
+        // Set up two packages where the target is valid and one neighbour is corrupt.
+        let (f_target, f_valid, f_bad) = {
+            let mut index = Index::open(&db_path).expect("schema");
+            let f_target = index
+                .upsert_file(Path::new("target/lib.rs"), Language::Rust, 0, 0, None)
+                .expect("target");
+            let f_valid = index
+                .upsert_file(Path::new("valid/lib.rs"), Language::Rust, 0, 0, None)
+                .expect("valid");
+            let f_bad = index
+                .upsert_file(Path::new("bad/lib.rs"), Language::Rust, 0, 0, None)
+                .expect("bad");
+            // target → valid AND target → bad
+            index
+                .insert_file_dependency(f_target, f_valid)
+                .expect("→valid");
+            index.insert_file_dependency(f_target, f_bad).expect("→bad");
+            (f_target, f_valid, f_bad)
+        };
+
+        // Insert the three packages via raw SQL so we can plant a corrupt source.
+        let raw = Connection::open(&db_path).expect("raw open");
+        raw.execute_batch(&format!(
+            "PRAGMA ignore_check_constraints = ON;
+             DELETE FROM arch_packages;
+             INSERT INTO arch_packages (id, name, path, source)
+             VALUES (1, 'target', 'target', 'manifest');
+             INSERT INTO arch_packages (id, name, path, source)
+             VALUES (2, 'valid', 'valid', 'manifest');
+             INSERT INTO arch_packages (id, name, path, source)
+             VALUES (3, 'bad', 'bad', 'totally-bogus');
+             INSERT INTO arch_file_packages (file_id, package_id)
+             VALUES ({target_id}, 1);
+             INSERT INTO arch_file_packages (file_id, package_id)
+             VALUES ({valid_id}, 2);
+             INSERT INTO arch_file_packages (file_id, package_id)
+             VALUES ({bad_id}, 3);
+             INSERT INTO arch_package_deps (source_pkg, target_pkg, dep_count)
+             VALUES (1, 2, 1);
+             INSERT INTO arch_package_deps (source_pkg, target_pkg, dep_count)
+             VALUES (1, 3, 1);",
+            target_id = f_target.as_i64(),
+            valid_id = f_valid.as_i64(),
+            bad_id = f_bad.as_i64(),
+        ))
+        .expect("seed");
+        drop(raw);
+
+        let index = Index::open(&db_path).expect("reopen");
+        let detail = index
+            .get_package_coupling("target")
+            .expect("target query should succeed (its source is valid)")
+            .expect("target package exists");
+
+        // Neighbour 'valid' should appear; 'bad' should be silently skipped.
+        let neighbour_names: Vec<_> = detail
+            .outgoing
+            .iter()
+            .map(|d| d.package.name.as_str())
+            .collect();
+        assert_eq!(
+            neighbour_names,
+            ["valid"],
+            "corrupt-source neighbour should be skipped from outgoing list"
+        );
+    }
 }
 
 #[cfg(test)]
