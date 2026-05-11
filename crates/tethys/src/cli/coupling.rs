@@ -231,6 +231,8 @@ fn render_bar(value: f64) -> String {
     format!("{filled}{empty}")
 }
 
+/// Color the instability bar by Martin's informal coupling zones:
+/// stable (≤0.40), transitional (≤0.70), unstable (>0.70).
 fn instability_color(value: f64, s: &str) -> colored::ColoredString {
     if value <= 0.40 {
         s.green()

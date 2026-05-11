@@ -97,11 +97,11 @@ impl Index {
 
         let conn = Connection::open(path)?;
 
-        // Wait up to 30s on a busy lock instead of erroring immediately. The
-        // architecture phase added in rivets-byie does a longer write
-        // (DELETE-cascade-rebuild over arch_* tables), and CI runs multiple
-        // test binaries against the same workspace DB. Without this, those
-        // tests race on the SQLite write lock and emit DatabaseBusy.
+        // Wait up to 30s on a busy lock instead of erroring immediately. This
+        // helps any multi-process scenario that writes to the same workspace
+        // DB — most concretely the nextest process-per-test runner and the
+        // architecture phase's longer DELETE-cascade-rebuild transaction
+        // (rivets-byie), which is what made the need visible.
         conn.busy_timeout(std::time::Duration::from_secs(30))?;
 
         // Enable WAL mode and foreign keys

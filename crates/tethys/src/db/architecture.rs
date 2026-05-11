@@ -41,6 +41,19 @@ impl Index {
         packages: &[PackageInsert<'_>],
         file_to_package_name: &[(FileId, &str)],
     ) -> Result<ArchStats> {
+        // Fail fast in dev/test if the caller forgot to dedupe. In release the
+        // `UNIQUE` constraint still catches it; this just gives a clearer panic
+        // before that opaque DB error reaches the user.
+        debug_assert_eq!(
+            packages
+                .iter()
+                .map(|p| p.name)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            packages.len(),
+            "repopulate_architecture: duplicate package names in input"
+        );
+
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
 
@@ -1115,6 +1128,87 @@ mod coupling_metrics_tests {
         assert_eq!(rows[0].package.name, "a");
         assert_eq!(rows[1].package.name, "b");
         assert_eq!(rows[2].package.name, "c");
+    }
+
+    #[test]
+    fn afferent_and_efferent_sorts_break_ties_by_name_ascending() {
+        // Fixture: 4 packages where Ca pairs (x=2, y=2) and (w=0, z=0) tie, and
+        // Ce pairs (w=2, z=2) and (x=0, y=0) tie. The secondary key
+        // `.then_with(|| a.name.cmp(&b.name))` must order each tied pair
+        // alphabetically, regardless of insertion order.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut index = Index::open(&dir.path().join("idx.db")).expect("open");
+
+        let f_w = index
+            .upsert_file(Path::new("w/lib.rs"), Language::Rust, 0, 0, None)
+            .expect("w");
+        let f_x = index
+            .upsert_file(Path::new("x/lib.rs"), Language::Rust, 0, 0, None)
+            .expect("x");
+        let f_y = index
+            .upsert_file(Path::new("y/lib.rs"), Language::Rust, 0, 0, None)
+            .expect("y");
+        let f_z = index
+            .upsert_file(Path::new("z/lib.rs"), Language::Rust, 0, 0, None)
+            .expect("z");
+
+        for (from, to) in [(f_w, f_x), (f_w, f_y), (f_z, f_x), (f_z, f_y)] {
+            index.insert_file_dependency(from, to).expect("dep");
+        }
+
+        // Deliberately insert in non-alphabetical order to prove the sort
+        // (not the storage order) is what ties get broken on.
+        let packages = [
+            PackageInsert {
+                name: "z",
+                path: "z",
+                source: PackageSource::Manifest,
+            },
+            PackageInsert {
+                name: "x",
+                path: "x",
+                source: PackageSource::Manifest,
+            },
+            PackageInsert {
+                name: "w",
+                path: "w",
+                source: PackageSource::Manifest,
+            },
+            PackageInsert {
+                name: "y",
+                path: "y",
+                source: PackageSource::Manifest,
+            },
+        ];
+        index
+            .repopulate_architecture(&packages, &[(f_w, "w"), (f_x, "x"), (f_y, "y"), (f_z, "z")])
+            .expect("repopulate");
+
+        let afferent_sorted = index
+            .get_coupling_metrics(CouplingSort::Afferent)
+            .expect("ca");
+        let afferent_names: Vec<_> = afferent_sorted
+            .iter()
+            .map(|m| m.package.name.as_str())
+            .collect();
+        assert_eq!(
+            afferent_names,
+            ["x", "y", "w", "z"],
+            "Ca-descending then name-ascending breaks ties alphabetically"
+        );
+
+        let efferent_sorted = index
+            .get_coupling_metrics(CouplingSort::Efferent)
+            .expect("ce");
+        let efferent_names: Vec<_> = efferent_sorted
+            .iter()
+            .map(|m| m.package.name.as_str())
+            .collect();
+        assert_eq!(
+            efferent_names,
+            ["w", "z", "x", "y"],
+            "Ce-descending then name-ascending breaks ties alphabetically"
+        );
     }
 
     #[test]

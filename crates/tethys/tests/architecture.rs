@@ -117,6 +117,22 @@ fn coupling_sort_orders_match_spec() {
     let by_instability = tethys
         .get_coupling_metrics(CouplingSort::Instability)
         .expect("by I");
+    // Instability values in this fixture: crate_a=1.0, crate_b=0.5, crate_c=0.0.
+    // Descending instability gives [a, b, c] — same order as alphabetical, but
+    // by very different keys. Assert the actual instability values too so a
+    // regression that broke the sort but coincidentally still produced
+    // alphabetical order would still fail.
+    let i_values: Vec<f64> = by_instability
+        .iter()
+        .map(tethys::CouplingMetrics::instability)
+        .collect();
+    assert_eq!(i_values.len(), 3);
+    assert!((i_values[0] - 1.0).abs() < 1e-9, "first by I should be 1.0");
+    assert!(
+        (i_values[1] - 0.5).abs() < 1e-9,
+        "second by I should be 0.5"
+    );
+    assert!((i_values[2] - 0.0).abs() < 1e-9, "third by I should be 0.0");
     let names_i: Vec<_> = by_instability
         .iter()
         .map(|m| m.package.name.as_str())
