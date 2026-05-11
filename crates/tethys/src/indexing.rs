@@ -1325,8 +1325,11 @@ impl Tethys {
         use crate::db::PackageInsert;
         use crate::types::PackageSource;
 
-        // Non-Rust workspaces have no crates; return zeros so callers can
-        // distinguish "no crates" (Some with zeros) from "phase failed" (None).
+        // Non-Rust workspaces have no crates; succeed with all-zero stats
+        // rather than returning Err. The upstream call site wraps Ok(_) into
+        // Some(ArchPhaseResult::Completed) and Err(_) into Failed, so this
+        // path produces Some(Completed(zeros)) — distinct from a real phase
+        // failure (Some(Failed)) and from "phase didn't run" (None).
         if self.crates.is_empty() {
             return Ok(crate::types::ArchStats::default());
         }

@@ -155,6 +155,11 @@ CREATE INDEX IF NOT EXISTS idx_arch_pkgdep_tgt ON arch_package_deps(target_pkg);
 -- is (source_pkg, target_pkg), each row is one distinct package-pair, so
 -- COUNT(*) ≡ COUNT(DISTINCT source_pkg|target_pkg) here — matching Martin's
 -- definition of Ca/Ce as counts of distinct dependent packages.
+--
+-- arch_package_deps.dep_count carries the finer-grained file-edge weight
+-- (how many cross-file deps roll up into that package pair). The view does
+-- NOT sum dep_count; only fetch_neighbors uses it, for ranking the
+-- detail-view edge counts.
 CREATE VIEW IF NOT EXISTS arch_coupling AS
 SELECT
     p.id   AS package_id,

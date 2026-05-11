@@ -2252,6 +2252,13 @@ pub struct CouplingMetrics {
 
 impl CouplingMetrics {
     /// Instability score: Ce / (Ca + Ce). Returns 0.0 when both Ca and Ce are zero.
+    ///
+    /// Martin's original formula is undefined at 0/0. We treat an isolated
+    /// package (no incoming or outgoing edges) as maximally stable (I=0):
+    /// with no consumers, there is no churn pressure on it. The alternative
+    /// of NaN propagates poorly through sort and JSON output; the alternative
+    /// of 1.0 would treat truly disconnected code as "maximally unstable",
+    /// which is the opposite of the everyday meaning.
     #[must_use]
     #[expect(
         clippy::cast_precision_loss,
