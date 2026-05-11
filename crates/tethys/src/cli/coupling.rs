@@ -350,6 +350,8 @@ fn sort_key_str(sort: SortFlag) -> &'static str {
     }
 }
 
+/// Round to 4 decimal places for stable JSON output. Not a display-precision
+/// helper — text output uses `{:.2}` separately.
 fn round_to_4(v: f64) -> f64 {
     (v * 10_000.0).round() / 10_000.0
 }
@@ -737,6 +739,36 @@ mod run_detail_tests {
         assert_eq!(
             stdout, "null\n",
             "json-mode stdout must be exactly 'null\\n' on not-found"
+        );
+    }
+
+    #[test]
+    fn run_detail_json_mode_succeeds_when_package_exists() {
+        // End-to-end check that the hand-rolled JSON shape matches what
+        // run_detail_to produces against a real workspace — guards against
+        // the typed structs and the serializer drifting out of sync until
+        // rivets-4srr replaces this with derived Serialize.
+        let (_dir, tethys) = single_crate_workspace("only");
+        let mut buf: Vec<u8> = Vec::new();
+        run_detail_to(&tethys, "only", true, &mut buf).expect("should succeed");
+        let v: serde_json::Value = serde_json::from_slice(&buf).expect("output must be valid JSON");
+        assert_eq!(v["package"]["name"], "only");
+        assert_eq!(v["package"]["source"], "manifest");
+        assert_eq!(v["afferent"], 0);
+        assert_eq!(v["efferent"], 0);
+        assert!(
+            v["outgoing"]
+                .as_array()
+                .expect("outgoing is array")
+                .is_empty(),
+            "single-crate workspace has no outgoing deps"
+        );
+        assert!(
+            v["incoming"]
+                .as_array()
+                .expect("incoming is array")
+                .is_empty(),
+            "single-crate workspace has no incoming deps"
         );
     }
 

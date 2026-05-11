@@ -95,11 +95,12 @@ pub fn run(
         );
     }
 
-    // Indexing already succeeded by this point. `print_arch_phase_result` is
-    // cosmetic trailing output. If the downstream consumer (e.g. `head -5`)
-    // closes the pipe before we finish writing, that is not a command failure —
-    // swallow BrokenPipe so the process exits cleanly.
-    print_arch_phase_result(&mut io::stdout().lock(), stats.arch_phase.as_ref())
+    // Indexing already succeeded by this point. The arch-phase warning is a
+    // diagnostic, not data — send it to stderr so callers piping `tethys index`
+    // stdout into another tool don't see warnings mixed into the data stream.
+    // Also swallow BrokenPipe so a closed downstream pipe doesn't fail the
+    // command (the primary work is already done).
+    print_arch_phase_result(&mut io::stderr().lock(), stats.arch_phase.as_ref())
         .or_else(super::ignore_broken_pipe)
         .map_err(tethys::Error::Io)?;
     print_lsp_session_errors(&stats.lsp_sessions);
@@ -143,26 +144,27 @@ fn print_arch_phase_result<W: Write>(
     Ok(())
 }
 
-/// Print LSP session errors, if any.
+/// Print LSP session errors, if any. Diagnostics go to stderr so they don't
+/// pollute stdout for callers that pipe `tethys index` output into another tool.
 fn print_lsp_session_errors(sessions: &[tethys::LspSessionResult]) {
     for session in sessions {
         if session.has_errors() {
-            println!();
+            eprintln!();
             match &session.outcome {
                 tethys::LspOutcome::ServerUnavailable {
                     reason,
                     install_hint,
                 } => {
-                    println!(
+                    eprintln!(
                         "{}: {} - {reason}",
                         "LSP error".red(),
                         session.language.as_str()
                     );
-                    println!("  {}: {install_hint}", "hint".dimmed());
+                    eprintln!("  {}: {install_hint}", "hint".dimmed());
                 }
                 tethys::LspOutcome::Completed(s) => {
                     for err in &s.errors {
-                        println!(
+                        eprintln!(
                             "{}: {} - {err}",
                             "LSP error".red(),
                             session.language.as_str()
@@ -197,13 +199,13 @@ mod arch_phase_print_tests {
     }
 
     #[test]
-    fn completed_path_writes_nothing_to_stdout() {
+    fn completed_path_writes_nothing() {
         let mut buf: Vec<u8> = Vec::new();
         let result = ArchPhaseResult::Completed(ArchStats::default());
         print_arch_phase_result(&mut buf, Some(&result)).expect("write");
         assert!(
             buf.is_empty(),
-            "completed path should be silent on stdout (rivets-tuph follow-up)"
+            "completed path should be silent (rivets-tuph tracks surfacing the package count)"
         );
     }
 
