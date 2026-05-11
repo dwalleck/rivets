@@ -55,6 +55,11 @@ impl Index {
                 tx.prepare("INSERT INTO arch_packages (name, path, source) VALUES (?1, ?2, ?3)")?;
             for pkg in packages {
                 stmt.execute(params![pkg.name, pkg.path, pkg.source.as_str()])?;
+                // Safe because (a) the transaction holds the exclusive write lock for
+                // its lifetime, so no other writer interleaves, and (b) `arch_packages`
+                // uses INTEGER PRIMARY KEY — `last_insert_rowid()` returns that rowid.
+                // If the PK is ever migrated to a non-rowid type (e.g., UUID, text key,
+                // or WITHOUT ROWID), switch back to a SELECT-back approach.
                 name_to_id.insert(pkg.name, PackageId::from(tx.last_insert_rowid()));
             }
         }
@@ -297,6 +302,15 @@ enum Direction {
     Incoming,
 }
 
+impl std::fmt::Display for Direction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Direction::Outgoing => f.write_str("outgoing"),
+            Direction::Incoming => f.write_str("incoming"),
+        }
+    }
+}
+
 impl Index {
     /// Detailed coupling for one package by exact name.
     /// Returns `Ok(None)` when no package matches; `Result::Err` only on DB failure.
@@ -412,7 +426,7 @@ impl Index {
                 tracing::warn!(
                     package_name = %name,
                     source = %source_str,
-                    direction = ?dir,
+                    direction = %dir,
                     "neighbor package has unknown source value; omitting from results"
                 );
                 continue;
