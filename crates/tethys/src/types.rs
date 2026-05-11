@@ -2152,7 +2152,16 @@ mod tests {
 
 // === Architecture types ===
 
-/// Internal numeric ID for a package row. Mirrors `FileId` / `SymbolId` pattern.
+/// Internal numeric ID for a package row. Mirrors the `FileId` / `SymbolId` pattern.
+///
+/// This is the database rowid for `arch_packages` and is stable only within
+/// a single index lifetime — `tethys index --rebuild` (or any other path
+/// that clears `arch_packages`) reassigns these values. External consumers
+/// that need stable cross-run identity should use [`Package::name`] instead,
+/// which is enforced unique per workspace at the schema level.
+///
+/// `PackageId` is part of the public API for symmetry with `FileId` /
+/// `SymbolId`, but no public method takes one as input. Treat it as opaque.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PackageId(i64);
 
@@ -2235,7 +2244,13 @@ pub struct CouplingMetrics {
 impl CouplingMetrics {
     /// Instability score: Ce / (Ca + Ce). Returns 0.0 when both Ca and Ce are zero.
     #[must_use]
-    #[allow(clippy::cast_precision_loss)]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "denom is the sum of two u32 counts, so its maximum value is \
+                  2 × u32::MAX ≈ 8.6 billion. f64 can represent all integers \
+                  up to 2^53 ≈ 9 quadrillion exactly, so this cast never loses \
+                  precision in practice. The lint fires on the cast syntax alone."
+    )]
     pub fn instability(&self) -> f64 {
         let denom = u64::from(self.afferent) + u64::from(self.efferent);
         if denom == 0 {
