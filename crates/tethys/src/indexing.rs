@@ -26,7 +26,8 @@ use crate::lsp;
 use crate::parallel::{OwnedSymbolData, ParsedFileData};
 use crate::resolver::resolve_module_path;
 use crate::types::{
-    FileId, Import, IndexOptions, IndexStats, Language, Span, SymbolId, SymbolKind,
+    ArchPhaseResult, FileId, Import, IndexOptions, IndexStats, Language, Span, SymbolId,
+    SymbolKind,
 };
 
 /// A dependency that couldn't be resolved because the target file wasn't indexed yet.
@@ -440,7 +441,7 @@ impl Tethys {
         // Update query planner statistics after bulk writes
         self.db.analyze()?;
 
-        let (architecture, arch_phase_error) = match self.run_architecture_phase() {
+        let arch_phase = match self.run_architecture_phase() {
             Ok(arch) => {
                 tracing::debug!(
                     packages = arch.packages_recorded,
@@ -448,14 +449,14 @@ impl Tethys {
                     edges = arch.package_deps_recorded,
                     "architecture phase complete"
                 );
-                (Some(arch), None)
+                Some(ArchPhaseResult::Completed(arch))
             }
             Err(e) => {
                 tracing::warn!(
                     error = %e,
                     "architecture phase failed; index data is otherwise valid"
                 );
-                (None, Some(e.to_string()))
+                Some(ArchPhaseResult::Failed(e.to_string()))
             }
         };
 
@@ -469,8 +470,7 @@ impl Tethys {
             errors,
             unresolved_dependencies,
             lsp_sessions,
-            architecture,
-            arch_phase_error,
+            arch_phase,
         })
     }
 
@@ -1562,6 +1562,7 @@ mod tests {
 
 #[cfg(test)]
 mod arch_phase_tests {
+    use crate::types::ArchPhaseResult;
     use crate::Tethys;
     use std::fs;
     use tempfile::TempDir;
@@ -1619,9 +1620,13 @@ edition = "2021"
     fn architecture_phase_records_packages() {
         let (_dir, mut tethys) = make_workspace_with_two_crates();
         let stats = tethys.index().expect("index");
-        let arch = stats.architecture.expect("architecture stats present");
-        assert_eq!(arch.packages_recorded, 2);
-        assert!(arch.files_assigned >= 2);
+        match stats.arch_phase {
+            Some(ArchPhaseResult::Completed(arch)) => {
+                assert_eq!(arch.packages_recorded, 2);
+                assert!(arch.files_assigned >= 2);
+            }
+            _ => panic!("expected arch_phase to be Some(Completed(...))"),
+        }
     }
 
     #[test]
@@ -1631,15 +1636,16 @@ edition = "2021"
         let dir = tempfile::tempdir().expect("temp dir");
         let mut tethys = Tethys::new(dir.path()).expect("Tethys::new");
         let stats = tethys.index().expect("index");
-        let arch = stats
-            .architecture
-            .expect("architecture should be Some even for non-Rust workspace");
-        assert_eq!(arch.packages_recorded, 0);
-        assert_eq!(arch.files_assigned, 0);
-        assert_eq!(arch.package_deps_recorded, 0);
         assert!(
-            stats.arch_phase_error.is_none(),
-            "no phase error for non-Rust workspace"
+            matches!(
+                &stats.arch_phase,
+                Some(ArchPhaseResult::Completed(arch))
+                    if arch.packages_recorded == 0
+                        && arch.files_assigned == 0
+                        && arch.package_deps_recorded == 0
+            ),
+            "expected arch_phase to be Some(Completed(all-zeros)) for non-Rust workspace, got: {:?}",
+            stats.arch_phase
         );
     }
 }

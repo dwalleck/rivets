@@ -847,6 +847,20 @@ impl Default for IndexOptions {
     }
 }
 
+/// Outcome of the architecture-analysis indexing phase.
+///
+/// `None` on `IndexStats::arch_phase` means the phase has not yet run
+/// (e.g., `IndexStats::default()`); `Some(...)` means it ran with one
+/// of these results.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArchPhaseResult {
+    /// The phase completed successfully. Stats may have zero counts on
+    /// non-Rust workspaces — that is a successful outcome, not a failure.
+    Completed(ArchStats),
+    /// The phase failed. The string carries the Display form of the error.
+    Failed(String),
+}
+
 /// Statistics from a full index operation.
 ///
 /// Returned by [`crate::Tethys::index()`], [`crate::Tethys::index_with_options()`],
@@ -873,17 +887,14 @@ pub struct IndexStats {
     /// Results from LSP resolution sessions (one per language attempted).
     /// Empty when `IndexOptions::use_lsp` was not set.
     pub lsp_sessions: Vec<LspSessionResult>,
-    /// Statistics from the architecture-analysis phase.
+    /// Outcome of the architecture-analysis phase.
     ///
-    /// - `Some(stats)` when the phase completed successfully (including the case
-    ///   where there are zero Rust crates — `stats` will have all fields at zero).
-    /// - `None` only when the phase itself failed; see `arch_phase_error` for details.
-    pub architecture: Option<ArchStats>,
-
-    /// Human-readable error from the architecture phase, set when `architecture`
-    /// is `None`. Both fields are `None` / `Some` together: if `architecture` is
-    /// `Some`, this is `None`; if `architecture` is `None`, this is `Some`.
-    pub arch_phase_error: Option<String>,
+    /// `None` means the phase did not run (the default state, before indexing).
+    /// `Some(ArchPhaseResult::Completed(stats))` means the phase succeeded;
+    /// the inner `ArchStats` may have zero counts on non-Rust workspaces.
+    /// `Some(ArchPhaseResult::Failed(err))` means the phase errored — index
+    /// data is otherwise valid.
+    pub arch_phase: Option<ArchPhaseResult>,
 }
 
 impl IndexStats {
@@ -2101,6 +2112,7 @@ mod tests {
             symbols_found: 50,
             references_found: 100,
             duration: Duration::from_secs(1),
+            arch_phase: None,
             files_skipped: 0,
             directories_skipped: vec![],
             errors: vec![],
@@ -2115,8 +2127,6 @@ mod tests {
                     outcome: LspOutcome::Completed(make_completed_session(3, 1, 0, Some(0))),
                 },
             ],
-            architecture: None,
-            arch_phase_error: None,
         };
         assert_eq!(stats.total_lsp_resolved(), 10);
     }
@@ -2133,8 +2143,7 @@ mod tests {
             errors: vec![],
             unresolved_dependencies: vec![],
             lsp_sessions: vec![],
-            architecture: None,
-            arch_phase_error: None,
+            arch_phase: None,
         };
         assert_eq!(stats.total_lsp_resolved(), 0);
         assert!(!stats.has_lsp_errors());
@@ -2287,9 +2296,9 @@ mod arch_stats_in_index_stats {
     use super::*;
 
     #[test]
-    fn index_stats_default_has_no_architecture() {
+    fn index_stats_default_arch_phase_is_none() {
         let stats = IndexStats::default();
-        assert!(stats.architecture.is_none());
+        assert!(stats.arch_phase.is_none());
     }
 }
 

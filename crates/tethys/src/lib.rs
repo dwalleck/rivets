@@ -50,12 +50,13 @@ mod types;
 pub use cargo::discover_crates;
 pub use error::{Error, IndexError, IndexErrorKind, Result};
 pub use types::{
-    ArchStats, CouplingDetail, CouplingMetrics, CouplingSort, CrateInfo, Cycle, DatabaseStats,
-    Dependent, FileAnalysis, FileId, FunctionSignature, Impact, Import, IndexOptions, IndexStats,
-    IndexUpdate, IndexedFile, Language, LspCompletedSession, LspOutcome, LspSessionResult, Package,
-    PackageDependency, PackageId, PackageSource, PanicKind, PanicPoint, Parameter, ParameterKind,
-    ReachabilityDirection, ReachabilityResult, ReachablePath, Reference, ReferenceKind, Span,
-    StalenessReport, Symbol, SymbolId, SymbolKind, UnresolvedRefForLsp, Visibility,
+    ArchPhaseResult, ArchStats, CouplingDetail, CouplingMetrics, CouplingSort, CrateInfo, Cycle,
+    DatabaseStats, Dependent, FileAnalysis, FileId, FunctionSignature, Impact, Import,
+    IndexOptions, IndexStats, IndexUpdate, IndexedFile, Language, LspCompletedSession, LspOutcome,
+    LspSessionResult, Package, PackageDependency, PackageId, PackageSource, PanicKind, PanicPoint,
+    Parameter, ParameterKind, ReachabilityDirection, ReachabilityResult, ReachablePath, Reference,
+    ReferenceKind, Span, StalenessReport, Symbol, SymbolId, SymbolKind, UnresolvedRefForLsp,
+    Visibility,
 };
 
 use std::borrow::Cow;
