@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use colored::Colorize;
-use tethys::{IndexOptions, Tethys};
+use tethys::{ArchPhaseResult, IndexOptions, Tethys};
 
 use super::ensure_lsp_if_requested;
 
@@ -94,7 +94,42 @@ pub fn run(
         );
     }
 
-    for session in &stats.lsp_sessions {
+    print_arch_phase_result(stats.arch_phase.as_ref());
+    print_lsp_session_errors(&stats.lsp_sessions);
+
+    Ok(())
+}
+
+/// Print architecture-phase outcome, if any. Success path is silent.
+fn print_arch_phase_result(arch_phase: Option<&ArchPhaseResult>) {
+    match arch_phase {
+        Some(ArchPhaseResult::Completed(arch)) => {
+            // Keep the success case silent — rivets-tuph tracks surfacing
+            // the package count in `tethys index` output. We don't want to
+            // drop the no-output behavior callers may scrape.
+            tracing::debug!(
+                packages = arch.packages_recorded,
+                files = arch.files_assigned,
+                "architecture phase summary"
+            );
+        }
+        Some(ArchPhaseResult::Failed(err)) => {
+            println!();
+            println!(
+                "  {}: architecture phase failed — coupling metrics unavailable",
+                "Warning".yellow().bold()
+            );
+            println!("  {}", err.dimmed());
+        }
+        None => {
+            // Phase didn't run (e.g., default state) — nothing to print.
+        }
+    }
+}
+
+/// Print LSP session errors, if any.
+fn print_lsp_session_errors(sessions: &[tethys::LspSessionResult]) {
+    for session in sessions {
         if session.has_errors() {
             println!();
             match &session.outcome {
@@ -122,6 +157,4 @@ pub fn run(
             }
         }
     }
-
-    Ok(())
 }
