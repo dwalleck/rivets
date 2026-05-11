@@ -38,9 +38,7 @@ fn assert_symbol_has_module_path(
     kind: SymbolKind,
     expected_module_path: &str,
 ) {
-    let symbols = tethys
-        .search_symbols(name)
-        .expect("search should succeed");
+    let symbols = tethys.search_symbols(name).expect("search should succeed");
 
     let symbol = symbols
         .iter()
