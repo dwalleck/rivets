@@ -552,6 +552,93 @@ mod package_coupling_tests {
         assert!(detail.outgoing.is_empty());
         assert!(detail.metrics.instability().abs() < 1e-9);
     }
+
+    #[test]
+    fn package_coupling_dep_count_aggregates_multiple_file_edges() {
+        // a has TWO files, both depending on b's single file.
+        // Expected: arch_package_deps(a, b).dep_count == 2.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut index = Index::open(&dir.path().join("idx.db")).expect("open");
+
+        let f_a1 = index
+            .upsert_file(Path::new("a/lib.rs"), Language::Rust, 0, 0, None)
+            .expect("a1");
+        let f_a2 = index
+            .upsert_file(Path::new("a/helpers.rs"), Language::Rust, 0, 0, None)
+            .expect("a2");
+        let f_b = index
+            .upsert_file(Path::new("b/lib.rs"), Language::Rust, 0, 0, None)
+            .expect("b");
+
+        index.insert_file_dependency(f_a1, f_b).expect("a1→b");
+        index.insert_file_dependency(f_a2, f_b).expect("a2→b");
+
+        let packages = [
+            PackageInsert {
+                name: "a",
+                path: "a",
+                source: PackageSource::Manifest,
+            },
+            PackageInsert {
+                name: "b",
+                path: "b",
+                source: PackageSource::Manifest,
+            },
+        ];
+        let mappings = [(f_a1, "a"), (f_a2, "a"), (f_b, "b")];
+        index
+            .repopulate_architecture(&packages, &mappings)
+            .expect("repopulate");
+
+        let detail = index
+            .get_package_coupling("a")
+            .expect("query")
+            .expect("found");
+        assert_eq!(detail.outgoing.len(), 1, "single edge to b");
+        assert_eq!(detail.outgoing[0].package.name, "b");
+        assert_eq!(
+            detail.outgoing[0].dep_count,
+            2,
+            "two file-edges roll up to dep_count=2"
+        );
+    }
+
+    #[test]
+    fn repopulate_architecture_filters_intra_package_deps() {
+        // Two files in the same package, with a file_dep between them.
+        // The dep must NOT appear in arch_package_deps (no self-edges allowed).
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut index = Index::open(&dir.path().join("idx.db")).expect("open");
+
+        let f1 = index
+            .upsert_file(Path::new("a/lib.rs"), Language::Rust, 0, 0, None)
+            .expect("f1");
+        let f2 = index
+            .upsert_file(Path::new("a/helpers.rs"), Language::Rust, 0, 0, None)
+            .expect("f2");
+        index.insert_file_dependency(f1, f2).expect("f1→f2");
+
+        let packages = [PackageInsert {
+            name: "a",
+            path: "a",
+            source: PackageSource::Manifest,
+        }];
+        let mappings = [(f1, "a"), (f2, "a")];
+        let stats = index
+            .repopulate_architecture(&packages, &mappings)
+            .expect("repopulate");
+
+        assert_eq!(stats.package_deps_recorded, 0, "intra-package dep filtered out");
+
+        let detail = index
+            .get_package_coupling("a")
+            .expect("query")
+            .expect("found");
+        assert!(detail.outgoing.is_empty());
+        assert!(detail.incoming.is_empty());
+        assert_eq!(detail.metrics.afferent, 0);
+        assert_eq!(detail.metrics.efferent, 0);
+    }
 }
 
 #[cfg(test)]
@@ -820,7 +907,7 @@ mod instability_property_tests {
         for i in 0..n {
             conn.execute(
                 "INSERT INTO arch_packages (id, name, path, source) VALUES (?1, ?2, ?3, 'manifest')",
-                rusqlite::params![i64::try_from(i + 1).unwrap(), format!("p{i}"), format!("p{i}")],
+                rusqlite::params![i64::try_from(i + 1).expect("package index fits in i64"), format!("p{i}"), format!("p{i}")],
             )
             .expect("insert pkg");
         }
@@ -833,8 +920,8 @@ mod instability_property_tests {
                 "INSERT OR IGNORE INTO arch_package_deps (source_pkg, target_pkg, dep_count)
                  VALUES (?1, ?2, 1)",
                 rusqlite::params![
-                    i64::try_from(src + 1).unwrap(),
-                    i64::try_from(tgt + 1).unwrap()
+                    i64::try_from(src + 1).expect("source index fits in i64"),
+                    i64::try_from(tgt + 1).expect("target index fits in i64")
                 ],
             )
             .expect("insert dep");
