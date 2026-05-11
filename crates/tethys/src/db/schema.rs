@@ -170,10 +170,18 @@ mod schema_tests {
     use super::SCHEMA;
     use rusqlite::Connection;
 
+    fn open_test_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory");
+        // Match Index::open's pragma setup so FK semantics are uniform in tests.
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("enable fks");
+        conn.execute_batch(SCHEMA).expect("apply schema");
+        conn
+    }
+
     #[test]
     fn schema_creates_arch_objects() {
-        let conn = Connection::open_in_memory().expect("open in-memory");
-        conn.execute_batch(SCHEMA).expect("apply schema");
+        let conn = open_test_conn();
 
         let count_object = |name: &str, kind: &str| -> i64 {
             conn.query_row(
@@ -192,8 +200,7 @@ mod schema_tests {
 
     #[test]
     fn arch_coupling_view_handles_empty_state() {
-        let conn = Connection::open_in_memory().expect("open in-memory");
-        conn.execute_batch(SCHEMA).expect("apply schema");
+        let conn = open_test_conn();
 
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM arch_coupling", [], |row| row.get(0))

@@ -2352,4 +2352,40 @@ mod arch_type_tests {
     fn coupling_sort_default_is_instability() {
         assert_eq!(CouplingSort::default(), CouplingSort::Instability);
     }
+
+    fn metrics(name: &str, afferent: u32, efferent: u32) -> CouplingMetrics {
+        CouplingMetrics {
+            package: Package {
+                id: PackageId::new(1),
+                name: name.into(),
+                path: name.into(),
+                source: PackageSource::Manifest,
+            },
+            afferent,
+            efferent,
+        }
+    }
+
+    #[test]
+    fn instability_is_zero_and_not_nan_when_both_couplings_are_zero() {
+        let i = metrics("isolated", 0, 0).instability();
+        assert_eq!(
+            i.to_bits(),
+            0.0_f64.to_bits(),
+            "convention: instability of an isolated package is exactly 0.0, not NaN"
+        );
+        assert!(!i.is_nan());
+    }
+
+    #[test]
+    fn instability_is_one_when_only_efferent() {
+        let i = metrics("pure-consumer", 0, 3).instability();
+        assert_eq!(i.to_bits(), 1.0_f64.to_bits());
+    }
+
+    #[test]
+    fn instability_is_zero_when_only_afferent() {
+        let i = metrics("pure-source", 3, 0).instability();
+        assert_eq!(i.to_bits(), 0.0_f64.to_bits());
+    }
 }

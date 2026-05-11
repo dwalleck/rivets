@@ -201,8 +201,7 @@ impl Index {
             CouplingSort::Instability => {
                 out.sort_by(|a, b| {
                     b.instability()
-                        .partial_cmp(&a.instability())
-                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .total_cmp(&a.instability())
                         .then_with(|| a.package.name.cmp(&b.package.name))
                 });
             }
@@ -1284,6 +1283,10 @@ mod instability_property_tests {
     /// not from the view, which no longer stores the computed column.
     fn instability_for(n: usize, edges: &[(usize, usize)]) -> Vec<(u32, u32, f64)> {
         let conn = Connection::open_in_memory().expect("open");
+        // Match the prod Index::open setup so FK constraints (e.g. arch_file_packages
+        // CASCADE deletes) are exercised under the same semantics in tests.
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("enable fks");
         conn.execute_batch(crate::db::SCHEMA).expect("schema");
 
         for i in 0..n {
