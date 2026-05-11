@@ -52,11 +52,10 @@ pub use error::{Error, IndexError, IndexErrorKind, Result};
 pub use types::{
     ArchStats, CouplingDetail, CouplingMetrics, CouplingSort, CrateInfo, Cycle, DatabaseStats,
     Dependent, FileAnalysis, FileId, FunctionSignature, Impact, Import, IndexOptions, IndexStats,
-    IndexUpdate, IndexedFile, Language, LspCompletedSession, LspOutcome, LspSessionResult,
-    Package, PackageDependency, PackageId, PackageSource, PanicKind, PanicPoint, Parameter,
-    ParameterKind, ReachabilityDirection, ReachabilityResult, ReachablePath, Reference,
-    ReferenceKind, Span, StalenessReport, Symbol, SymbolId, SymbolKind, UnresolvedRefForLsp,
-    Visibility,
+    IndexUpdate, IndexedFile, Language, LspCompletedSession, LspOutcome, LspSessionResult, Package,
+    PackageDependency, PackageId, PackageSource, PanicKind, PanicPoint, Parameter, ParameterKind,
+    ReachabilityDirection, ReachabilityResult, ReachablePath, Reference, ReferenceKind, Span,
+    StalenessReport, Symbol, SymbolId, SymbolKind, UnresolvedRefForLsp, Visibility,
 };
 
 use std::borrow::Cow;
@@ -939,17 +938,17 @@ mod arch_api_tests {
         fs::write(
             root.join("Cargo.toml"),
             "[workspace]\nmembers = [\"a\", \"b\"]\nresolver = \"2\"\n",
-        ).expect("workspace toml");
+        )
+        .expect("workspace toml");
         for name in ["a", "b"] {
             fs::create_dir_all(root.join(format!("{name}/src"))).expect("mkdir");
             fs::write(
                 root.join(format!("{name}/Cargo.toml")),
                 format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
-            ).expect("crate toml");
-            fs::write(
-                root.join(format!("{name}/src/lib.rs")),
-                "pub fn x() {}\n",
-            ).expect("crate lib");
+            )
+            .expect("crate toml");
+            fs::write(root.join(format!("{name}/src/lib.rs")), "pub fn x() {}\n")
+                .expect("crate lib");
         }
         let mut tethys = Tethys::new(root).expect("Tethys::new");
         tethys.index().expect("index");
@@ -977,10 +976,12 @@ mod arch_api_tests {
     #[test]
     fn get_package_coupling_unknown_returns_none() {
         let (_dir, tethys) = workspace_with_two_crates();
-        assert!(tethys
-            .get_package_coupling("missing")
-            .expect("query")
-            .is_none());
+        assert!(
+            tethys
+                .get_package_coupling("missing")
+                .expect("query")
+                .is_none()
+        );
     }
 }
 

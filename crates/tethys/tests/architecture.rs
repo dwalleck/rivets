@@ -91,7 +91,11 @@ fn coupling_metrics_match_expected_values() {
 
     assert_eq!(rows.len(), 3, "three crates expected");
 
-    let by_name = |n: &str| rows.iter().find(|m| m.package.name == n).expect("crate present");
+    let by_name = |n: &str| {
+        rows.iter()
+            .find(|m| m.package.name == n)
+            .expect("crate present")
+    };
 
     let a = by_name("crate_a");
     assert_eq!((a.afferent, a.efferent), (0, 2), "crate_a Ca=0, Ce=2");
@@ -113,7 +117,10 @@ fn coupling_sort_orders_match_spec() {
     let by_instability = tethys
         .get_coupling_metrics(CouplingSort::Instability)
         .expect("by I");
-    let names_i: Vec<_> = by_instability.iter().map(|m| m.package.name.as_str()).collect();
+    let names_i: Vec<_> = by_instability
+        .iter()
+        .map(|m| m.package.name.as_str())
+        .collect();
     assert_eq!(names_i, ["crate_a", "crate_b", "crate_c"]);
 
     let by_name = tethys
@@ -131,8 +138,16 @@ fn package_coupling_drilldown_for_middle_crate() {
         .expect("query")
         .expect("found");
 
-    let in_names: Vec<_> = detail.incoming.iter().map(|d| d.package.name.as_str()).collect();
-    let out_names: Vec<_> = detail.outgoing.iter().map(|d| d.package.name.as_str()).collect();
+    let in_names: Vec<_> = detail
+        .incoming
+        .iter()
+        .map(|d| d.package.name.as_str())
+        .collect();
+    let out_names: Vec<_> = detail
+        .outgoing
+        .iter()
+        .map(|d| d.package.name.as_str())
+        .collect();
 
     assert_eq!(in_names, ["crate_a"]);
     assert_eq!(out_names, ["crate_c"]);
@@ -141,9 +156,13 @@ fn package_coupling_drilldown_for_middle_crate() {
 #[test]
 fn re_indexing_yields_identical_metrics() {
     let (_dir, mut tethys) = three_crate_workspace();
-    let first = tethys.get_coupling_metrics(CouplingSort::Name).expect("first");
+    let first = tethys
+        .get_coupling_metrics(CouplingSort::Name)
+        .expect("first");
     tethys.index().expect("re-index");
-    let second = tethys.get_coupling_metrics(CouplingSort::Name).expect("second");
+    let second = tethys
+        .get_coupling_metrics(CouplingSort::Name)
+        .expect("second");
     assert_eq!(first, second);
 }
 
@@ -153,8 +172,10 @@ fn empty_workspace_returns_empty_metrics() {
     let mut tethys = Tethys::new(dir.path()).expect("Tethys::new");
     tethys.index().expect("index");
     assert!(tethys.get_packages().expect("packages").is_empty());
-    assert!(tethys
-        .get_coupling_metrics(CouplingSort::default())
-        .expect("metrics")
-        .is_empty());
+    assert!(
+        tethys
+            .get_coupling_metrics(CouplingSort::default())
+            .expect("metrics")
+            .is_empty()
+    );
 }

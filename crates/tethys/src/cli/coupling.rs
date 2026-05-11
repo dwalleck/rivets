@@ -97,7 +97,11 @@ fn collect_suggestions(name: &str, all_names: &[String]) -> Vec<String> {
 }
 
 fn print_not_found_stderr(tethys: &Tethys, name: &str) -> Result<(), tethys::Error> {
-    eprintln!("{}: no package named '{}' found", "error".red().bold(), name);
+    eprintln!(
+        "{}: no package named '{}' found",
+        "error".red().bold(),
+        name
+    );
 
     let pkgs = tethys.get_packages()?;
     let names: Vec<String> = pkgs.into_iter().map(|p| p.name).collect();
@@ -250,7 +254,9 @@ pub(crate) fn write_table_text<W: Write>(
     writeln!(
         out,
         "  {}",
-        "PACKAGE              Ca   Ce   INSTABILITY".white().dimmed()
+        "PACKAGE              Ca   Ce   INSTABILITY"
+            .white()
+            .dimmed()
     )?;
 
     let max_name_len = metrics
@@ -413,7 +419,9 @@ mod table_tests {
 #[cfg(test)]
 mod detail_tests {
     use super::*;
-    use tethys::{CouplingDetail, CouplingMetrics, Package, PackageDependency, PackageId, PackageSource};
+    use tethys::{
+        CouplingDetail, CouplingMetrics, Package, PackageDependency, PackageId, PackageSource,
+    };
 
     fn pkg(name: &str) -> Package {
         Package {
@@ -437,9 +445,18 @@ mod detail_tests {
                 dep_count: 5,
             }],
             incoming: vec![
-                PackageDependency { package: pkg("cli-binary"), dep_count: 3 },
-                PackageDependency { package: pkg("rivets-test"), dep_count: 2 },
-                PackageDependency { package: pkg("rivets-bench"), dep_count: 1 },
+                PackageDependency {
+                    package: pkg("cli-binary"),
+                    dep_count: 3,
+                },
+                PackageDependency {
+                    package: pkg("rivets-test"),
+                    dep_count: 2,
+                },
+                PackageDependency {
+                    package: pkg("rivets-bench"),
+                    dep_count: 1,
+                },
             ],
         }
     }

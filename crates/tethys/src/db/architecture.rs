@@ -49,9 +49,8 @@ impl Index {
 
         // 2. Insert packages.
         {
-            let mut stmt = tx.prepare(
-                "INSERT INTO arch_packages (name, path, source) VALUES (?1, ?2, ?3)",
-            )?;
+            let mut stmt =
+                tx.prepare("INSERT INTO arch_packages (name, path, source) VALUES (?1, ?2, ?3)")?;
             for pkg in packages {
                 stmt.execute(params![pkg.name, pkg.path, pkg.source.as_str()])?;
             }
@@ -63,7 +62,10 @@ impl Index {
         {
             let mut stmt = tx.prepare("SELECT id, name FROM arch_packages")?;
             let rows = stmt.query_map([], |row| {
-                Ok((PackageId::from(row.get::<_, i64>(0)?), row.get::<_, String>(1)?))
+                Ok((
+                    PackageId::from(row.get::<_, i64>(0)?),
+                    row.get::<_, String>(1)?,
+                ))
             })?;
             for row in rows {
                 let (id, name) = row?;
@@ -74,9 +76,8 @@ impl Index {
         // 4. Insert file → package mappings, skipping unknown names.
         let mut files_assigned: usize = 0;
         {
-            let mut stmt = tx.prepare(
-                "INSERT INTO arch_file_packages (file_id, package_id) VALUES (?1, ?2)",
-            )?;
+            let mut stmt =
+                tx.prepare("INSERT INTO arch_file_packages (file_id, package_id) VALUES (?1, ?2)")?;
             for (file_id, name) in file_to_package_name {
                 if let Some(pkg_id) = name_to_id.get(*name) {
                     stmt.execute(params![file_id.as_i64(), pkg_id.as_i64()])?;
@@ -118,9 +119,8 @@ impl Index {
         use std::path::PathBuf;
 
         let conn = self.connection()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, name, path, source FROM arch_packages ORDER BY name ASC",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT id, name, path, source FROM arch_packages ORDER BY name ASC")?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
@@ -226,10 +226,20 @@ mod get_packages_tests {
         let path = dir.path().join("idx.db");
         let index = Index::open(&path).expect("open");
         let packages = [
-            PackageInsert { name: "z_crate", path: "crates/z", source: PackageSource::Manifest },
-            PackageInsert { name: "a_crate", path: "crates/a", source: PackageSource::Manifest },
+            PackageInsert {
+                name: "z_crate",
+                path: "crates/z",
+                source: PackageSource::Manifest,
+            },
+            PackageInsert {
+                name: "a_crate",
+                path: "crates/a",
+                source: PackageSource::Manifest,
+            },
         ];
-        index.repopulate_architecture(&packages, &[]).expect("repopulate");
+        index
+            .repopulate_architecture(&packages, &[])
+            .expect("repopulate");
         (dir, index)
     }
 
@@ -377,7 +387,9 @@ impl Index {
         let mut out = Vec::new();
         for row in rows {
             let (id, name, path, source_str, dep_count) = row?;
-            let Some(source) = PackageSource::parse(&source_str) else { continue };
+            let Some(source) = PackageSource::parse(&source_str) else {
+                continue;
+            };
             out.push(PackageDependency {
                 package: Package {
                     id: PackageId::from(id),
@@ -403,43 +415,79 @@ mod package_coupling_tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut index = Index::open(&dir.path().join("idx.db")).expect("open");
 
-        let f_a = index.upsert_file(Path::new("a/lib.rs"), Language::Rust, 0, 0, None).expect("a");
-        let f_b = index.upsert_file(Path::new("b/lib.rs"), Language::Rust, 0, 0, None).expect("b");
-        let f_c = index.upsert_file(Path::new("c/lib.rs"), Language::Rust, 0, 0, None).expect("c");
+        let f_a = index
+            .upsert_file(Path::new("a/lib.rs"), Language::Rust, 0, 0, None)
+            .expect("a");
+        let f_b = index
+            .upsert_file(Path::new("b/lib.rs"), Language::Rust, 0, 0, None)
+            .expect("b");
+        let f_c = index
+            .upsert_file(Path::new("c/lib.rs"), Language::Rust, 0, 0, None)
+            .expect("c");
 
         index.insert_file_dependency(f_a, f_b).expect("a→b");
         index.insert_file_dependency(f_a, f_c).expect("a→c");
         index.insert_file_dependency(f_b, f_c).expect("b→c");
 
         let packages = [
-            PackageInsert { name: "a", path: "a", source: PackageSource::Manifest },
-            PackageInsert { name: "b", path: "b", source: PackageSource::Manifest },
-            PackageInsert { name: "c", path: "c", source: PackageSource::Manifest },
+            PackageInsert {
+                name: "a",
+                path: "a",
+                source: PackageSource::Manifest,
+            },
+            PackageInsert {
+                name: "b",
+                path: "b",
+                source: PackageSource::Manifest,
+            },
+            PackageInsert {
+                name: "c",
+                path: "c",
+                source: PackageSource::Manifest,
+            },
         ];
         let mappings = [(f_a, "a"), (f_b, "b"), (f_c, "c")];
-        index.repopulate_architecture(&packages, &mappings).expect("repopulate");
+        index
+            .repopulate_architecture(&packages, &mappings)
+            .expect("repopulate");
         (dir, index)
     }
 
     #[test]
     fn package_coupling_returns_outgoing_and_incoming() {
         let (_dir, index) = seeded_index();
-        let detail = index.get_package_coupling("b").expect("query").expect("found");
+        let detail = index
+            .get_package_coupling("b")
+            .expect("query")
+            .expect("found");
 
         assert_eq!(detail.metrics.package.name, "b");
         assert_eq!((detail.metrics.afferent, detail.metrics.efferent), (1, 1));
 
-        let in_names: Vec<_> = detail.incoming.iter().map(|d| d.package.name.as_str()).collect();
+        let in_names: Vec<_> = detail
+            .incoming
+            .iter()
+            .map(|d| d.package.name.as_str())
+            .collect();
         assert_eq!(in_names, ["a"]);
 
-        let out_names: Vec<_> = detail.outgoing.iter().map(|d| d.package.name.as_str()).collect();
+        let out_names: Vec<_> = detail
+            .outgoing
+            .iter()
+            .map(|d| d.package.name.as_str())
+            .collect();
         assert_eq!(out_names, ["c"]);
     }
 
     #[test]
     fn package_coupling_none_for_missing_package() {
         let (_dir, index) = seeded_index();
-        assert!(index.get_package_coupling("does-not-exist").expect("query").is_none());
+        assert!(
+            index
+                .get_package_coupling("does-not-exist")
+                .expect("query")
+                .is_none()
+        );
     }
 
     #[test]
@@ -447,11 +495,18 @@ mod package_coupling_tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let index = Index::open(&dir.path().join("idx.db")).expect("open");
         let packages = [PackageInsert {
-            name: "lonely", path: "lonely", source: PackageSource::Manifest,
+            name: "lonely",
+            path: "lonely",
+            source: PackageSource::Manifest,
         }];
-        index.repopulate_architecture(&packages, &[]).expect("repopulate");
+        index
+            .repopulate_architecture(&packages, &[])
+            .expect("repopulate");
 
-        let detail = index.get_package_coupling("lonely").expect("query").expect("found");
+        let detail = index
+            .get_package_coupling("lonely")
+            .expect("query")
+            .expect("found");
         assert!(detail.incoming.is_empty());
         assert!(detail.outgoing.is_empty());
         assert!(detail.metrics.instability.abs() < 1e-9);
@@ -470,21 +525,41 @@ mod coupling_metrics_tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut index = Index::open(&dir.path().join("idx.db")).expect("open");
 
-        let f_a = index.upsert_file(Path::new("a/lib.rs"), Language::Rust, 0, 0, None).expect("a");
-        let f_b = index.upsert_file(Path::new("b/lib.rs"), Language::Rust, 0, 0, None).expect("b");
-        let f_c = index.upsert_file(Path::new("c/lib.rs"), Language::Rust, 0, 0, None).expect("c");
+        let f_a = index
+            .upsert_file(Path::new("a/lib.rs"), Language::Rust, 0, 0, None)
+            .expect("a");
+        let f_b = index
+            .upsert_file(Path::new("b/lib.rs"), Language::Rust, 0, 0, None)
+            .expect("b");
+        let f_c = index
+            .upsert_file(Path::new("c/lib.rs"), Language::Rust, 0, 0, None)
+            .expect("c");
 
         index.insert_file_dependency(f_a, f_b).expect("a→b");
         index.insert_file_dependency(f_a, f_c).expect("a→c");
         index.insert_file_dependency(f_b, f_c).expect("b→c");
 
         let packages = [
-            PackageInsert { name: "a", path: "a", source: PackageSource::Manifest },
-            PackageInsert { name: "b", path: "b", source: PackageSource::Manifest },
-            PackageInsert { name: "c", path: "c", source: PackageSource::Manifest },
+            PackageInsert {
+                name: "a",
+                path: "a",
+                source: PackageSource::Manifest,
+            },
+            PackageInsert {
+                name: "b",
+                path: "b",
+                source: PackageSource::Manifest,
+            },
+            PackageInsert {
+                name: "c",
+                path: "c",
+                source: PackageSource::Manifest,
+            },
         ];
         let mappings = [(f_a, "a"), (f_b, "b"), (f_c, "c")];
-        index.repopulate_architecture(&packages, &mappings).expect("repopulate");
+        index
+            .repopulate_architecture(&packages, &mappings)
+            .expect("repopulate");
 
         (dir, index)
     }
@@ -498,7 +573,9 @@ mod coupling_metrics_tests {
     #[test]
     fn coupling_metrics_match_expected_ca_ce_instability() {
         let (_dir, index) = seeded_index();
-        let rows = index.get_coupling_metrics(CouplingSort::Name).expect("metrics");
+        let rows = index
+            .get_coupling_metrics(CouplingSort::Name)
+            .expect("metrics");
 
         let a = metrics_for(&rows, "a");
         assert_eq!((a.afferent, a.efferent), (0, 2));
@@ -516,7 +593,9 @@ mod coupling_metrics_tests {
     #[test]
     fn sort_by_instability_descending() {
         let (_dir, index) = seeded_index();
-        let rows = index.get_coupling_metrics(CouplingSort::Instability).expect("metrics");
+        let rows = index
+            .get_coupling_metrics(CouplingSort::Instability)
+            .expect("metrics");
         assert_eq!(rows[0].package.name, "a");
         assert_eq!(rows[1].package.name, "b");
         assert_eq!(rows[2].package.name, "c");
@@ -525,7 +604,9 @@ mod coupling_metrics_tests {
     #[test]
     fn sort_by_name_ascending() {
         let (_dir, index) = seeded_index();
-        let rows = index.get_coupling_metrics(CouplingSort::Name).expect("metrics");
+        let rows = index
+            .get_coupling_metrics(CouplingSort::Name)
+            .expect("metrics");
         assert_eq!(rows[0].package.name, "a");
         assert_eq!(rows[1].package.name, "b");
         assert_eq!(rows[2].package.name, "c");
@@ -536,11 +617,17 @@ mod coupling_metrics_tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let index = Index::open(&dir.path().join("idx.db")).expect("open");
         let packages = [PackageInsert {
-            name: "lonely", path: "lonely", source: PackageSource::Manifest,
+            name: "lonely",
+            path: "lonely",
+            source: PackageSource::Manifest,
         }];
-        index.repopulate_architecture(&packages, &[]).expect("repopulate");
+        index
+            .repopulate_architecture(&packages, &[])
+            .expect("repopulate");
 
-        let rows = index.get_coupling_metrics(CouplingSort::Name).expect("metrics");
+        let rows = index
+            .get_coupling_metrics(CouplingSort::Name)
+            .expect("metrics");
         assert_eq!(rows.len(), 1);
         assert_eq!((rows[0].afferent, rows[0].efferent), (0, 0));
         assert!(rows[0].instability.abs() < 1e-9);

@@ -39,8 +39,10 @@ fn index_tethys_crate_has_module_paths() {
     };
 
     let mut tethys = Tethys::new(&workspace).expect("new should succeed");
-    // Use rebuild to ensure fresh database with new module_path computation
-    let _stats = tethys.rebuild().expect("rebuild should succeed");
+    // Use index (not rebuild) so this test can run concurrently with others
+    // that share the same workspace DB. Rebuild is destructive and causes
+    // os-error-32 (file-in-use) race conditions on Windows when tests run in parallel.
+    let _stats = tethys.index().expect("index should succeed");
 
     // Query for a known symbol in tethys itself
     let symbols = tethys
@@ -67,8 +69,9 @@ fn nested_module_paths_are_correct() {
     };
 
     let mut tethys = Tethys::new(&workspace).expect("new should succeed");
-    // Use rebuild to ensure fresh database with new module_path computation
-    let _stats = tethys.rebuild().expect("rebuild should succeed");
+    // Index incrementally — does not delete the DB, so it is safe to run
+    // concurrently with other tests that share the same workspace DB.
+    let _stats = tethys.index().expect("index should succeed");
 
     // Query for discover_crates which is in cargo.rs
     let symbols = tethys

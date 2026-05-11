@@ -208,9 +208,11 @@ fn main() -> ExitCode {
             depth,
             lsp,
         } => cli::impact::run(&workspace, &target, symbol, depth, lsp),
-        Commands::Coupling { sort, package, json } => {
-            cli::coupling::run(&workspace, sort, package, json)
-        }
+        Commands::Coupling {
+            sort,
+            package,
+            json,
+        } => cli::coupling::run(&workspace, sort, package, json),
         Commands::Cycles => cli::cycles::run(&workspace),
         Commands::Stats => cli::stats::run(&workspace),
         Commands::Reachable {

@@ -849,8 +849,8 @@ impl Default for IndexOptions {
 
 /// Statistics from a full index operation.
 ///
-/// Returned by [`Tethys::index()`], [`Tethys::index_with_options()`],
-/// [`Tethys::rebuild()`], and [`Tethys::rebuild_with_options()`].
+/// Returned by [`crate::Tethys::index()`], [`crate::Tethys::index_with_options()`],
+/// [`crate::Tethys::rebuild()`], and [`crate::Tethys::rebuild_with_options()`].
 #[derive(Debug, Clone, Default)]
 pub struct IndexStats {
     /// Number of files successfully indexed

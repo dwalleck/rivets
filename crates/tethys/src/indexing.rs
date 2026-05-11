@@ -1327,11 +1327,7 @@ impl Tethys {
         let package_paths: Vec<String> = self
             .crates
             .iter()
-            .map(|c| {
-                self.relative_path(&c.path)
-                    .to_string_lossy()
-                    .into_owned()
-            })
+            .map(|c| self.relative_path(&c.path).to_string_lossy().into_owned())
             .collect();
 
         let packages: Vec<PackageInsert<'_>> = self
@@ -1572,7 +1568,8 @@ mod arch_phase_tests {
 members = ["crate_a", "crate_b"]
 resolver = "2"
 "#,
-        ).expect("write workspace toml");
+        )
+        .expect("write workspace toml");
 
         fs::create_dir_all(root.join("crate_a/src")).expect("mkdir a");
         fs::write(
@@ -1582,11 +1579,13 @@ name = "crate_a"
 version = "0.1.0"
 edition = "2021"
 "#,
-        ).expect("write a toml");
+        )
+        .expect("write a toml");
         fs::write(
             root.join("crate_a/src/lib.rs"),
             "pub fn hello() -> String { String::from(\"hi\") }\n",
-        ).expect("write a lib");
+        )
+        .expect("write a lib");
 
         fs::create_dir_all(root.join("crate_b/src")).expect("mkdir b");
         fs::write(
@@ -1596,11 +1595,13 @@ name = "crate_b"
 version = "0.1.0"
 edition = "2021"
 "#,
-        ).expect("write b toml");
+        )
+        .expect("write b toml");
         fs::write(
             root.join("crate_b/src/lib.rs"),
             "pub fn world() -> u32 { 42 }\n",
-        ).expect("write b lib");
+        )
+        .expect("write b lib");
 
         let tethys = Tethys::new(root).expect("Tethys::new");
         (dir, tethys)

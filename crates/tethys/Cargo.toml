@@ -40,7 +40,7 @@ lsp-types = "0.97"
 percent-encoding = "2.3"
 
 # Cargo manifest parsing
-cargo_toml = "0.20"
+cargo_toml = "0.22"
 
 # CLI (for binary)
 clap.workspace = true
