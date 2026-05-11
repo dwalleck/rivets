@@ -85,6 +85,16 @@ cargo run -- <subcommand>    # Run rivets CLI
 
 - `unsafe_code = "forbid"` - No unsafe code anywhere
 - `clippy::pedantic = "warn"` - Pedantic lints enabled workspace-wide
+- **CI runs `cargo clippy --all-targets --all-features -- -D warnings`** — every pedantic warning is a build break. Common surprise sources: `clippy::doc_markdown` (backtick bare identifiers like `SQLite`, `CrateInfo`), `clippy::unnecessary_wraps` (`Result<(), E>` that always returns `Ok(())`), `clippy::similar_names` (e.g. `by_ca` / `by_ce`), `clippy::missing_docs` (public struct fields need `///`).
+
+### Lint Suppression Gotchas
+
+- **Dead code on `pub` items pending a consumer**: use `#[allow(dead_code)]`, NOT `#[expect(dead_code)]`. `pub` items in a library crate don't trigger `dead_code` in the test binary target (they're considered API surface), so `#[expect]` fires as "unfulfilled" under `-D warnings`. See `crates/tethys/src/graph/mod.rs` and `graph/types.rs` for the established pattern.
+- **`pub(crate)` in a lib crate is NOT visible to the bin crate's tests in the same package.** Lib and bin are separate compilation units. If a constructor needs to be reachable from `#[cfg(test)]` blocks in a bin module of a lib+bin package (e.g. `tethys`), keep it `pub` with a doc comment explaining the intent, not `pub(crate)`.
+
+### Test Concurrency with SQLite
+
+Nextest is process-per-test. Tests that share an external resource (most often a SQLite DB file from the rivets workspace itself, e.g., `module_path_integration` tests in `tethys`) race across processes. Mitigations: (a) SQLite connections in this repo set `busy_timeout(30s)` in `Index::open` so writers wait gracefully instead of erroring; (b) when multiple tests would call `tethys.index()` against the same workspace, **consolidate them into one `#[test]` with multiple assertions** rather than relying on the busy timeout — the test runs once per binary, no race.
 
 ### Crate-specific
 
@@ -177,6 +187,22 @@ Cargo workspace with 4 crates:
 - `src/domain/` - Core domain types (Issue, Priority, Status, etc.)
 - `src/storage/` - Persistence layer (JSONL-backed)
 - `src/output/` - CLI output formatting
+
+### Key directories in `tethys` crate
+
+- `src/cli/` - Per-subcommand modules (`index`, `search`, `coupling`, `callers`, …)
+- `src/db/` - SQLite storage layer (`schema`, `files`, `symbols`, `refs`, `architecture`, …)
+- `src/languages/` - Per-language tree-sitter extractors (`rust`, `csharp`, `common`)
+- `src/graph/` - Graph traversal queries (`SymbolGraphOps`, `FileGraphOps`)
+- `src/lsp/` - LSP-based reference refinement (rust-analyzer integration)
+- `src/indexing.rs` - Indexing pipeline orchestration on `Tethys`
+
+## Documentation Conventions
+
+- Design specs: `docs/design/<feature>.md` (no date prefix)
+- Implementation plans: `docs/plans/YYYY-MM-DD-<feature>.md`
+- Long-lived research/comparison docs live next to the crate they discuss (e.g., `crates/tethys/KIROGRAPH-COMPARISON.md`), not in `docs/`.
+- The `docs/superpowers/` paths some plugin skills (brainstorming, writing-plans) suggest by default do NOT match this convention — override them when invoking those skills.
 
 ## Extended Guidelines (from GitHub Awesome Copilot)
 
@@ -449,29 +475,3 @@ tracing::info!("Loaded {} issues from {}", count, path.display());
 
 - Use `tracing::*` for **internal diagnostics** (debugging, monitoring, troubleshooting)
 - Use `println!/eprintln!` for **user-facing output** (command results, error messages shown to users)
-
-## ⚠️ CRITICAL: Before Making ANY Code Changes
-
-**MANDATORY**: Always consult project guidelines before:
-
-- Writing any code
-- Making any modifications
-- Implementing any features
-- Creating any tests
-
-Key guidelines to follow:
-
-- Required Test-Driven Development workflow
-- Documentation standards
-- Code quality requirements
-- Step-by-step implementation process
-- Verification checklists
-
-**SPECIAL ATTENTION**: If working as part of a multi-agent team:
-
-1. You MUST follow parallel development workflows
-2. You MUST create branches and show ALL command outputs
-3. You MUST run verification scripts and show their output
-4. You MUST create progress tracking files
-
-**NEVER** proceed with implementation without following established guidelines.
