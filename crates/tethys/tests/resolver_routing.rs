@@ -143,3 +143,105 @@ pub fn shared_helper(x: u32) -> u32 {
          unqualified shared_helper(...) call; got: {edges:?}"
     );
 }
+
+/// Companion to the test above, exercising the *fallthrough* branch of
+/// `fallback_symbol_search`. When `shared_helper` exists only in `crate_b`
+/// (no same-crate candidate), the resolver must drop through to the unscoped
+/// `search_unique_symbol_by_name` and resolve to `crate_b`. This is correct
+/// behavior — there's no phantom risk because there's no ambiguity. A
+/// regression that broke the fallthrough (e.g., returning `None` after the
+/// same-crate miss instead of continuing) would orphan this reference and
+/// fail the positive assertion below.
+///
+/// Pair with `fallback_routes_unqualified_ref_to_same_crate_not_cross_crate`:
+/// that test pins the *priority* leg (same-crate wins); this test pins the
+/// *fallthrough* leg (no same-crate -> use workspace-wide if unique).
+#[test]
+fn fallback_resolves_via_unscoped_when_no_same_crate_candidate() {
+    let (_dir, mut tethys) = workspace_with_files(&[
+        (
+            "Cargo.toml",
+            r#"
+[workspace]
+members = ["crate_a", "crate_b"]
+resolver = "2"
+"#,
+        ),
+        (
+            "crate_a/Cargo.toml",
+            r#"
+[package]
+name = "crate_a"
+version = "0.1.0"
+edition = "2021"
+"#,
+        ),
+        (
+            "crate_a/src/lib.rs",
+            r"
+mod imports_module;
+
+use crate::imports_module::imported_fn;
+
+pub fn entry() -> u32 {
+    imported_fn();
+    shared_helper(42)
+}
+",
+        ),
+        (
+            "crate_a/src/imports_module.rs",
+            r"
+pub fn imported_fn() {}
+",
+        ),
+        (
+            "crate_b/Cargo.toml",
+            r#"
+[package]
+name = "crate_b"
+version = "0.1.0"
+edition = "2021"
+"#,
+        ),
+        (
+            "crate_b/src/lib.rs",
+            r"
+pub fn shared_helper(x: u32) -> u32 {
+    x + 1
+}
+",
+        ),
+    ]);
+
+    tethys.index().expect("index should succeed");
+
+    let conn = open_db(&tethys);
+    let edges: Vec<(String, String)> = conn
+        .prepare(
+            "SELECT f1.path, f2.path
+             FROM file_deps d
+             JOIN files f1 ON f1.id = d.from_file_id
+             JOIN files f2 ON f2.id = d.to_file_id",
+        )
+        .expect("prepare file_deps query")
+        .query_map(params![], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("query")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect");
+
+    // The unqualified `shared_helper(42)` call has NO same-crate candidate
+    // (crate_a defines none). The resolver's same-crate scoping must return
+    // `None`, fall through to the unscoped path, find the unique workspace
+    // candidate in crate_b, and produce the cross-crate edge. A regression
+    // that fails to fall through (e.g., early-returns after the same-crate
+    // miss) would orphan the reference and this assertion would fail.
+    let fallthrough_edge_present = edges
+        .iter()
+        .any(|(from, to)| from == "crate_a/src/lib.rs" && to == "crate_b/src/lib.rs");
+    assert!(
+        fallthrough_edge_present,
+        "expected fallthrough edge crate_a/src/lib.rs -> crate_b/src/lib.rs from the \
+         unqualified shared_helper(...) call (only candidate is in crate_b); got: {edges:?}"
+    );
+}
