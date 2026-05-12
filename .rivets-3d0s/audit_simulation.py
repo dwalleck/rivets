@@ -55,7 +55,8 @@ def crate_of(path: str) -> str | None:
     return None
 
 def audit_would_demote(ref_kind: str, sym_kind: str,
-                       caller_crate: str | None, target_crate: str | None) -> bool:
+                       caller_crate: str | None, target_crate: str | None,
+                       extended: bool = False) -> bool:
     """The proposed audit's rule. Returns True if the audit would set
     symbol_id=NULL for this ref.
 
@@ -63,6 +64,11 @@ def audit_would_demote(ref_kind: str, sym_kind: str,
     qualified calls within a crate produce ref_kind/sym_kind combinations
     that look incompatible on paper but are legitimate. The audit only
     targets cross-crate fallback-resolved refs.
+
+    When `extended=True`, the rule additionally demotes cross-crate
+    `ref_kind=call` matches to `sym_kind=method` or `sym_kind=function`
+    (Option A — addressing the un-ambiguation drift discovered during
+    checkpointed-build of the base rule).
     """
     if caller_crate is None or target_crate is None:
         return False
@@ -71,7 +77,10 @@ def audit_would_demote(ref_kind: str, sym_kind: str,
     if ref_kind == "type":
         return sym_kind not in TYPE_KINDS
     if ref_kind == "call":
-        return sym_kind in NON_CALLABLE_FOR_CALL
+        if sym_kind in NON_CALLABLE_FOR_CALL:
+            return True
+        if extended and sym_kind in {"method", "function"}:
+            return True
     return False
 
 conn = sqlite3.connect(DB)
@@ -110,10 +119,18 @@ print(f"  same-crate: {len(same_crate)}")
 print()
 
 # Apply simulated audit. r is (sym_kind, ref_kind, caller_crate, target_crate, name)
-phantom_demoted = [r for r in phantoms if audit_would_demote(r[1], r[0], r[2], r[3])]
-phantom_survived = [r for r in phantoms if not audit_would_demote(r[1], r[0], r[2], r[3])]
-legit_demoted = [r for r in legit_cross if audit_would_demote(r[1], r[0], r[2], r[3])]
-same_crate_demoted = [r for r in same_crate if audit_would_demote(r[1], r[0], r[2], r[3])]
+# Toggle EXTENDED to probe Option A (demote call->method/function cross-crate).
+EXTENDED = True
+print(f"[audit mode: {'EXTENDED (Option A)' if EXTENDED else 'BASE'}]")
+print()
+
+def demote(r):
+    return audit_would_demote(r[1], r[0], r[2], r[3], extended=EXTENDED)
+
+phantom_demoted = [r for r in phantoms if demote(r)]
+phantom_survived = [r for r in phantoms if not demote(r)]
+legit_demoted = [r for r in legit_cross if demote(r)]
+same_crate_demoted = [r for r in same_crate if demote(r)]
 
 print("=== Simulated audit verdict ===")
 print(f"  phantoms demoted:     {len(phantom_demoted)} / {len(phantoms)}")
