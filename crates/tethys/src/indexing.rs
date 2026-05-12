@@ -878,7 +878,7 @@ impl Tethys {
 
             // Resolve the module path to a file
             if let Some(resolved) =
-                resolve_module_path(&import_stmt.path, current_file, &crate_root)
+                resolve_module_path(&import_stmt.path, current_file, &crate_root, self.crates())
             {
                 // Make the path relative to workspace root
                 let dep_path = self.relative_path(&resolved).to_path_buf();
@@ -1039,7 +1039,7 @@ impl Tethys {
             }
 
             if let Some(resolved) =
-                resolve_module_path(&import_stmt.path, current_file, &crate_root)
+                resolve_module_path(&import_stmt.path, current_file, &crate_root, self.crates())
             {
                 let dep_path = self.relative_path(&resolved).to_path_buf();
                 depended_files.insert(dep_path);

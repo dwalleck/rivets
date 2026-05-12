@@ -310,7 +310,8 @@ impl Tethys {
 
         let path_segments: Vec<String> = source_module.split("::").map(String::from).collect();
 
-        let Some(resolved_file) = resolve_module_path(&path_segments, current_path, crate_root)
+        let Some(resolved_file) =
+            resolve_module_path(&path_segments, current_path, crate_root, self.crates())
         else {
             trace!(
                 source_module = %source_module,

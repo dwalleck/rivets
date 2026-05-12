@@ -1,16 +1,26 @@
 //! Module path resolution for Rust source files.
 //!
 //! Maps use statement paths to actual file paths within the workspace.
-//! External crates return `None` since we can't analyze external code.
+//! Handles `crate::` / `self::` / `super::` prefixes plus paths starting
+//! with a known workspace-crate name (Rust 2018+ idiom). Paths starting
+//! with an external crate name return `None` since we can't analyze
+//! external code.
 
 use std::path::{Path, PathBuf};
+
+use crate::types::CrateInfo;
 
 /// Resolve a module path to a file path within the workspace.
 ///
 /// # Arguments
-/// * `path` - Module path segments (e.g., `["crate", "auth"]`)
+/// * `path` - Module path segments (e.g., `["crate", "auth"]` or
+///   `["rivets", "storage", "in_memory"]`)
 /// * `current_file` - Path to the file containing the use statement
-/// * `crate_root` - Root of the crate (usually `src/` directory)
+/// * `crate_root` - Root of the *current* file's crate (usually `src/` directory)
+/// * `workspace_crates` - All discovered crates in the workspace. When `path[0]`
+///   matches a `CrateInfo::name` (with `-` → `_` normalization to convert Cargo
+///   manifest names to Rust module names), resolution recurses into that
+///   crate's `src/` as the new `crate_root`.
 ///
 /// # Returns
 /// * `Some(PathBuf)` - Resolved file path within the workspace
@@ -20,6 +30,7 @@ pub fn resolve_module_path(
     path: &[String],
     current_file: &Path,
     crate_root: &Path,
+    workspace_crates: &[CrateInfo],
 ) -> Option<PathBuf> {
     if path.is_empty() {
         return None;
@@ -29,8 +40,19 @@ pub fn resolve_module_path(
         "crate" => resolve_crate_path(&path[1..], crate_root),
         "self" => resolve_self_path(&path[1..], current_file),
         "super" => resolve_super_path(&path[1..], current_file),
-        // External crate - cannot resolve
-        _ => None,
+        head => {
+            // rivets-v465: paths starting with a workspace-crate name
+            // (Rust 2018+ idiom: `use other_crate::Module::Item`) route
+            // to that crate's `src/` directory and recurse. Pre-fix this
+            // landed in the `_ => None` arm with the misleading comment
+            // "External crate - cannot resolve", which made tethys treat
+            // every workspace-cross-crate import as if it were external.
+            let target = workspace_crates
+                .iter()
+                .find(|c| c.name.replace('-', "_") == head)?;
+            let other_src = target.path.join("src");
+            resolve_crate_path(&path[1..], &other_src)
+        }
     }
 }
 
@@ -152,7 +174,7 @@ mod tests {
         let current = crate_root.join("lib.rs");
 
         let path = vec!["crate".to_string(), "config".to_string()];
-        let result = resolve_module_path(&path, &current, &crate_root);
+        let result = resolve_module_path(&path, &current, &crate_root, &[]);
 
         assert!(result.is_some());
         let resolved = result.unwrap();
@@ -167,7 +189,7 @@ mod tests {
         let current = crate_root.join("lib.rs");
 
         let path = vec!["crate".to_string(), "auth".to_string()];
-        let result = resolve_module_path(&path, &current, &crate_root);
+        let result = resolve_module_path(&path, &current, &crate_root, &[]);
 
         assert!(result.is_some());
         let resolved = result.unwrap();
@@ -182,7 +204,7 @@ mod tests {
         let current = crate_root.join("auth").join("mod.rs");
 
         let path = vec!["self".to_string(), "middleware".to_string()];
-        let result = resolve_module_path(&path, &current, &crate_root);
+        let result = resolve_module_path(&path, &current, &crate_root, &[]);
 
         assert!(result.is_some());
         let resolved = result.unwrap();
@@ -197,7 +219,7 @@ mod tests {
         let current = crate_root.join("lib.rs");
 
         let path = vec!["serde".to_string(), "Serialize".to_string()];
-        let result = resolve_module_path(&path, &current, &crate_root);
+        let result = resolve_module_path(&path, &current, &crate_root, &[]);
 
         assert!(result.is_none());
     }
@@ -215,7 +237,7 @@ mod tests {
 
         let current = inner.join("mod.rs");
         let path = vec!["super".to_string(), "middleware".to_string()];
-        let result = resolve_module_path(&path, &current, &crate_root);
+        let result = resolve_module_path(&path, &current, &crate_root, &[]);
 
         assert!(result.is_some());
         let resolved = result.unwrap();
@@ -228,7 +250,67 @@ mod tests {
         let crate_root = dir.path().join("src");
         let current = crate_root.join("lib.rs");
 
-        let result = resolve_module_path(&[], &current, &crate_root);
+        let result = resolve_module_path(&[], &current, &crate_root, &[]);
         assert!(result.is_none());
+    }
+
+    /// rivets-v465 stress fixture: a workspace with two crates where
+    /// `crate_a` imports something from `crate_b`. Pre-fix, `path[0]="crate_b"`
+    /// fell into the `_ => None` arm. Post-fix, the new arm matches it
+    /// against the workspace `CrateInfo` list and recurses into
+    /// `crate_b/src/` as the new `crate_root`.
+    ///
+    /// Catches both directions of the bug:
+    /// - "new arm misfires" — passing a non-workspace head should still None
+    ///   (covered by `returns_none_for_external_crate` above, now run against
+    ///   a non-empty crate list)
+    /// - "new arm doesn't fire for the right head" — this test
+    #[test]
+    fn resolves_workspace_crate_via_new_arm() {
+        use crate::types::CrateInfo;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        // caller_crate only needs a src/lib.rs to exist.
+        let caller_crate = dir.path().join("caller_crate");
+        let caller_src = caller_crate.join("src");
+        fs::create_dir_all(&caller_src).expect("caller src");
+        fs::write(caller_src.join("lib.rs"), "").expect("caller lib.rs");
+
+        // target_crate is what the import points at. `use target_crate::storage`
+        // must resolve to target_crate/src/storage.rs.
+        let target_crate = dir.path().join("target_crate");
+        let target_src = target_crate.join("src");
+        fs::create_dir_all(&target_src).expect("target src");
+        fs::write(target_src.join("lib.rs"), "").expect("target lib.rs");
+        fs::write(target_src.join("storage.rs"), "pub fn helper() {}")
+            .expect("target storage.rs");
+
+        let crates = vec![
+            CrateInfo {
+                name: "caller_crate".to_string(),
+                path: caller_crate.clone(),
+                lib_path: Some(PathBuf::from("src/lib.rs")),
+                bin_paths: vec![],
+            },
+            CrateInfo {
+                name: "target_crate".to_string(),
+                path: target_crate.clone(),
+                lib_path: Some(PathBuf::from("src/lib.rs")),
+                bin_paths: vec![],
+            },
+        ];
+
+        let current = caller_src.join("lib.rs");
+        let path = vec!["target_crate".to_string(), "storage".to_string()];
+        let result = resolve_module_path(&path, &current, &caller_src, &crates);
+
+        let resolved = result.expect("target_crate::storage should resolve to target_crate/src/storage.rs");
+        assert!(
+            resolved.ends_with("target_crate/src/storage.rs")
+                || resolved.ends_with("target_crate\\src\\storage.rs"),
+            "expected target_crate/src/storage.rs, got {resolved:?}"
+        );
+        assert!(resolved.exists(), "resolved path must exist on disk");
     }
 }
