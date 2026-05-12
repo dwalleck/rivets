@@ -198,8 +198,13 @@ impl Tethys {
             }
         }
 
-        // Fallback search differs for qualified vs simple names
-        if let Some(symbol) = self.fallback_symbol_search(ref_name, is_qualified)? {
+        // Fallback search differs for qualified vs simple names. The caller's
+        // file path scopes simple-name lookups to the same crate first; without
+        // that scope, names like `Error` resolve to the first matching symbol
+        // workspace-wide (rivets-0gom).
+        if let Some(symbol) =
+            self.fallback_symbol_search(ref_name, is_qualified, ctx.current_file_path)?
+        {
             trace!(
                 ref_id = ref_.id,
                 ref_name = %ref_name,
@@ -331,26 +336,74 @@ impl Tethys {
     /// Fallback symbol search when import-based resolution fails.
     ///
     /// For qualified names, searches by exact `qualified_name` match.
-    /// For simple names, searches by name across all files (safe for unambiguous symbols).
-    fn fallback_symbol_search(&self, ref_name: &str, is_qualified: bool) -> Result<Option<Symbol>> {
+    /// For simple names, prefers a same-crate match (using `caller_file_path`
+    /// to identify the caller's containing crate). Only when no same-crate
+    /// symbol of that name exists does this fall back to the unscoped
+    /// workspace-wide search.
+    fn fallback_symbol_search(
+        &self,
+        ref_name: &str,
+        is_qualified: bool,
+        caller_file_path: Option<&Path>,
+    ) -> Result<Option<Symbol>> {
         if is_qualified {
-            self.db.get_symbol_by_qualified_name(ref_name)
-        } else {
-            let Some(symbol) = self.db.search_symbol_by_name(ref_name)? else {
-                return Ok(None);
-            };
-            // Verify the symbol's file exists
-            if self.db.get_file_by_id(symbol.file_id)?.is_some() {
-                Ok(Some(symbol))
+            return self.db.get_symbol_by_qualified_name(ref_name);
+        }
+
+        // Same-crate first: cheap, deterministic, and almost always correct.
+        if let Some(path) = caller_file_path {
+            if let Some(crate_info) = self.get_crate_for_file(path) {
+                let prefix = self.relative_path(&crate_info.path);
+                let prefix_str = prefix.to_string_lossy();
+                if let Some(symbol) = self
+                    .db
+                    .search_symbol_by_name_in_path_prefix(ref_name, &prefix_str)?
+                {
+                    if self.db.get_file_by_id(symbol.file_id)?.is_some() {
+                        return Ok(Some(symbol));
+                    }
+                    // Same-crate symbol exists but its file record is gone. DB is
+                    // inconsistent; falling through to the unscoped search would
+                    // silently mask the inconsistency by returning a different
+                    // crate's symbol. Refuse with a warn instead.
+                    warn!(
+                        ref_name = %ref_name,
+                        symbol_id = %symbol.id,
+                        file_id = %symbol.file_id,
+                        "Same-crate symbol found but file record missing - returning None to avoid masking DB inconsistency"
+                    );
+                    return Ok(None);
+                }
             } else {
-                warn!(
+                // Caller's file is in the workspace but not in any indexed crate.
+                // Most likely: stale DB entry for a deleted file (rivets-lcb6),
+                // or an orphan file under a non-member directory (rivets-fayv).
+                // Either way the same-crate path silently disables — log it so
+                // operators can correlate unresolved refs to orphan files.
+                debug!(
+                    caller_file = %path.display(),
                     ref_name = %ref_name,
-                    symbol_id = %symbol.id,
-                    file_id = %symbol.file_id,
-                    "Symbol found but file record missing - database may be inconsistent"
+                    "Caller file has no containing crate; same-crate scoping skipped"
                 );
-                Ok(None)
             }
+        }
+
+        // Unscoped fallback. `search_unique_symbol_by_name` returns None on
+        // genuine ambiguity (≥2 workspace candidates), so this only resolves
+        // when exactly one workspace-wide candidate exists.
+        let Some(symbol) = self.db.search_unique_symbol_by_name(ref_name)? else {
+            return Ok(None);
+        };
+        if self.db.get_file_by_id(symbol.file_id)?.is_some() {
+            Ok(Some(symbol))
+        } else {
+            warn!(
+                ref_name = %ref_name,
+                symbol_id = %symbol.id,
+                file_id = %symbol.file_id,
+                "Symbol found but file record missing - database may be inconsistent"
+            );
+            Ok(None)
         }
     }
 

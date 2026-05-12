@@ -1,0 +1,46 @@
+total file_deps rows: 359
+
+=== Section 1: CROSS-CRATE EDGES (claims 3, 4) ===
+distinct cross-crate (from, to) pairs: 73
+
+FROM           TO              EDGES
+tethys         rivets-jsonl       21
+tethys         rivets             16
+rivets         rivets-jsonl       15
+rivets-mcp     rivets              7
+rivets         tethys              5
+rivets-mcp     tethys              4
+rivets-jsonl   tethys              3
+rivets-mcp     rivets-jsonl        2
+
+=== Section 2: INTRA-CRATE EDGES (claim 5: unchanged before/after fix) ===
+CRATE           EDGES
+tethys            178
+rivets             73
+rivets-jsonl       12
+rivets-mcp         10
+
+=== Section 3: AMBIGUITY CHECK (claim 6: should-have-been-None cases) ===
+refs resolved across crates: 294
+ambiguity violations (claim 6): 0
+
+# Notes (round 2 of review feedback)
+#
+# Comparison to round 1 (after-review-fixes.txt):
+#   - Cross-crate pairs: 73 → 73 (UNCHANGED; round 2 is orthogonal to cross-crate)
+#   - Total file_deps: 465 → 359 (-106)
+#   - Intra-crate tethys: 272 → 178 (-94)
+#   - Intra-crate rivets: 82 → 73 (-9)
+#   - Intra-crate rivets-jsonl: 13 → 12 (-1)
+#   - Intra-crate rivets-mcp: 12 → 10 (-2)
+#   - Ambiguity violations: 0 → 0 (HELD)
+#
+# The intra-crate drop is the intended consequence of LIMIT 1 → LIMIT 2 +
+# refuse-when-multiple in search_symbol_by_name_in_path_prefix. Within tethys,
+# names like `path`, `kind`, `line`, `name`, `run` have 10-14 candidates each;
+# the old code returned an arbitrary one. The new code returns None, which
+# causes the resolver to refuse-to-resolve those refs rather than fabricate.
+#
+# Cross-crate constancy (73 unchanged, 294 cross-crate refs unchanged) is the
+# load-bearing signal: round 2's change is correctly scoped to the same-crate
+# code path; it has no unintended effect on cross-crate resolution.
