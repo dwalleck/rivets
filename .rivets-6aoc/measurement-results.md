@@ -38,7 +38,7 @@ The cross-crate resolved count went *down* by 9 (305 → 296), which initially l
 
 **PASSES.** Hyperfine post-fix: **23.444s ± 0.454s** (3 runs). Pre-fix single run: 23.15s. Ratio 1.013 (+1.3%). Well under 10% threshold.
 
-The per-file `cargo::get_crate_for_file` lookup adds O(files × crates) work. For the rivets workspace this is 118 × 4 = 472 ops, dwarfed by the indexing pipeline's other work. The honest budget statement: this would matter at ~100-crate workspaces. The plan's pre-mitigation (swap to BTreeMap if scale demands) remains available.
+The per-file `cargo::get_crate_for_file` lookup adds O(files × crates) work. For the rivets workspace this is 118 × 4 = 472 ops, dwarfed by the indexing pipeline's other work. The honest budget statement: this would matter at ~100-crate workspaces. The plan's pre-mitigation (swap to BTreeMap if scale demands) is tracked at [rivets-bjdn](rivets-bjdn).
 
 ## Verdict
 
