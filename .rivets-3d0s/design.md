@@ -93,23 +93,77 @@ guess. That's ~145 phantom refs requiring either:
   policy (probably correct; we'd accept that some legitimate cross-crate
   method calls go unresolved, but tethys already accepts this for stdlib).
 
-## Implication for next skill (falsifiable-design)
+## LSP angle — empirically tested
+
+After the kind-mismatch insight, an obvious question: does tethys's existing
+`--lsp` flag (Pass 3, rust-analyzer integration) fix this? Built
+`.rivets-3d0s/lsp_probe.py` to verify with a 2-file fixture:
+
+- `crate_caller/src/lib.rs`: calls `map.len()` on a `HashMap` (stdlib)
+- `crate_target/src/lib.rs`: defines `impl WarningCollector { pub fn len(&self) -> usize }`
+
+Result:
+
+| Run | Phantom edge `crate_caller -> crate_target`? |
+|---|---|
+| Index WITHOUT `--lsp` | **Present** (ref_count=1) |
+| Index WITH `--lsp` | **Still present** (ref_count=1, identical resolution) |
+
+**Why:** Pass 3 (LSP) queries `WHERE r.symbol_id IS NULL`
+(`db/references.rs:119`). It only resolves *previously unresolved* refs.
+The rivets-3d0s phantoms are *wrongly resolved* by Pass 1/2 (`symbol_id`
+already points at the workspace `len`), so Pass 3 never touches them.
+
+Independent confirmation that LSP works in principle: the existing test
+`lsp_resolves_method_on_inferred_type` in `crates/tethys/tests/lsp_resolution.rs`
+exercises the same `.len()` pattern and passes with rust-analyzer
+installed.
+
+## Revised fix shape: audit-and-demote
+
+The kind-mismatch insight plus the LSP-only-fills-gaps finding suggest a
+cleaner fix than the original design:
+
+1. **Pass 2.5 (new): kind-compatibility audit.** After Pass 2 completes, walk
+   all resolved refs and demote those with incompatible
+   `ref_kind` ↔ `sym_kind` to `symbol_id = NULL`. Cheap, deterministic, no
+   LSP dependency.
+2. **Pass 3 (existing, when `--lsp`):** picks up the demoted refs via the
+   existing `WHERE symbol_id IS NULL` query and re-resolves via
+   rust-analyzer's type inference.
+
+Two-tier behavior for free:
+- Without `--lsp`: demoted refs stay unresolved (no phantom edges, lower
+  total resolution rate). Strictly better than wrong-resolution.
+- With `--lsp`: demoted refs get correctly re-resolved via type info.
+
+## What the audit checks
 
 The fix design needs to answer:
-1. **Where does ref_kind get extracted?** Already in DB (column `refs.kind`).
-   So the filter can live in `fallback_symbol_search` or in
-   `search_unique_symbol_by_name` (whichever accepts the ref_kind param).
-2. **What's the kind-compatibility matrix?**
-   - `ref_kind=type` should only match sym_kind in `{struct, enum, trait, type_alias, union}`.
-   - `ref_kind=call` is harder — without type info, the only safe answer
-     is "don't resolve unscoped at all for call-position refs to
-     method/field/module" (refuse rather than guess). Legitimate same-crate
-     calls go through the rivets-0gom scoping path before this.
+1. **Where does `ref_kind` get extracted?** Already in DB (column `refs.kind`).
+   The audit lives in a new step after Pass 2 in `Tethys::index_with_options`.
+2. **The kind-compatibility matrix:**
+   - `ref_kind=type` should only match sym_kinds that are types:
+     `{struct, enum, trait, type_alias, union}`. Demote everything else
+     (catches the 29 type-position phantoms — `Serialize` → `LspError::Serialize` enum_variant, etc.)
+   - `ref_kind=call` should only match call-shaped sym_kinds: `{function, method}`.
+     Demote `struct_field`, `module`, `enum_variant` (catches most of the 145 call-position phantoms).
+   - Same-crate matches via the rivets-0gom scoping path are still trusted
+     (no audit) — they're cheap and accurate by construction.
 3. **What does "same-crate fallback" look like under this rule?** The
    round-3 integration test (`fallback_routes_unqualified_ref_to_same_crate_not_cross_crate`)
-   currently relies on workspace-wide for `shared_helper`. If we tighten the
-   workspace-wide fallback, that test fixture needs to use a `function`-kind
-   target so it stays valid under the new rule.
+   currently relies on workspace-wide for `shared_helper`. The audit runs
+   AFTER resolution, not as a filter at resolve-time, so existing tests
+   should pass unchanged — the audit only demotes resolved refs that fail
+   the kind check, and `shared_helper` resolved to a same-crate function
+   passes the check.
+
+## Side findings
+
+- `--lsp` produced `LSP error -32603: url is not a file` warnings in the
+  probe fixture but the existing test passed. There may be a tethys bug in
+  Windows path handling for rebuild-on-existing-DB scenarios. Not blocking
+  rivets-3d0s but worth filing later.
 
 ## Artifacts
 
