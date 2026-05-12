@@ -283,8 +283,7 @@ mod tests {
         let target_src = target_crate.join("src");
         fs::create_dir_all(&target_src).expect("target src");
         fs::write(target_src.join("lib.rs"), "").expect("target lib.rs");
-        fs::write(target_src.join("storage.rs"), "pub fn helper() {}")
-            .expect("target storage.rs");
+        fs::write(target_src.join("storage.rs"), "pub fn helper() {}").expect("target storage.rs");
 
         let crates = vec![
             CrateInfo {
@@ -305,12 +304,101 @@ mod tests {
         let path = vec!["target_crate".to_string(), "storage".to_string()];
         let result = resolve_module_path(&path, &current, &caller_src, &crates);
 
-        let resolved = result.expect("target_crate::storage should resolve to target_crate/src/storage.rs");
+        let resolved =
+            result.expect("target_crate::storage should resolve to target_crate/src/storage.rs");
         assert!(
             resolved.ends_with("target_crate/src/storage.rs")
                 || resolved.ends_with("target_crate\\src\\storage.rs"),
             "expected target_crate/src/storage.rs, got {resolved:?}"
         );
         assert!(resolved.exists(), "resolved path must exist on disk");
+    }
+
+    /// Build a multi-crate workspace tempdir with the given
+    /// `(crate_name, extra_files)` pairs. Each `extra_files` entry is a
+    /// path relative to that crate's `src/` directory.
+    fn workspace_with_crates(
+        crates: &[(&str, &[&str])],
+    ) -> (TempDir, Vec<crate::types::CrateInfo>) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut infos = Vec::new();
+        for (name, extras) in crates {
+            let crate_path = dir.path().join(name);
+            let src = crate_path.join("src");
+            fs::create_dir_all(&src).expect("crate src");
+            fs::write(src.join("lib.rs"), "").expect("crate lib.rs");
+            for relative in *extras {
+                let full = src.join(relative);
+                if let Some(parent) = full.parent() {
+                    fs::create_dir_all(parent).expect("nested dir");
+                }
+                fs::write(&full, "").expect("nested file");
+            }
+            infos.push(crate::types::CrateInfo {
+                name: (*name).to_string(),
+                path: crate_path,
+                lib_path: Some(PathBuf::from("src/lib.rs")),
+                bin_paths: vec![],
+            });
+        }
+        (dir, infos)
+    }
+
+    /// Slice 2 / design claim C2: multi-segment path through a workspace
+    /// crate resolves to a deeply-nested file (not just the crate root's
+    /// `lib.rs`). Catches the bug where the new arm hands off to
+    /// `resolve_crate_path` but the latter can't reach files in subdirectories.
+    #[test]
+    fn workspace_crate_path_traverses_to_nested_file() {
+        let (dir, crates) =
+            workspace_with_crates(&[("caller", &[]), ("target", &["nested/deep/thing.rs"])]);
+        let current = dir.path().join("caller/src/lib.rs");
+        let path = vec![
+            "target".to_string(),
+            "nested".to_string(),
+            "deep".to_string(),
+            "thing".to_string(),
+        ];
+        let result = resolve_module_path(&path, &current, &dir.path().join("caller/src"), &crates);
+        let resolved = result.expect("multi-segment workspace-crate path must resolve");
+        assert!(
+            resolved.ends_with("target/src/nested/deep/thing.rs")
+                || resolved.ends_with("target\\src\\nested\\deep\\thing.rs"),
+            "expected target/src/nested/deep/thing.rs, got {resolved:?}"
+        );
+    }
+
+    /// Slice 2 / design claim C3 (stronger version): with a non-empty
+    /// `workspace_crates` list, an EXTERNAL crate head (`serde`) must still
+    /// return `None`. Catches the bug where the new arm matches too eagerly
+    /// (e.g., partial-name match, or always-`Some`).
+    #[test]
+    fn external_crate_returns_none_even_with_workspace_list() {
+        let (dir, crates) = workspace_with_crates(&[("caller", &[]), ("target", &[])]);
+        let current = dir.path().join("caller/src/lib.rs");
+        let path = vec!["serde".to_string(), "Serialize".to_string()];
+        let result = resolve_module_path(&path, &current, &dir.path().join("caller/src"), &crates);
+        assert!(
+            result.is_none(),
+            "serde is not in workspace; new arm must not match it, got {result:?}"
+        );
+    }
+
+    /// Slice 2: Cargo manifest names allow hyphens; Rust module names use
+    /// underscores. `use rivets_jsonl::Foo` (`path[0]="rivets_jsonl"`) must
+    /// match a `CrateInfo` with name `"rivets-jsonl"`. Catches the bug where
+    /// the new arm compares raw strings without normalization.
+    #[test]
+    fn hyphenated_crate_name_matches_underscore_path_head() {
+        let (dir, crates) = workspace_with_crates(&[("caller", &[]), ("my-crate", &["thing.rs"])]);
+        let current = dir.path().join("caller/src/lib.rs");
+        let path = vec!["my_crate".to_string(), "thing".to_string()];
+        let result = resolve_module_path(&path, &current, &dir.path().join("caller/src"), &crates);
+        let resolved = result.expect("hyphenated my-crate should match my_crate path head");
+        assert!(
+            resolved.ends_with("my-crate/src/thing.rs")
+                || resolved.ends_with("my-crate\\src\\thing.rs"),
+            "expected my-crate/src/thing.rs, got {resolved:?}"
+        );
     }
 }
