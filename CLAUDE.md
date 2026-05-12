@@ -214,6 +214,14 @@ Cargo workspace with 4 crates:
 - Long-lived research/comparison docs live next to the crate they discuss (e.g., `crates/tethys/KIROGRAPH-COMPARISON.md`), not in `docs/`.
 - The `docs/superpowers/` paths some plugin skills (brainstorming, writing-plans) suggest by default do NOT match this convention — override them when invoking those skills.
 
+### Issue diagnostic directories (`.<issue-id>/`)
+
+For substantial fixes, an issue-scoped diagnostic directory at the repo root holds the audit trail: prove-it-prototype probes, oracles, falsifiable design, plan, empirical snapshots, and per-round review decision logs (e.g., `.rivets-v465/`, `.rivets-3d0s/`). They're committed alongside the code change as the historical record of *why* the fix looks the way it does.
+
+- Point-in-time, not maintained. Probe scripts query whatever schema/state was current when the fix was developed; they will go stale and that's expected.
+- Per-round review responses go in `.<issue-id>/review-decisions-round-N.md`. Don't edit prior rounds; add a new file per round.
+- Once the issue is closed and the fix has stabilized, these directories are archival reference, not active tooling. Don't treat them as runnable utilities without re-validating against current code.
+
 ## Extended Guidelines (from GitHub Awesome Copilot)
 
 ### Self-Explanatory Code Commenting
