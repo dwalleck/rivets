@@ -5,18 +5,24 @@ Method: built release tethys on each side, wiped `.rivets/index/tethys.db`, re-i
 
 ## Snapshot diff
 
-| Metric | Pre-fix (main, commit c1af978) | Post-fix (branch HEAD, commit e2ffe39) | Δ |
-|---|---|---|---|
-| Total refs | 21,481 | 21,627 | +146 |
-| Resolved refs | 6,456 | 6,566 | **+110** |
-| Intra-crate resolved | 5,985 | 6,156 | **+171** |
-| Cross-crate resolved | 305 | 296 | -9 |
-| `file_deps` total | 374 | 383 | +9 |
-| `file_deps` intra-crate | 285 | 307 | +22 |
-| `file_deps` cross-crate | 76 | 72 | -4 |
-| Unresolved `crate::*` refs | 28 | 31 | +3 |
+| Metric | Pre-fix (main, commit c1af978) | Post-slice-5 (commit e2ffe39) | Post-round-1-review-fixes | Δ vs pre-fix |
+|---|---|---|---|---|
+| Total refs | 21,481 | 21,627 | 21,661 | +180 |
+| Resolved refs | 6,456 | 6,566 | **6,630** | **+174** |
+| Intra-crate resolved | 5,985 | 6,156 | 6,161 | +176 |
+| Cross-crate resolved | 305 | 296 | 296 | -9 |
+| `file_deps` total | 374 | 383 | 393 | +19 |
+| `file_deps` intra-crate | 285 | 307 | 307 | +22 |
+| `file_deps` cross-crate | 76 | 72 | 72 | -4 |
+| Unresolved `crate::*` refs | 28 | 31 | 31 | +3 |
 
-Raw JSON: `.rivets-6aoc/measure-pre-fix.json`, `.rivets-6aoc/measure-post-fix.json`.
+Raw JSON: `.rivets-6aoc/measure-pre-fix.json`, `.rivets-6aoc/measure-post-fix.json`, `.rivets-6aoc/measure-post-round-1-fixes.json`.
+
+### Round-1 review-fix delta (+64 resolved refs)
+
+The C2/I4 review finding correctly identified a regression in the initial slice-2/3 implementation: skipping Pass-2-imports entirely for files outside any known crate dropped `fallback_symbol_search` resolution for qualified references in those files (workspace-root examples, bench dirs, etc.). Replacing the skip with a "file-parent sentinel `crate_root`" approach restores that path — `crate::*` arms harmlessly fail to resolve in such files (their semantics is undefined anyway), while the rest of the resolver pipeline (self/super arms, workspace-crate arm, path-agnostic fallback) continues to run.
+
+Net effect: +64 newly-resolved refs after the C2/I4 fix, on top of the +110 from the initial slices. Total: **+174 resolved refs vs main**.
 
 ## Claim verification
 
