@@ -145,6 +145,8 @@ This project uses [Conventional Commits](https://www.conventionalcommits.org/en/
 - `ci`: CI/CD configuration
 - `chore`: Maintenance tasks
 
+**Note:** CI's "Validate Commits" job (`.github/workflows/ci.yml`) enforces these via regex. Commits using non-listed types like `plan(...)` or `design(...)` from the gilfoyle workflow fail this check — pre-existing known noise on branches that use those types. If Validate Commits is red, inspect offending commit subjects before assuming new breakage.
+
 ### Suggested Scopes (Optional)
 
 Scopes must be lowercase. Common scopes:
@@ -197,12 +199,28 @@ Cargo workspace with 4 crates:
 - `src/lsp/` - LSP-based reference refinement (rust-analyzer integration)
 - `src/indexing.rs` - Indexing pipeline orchestration on `Tethys`
 
+### Tethys resolver internals
+
+- 3 passes: Pass 1 tree-sitter same-file (`indexing.rs::store_references`), Pass 2 imports+fallback (`resolve.rs::resolve_cross_file_references`), Pass 3 LSP (`--lsp`, fills `symbol_id IS NULL` only).
+- Pass 2 short-circuits on import-less files: `resolve_refs_for_file` returns early if `imports.is_empty()`. References in such files never reach Pass-2 import/fallback resolution.
+- **Provenance gotcha:** Pass 2's `resolve_reference` clears `reference_name` to NULL on resolve (in `db/references.rs::resolve_reference`). `reference_name IS NULL` does NOT attribute provenance to any pass. To measure which pass resolved which refs: toggle a branch in `resolve.rs` (e.g., `if false && let Some(symbol) = fallback_symbol_search(...)`), rebuild release, wipe DB, re-index, diff resolved counts. No other way without a schema change.
+- ALLOWED cross-crate Cargo deps in this workspace: `rivets→rivets-jsonl`, `rivets-mcp→rivets`, `rivets-mcp→rivets-jsonl`. Other ordered pairs are phantom-by-definition for resolver probes.
+- Known multi-crate resolver bugs to be aware of: `rivets-6aoc` and `rivets-34tv` (hardcoded `src/` join in `resolve.rs::resolve_cross_file_references`, `indexing.rs::compute_dependencies`, `indexing.rs::compute_dependencies_from_stored`, and the workspace-crate arm of `resolver.rs::resolve_module_path`); `rivets-714v` (`--lsp` multi-crate path bug). Run `rivets show <id>` for current state.
+
 ## Documentation Conventions
 
 - Design specs: `docs/design/<feature>.md` (no date prefix)
 - Implementation plans: `docs/plans/YYYY-MM-DD-<feature>.md`
 - Long-lived research/comparison docs live next to the crate they discuss (e.g., `crates/tethys/KIROGRAPH-COMPARISON.md`), not in `docs/`.
 - The `docs/superpowers/` paths some plugin skills (brainstorming, writing-plans) suggest by default do NOT match this convention — override them when invoking those skills.
+
+### Issue diagnostic directories (`.<issue-id>/`)
+
+For substantial fixes, an issue-scoped diagnostic directory at the repo root holds the audit trail: prove-it-prototype probes, oracles, falsifiable design, plan, empirical snapshots, and per-round review decision logs (e.g., `.rivets-v465/`, `.rivets-3d0s/`). They're committed alongside the code change as the historical record of *why* the fix looks the way it does.
+
+- Point-in-time, not maintained. Probe scripts query whatever schema/state was current when the fix was developed; they will go stale and that's expected.
+- Per-round review responses go in `.<issue-id>/review-decisions-round-N.md`. Don't edit prior rounds; add a new file per round.
+- Once the issue is closed and the fix has stabilized, these directories are archival reference, not active tooling. Don't treat them as runnable utilities without re-validating against current code.
 
 ## Extended Guidelines (from GitHub Awesome Copilot)
 
