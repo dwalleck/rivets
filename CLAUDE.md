@@ -145,6 +145,8 @@ This project uses [Conventional Commits](https://www.conventionalcommits.org/en/
 - `ci`: CI/CD configuration
 - `chore`: Maintenance tasks
 
+**Note:** CI's "Validate Commits" job (`.github/workflows/ci.yml`) enforces these via regex. Commits using non-listed types like `plan(...)` or `design(...)` from the gilfoyle workflow fail this check — pre-existing known noise on branches that use those types. If Validate Commits is red, inspect offending commit subjects before assuming new breakage.
+
 ### Suggested Scopes (Optional)
 
 Scopes must be lowercase. Common scopes:
@@ -196,6 +198,14 @@ Cargo workspace with 4 crates:
 - `src/graph/` - Graph traversal queries (`SymbolGraphOps`, `FileGraphOps`)
 - `src/lsp/` - LSP-based reference refinement (rust-analyzer integration)
 - `src/indexing.rs` - Indexing pipeline orchestration on `Tethys`
+
+### Tethys resolver internals
+
+- 3 passes: Pass 1 tree-sitter same-file (`indexing.rs::store_references`), Pass 2 imports+fallback (`resolve.rs::resolve_cross_file_references`), Pass 3 LSP (`--lsp`, fills `symbol_id IS NULL` only).
+- Pass 2 short-circuits on import-less files: `resolve_refs_for_file` returns early if `imports.is_empty()`. References in such files never reach Pass-2 import/fallback resolution.
+- **Provenance gotcha:** Pass 2's `resolve_reference` clears `reference_name` to NULL on resolve (`db/references.rs:157`). `reference_name IS NULL` does NOT attribute provenance to any pass. To measure which pass resolved which refs: toggle a branch in `resolve.rs` (e.g., `if false && let Some(symbol) = fallback_symbol_search(...)`), rebuild release, wipe DB, re-index, diff resolved counts. No other way without a schema change.
+- ALLOWED cross-crate Cargo deps in this workspace: `rivets→rivets-jsonl`, `rivets-mcp→rivets`, `rivets-mcp→rivets-jsonl`. Other ordered pairs are phantom-by-definition for resolver probes.
+- Known multi-crate resolver bugs to be aware of: `rivets-6aoc` and `rivets-34tv` (hardcoded `self.workspace_root.join("src")` at `resolve.rs:66`, `indexing.rs:857`, `indexing.rs:1023`); `rivets-714v` (`--lsp` multi-crate path bug). Run `rivets show <id>` for current state.
 
 ## Documentation Conventions
 
