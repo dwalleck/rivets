@@ -62,7 +62,7 @@ pub fn resolve_module_path(
                     .filter(|p| p.exists());
             }
 
-            let other_src = target.path.join("src");
+            let other_src = target.src_root();
             resolve_crate_path(&path[1..], &other_src)
         }
     }
@@ -540,6 +540,58 @@ mod tests {
             resolved.ends_with("my-crate/src/thing.rs")
                 || resolved.ends_with("my-crate\\src\\thing.rs"),
             "expected my-crate/src/thing.rs, got {resolved:?}"
+        );
+    }
+
+    /// Stress fixture for slice 4: a workspace crate with a non-standard
+    /// `lib_path` must have its source modules resolved under the derived
+    /// `src_root()`, NOT under a hardcoded `<crate>/src`. A pre-fix impl
+    /// using `target.path.join("src")` would look for `<crate>/src/module.rs`
+    /// (which doesn't exist) and return None; the post-fix `target.src_root()`
+    /// derives `<crate>/custom/path` from `lib_path.parent()` and finds the
+    /// actual file.
+    #[test]
+    fn workspace_crate_arm_uses_src_root_not_hardcoded_src() {
+        use crate::types::CrateInfo;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target_crate = dir.path().join("target");
+        let custom_dir = target_crate.join("custom/path");
+        fs::create_dir_all(&custom_dir).expect("custom dir");
+        fs::write(custom_dir.join("lib.rs"), "").expect("lib.rs");
+        fs::write(custom_dir.join("module.rs"), "pub fn x() {}").expect("module.rs");
+
+        let caller_crate = dir.path().join("caller");
+        fs::create_dir_all(caller_crate.join("src")).expect("caller src");
+        fs::write(caller_crate.join("src/lib.rs"), "").expect("caller lib.rs");
+
+        let crates = vec![
+            CrateInfo {
+                name: "caller".into(),
+                path: caller_crate.clone(),
+                lib_path: Some(PathBuf::from("src/lib.rs")),
+                bin_paths: vec![],
+            },
+            CrateInfo {
+                name: "target".into(),
+                path: target_crate.clone(),
+                lib_path: Some(PathBuf::from("custom/path/lib.rs")),
+                bin_paths: vec![],
+            },
+        ];
+
+        let result = resolve_module_path(
+            &["target".to_string(), "module".to_string()],
+            &caller_crate.join("src/lib.rs"),
+            &caller_crate.join("src"),
+            &crates,
+        );
+        let resolved = result
+            .expect("non-standard lib_path target should resolve via src_root, not hardcoded src/");
+        assert!(
+            resolved.ends_with("custom/path/module.rs")
+                || resolved.ends_with("custom\\path\\module.rs"),
+            "expected target/custom/path/module.rs (via lib_path.parent()), got {resolved:?}"
         );
     }
 }
