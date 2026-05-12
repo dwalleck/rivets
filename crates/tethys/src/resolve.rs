@@ -198,8 +198,13 @@ impl Tethys {
             }
         }
 
-        // Fallback search differs for qualified vs simple names
-        if let Some(symbol) = self.fallback_symbol_search(ref_name, is_qualified)? {
+        // Fallback search differs for qualified vs simple names. The caller's
+        // file path scopes simple-name lookups to the same crate first; without
+        // that scope, names like `Error` resolve to the first matching symbol
+        // workspace-wide (rivets-0gom).
+        if let Some(symbol) =
+            self.fallback_symbol_search(ref_name, is_qualified, ctx.current_file_path)?
+        {
             trace!(
                 ref_id = ref_.id,
                 ref_name = %ref_name,
@@ -331,26 +336,58 @@ impl Tethys {
     /// Fallback symbol search when import-based resolution fails.
     ///
     /// For qualified names, searches by exact `qualified_name` match.
-    /// For simple names, searches by name across all files (safe for unambiguous symbols).
-    fn fallback_symbol_search(&self, ref_name: &str, is_qualified: bool) -> Result<Option<Symbol>> {
+    /// For simple names, prefers a same-crate match (using `caller_file_path`
+    /// to identify the caller's containing crate). Only when no same-crate
+    /// symbol of that name exists does this fall back to the unscoped
+    /// workspace-wide search.
+    fn fallback_symbol_search(
+        &self,
+        ref_name: &str,
+        is_qualified: bool,
+        caller_file_path: Option<&Path>,
+    ) -> Result<Option<Symbol>> {
         if is_qualified {
-            self.db.get_symbol_by_qualified_name(ref_name)
-        } else {
-            let Some(symbol) = self.db.search_symbol_by_name(ref_name)? else {
-                return Ok(None);
-            };
-            // Verify the symbol's file exists
-            if self.db.get_file_by_id(symbol.file_id)?.is_some() {
-                Ok(Some(symbol))
+            return self.db.get_symbol_by_qualified_name(ref_name);
+        }
+
+        // Same-crate first: cheap, deterministic, and almost always correct.
+        if let Some(path) = caller_file_path
+            && let Some(crate_info) = self.get_crate_for_file(path)
+        {
+            // The DB stores file paths with forward slashes (see db::files::normalize_path).
+            // On Windows, `relative_path` returns native backslash paths, so we must
+            // normalize the prefix or the LIKE comparison silently misses every file.
+            let relative = self.relative_path(&crate_info.path);
+            let raw = relative.to_string_lossy();
+            let normalized: String = if cfg!(windows) {
+                raw.replace('\\', "/")
             } else {
-                warn!(
-                    ref_name = %ref_name,
-                    symbol_id = %symbol.id,
-                    file_id = %symbol.file_id,
-                    "Symbol found but file record missing - database may be inconsistent"
-                );
-                Ok(None)
+                raw.into_owned()
+            };
+            let prefix = format!("{normalized}/");
+            if let Some(symbol) = self
+                .db
+                .search_symbol_by_name_in_path_prefix(ref_name, &prefix)?
+                && self.db.get_file_by_id(symbol.file_id)?.is_some()
+            {
+                return Ok(Some(symbol));
             }
+        }
+
+        // Unscoped fallback (slice 3 hardens this against genuine ambiguity).
+        let Some(symbol) = self.db.search_symbol_by_name(ref_name)? else {
+            return Ok(None);
+        };
+        if self.db.get_file_by_id(symbol.file_id)?.is_some() {
+            Ok(Some(symbol))
+        } else {
+            warn!(
+                ref_name = %ref_name,
+                symbol_id = %symbol.id,
+                file_id = %symbol.file_id,
+                "Symbol found but file record missing - database may be inconsistent"
+            );
+            Ok(None)
         }
     }
 

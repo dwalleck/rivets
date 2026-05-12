@@ -238,10 +238,6 @@ impl Index {
     /// trailing separator (e.g. `"crates/tethys/"`).
     ///
     /// Returns `None` if no symbol with that name exists under the prefix.
-    #[allow(
-        dead_code,
-        reason = "wired into fallback_symbol_search in slice 2 of rivets-0gom"
-    )]
     pub fn search_symbol_by_name_in_path_prefix(
         &self,
         name: &str,
