@@ -19,8 +19,9 @@ use crate::types::CrateInfo;
 /// * `crate_root` - Root of the *current* file's crate (usually `src/` directory)
 /// * `workspace_crates` - All discovered crates in the workspace. When `path[0]`
 ///   matches a `CrateInfo::name` (with `-` → `_` normalization to convert Cargo
-///   manifest names to Rust module names), resolution recurses into that
-///   crate's `src/` as the new `crate_root`.
+///   manifest names to Rust module names): a single-segment path resolves to
+///   the target crate's entry-point file (`lib_path` or first bin); a
+///   multi-segment path recurses into that crate's `src/` as the new `crate_root`.
 ///
 /// # Returns
 /// * `Some(PathBuf)` - Resolved file path within the workspace
@@ -41,15 +42,22 @@ pub fn resolve_module_path(
         "self" => resolve_self_path(&path[1..], current_file),
         "super" => resolve_super_path(&path[1..], current_file),
         head => {
-            // rivets-v465: paths starting with a workspace-crate name
-            // (Rust 2018+ idiom: `use other_crate::Module::Item`) route
-            // to that crate's `src/` directory and recurse. Pre-fix this
-            // landed in the `_ => None` arm with the misleading comment
-            // "External crate - cannot resolve", which made tethys treat
-            // every workspace-cross-crate import as if it were external.
+            // Rust 2018+: workspace-crate prefix routes into that crate's src/.
+            // External crates aren't in the list, so `?` returns None for them.
             let target = workspace_crates
                 .iter()
                 .find(|c| c.name.replace('-', "_") == head)?;
+
+            // Single-segment path (e.g. `use rivets;`) refers to the crate
+            // itself, which on disk is the entry-point file — not the src/ dir.
+            if path.len() == 1 {
+                return target
+                    .lib_path
+                    .as_ref()
+                    .or_else(|| target.bin_paths.first().map(|(_, p)| p))
+                    .map(|p| target.path.join(p));
+            }
+
             let other_src = target.path.join("src");
             resolve_crate_path(&path[1..], &other_src)
         }
@@ -381,6 +389,54 @@ mod tests {
         assert!(
             result.is_none(),
             "serde is not in workspace; new arm must not match it, got {result:?}"
+        );
+    }
+
+    /// Single-segment path through the workspace-crate arm resolves to the
+    /// entry-point file, not the `src/` directory. Without this, a `use foo;`
+    /// import would feed a directory path into the dep-graph file table.
+    #[test]
+    fn single_segment_workspace_crate_resolves_to_entry_point_file() {
+        let (dir, crates) = workspace_with_crates(&[("caller", &[]), ("target", &[])]);
+        let current = dir.path().join("caller/src/lib.rs");
+        let path = vec!["target".to_string()];
+        let result = resolve_module_path(&path, &current, &dir.path().join("caller/src"), &crates);
+        let resolved = result.expect("single-segment workspace-crate must resolve to entry point");
+        assert!(
+            resolved.ends_with("target/src/lib.rs") || resolved.ends_with("target\\src\\lib.rs"),
+            "expected target/src/lib.rs, got {resolved:?}"
+        );
+    }
+
+    /// Self-reference: a file using its OWN crate's name in an import path
+    /// (e.g. `use rivets::Foo` from inside `rivets`) must resolve identically
+    /// to the `crate::Foo` form. The new arm should find the caller's own
+    /// `CrateInfo` and recurse into the same `src/` it would have used for
+    /// `crate::`.
+    #[test]
+    fn workspace_crate_self_reference_matches_crate_form() {
+        let (dir, crates) = workspace_with_crates(&[("solo", &["storage.rs"])]);
+        let current = dir.path().join("solo/src/lib.rs");
+        let solo_src = dir.path().join("solo/src");
+
+        let via_workspace_arm = resolve_module_path(
+            &["solo".to_string(), "storage".to_string()],
+            &current,
+            &solo_src,
+            &crates,
+        )
+        .expect("self-reference via workspace arm must resolve");
+        let via_crate_arm = resolve_module_path(
+            &["crate".to_string(), "storage".to_string()],
+            &current,
+            &solo_src,
+            &crates,
+        )
+        .expect("crate::storage must resolve");
+
+        assert_eq!(
+            via_workspace_arm, via_crate_arm,
+            "self-import via crate-name and `crate::` form must produce the same file path"
         );
     }
 
