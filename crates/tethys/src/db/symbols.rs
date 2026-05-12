@@ -2,7 +2,7 @@
 
 use rusqlite::OptionalExtension;
 use rusqlite::params;
-use tracing::trace;
+use tracing::{debug, trace};
 
 use super::{Index, SYMBOLS_COLUMNS, row_to_symbol};
 use crate::error::Result;
@@ -230,20 +230,25 @@ impl Index {
     }
 
     /// Search for a symbol by name, restricted to files whose path begins
-    /// with `path_prefix`.
+    /// with `path_prefix`. The prefix must use forward slashes and end with
+    /// a separator, e.g. `"crates/tethys/"`; backslash-containing prefixes
+    /// match zero rows because file paths are stored normalized
+    /// (see [`crate::db::files::normalize_path`]).
     ///
-    /// Used by `fallback_symbol_search` to prefer same-crate matches before
-    /// falling back to the unscoped [`Self::search_symbol_by_name`]. The
-    /// prefix is typically the caller's containing crate path with a
-    /// trailing separator (e.g. `"crates/tethys/"`).
-    ///
-    /// Returns `None` if no symbol with that name exists under the prefix.
+    /// Returns `None` if no symbol with that name exists under the prefix,
+    /// OR if `path_prefix` is empty (which would otherwise produce a
+    /// workspace-wide wildcard, reintroducing the rivets-0gom bug class).
     pub fn search_symbol_by_name_in_path_prefix(
         &self,
         name: &str,
         path_prefix: &str,
     ) -> Result<Option<Symbol>> {
-        debug_assert!(!path_prefix.is_empty(), "path_prefix must not be empty");
+        if path_prefix.is_empty() {
+            // Empty prefix → LIKE '%' → matches every file. That would
+            // silently degrade this scoped lookup to the unscoped one.
+            // Refuse instead.
+            return Ok(None);
+        }
         let conn = self.connection()?;
         let like_pattern = format!("{path_prefix}%");
         conn.query_row(
@@ -260,30 +265,36 @@ impl Index {
         .map_err(Into::into)
     }
 
-    /// Search for a symbol by name across all files.
+    /// Search for a symbol by name across all files, returning the unique
+    /// match or `None` (when there are zero or multiple candidates).
     ///
-    /// Returns the unique match if exactly one symbol with that name exists in
-    /// the workspace. Returns `None` when zero or multiple symbols share the
-    /// name — genuine ambiguity. Callers that want a crate-scoped lookup
-    /// should use [`Self::search_symbol_by_name_in_path_prefix`] first; this
-    /// function is the last-resort fallback.
-    pub fn search_symbol_by_name(&self, name: &str) -> Result<Option<Symbol>> {
+    /// Callers wanting a crate-scoped lookup should use
+    /// [`Self::search_symbol_by_name_in_path_prefix`] first; this function
+    /// is the last-resort workspace-wide fallback and deliberately refuses
+    /// to pick arbitrarily among ambiguous matches.
+    pub fn search_unique_symbol_by_name(&self, name: &str) -> Result<Option<Symbol>> {
         trace!(
             symbol_name = %name,
-            "Searching for symbol by name (any file, unambiguous-only)"
+            "Searching for symbol by name (workspace-wide, unique-only)"
         );
 
         let conn = self.connection()?;
         let mut stmt = conn.prepare(&format!(
             "SELECT {SYMBOLS_COLUMNS} FROM symbols WHERE name = ?1 LIMIT 2"
         ))?;
-        let rows: Vec<Symbol> = stmt
-            .query_map([name], row_to_symbol)?
-            .collect::<std::result::Result<_, _>>()?;
-        match rows.len() {
-            1 => Ok(rows.into_iter().next()),
-            _ => Ok(None), // 0 = not found; >=2 = ambiguous, refuse to guess
+        let mut iter = stmt.query_map([name], row_to_symbol)?;
+        let Some(first) = iter.next().transpose()? else {
+            return Ok(None);
+        };
+        if iter.next().transpose()?.is_some() {
+            debug!(
+                symbol_name = %name,
+                first_match_file_id = %first.file_id,
+                "Refusing ambiguous workspace-wide name match (multiple candidates)"
+            );
+            return Ok(None);
         }
+        Ok(Some(first))
     }
 
     /// Find a symbol at a specific file and line.
@@ -462,7 +473,7 @@ mod search_by_name_ambiguity_tests {
         let (_dir, mut index) = fresh_index();
         let bar_id = insert_bar_in(&mut index, "crate_a/src/lib.rs");
         let result = index
-            .search_symbol_by_name("Bar")
+            .search_unique_symbol_by_name("Bar")
             .expect("query")
             .expect("unique Bar should resolve");
         assert_eq!(result.id, bar_id);
@@ -473,7 +484,7 @@ mod search_by_name_ambiguity_tests {
         let (_dir, mut index) = fresh_index();
         let _bar_a = insert_bar_in(&mut index, "crate_a/src/lib.rs");
         let _bar_b = insert_bar_in(&mut index, "crate_b/src/lib.rs");
-        let result = index.search_symbol_by_name("Bar").expect("query");
+        let result = index.search_unique_symbol_by_name("Bar").expect("query");
         assert!(
             result.is_none(),
             "ambiguous Bar (two cross-crate candidates) must return None, got {result:?}"
@@ -484,7 +495,12 @@ mod search_by_name_ambiguity_tests {
     fn no_match_returns_none() {
         let (_dir, mut index) = fresh_index();
         insert_bar_in(&mut index, "crate_a/src/lib.rs");
-        let result = index.search_symbol_by_name("Nonexistent").expect("query");
-        assert!(result.is_none());
+        let result = index
+            .search_unique_symbol_by_name("Nonexistent")
+            .expect("query");
+        assert!(
+            result.is_none(),
+            "missing name must return None, got {result:?}"
+        );
     }
 }

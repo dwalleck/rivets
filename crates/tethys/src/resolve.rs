@@ -354,28 +354,35 @@ impl Tethys {
         if let Some(path) = caller_file_path
             && let Some(crate_info) = self.get_crate_for_file(path)
         {
-            // The DB stores file paths with forward slashes (see db::files::normalize_path).
-            // On Windows, `relative_path` returns native backslash paths, so we must
-            // normalize the prefix or the LIKE comparison silently misses every file.
-            let relative = self.relative_path(&crate_info.path);
-            let raw = relative.to_string_lossy();
-            let normalized: String = if cfg!(windows) {
-                raw.replace('\\', "/")
-            } else {
-                raw.into_owned()
-            };
-            let prefix = format!("{normalized}/");
+            let prefix = format!(
+                "{}/",
+                crate::db::normalize_path(&self.relative_path(&crate_info.path))
+            );
             if let Some(symbol) = self
                 .db
                 .search_symbol_by_name_in_path_prefix(ref_name, &prefix)?
-                && self.db.get_file_by_id(symbol.file_id)?.is_some()
             {
-                return Ok(Some(symbol));
+                if self.db.get_file_by_id(symbol.file_id)?.is_some() {
+                    return Ok(Some(symbol));
+                }
+                // Same-crate symbol exists but its file record is gone. DB is
+                // inconsistent; falling through to the unscoped search would
+                // silently mask the inconsistency by returning a different
+                // crate's symbol. Refuse with a warn instead.
+                warn!(
+                    ref_name = %ref_name,
+                    symbol_id = %symbol.id,
+                    file_id = %symbol.file_id,
+                    "Same-crate symbol found but file record missing - returning None to avoid masking DB inconsistency"
+                );
+                return Ok(None);
             }
         }
 
-        // Unscoped fallback (slice 3 hardens this against genuine ambiguity).
-        let Some(symbol) = self.db.search_symbol_by_name(ref_name)? else {
+        // Unscoped fallback. `search_unique_symbol_by_name` returns None on
+        // genuine ambiguity (≥2 workspace candidates), so this only resolves
+        // when exactly one workspace-wide candidate exists.
+        let Some(symbol) = self.db.search_unique_symbol_by_name(ref_name)? else {
             return Ok(None);
         };
         if self.db.get_file_by_id(symbol.file_id)?.is_some() {
