@@ -126,6 +126,15 @@ impl Tethys {
         let parser = tree_sitter::Parser::new();
         let crates = cargo::discover_crates(&workspace_root);
 
+        debug_assert!(
+            {
+                let mut sorted: Vec<&str> = crates.iter().map(|c| c.name.as_str()).collect();
+                sorted.sort_unstable();
+                sorted.windows(2).all(|w| w[0] != w[1])
+            },
+            "discover_crates returned duplicate crate names; Cargo's manifest layer should prevent this"
+        );
+
         Ok(Self {
             workspace_root,
             db_path,

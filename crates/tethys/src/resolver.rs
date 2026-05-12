@@ -51,12 +51,15 @@ pub fn resolve_module_path(
 
             // Single-segment path (e.g. `use rivets;`) refers to the crate
             // itself, which on disk is the entry-point file — not the src/ dir.
+            // Filter on `.exists()` to mirror `resolve_as_module`'s guarantee
+            // that returned paths exist on disk.
             if path.len() == 1 {
                 return target
                     .lib_path
                     .as_ref()
                     .or_else(|| target.bin_paths.first().map(|(_, p)| p))
-                    .map(|p| target.path.join(p));
+                    .map(|p| target.path.join(p))
+                    .filter(|p| p.exists());
             }
 
             let other_src = target.path.join("src");
@@ -263,17 +266,10 @@ mod tests {
         assert!(result.is_none());
     }
 
-    /// rivets-v465 stress fixture: a workspace with two crates where
-    /// `crate_a` imports something from `crate_b`. Pre-fix, `path[0]="crate_b"`
-    /// fell into the `_ => None` arm. Post-fix, the new arm matches it
-    /// against the workspace `CrateInfo` list and recurses into
-    /// `crate_b/src/` as the new `crate_root`.
-    ///
-    /// Catches both directions of the bug:
-    /// - "new arm misfires" — passing a non-workspace head should still None
-    ///   (covered by `returns_none_for_external_crate` above, now run against
-    ///   a non-empty crate list)
-    /// - "new arm doesn't fire for the right head" — this test
+    /// A two-crate workspace where `caller_crate` imports from `target_crate`
+    /// via the workspace-crate arm: `path[0]="target_crate"` must match the
+    /// `CrateInfo` list and recurse into `target_crate/src/` as the new
+    /// `crate_root`. Catches the "arm doesn't fire for a matching head" bug.
     #[test]
     fn resolves_workspace_crate_via_new_arm() {
         use crate::types::CrateInfo;
@@ -353,10 +349,10 @@ mod tests {
         (dir, infos)
     }
 
-    /// Slice 2 / design claim C2: multi-segment path through a workspace
-    /// crate resolves to a deeply-nested file (not just the crate root's
-    /// `lib.rs`). Catches the bug where the new arm hands off to
-    /// `resolve_crate_path` but the latter can't reach files in subdirectories.
+    /// Multi-segment path through a workspace crate resolves to a deeply-nested
+    /// file (not just the crate root's `lib.rs`). Catches the bug where the new
+    /// arm hands off to `resolve_crate_path` but the latter can't reach files
+    /// in subdirectories.
     #[test]
     fn workspace_crate_path_traverses_to_nested_file() {
         let (dir, crates) =
@@ -377,10 +373,9 @@ mod tests {
         );
     }
 
-    /// Slice 2 / design claim C3 (stronger version): with a non-empty
-    /// `workspace_crates` list, an EXTERNAL crate head (`serde`) must still
-    /// return `None`. Catches the bug where the new arm matches too eagerly
-    /// (e.g., partial-name match, or always-`Some`).
+    /// With a non-empty `workspace_crates` list, an EXTERNAL crate head
+    /// (`serde`) must still return `None`. Catches the bug where the new arm
+    /// matches too eagerly (e.g., partial-name match, or always-`Some`).
     #[test]
     fn external_crate_returns_none_even_with_workspace_list() {
         let (dir, crates) = workspace_with_crates(&[("caller", &[]), ("target", &[])]);
@@ -530,10 +525,10 @@ mod tests {
         );
     }
 
-    /// Slice 2: Cargo manifest names allow hyphens; Rust module names use
-    /// underscores. `use rivets_jsonl::Foo` (`path[0]="rivets_jsonl"`) must
-    /// match a `CrateInfo` with name `"rivets-jsonl"`. Catches the bug where
-    /// the new arm compares raw strings without normalization.
+    /// Cargo manifest names allow hyphens; Rust module names use underscores.
+    /// `use rivets_jsonl::Foo` (`path[0]="rivets_jsonl"`) must match a
+    /// `CrateInfo` with name `"rivets-jsonl"`. Catches the bug where the new
+    /// arm compares raw strings without normalization.
     #[test]
     fn hyphenated_crate_name_matches_underscore_path_head() {
         let (dir, crates) = workspace_with_crates(&[("caller", &[]), ("my-crate", &["thing.rs"])]);
