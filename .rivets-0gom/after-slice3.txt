@@ -1,0 +1,25 @@
+total file_deps rows: 466
+
+=== Section 1: CROSS-CRATE EDGES (claims 3, 4) ===
+distinct cross-crate (from, to) pairs: 74
+
+FROM           TO              EDGES
+tethys         rivets-jsonl       22
+tethys         rivets             16
+rivets         rivets-jsonl       15
+rivets-mcp     rivets              7
+rivets         tethys              5
+rivets-mcp     tethys              4
+rivets-jsonl   tethys              3
+rivets-mcp     rivets-jsonl        2
+
+=== Section 2: INTRA-CRATE EDGES (claim 5: unchanged before/after fix) ===
+CRATE           EDGES
+tethys            272
+rivets             82
+rivets-jsonl       13
+rivets-mcp         12
+
+=== Section 3: AMBIGUITY CHECK (claim 6: should-have-been-None cases) ===
+refs resolved across crates: 295
+ambiguity violations (claim 6): 0

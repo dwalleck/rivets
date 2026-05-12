@@ -262,23 +262,28 @@ impl Index {
 
     /// Search for a symbol by name across all files.
     ///
-    /// This is a fallback for glob imports where we don't know which specific
-    /// file the symbol comes from.
+    /// Returns the unique match if exactly one symbol with that name exists in
+    /// the workspace. Returns `None` when zero or multiple symbols share the
+    /// name — genuine ambiguity. Callers that want a crate-scoped lookup
+    /// should use [`Self::search_symbol_by_name_in_path_prefix`] first; this
+    /// function is the last-resort fallback.
     pub fn search_symbol_by_name(&self, name: &str) -> Result<Option<Symbol>> {
         trace!(
             symbol_name = %name,
-            "Searching for symbol by name (any file)"
+            "Searching for symbol by name (any file, unambiguous-only)"
         );
 
         let conn = self.connection()?;
-
-        conn.query_row(
-            &format!("SELECT {SYMBOLS_COLUMNS} FROM symbols WHERE name = ?1 LIMIT 1"),
-            [name],
-            row_to_symbol,
-        )
-        .optional()
-        .map_err(Into::into)
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SYMBOLS_COLUMNS} FROM symbols WHERE name = ?1 LIMIT 2"
+        ))?;
+        let rows: Vec<Symbol> = stmt
+            .query_map([name], row_to_symbol)?
+            .collect::<std::result::Result<_, _>>()?;
+        match rows.len() {
+            1 => Ok(rows.into_iter().next()),
+            _ => Ok(None), // 0 = not found; >=2 = ambiguous, refuse to guess
+        }
     }
 
     /// Find a symbol at a specific file and line.
@@ -414,5 +419,72 @@ mod search_in_prefix_tests {
             result.is_none(),
             "must return None when no file's path begins with the prefix, got {result:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod search_by_name_ambiguity_tests {
+    use super::*;
+    use crate::db::Index;
+    use crate::types::{Language, Visibility};
+    use tempfile::TempDir;
+
+    fn insert_bar_in(index: &mut Index, file_path: &str) -> SymbolId {
+        let file_id = index
+            .upsert_file(std::path::Path::new(file_path), Language::Rust, 0, 0, None)
+            .expect("file");
+        index
+            .insert_symbol(&InsertSymbolParams {
+                file_id,
+                name: "Bar",
+                module_path: "crate",
+                qualified_name: "Bar",
+                kind: SymbolKind::Struct,
+                line: 1,
+                column: 1,
+                span: None,
+                signature: Some("pub struct Bar"),
+                visibility: Visibility::Public,
+                parent_symbol_id: None,
+                is_test: false,
+            })
+            .expect("symbol")
+    }
+
+    fn fresh_index() -> (TempDir, Index) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let index = Index::open(&dir.path().join("idx.db")).expect("open");
+        (dir, index)
+    }
+
+    #[test]
+    fn unique_match_returned() {
+        let (_dir, mut index) = fresh_index();
+        let bar_id = insert_bar_in(&mut index, "crate_a/src/lib.rs");
+        let result = index
+            .search_symbol_by_name("Bar")
+            .expect("query")
+            .expect("unique Bar should resolve");
+        assert_eq!(result.id, bar_id);
+    }
+
+    #[test]
+    fn multiple_matches_return_none_not_arbitrary_winner() {
+        let (_dir, mut index) = fresh_index();
+        let _bar_a = insert_bar_in(&mut index, "crate_a/src/lib.rs");
+        let _bar_b = insert_bar_in(&mut index, "crate_b/src/lib.rs");
+        let result = index.search_symbol_by_name("Bar").expect("query");
+        assert!(
+            result.is_none(),
+            "ambiguous Bar (two cross-crate candidates) must return None, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn no_match_returns_none() {
+        let (_dir, mut index) = fresh_index();
+        insert_bar_in(&mut index, "crate_a/src/lib.rs");
+        let result = index.search_symbol_by_name("Nonexistent").expect("query");
+        assert!(result.is_none());
     }
 }
