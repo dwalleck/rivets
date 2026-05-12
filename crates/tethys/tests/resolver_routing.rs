@@ -245,3 +245,100 @@ pub fn shared_helper(x: u32) -> u32 {
          unqualified shared_helper(...) call (only candidate is in crate_b); got: {edges:?}"
     );
 }
+
+/// Fetch all `(from_path, to_path)` edges from the indexed workspace's
+/// `file_deps` table. Used by the multi-crate-resolution tests to assert
+/// per-file `crate_root` routing produces the expected sub-crate edges.
+fn file_deps_edges(tethys: &tethys::Tethys) -> Vec<(String, String)> {
+    open_db(tethys)
+        .prepare(
+            "SELECT f1.path, f2.path
+             FROM file_deps d
+             JOIN files f1 ON f1.id = d.from_file_id
+             JOIN files f2 ON f2.id = d.to_file_id",
+        )
+        .expect("prepare file_deps query")
+        .query_map(params![], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("query")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect")
+}
+
+/// Two-crate workspace where each crate has `use crate::module;` resolving
+/// to its OWN crate's `src/module.rs`. Pre-fix (rivets-6aoc), the resolver
+/// hardcoded `crate_root` = `workspace_root/src`, so neither crate's
+/// `use crate::widget;` could be resolved via Pass-2-imports — the path
+/// `<workspace_root>/src/widget.rs` doesn't exist in this workspace.
+/// Post-fix, per-file `crate_root` lookup routes each file to its own
+/// crate's `src/`, and both imports resolve to the correct sub-crate file.
+///
+/// Slice-2 stress fixture for rivets-6aoc + rivets-34tv (sites in
+/// `resolve.rs::resolve_cross_file_references`). Falsifies design claim C5
+/// at the resolve.rs site.
+#[test]
+fn pass2_imports_resolve_per_crate_in_multi_crate_workspace() {
+    let (_dir, mut tethys) = workspace_with_files(&[
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crate_a\", \"crate_b\"]\nresolver = \"2\"\n",
+        ),
+        (
+            "crate_a/Cargo.toml",
+            "[package]\nname = \"crate_a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        (
+            "crate_a/src/lib.rs",
+            "mod widget;\nuse crate::widget::Widget;\npub fn make() -> Widget { Widget::new() }\n",
+        ),
+        (
+            "crate_a/src/widget.rs",
+            "pub struct Widget;\nimpl Widget { pub fn new() -> Self { Self } }\n",
+        ),
+        (
+            "crate_b/Cargo.toml",
+            "[package]\nname = \"crate_b\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        (
+            "crate_b/src/lib.rs",
+            "mod gadget;\nuse crate::gadget::Gadget;\npub fn build() -> Gadget { Gadget::new() }\n",
+        ),
+        (
+            "crate_b/src/gadget.rs",
+            "pub struct Gadget;\nimpl Gadget { pub fn new() -> Self { Self } }\n",
+        ),
+    ]);
+
+    tethys.index().expect("index should succeed");
+    let edges = file_deps_edges(&tethys);
+
+    let crate_a_to_widget = edges
+        .iter()
+        .any(|(from, to)| from == "crate_a/src/lib.rs" && to == "crate_a/src/widget.rs");
+    let crate_b_to_gadget = edges
+        .iter()
+        .any(|(from, to)| from == "crate_b/src/lib.rs" && to == "crate_b/src/gadget.rs");
+
+    assert!(
+        crate_a_to_widget,
+        "expected crate_a/src/lib.rs -> crate_a/src/widget.rs from `use crate::widget`; \
+         got: {edges:?}"
+    );
+    assert!(
+        crate_b_to_gadget,
+        "expected crate_b/src/lib.rs -> crate_b/src/gadget.rs from `use crate::gadget`; \
+         got: {edges:?}"
+    );
+
+    // Negative leg: no cross-crate phantom edges from these `crate::` imports.
+    let phantom: Vec<&(String, String)> = edges
+        .iter()
+        .filter(|(from, to)| {
+            (from.starts_with("crate_a/") && to.starts_with("crate_b/"))
+                || (from.starts_with("crate_b/") && to.starts_with("crate_a/"))
+        })
+        .collect();
+    assert!(
+        phantom.is_empty(),
+        "no cross-crate edges expected from intra-crate `crate::` imports; got: {phantom:?}"
+    );
+}

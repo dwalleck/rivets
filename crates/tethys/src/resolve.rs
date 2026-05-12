@@ -63,37 +63,55 @@ impl Tethys {
             by_file.entry(ref_.file_id).or_default().push(ref_);
         }
 
-        let crate_root = self.workspace_root.join("src");
-
         for (file_id, refs) in by_file {
-            resolved_count += self.resolve_refs_for_file(file_id, refs, &crate_root)?;
+            resolved_count += self.resolve_refs_for_file(file_id, refs)?;
         }
 
         Ok(resolved_count)
     }
 
     /// Resolve references for a single file using its imports.
-    fn resolve_refs_for_file(
-        &self,
-        file_id: FileId,
-        refs: Vec<Reference>,
-        crate_root: &Path,
-    ) -> Result<usize> {
+    ///
+    /// `crate_root` is computed per file via [`crate::cargo::get_crate_for_file`] +
+    /// [`crate::types::CrateInfo::src_root`] — `crate::` paths in a sub-crate file
+    /// resolve under that crate's own `src/`, not the workspace root.
+    ///
+    /// Files outside any known crate (e.g., workspace-root example/bench
+    /// directories) are skipped: there's no meaningful `crate_root` for them,
+    /// and any `crate::*` paths they contain are semantic no-ops in Rust
+    /// regardless of resolver behavior.
+    fn resolve_refs_for_file(&self, file_id: FileId, refs: Vec<Reference>) -> Result<usize> {
         let imports = self.db.get_imports_for_file(file_id)?;
         if imports.is_empty() {
             return Ok(0);
         }
 
         // Get the current file's path for relative path resolution
-        let current_file_path = if let Some(f) = self.db.get_file_by_id(file_id)? {
-            Some(self.workspace_root.join(&f.path))
-        } else {
+        let Some(file_record) = self.db.get_file_by_id(file_id)? else {
             warn!(
                 file_id = %file_id,
                 "File not found during reference resolution - possible database inconsistency"
             );
-            None
+            return Ok(0);
         };
+        let current_file_path = self.workspace_root.join(&file_record.path);
+
+        // Per-file crate_root: derived from the file's owning crate via
+        // get_crate_for_file + CrateInfo::src_root(). No fallback — if the
+        // file isn't in any known crate, skip Pass-2-imports (any `crate::*`
+        // paths in such a file are semantic no-ops anyway). The pre-fix
+        // behavior of falling back to workspace_root/src was a no-op in
+        // practice because that path doesn't exist in typical Cargo workspaces.
+        let Some(crate_info) = crate::cargo::get_crate_for_file(&current_file_path, &self.crates)
+        else {
+            trace!(
+                file_id = %file_id,
+                file = %current_file_path.display(),
+                "File not in any known crate; skipping Pass-2-imports"
+            );
+            return Ok(0);
+        };
+        let crate_root = crate_info.src_root();
 
         // Build import structures
         let (explicit_imports, glob_imports) = Self::build_import_maps(&imports);
@@ -101,8 +119,8 @@ impl Tethys {
         let ctx = ResolveContext {
             explicit_imports: &explicit_imports,
             glob_imports: &glob_imports,
-            current_file_path: current_file_path.as_deref(),
-            crate_root,
+            current_file_path: Some(&current_file_path),
+            crate_root: &crate_root,
             file_id,
         };
 

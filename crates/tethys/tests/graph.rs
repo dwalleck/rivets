@@ -24,6 +24,15 @@ use tethys::Tethys;
 fn workspace_with_call_graph() -> (TempDir, Tethys) {
     let dir = tempfile::tempdir().expect("failed to create temp dir");
 
+    // Cargo.toml: makes this a valid single-crate workspace so tethys's
+    // per-file crate_root lookup finds a crate. Without this, Pass-2-imports
+    // is skipped for every file (no known crate).
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"test_call_graph\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+    )
+    .expect("write Cargo.toml");
+
     // Create src directory
     fs::create_dir_all(dir.path().join("src")).expect("create src dir");
 
@@ -644,6 +653,12 @@ fn single_file_workspace_detect_cycles_returns_empty() {
 fn workspace_with_intra_file_calls() -> (TempDir, Tethys) {
     let dir = tempfile::tempdir().expect("failed to create temp dir");
 
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"test_intra_file\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+    )
+    .expect("write Cargo.toml");
+
     fs::create_dir_all(dir.path().join("src")).expect("failed to create src dir");
 
     fs::write(
@@ -1251,6 +1266,12 @@ fn reachability_max_depth_none_uses_default() {
 /// Helper that creates a workspace with a cyclic call pattern: a -> b -> c -> a
 fn workspace_with_cyclic_calls() -> (TempDir, Tethys) {
     let dir = tempfile::tempdir().expect("failed to create temp dir");
+
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"test_cyclic\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+    )
+    .expect("write Cargo.toml");
 
     fs::create_dir_all(dir.path().join("src")).expect("failed to create src dir");
 
