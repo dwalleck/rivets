@@ -351,31 +351,40 @@ impl Tethys {
         }
 
         // Same-crate first: cheap, deterministic, and almost always correct.
-        if let Some(path) = caller_file_path
-            && let Some(crate_info) = self.get_crate_for_file(path)
-        {
-            let prefix = format!(
-                "{}/",
-                crate::db::normalize_path(&self.relative_path(&crate_info.path))
-            );
-            if let Some(symbol) = self
-                .db
-                .search_symbol_by_name_in_path_prefix(ref_name, &prefix)?
-            {
-                if self.db.get_file_by_id(symbol.file_id)?.is_some() {
-                    return Ok(Some(symbol));
+        if let Some(path) = caller_file_path {
+            if let Some(crate_info) = self.get_crate_for_file(path) {
+                let prefix = self.relative_path(&crate_info.path);
+                let prefix_str = prefix.to_string_lossy();
+                if let Some(symbol) = self
+                    .db
+                    .search_symbol_by_name_in_path_prefix(ref_name, &prefix_str)?
+                {
+                    if self.db.get_file_by_id(symbol.file_id)?.is_some() {
+                        return Ok(Some(symbol));
+                    }
+                    // Same-crate symbol exists but its file record is gone. DB is
+                    // inconsistent; falling through to the unscoped search would
+                    // silently mask the inconsistency by returning a different
+                    // crate's symbol. Refuse with a warn instead.
+                    warn!(
+                        ref_name = %ref_name,
+                        symbol_id = %symbol.id,
+                        file_id = %symbol.file_id,
+                        "Same-crate symbol found but file record missing - returning None to avoid masking DB inconsistency"
+                    );
+                    return Ok(None);
                 }
-                // Same-crate symbol exists but its file record is gone. DB is
-                // inconsistent; falling through to the unscoped search would
-                // silently mask the inconsistency by returning a different
-                // crate's symbol. Refuse with a warn instead.
-                warn!(
+            } else {
+                // Caller's file is in the workspace but not in any indexed crate.
+                // Most likely: stale DB entry for a deleted file (rivets-lcb6),
+                // or an orphan file under a non-member directory (rivets-fayv).
+                // Either way the same-crate path silently disables — log it so
+                // operators can correlate unresolved refs to orphan files.
+                debug!(
+                    caller_file = %path.display(),
                     ref_name = %ref_name,
-                    symbol_id = %symbol.id,
-                    file_id = %symbol.file_id,
-                    "Same-crate symbol found but file record missing - returning None to avoid masking DB inconsistency"
+                    "Caller file has no containing crate; same-crate scoping skipped"
                 );
-                return Ok(None);
             }
         }
 

@@ -230,39 +230,65 @@ impl Index {
     }
 
     /// Search for a symbol by name, restricted to files whose path begins
-    /// with `path_prefix`. The prefix must use forward slashes and end with
-    /// a separator, e.g. `"crates/tethys/"`; backslash-containing prefixes
-    /// match zero rows because file paths are stored normalized
-    /// (see [`crate::db::files::normalize_path`]).
+    /// with `path_prefix`.
     ///
-    /// Returns `None` if no symbol with that name exists under the prefix,
-    /// OR if `path_prefix` is empty (which would otherwise produce a
-    /// workspace-wide wildcard, reintroducing the rivets-0gom bug class).
+    /// The function normalizes the prefix internally (Windows backslashes →
+    /// forward slashes) and ensures a trailing separator so that, e.g.,
+    /// `"crates/foo"` does not accidentally match `"crates/foobar/"`.
+    /// Callers can pass either `"crates/foo"` or `"crates/foo/"`.
+    ///
+    /// Returns `None` when:
+    /// - No symbol with `name` exists under the prefix
+    /// - The prefix normalizes to empty or `"/"` (would otherwise match
+    ///   everything and silently degrade to the unscoped query — the
+    ///   rivets-0gom bug class)
+    /// - Multiple candidates exist (genuine intra-prefix ambiguity —
+    ///   matches the unique-match semantics of [`Self::search_unique_symbol_by_name`])
+    ///
+    /// `path_prefix` is treated as a literal LIKE-prefix; `%` or `_` in the
+    /// prefix would behave as LIKE wildcards. In practice prefixes come from
+    /// crate directory paths and don't contain those characters.
     pub fn search_symbol_by_name_in_path_prefix(
         &self,
         name: &str,
         path_prefix: &str,
     ) -> Result<Option<Symbol>> {
-        if path_prefix.is_empty() {
-            // Empty prefix → LIKE '%' → matches every file. That would
-            // silently degrade this scoped lookup to the unscoped one.
-            // Refuse instead.
+        let normalized = crate::db::normalize_path(std::path::Path::new(path_prefix));
+        // Degenerate prefixes that would silently match every file:
+        // - "" → LIKE '%' matches everything (workspace-wide; rivets-0gom)
+        // - "/" → LIKE '/%' matches nothing on rivets-style relative paths
+        //   but is the result of a flat-workspace crate_root and would
+        //   silently disable scoping without a useful match
+        if normalized.is_empty() || normalized == "/" {
             return Ok(None);
         }
+        let bounded_prefix = if normalized.ends_with('/') {
+            normalized
+        } else {
+            format!("{normalized}/")
+        };
+        let like_pattern = format!("{bounded_prefix}%");
+
         let conn = self.connection()?;
-        let like_pattern = format!("{path_prefix}%");
-        conn.query_row(
-            &format!(
-                "SELECT {SYMBOLS_COLUMNS} FROM symbols
-                 WHERE name = ?1
-                   AND file_id IN (SELECT id FROM files WHERE path LIKE ?2)
-                 LIMIT 1"
-            ),
-            params![name, like_pattern],
-            row_to_symbol,
-        )
-        .optional()
-        .map_err(Into::into)
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SYMBOLS_COLUMNS} FROM symbols
+             WHERE name = ?1
+               AND file_id IN (SELECT id FROM files WHERE path LIKE ?2)
+             LIMIT 2"
+        ))?;
+        let mut iter = stmt.query_map(params![name, like_pattern], row_to_symbol)?;
+        let Some(first) = iter.next().transpose()? else {
+            return Ok(None);
+        };
+        if iter.next().transpose()?.is_some() {
+            debug!(
+                symbol_name = %name,
+                path_prefix = %bounded_prefix,
+                "Refusing ambiguous name match within path prefix (multiple candidates)"
+            );
+            return Ok(None);
+        }
+        Ok(Some(first))
     }
 
     /// Search for a symbol by name across all files, returning the unique
@@ -429,6 +455,118 @@ mod search_in_prefix_tests {
         assert!(
             result.is_none(),
             "must return None when no file's path begins with the prefix, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn returns_none_for_empty_prefix() {
+        // Empty prefix must NOT degrade to workspace-wide match.
+        let (_dir, index, _, _) = two_crate_workspace_with_shared_foo();
+        let result = index
+            .search_symbol_by_name_in_path_prefix("Foo", "")
+            .expect("query");
+        assert!(
+            result.is_none(),
+            "empty prefix must return None to prevent silent workspace-wide degradation, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn returns_none_for_degenerate_slash_prefix() {
+        // A "/" prefix arises from flat-workspace `relative_path` returning
+        // Path("") plus the (legacy, now removed) caller-side trailing-slash
+        // logic. The function must refuse rather than silently match nothing.
+        let (_dir, index, _, _) = two_crate_workspace_with_shared_foo();
+        let result = index
+            .search_symbol_by_name_in_path_prefix("Foo", "/")
+            .expect("query");
+        assert!(result.is_none(), "got {result:?}");
+    }
+
+    #[test]
+    fn prefix_does_not_match_neighboring_crate_directory() {
+        // The trailing-slash invariant: searching under `crate_a/` must NOT
+        // match files in `crate_ab/`. The function adds a trailing slash
+        // when missing; this test pins that contract.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut index = Index::open(&dir.path().join("idx.db")).expect("open");
+
+        let file_ab = index
+            .upsert_file(
+                std::path::Path::new("crate_ab/src/lib.rs"),
+                Language::Rust,
+                0,
+                0,
+                None,
+            )
+            .expect("file ab");
+        let foo_in_ab = index
+            .insert_symbol(&InsertSymbolParams {
+                file_id: file_ab,
+                name: "Foo",
+                module_path: "crate",
+                qualified_name: "crate_ab::Foo",
+                kind: SymbolKind::Struct,
+                line: 1,
+                column: 1,
+                span: None,
+                signature: Some("pub struct Foo"),
+                visibility: Visibility::Public,
+                parent_symbol_id: None,
+                is_test: false,
+            })
+            .expect("foo in ab");
+
+        // Searching under crate_a/ must NOT find Foo in crate_ab/.
+        let result = index
+            .search_symbol_by_name_in_path_prefix("Foo", "crate_a/")
+            .expect("query");
+        assert!(
+            result.is_none(),
+            "prefix 'crate_a/' must not match files in 'crate_ab/', got {result:?}"
+        );
+        // Sanity: caller asking for crate_ab/ DOES find it.
+        let result = index
+            .search_symbol_by_name_in_path_prefix("Foo", "crate_ab/")
+            .expect("query");
+        assert_eq!(result.expect("found").id, foo_in_ab);
+    }
+
+    #[test]
+    fn returns_none_when_intra_prefix_ambiguous() {
+        // Two symbols named `Foo` in the SAME prefix (different files).
+        // Function must refuse to pick arbitrarily.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut index = Index::open(&dir.path().join("idx.db")).expect("open");
+
+        for path in ["crate_a/src/error.rs", "crate_a/src/io.rs"] {
+            let file_id = index
+                .upsert_file(std::path::Path::new(path), Language::Rust, 0, 0, None)
+                .expect("file");
+            index
+                .insert_symbol(&InsertSymbolParams {
+                    file_id,
+                    name: "Foo",
+                    module_path: "crate",
+                    qualified_name: "crate_a::Foo",
+                    kind: SymbolKind::Struct,
+                    line: 1,
+                    column: 1,
+                    span: None,
+                    signature: Some("pub struct Foo"),
+                    visibility: Visibility::Public,
+                    parent_symbol_id: None,
+                    is_test: false,
+                })
+                .expect("foo");
+        }
+
+        let result = index
+            .search_symbol_by_name_in_path_prefix("Foo", "crate_a/")
+            .expect("query");
+        assert!(
+            result.is_none(),
+            "two Foo symbols in same crate must return None (refuse to guess), got {result:?}"
         );
     }
 }
