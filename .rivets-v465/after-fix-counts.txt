@@ -1,0 +1,41 @@
+Empirical verification of rivets-v465 slices 1+2 on the rivets workspace.
+Measured 2026-05-12 on branch fix/rivets-v465-import-resolver-leak at
+commit 853d0e4 (slice 2 landed).
+
+=== With fallback ENABLED (production behavior) ===
+Total leaks (ALLOWED cross-crate call->method/function/enum_variant): 105
+FORBIDDEN-pair phantoms: 174
+Same-crate refs: ~5971 (unchanged from pre-fix)
+
+=== With fallback DISABLED (probe: how many refs does Pass 2 imports now catch?) ===
+ALLOWED-pair refs remaining resolved: 6 (5 function + 1 method)
+FORBIDDEN-pair phantoms remaining: 0
+
+=== Pre-fix baseline (from prove-it-prototype's disable-fallback experiment) ===
+ALLOWED-pair refs remaining resolved with fallback off: 0
+FORBIDDEN-pair phantoms remaining with fallback off: 0
+
+=== Delta from slice 1+2 ===
+Refs migrated from Pass-2-fallback to Pass-2-imports: 6
+Fallback population shrunk by: 6 (from 279 cross-crate to 273)
+Same-crate count: unchanged
+
+=== Upper-bound probe (refine_c5_upper_bound.py) ===
+Of 105 ALLOWED-pair leaks:
+  5  FIX_SHOULD_CATCH (named import with workspace-crate source_module)
+100  NO_NAME_MATCHING_IMPORT (method-on-imported-type, glob, or no import)
+
+Conclusion: the slice-1+2 fix correctly resolves the small population
+(5-6 refs) where the leaked ref's name matches an explicit workspace-crate
+import's symbol_name. The remaining ~99 ALLOWED-pair leaks and all 174
+FORBIDDEN-pair phantoms are method-on-imported-type calls that need
+type information (LSP / rivets-714v) to migrate out of fallback.
+
+Design claims (post-revision):
+  C1 PASS (workspace-crate detection returns Some)
+  C2 PASS (multi-segment path traversal works)
+  C3 PASS (external crates still None)
+  C4 PASS (no regression on crate/self/super)
+  C5 PASS (revised: ≥5 refs migrate; actual 6)
+  C6 PASS (revised: fallback drops ≥5; actual 6)
+  C7 PASS (same-crate count unchanged)
