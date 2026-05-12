@@ -156,6 +156,13 @@ impl Language {
 /// Information about a Rust crate discovered from Cargo.toml.
 ///
 /// Used to determine crate roots for module path resolution.
+///
+/// **Computing source directories:** use [`CrateInfo::src_root`] rather than
+/// hardcoding `<path>/src` — that hardcode is the bug class fixed by
+/// `rivets-6aoc`, and re-introducing it at a new call site silently breaks
+/// multi-crate workspaces whose root has no `src/` directory. The accessor
+/// derives the directory from `lib_path` / `bin_paths` so non-standard layouts
+/// (e.g. `lib.path = "custom/lib.rs"`, `src/bin/X.rs`) resolve correctly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CrateInfo {
     /// Crate name from `[package].name`
@@ -176,8 +183,13 @@ impl CrateInfo {
     /// 2. First `bin_paths` entry's parent — for bin-only crates (where source
     ///    modules live next to the bin entry, e.g., `src/` for `src/main.rs`
     ///    or `src/bin/` for `src/bin/myapp.rs`).
-    /// 3. `<path>/src` — pathological last resort (no lib AND no bins; Cargo
-    ///    rejects such a configuration, so this branch is defensive only).
+    /// 3. `<path>/src` — pathological last resort. Reachable only when a
+    ///    `Cargo.toml` has `[package]` but no `[lib]`, no `[[bin]]`, no
+    ///    discoverable `src/lib.rs`, and no discoverable `src/main.rs`. Cargo
+    ///    emits a build-time warning for this configuration but the manifest
+    ///    parser does not reject it, so the path is returned defensively. The
+    ///    returned path is unverified — callers should treat the result as a
+    ///    candidate, not a guaranteed-existent directory.
     ///
     /// When the derived `lib_path`/`bin_path` has no meaningful parent (e.g.,
     /// `lib.rs` at the crate root), returns the crate's own path.
@@ -189,6 +201,13 @@ impl CrateInfo {
         if let Some((_, rel)) = self.bin_paths.first() {
             return Self::dir_of(&self.path, rel);
         }
+        // Pathological: no lib AND no bins. Surface the anomaly to the
+        // operator since downstream resolution will silently fail.
+        tracing::warn!(
+            crate_name = %self.name,
+            crate_path = %self.path.display(),
+            "CrateInfo has no lib_path AND no bin_paths; src_root falling back to <path>/src (path may not exist on disk)"
+        );
         self.path.join("src")
     }
 
@@ -2203,9 +2222,8 @@ mod tests {
         assert_eq!(ci.src_root(), PathBuf::from("/ws/crates/test_crate/src"));
     }
 
-    /// Stress fixture for falsifiable-design claim C1: a non-standard
-    /// `lib_path` must NOT silently get `src` appended. An impl that hardcodes
-    /// `"src"` regardless of `lib_path` would fail this test.
+    /// A non-standard `lib_path` must NOT silently get `src` appended. An impl
+    /// that hardcodes `"src"` regardless of `lib_path` would fail this test.
     #[test]
     fn src_root_follows_non_standard_lib_path_layout() {
         let ci = crate_info(Some("custom/nested/lib.rs"));
@@ -2231,10 +2249,9 @@ mod tests {
         assert_eq!(ci.src_root(), PathBuf::from("/ws/crates/test_crate/src"));
     }
 
-    /// Stress fixture: a bin-only crate whose bin lives at a non-standard
-    /// location (`src/bin/myapp.rs`). A previous impl that fell back to
-    /// `path.join("src")` whenever `lib_path` was `None` would return
-    /// `<path>/src`, missing the actual bin parent (`<path>/src/bin`).
+    /// Bin-only crate with a non-standard bin location (`src/bin/myapp.rs`).
+    /// An impl that hardcodes `"src"` for the `lib_path = None` case would
+    /// return `<path>/src`, missing the actual bin parent (`<path>/src/bin`).
     #[test]
     fn src_root_follows_non_standard_bin_path_layout() {
         let ci = crate_info_full(None, vec![("myapp", "src/bin/myapp.rs")]);

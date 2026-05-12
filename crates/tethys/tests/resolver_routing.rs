@@ -265,16 +265,12 @@ fn file_deps_edges(tethys: &tethys::Tethys) -> Vec<(String, String)> {
 }
 
 /// Two-crate workspace where each crate has `use crate::module;` resolving
-/// to its OWN crate's `src/module.rs`. Pre-fix (rivets-6aoc), the resolver
-/// hardcoded `crate_root` = `workspace_root/src`, so neither crate's
-/// `use crate::widget;` could be resolved via Pass-2-imports — the path
-/// `<workspace_root>/src/widget.rs` doesn't exist in this workspace.
-/// Post-fix, per-file `crate_root` lookup routes each file to its own
-/// crate's `src/`, and both imports resolve to the correct sub-crate file.
-///
-/// Slice-2 stress fixture for rivets-6aoc + rivets-34tv (sites in
-/// `resolve.rs::resolve_cross_file_references`). Falsifies design claim C5
-/// at the resolve.rs site.
+/// to its OWN crate's `src/module.rs`. The resolver must compute
+/// `crate_root` per file: `crate_a/src/lib.rs`'s `use crate::widget` resolves
+/// under `crate_a/src/`, and `crate_b/src/lib.rs`'s `use crate::gadget`
+/// resolves under `crate_b/src/`. An impl that hardcodes `crate_root` to a
+/// single workspace-wide directory (e.g., `workspace_root/src`) would fail
+/// for both crates in a workspace whose root has no `src/`.
 #[test]
 fn pass2_imports_resolve_per_crate_in_multi_crate_workspace() {
     let (_dir, mut tethys) = workspace_with_files(&[
@@ -341,4 +337,121 @@ fn pass2_imports_resolve_per_crate_in_multi_crate_workspace() {
         phantom.is_empty(),
         "no cross-crate edges expected from intra-crate `crate::` imports; got: {phantom:?}"
     );
+}
+
+/// Regression gate: a 3-crate workspace where each crate has multiple
+/// intra-crate `use crate::*` imports. After indexing, the resolved-ref count
+/// must meet a minimum floor — proves that per-file `crate_root` lookup
+/// (rivets-6aoc) is wired through Pass-2-imports + dep-graph computation.
+///
+/// A regression that re-introduces a hardcoded `workspace_root.join("src")`
+/// `crate_root` would fail this test because the fixture's workspace root has
+/// no `src/` directory, so the hardcoded path can't resolve any of the
+/// intra-crate imports.
+///
+/// Runs the same fixture through both default and streaming indexing modes
+/// (the streaming path goes through `compute_dependencies_from_stored`).
+#[test]
+fn multi_crate_intra_crate_imports_meet_resolved_ref_floor() {
+    fn run_with_options(options: tethys::IndexOptions, mode_label: &str) {
+        let (_dir, mut tethys) = workspace_with_files(&[
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"crate_a\", \"crate_b\", \"crate_c\"]\nresolver = \"2\"\n",
+            ),
+            (
+                "crate_a/Cargo.toml",
+                "[package]\nname = \"crate_a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            (
+                "crate_a/src/lib.rs",
+                "mod widget;\nmod alpha;\nmod beta;\n\
+                 use crate::widget::Widget;\n\
+                 use crate::alpha::Alpha;\n\
+                 use crate::beta::Beta;\n\
+                 pub fn make_a() -> (Widget, Alpha, Beta) { (Widget, Alpha, Beta) }\n",
+            ),
+            ("crate_a/src/widget.rs", "pub struct Widget;\n"),
+            ("crate_a/src/alpha.rs", "pub struct Alpha;\n"),
+            ("crate_a/src/beta.rs", "pub struct Beta;\n"),
+            (
+                "crate_b/Cargo.toml",
+                "[package]\nname = \"crate_b\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            (
+                "crate_b/src/lib.rs",
+                "mod gadget;\nmod gamma;\n\
+                 use crate::gadget::Gadget;\n\
+                 use crate::gamma::Gamma;\n\
+                 pub fn make_b() -> (Gadget, Gamma) { (Gadget, Gamma) }\n",
+            ),
+            ("crate_b/src/gadget.rs", "pub struct Gadget;\n"),
+            ("crate_b/src/gamma.rs", "pub struct Gamma;\n"),
+            (
+                "crate_c/Cargo.toml",
+                "[package]\nname = \"crate_c\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            (
+                "crate_c/src/lib.rs",
+                "mod gizmo;\nmod delta;\n\
+                 use crate::gizmo::Gizmo;\n\
+                 use crate::delta::Delta;\n\
+                 pub fn make_c() -> (Gizmo, Delta) { (Gizmo, Delta) }\n",
+            ),
+            ("crate_c/src/gizmo.rs", "pub struct Gizmo;\n"),
+            ("crate_c/src/delta.rs", "pub struct Delta;\n"),
+        ]);
+
+        tethys
+            .index_with_options(options)
+            .unwrap_or_else(|e| panic!("[{mode_label}] index should succeed: {e}"));
+
+        let conn = open_db(&tethys);
+
+        // Floor 1: resolved cross-file references. The 7 use-statements
+        // (3 in crate_a + 2 in crate_b + 2 in crate_c) each generate at
+        // least one resolved reference to the imported struct. With the
+        // per-file `crate_root` fix, all 7 resolve via Pass-2-imports. A
+        // regression that re-hardcodes `workspace_root.join("src")` would
+        // find none of them (workspace root has no `src/`).
+        let resolved_cross_file_refs: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM refs r
+                 JOIN symbols s ON s.id = r.symbol_id
+                 WHERE r.symbol_id IS NOT NULL AND s.file_id != r.file_id",
+                params![],
+                |row| row.get(0),
+            )
+            .expect("count resolved cross-file refs");
+        assert!(
+            resolved_cross_file_refs >= 7,
+            "[{mode_label}] expected ≥7 resolved cross-file refs (one per `use crate::X` import), \
+             got {resolved_cross_file_refs}. Likely a regression re-introducing a hardcoded \
+             `workspace_root.join(\"src\")` crate_root."
+        );
+
+        // Floor 2: intra-crate dep-graph edges. Each `use crate::X` should
+        // produce a `file_deps` edge from the importer's lib.rs to its
+        // crate's X.rs. 7 imports → 7 edges.
+        let intra_crate_edges: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM file_deps d
+                 JOIN files f1 ON f1.id = d.from_file_id
+                 JOIN files f2 ON f2.id = d.to_file_id
+                 WHERE substr(f1.path, 1, instr(f1.path, '/')) =
+                       substr(f2.path, 1, instr(f2.path, '/'))",
+                params![],
+                |row| row.get(0),
+            )
+            .expect("count intra-crate dep edges");
+        assert!(
+            intra_crate_edges >= 7,
+            "[{mode_label}] expected ≥7 intra-crate file_deps edges (one per `use crate::X`), \
+             got {intra_crate_edges}. Likely a regression in `compute_dependencies` or \
+             `compute_dependencies_from_stored`."
+        );
+    }
+
+    run_with_options(tethys::IndexOptions::default(), "default");
+    run_with_options(tethys::IndexOptions::with_streaming(), "streaming");
 }

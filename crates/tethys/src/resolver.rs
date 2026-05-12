@@ -53,6 +53,11 @@ pub fn resolve_module_path(
             // itself, which on disk is the entry-point file — not the src/ dir.
             // Filter on `.exists()` to mirror `resolve_as_module`'s guarantee
             // that returned paths exist on disk.
+            //
+            // TODO(rivets-i8qn): the lib_path/bin_paths fallback chain below
+            // duplicates what an `entry_point_file()` accessor on `CrateInfo`
+            // would encapsulate. Replace this block with `target.entry_point_file()`
+            // once that accessor lands.
             if path.len() == 1 {
                 return target
                     .lib_path
@@ -543,13 +548,12 @@ mod tests {
         );
     }
 
-    /// Stress fixture for slice 4: a workspace crate with a non-standard
-    /// `lib_path` must have its source modules resolved under the derived
-    /// `src_root()`, NOT under a hardcoded `<crate>/src`. A pre-fix impl
-    /// using `target.path.join("src")` would look for `<crate>/src/module.rs`
-    /// (which doesn't exist) and return None; the post-fix `target.src_root()`
-    /// derives `<crate>/custom/path` from `lib_path.parent()` and finds the
-    /// actual file.
+    /// A workspace-crate target with a non-standard `lib_path` must resolve
+    /// its source modules under the derived `src_root()`, not under a
+    /// hardcoded `<crate>/src`. An impl that always appends `src/` to the
+    /// target's path would look for `<crate>/src/module.rs` (which doesn't
+    /// exist) and return None; the correct impl derives `<crate>/custom/path`
+    /// from `lib_path.parent()` via `src_root()` and finds the actual file.
     #[test]
     fn workspace_crate_arm_uses_src_root_not_hardcoded_src() {
         use crate::types::CrateInfo;

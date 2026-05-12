@@ -833,10 +833,12 @@ impl Tethys {
     /// Dependencies that can't be resolved (target file not yet indexed) are added to
     /// `pending` for retry in subsequent passes.
     ///
-    /// Files outside any known crate (e.g., workspace-root example/bench dirs) are
-    /// skipped — `crate::*` paths in such files have no meaningful crate root, and
-    /// the rest of the resolver's arms (`self::`/`super::`/external) can't anchor
-    /// dep edges without a crate context either.
+    /// `crate_root` is derived per file via [`crate::cargo::get_crate_for_file`] +
+    /// [`crate::types::CrateInfo::src_root`]. For files outside any known crate
+    /// (e.g., workspace-root example/bench dirs), the file's parent directory is
+    /// used as a sentinel `crate_root`: `crate::*` paths in such files have no
+    /// valid anchor, but `self::`/`super::` (resolved off `current_file` directly)
+    /// continue to produce dep edges.
     fn compute_dependencies(
         &self,
         current_file: &Path,
@@ -847,14 +849,19 @@ impl Tethys {
     ) -> Result<()> {
         use std::collections::HashSet;
 
-        let Some(crate_info) = crate::cargo::get_crate_for_file(current_file, self.crates()) else {
-            trace!(
+        let crate_root = if let Some(crate_info) =
+            crate::cargo::get_crate_for_file(current_file, self.crates())
+        {
+            crate_info.src_root()
+        } else {
+            debug!(
                 file = %current_file.display(),
-                "compute_dependencies: file not in any known crate; skipping"
+                "compute_dependencies: file not in any known crate; using file parent as sentinel crate_root"
             );
-            return Ok(());
+            current_file
+                .parent()
+                .map_or_else(|| self.workspace_root.clone(), Path::to_path_buf)
         };
-        let crate_root = crate_info.src_root();
 
         // Build a set of actually referenced names (both direct names and path prefixes)
         let mut referenced_names: HashSet<&str> = HashSet::new();
@@ -1018,10 +1025,8 @@ impl Tethys {
     /// Compute dependencies from stored import/reference data.
     ///
     /// Similar to `compute_dependencies` but takes pre-processed data rather than
-    /// `ExtractedReference` objects. Used in streaming mode.
-    ///
-    /// Files outside any known crate are skipped — see `compute_dependencies` for
-    /// the rationale.
+    /// `ExtractedReference` objects. Used in streaming mode. See
+    /// `compute_dependencies` for the `crate_root` derivation rationale.
     fn compute_dependencies_from_stored(
         &self,
         current_file: &Path,
@@ -1032,14 +1037,19 @@ impl Tethys {
     ) -> Result<()> {
         use std::collections::HashSet;
 
-        let Some(crate_info) = crate::cargo::get_crate_for_file(current_file, self.crates()) else {
-            trace!(
+        let crate_root = if let Some(crate_info) =
+            crate::cargo::get_crate_for_file(current_file, self.crates())
+        {
+            crate_info.src_root()
+        } else {
+            debug!(
                 file = %current_file.display(),
-                "compute_dependencies_from_stored: file not in any known crate; skipping"
+                "compute_dependencies_from_stored: file not in any known crate; using file parent as sentinel crate_root"
             );
-            return Ok(());
+            current_file
+                .parent()
+                .map_or_else(|| self.workspace_root.clone(), Path::to_path_buf)
         };
-        let crate_root = crate_info.src_root();
 
         // Build a set of actually referenced names
         let refs_set: HashSet<&str> = reference_names.iter().map(String::as_str).collect();

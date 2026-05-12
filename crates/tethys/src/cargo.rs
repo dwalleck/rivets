@@ -107,6 +107,47 @@ fn parse_crate(crate_path: &Path) -> Option<CrateInfo> {
     parse_crate_from_manifest(crate_path, &manifest)
 }
 
+/// Validate that a target path (from `[lib].path` or `[[bin]].path` in a
+/// crate's `Cargo.toml`) is a relative, non-empty path that stays within
+/// the crate directory.
+///
+/// Returns `None` and logs a `warn!` if the path is absolute, empty, or
+/// climbs above the crate root via `..` components. Defense-in-depth against
+/// malformed or hostile manifests: an absolute `lib.path = "/etc/passwd/lib.rs"`
+/// would otherwise cause `crate_path.join(...)` to escape the workspace.
+fn sanitize_target_path(crate_path: &Path, rel: PathBuf, target_name: &str) -> Option<PathBuf> {
+    if rel.as_os_str().is_empty() {
+        warn!(
+            crate_path = %crate_path.display(),
+            target = %target_name,
+            "Manifest target has empty path; ignoring"
+        );
+        return None;
+    }
+    if rel.is_absolute() {
+        warn!(
+            crate_path = %crate_path.display(),
+            target = %target_name,
+            path = %rel.display(),
+            "Manifest target has absolute path; ignoring (must be crate-relative)"
+        );
+        return None;
+    }
+    if rel
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        warn!(
+            crate_path = %crate_path.display(),
+            target = %target_name,
+            path = %rel.display(),
+            "Manifest target path climbs above crate root via `..`; ignoring"
+        );
+        return None;
+    }
+    Some(rel)
+}
+
 /// Extract `CrateInfo` from a parsed manifest.
 fn parse_crate_from_manifest(crate_path: &Path, manifest: &Manifest) -> Option<CrateInfo> {
     let Some(package) = manifest.package.as_ref() else {
@@ -128,7 +169,10 @@ fn parse_crate_from_manifest(crate_path: &Path, manifest: &Manifest) -> Option<C
     });
 
     let lib_path = if let Some(lib) = &manifest.lib {
-        lib.path.as_ref().map(PathBuf::from)
+        lib.path
+            .as_ref()
+            .map(PathBuf::from)
+            .and_then(|p| sanitize_target_path(&crate_path, p, "lib"))
     } else {
         let default_lib = crate_path.join("src/lib.rs");
         if default_lib.exists() {
@@ -145,7 +189,10 @@ fn parse_crate_from_manifest(crate_path: &Path, manifest: &Manifest) -> Option<C
     for bin in &manifest.bin {
         let name = bin.name.clone().unwrap_or_else(|| package.name.clone());
         let path = if let Some(explicit_path) = bin.path.as_ref() {
-            PathBuf::from(explicit_path)
+            match sanitize_target_path(&crate_path, PathBuf::from(explicit_path), &name) {
+                Some(p) => p,
+                None => continue,
+            }
         } else {
             let inferred = PathBuf::from(format!("src/bin/{name}.rs"));
             let full_path = crate_path.join(&inferred);
