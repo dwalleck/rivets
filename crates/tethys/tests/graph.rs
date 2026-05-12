@@ -332,6 +332,13 @@ fn detect_cycles_returns_empty_for_acyclic_workspace() {
 #[test]
 fn cyclic_dependencies_are_detected() {
     let dir = tempfile::tempdir().expect("failed to create temp dir");
+
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"test_cycle_two\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+    )
+    .expect("write Cargo.toml");
+
     fs::create_dir_all(dir.path().join("src")).expect("create src dir");
 
     // Create a simple A -> B -> A cycle
@@ -419,6 +426,13 @@ impl B {
 #[test]
 fn three_file_cycle_dependencies_are_detected() {
     let dir = tempfile::tempdir().expect("failed to create temp dir");
+
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"test_cycle_three\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+    )
+    .expect("write Cargo.toml");
+
     fs::create_dir_all(dir.path().join("src")).expect("create src dir");
 
     // Create A -> B -> C -> A cycle

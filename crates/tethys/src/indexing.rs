@@ -832,6 +832,11 @@ impl Tethys {
     ///
     /// Dependencies that can't be resolved (target file not yet indexed) are added to
     /// `pending` for retry in subsequent passes.
+    ///
+    /// Files outside any known crate (e.g., workspace-root example/bench dirs) are
+    /// skipped — `crate::*` paths in such files have no meaningful crate root, and
+    /// the rest of the resolver's arms (`self::`/`super::`/external) can't anchor
+    /// dep edges without a crate context either.
     fn compute_dependencies(
         &self,
         current_file: &Path,
@@ -841,6 +846,15 @@ impl Tethys {
         pending: &mut Vec<PendingDependency>,
     ) -> Result<()> {
         use std::collections::HashSet;
+
+        let Some(crate_info) = crate::cargo::get_crate_for_file(current_file, self.crates()) else {
+            trace!(
+                file = %current_file.display(),
+                "compute_dependencies: file not in any known crate; skipping"
+            );
+            return Ok(());
+        };
+        let crate_root = crate_info.src_root();
 
         // Build a set of actually referenced names (both direct names and path prefixes)
         let mut referenced_names: HashSet<&str> = HashSet::new();
@@ -853,8 +867,6 @@ impl Tethys {
                 referenced_names.insert(first);
             }
         }
-
-        let crate_root = self.workspace_root.join("src");
 
         // Track which files we depend on (dedupe)
         let mut depended_files: HashSet<PathBuf> = HashSet::new();
@@ -1007,6 +1019,9 @@ impl Tethys {
     ///
     /// Similar to `compute_dependencies` but takes pre-processed data rather than
     /// `ExtractedReference` objects. Used in streaming mode.
+    ///
+    /// Files outside any known crate are skipped — see `compute_dependencies` for
+    /// the rationale.
     fn compute_dependencies_from_stored(
         &self,
         current_file: &Path,
@@ -1017,10 +1032,17 @@ impl Tethys {
     ) -> Result<()> {
         use std::collections::HashSet;
 
+        let Some(crate_info) = crate::cargo::get_crate_for_file(current_file, self.crates()) else {
+            trace!(
+                file = %current_file.display(),
+                "compute_dependencies_from_stored: file not in any known crate; skipping"
+            );
+            return Ok(());
+        };
+        let crate_root = crate_info.src_root();
+
         // Build a set of actually referenced names
         let refs_set: HashSet<&str> = reference_names.iter().map(String::as_str).collect();
-
-        let crate_root = self.workspace_root.join("src");
         let mut depended_files: HashSet<PathBuf> = HashSet::new();
 
         for import_stmt in imports {
