@@ -229,6 +229,41 @@ impl Index {
         .map_err(Into::into)
     }
 
+    /// Search for a symbol by name, restricted to files whose path begins
+    /// with `path_prefix`.
+    ///
+    /// Used by `fallback_symbol_search` to prefer same-crate matches before
+    /// falling back to the unscoped [`Self::search_symbol_by_name`]. The
+    /// prefix is typically the caller's containing crate path with a
+    /// trailing separator (e.g. `"crates/tethys/"`).
+    ///
+    /// Returns `None` if no symbol with that name exists under the prefix.
+    #[allow(
+        dead_code,
+        reason = "wired into fallback_symbol_search in slice 2 of rivets-0gom"
+    )]
+    pub fn search_symbol_by_name_in_path_prefix(
+        &self,
+        name: &str,
+        path_prefix: &str,
+    ) -> Result<Option<Symbol>> {
+        debug_assert!(!path_prefix.is_empty(), "path_prefix must not be empty");
+        let conn = self.connection()?;
+        let like_pattern = format!("{path_prefix}%");
+        conn.query_row(
+            &format!(
+                "SELECT {SYMBOLS_COLUMNS} FROM symbols
+                 WHERE name = ?1
+                   AND file_id IN (SELECT id FROM files WHERE path LIKE ?2)
+                 LIMIT 1"
+            ),
+            params![name, like_pattern],
+            row_to_symbol,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     /// Search for a symbol by name across all files.
     ///
     /// This is a fallback for glob imports where we don't know which specific
@@ -276,5 +311,112 @@ impl Index {
         )
         .optional()
         .map_err(Into::into)
+    }
+}
+
+#[cfg(test)]
+mod search_in_prefix_tests {
+    use super::*;
+    use crate::db::Index;
+    use crate::types::{Language, Visibility};
+    use tempfile::TempDir;
+
+    /// Set up an index with two synthetic crates, each defining a symbol `Foo`.
+    /// Returns `(dir, index, foo_in_a_id, foo_in_b_id)`. Dir kept alive by caller.
+    fn two_crate_workspace_with_shared_foo() -> (TempDir, Index, SymbolId, SymbolId) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut index = Index::open(&dir.path().join("idx.db")).expect("open");
+
+        let file_a = index
+            .upsert_file(
+                std::path::Path::new("crate_a/src/lib.rs"),
+                Language::Rust,
+                0,
+                0,
+                None,
+            )
+            .expect("file a");
+        let file_b = index
+            .upsert_file(
+                std::path::Path::new("crate_b/src/lib.rs"),
+                Language::Rust,
+                0,
+                0,
+                None,
+            )
+            .expect("file b");
+
+        let foo_in_a = index
+            .insert_symbol(&InsertSymbolParams {
+                file_id: file_a,
+                name: "Foo",
+                module_path: "crate",
+                qualified_name: "crate_a::Foo",
+                kind: SymbolKind::Struct,
+                line: 1,
+                column: 1,
+                span: None,
+                signature: Some("pub struct Foo"),
+                visibility: Visibility::Public,
+                parent_symbol_id: None,
+                is_test: false,
+            })
+            .expect("foo in a");
+        let foo_in_b = index
+            .insert_symbol(&InsertSymbolParams {
+                file_id: file_b,
+                name: "Foo",
+                module_path: "crate",
+                qualified_name: "crate_b::Foo",
+                kind: SymbolKind::Struct,
+                line: 1,
+                column: 1,
+                span: None,
+                signature: Some("pub struct Foo"),
+                visibility: Visibility::Public,
+                parent_symbol_id: None,
+                is_test: false,
+            })
+            .expect("foo in b");
+
+        (dir, index, foo_in_a, foo_in_b)
+    }
+
+    #[test]
+    fn returns_same_crate_match_when_caller_in_crate_a() {
+        let (_dir, index, foo_in_a, _) = two_crate_workspace_with_shared_foo();
+        let result = index
+            .search_symbol_by_name_in_path_prefix("Foo", "crate_a/")
+            .expect("query")
+            .expect("found");
+        assert_eq!(
+            result.id, foo_in_a,
+            "must return crate_a's Foo, not crate_b's"
+        );
+    }
+
+    #[test]
+    fn returns_same_crate_match_when_caller_in_crate_b() {
+        let (_dir, index, _, foo_in_b) = two_crate_workspace_with_shared_foo();
+        let result = index
+            .search_symbol_by_name_in_path_prefix("Foo", "crate_b/")
+            .expect("query")
+            .expect("found");
+        assert_eq!(
+            result.id, foo_in_b,
+            "must return crate_b's Foo, not crate_a's"
+        );
+    }
+
+    #[test]
+    fn returns_none_when_prefix_matches_no_files() {
+        let (_dir, index, _, _) = two_crate_workspace_with_shared_foo();
+        let result = index
+            .search_symbol_by_name_in_path_prefix("Foo", "crate_c/")
+            .expect("query");
+        assert!(
+            result.is_none(),
+            "must return None when no file's path begins with the prefix, got {result:?}"
+        );
     }
 }
