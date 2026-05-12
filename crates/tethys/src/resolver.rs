@@ -409,6 +409,95 @@ mod tests {
         );
     }
 
+    /// Bin-only crate: when `lib_path` is `None`, a single-segment path must
+    /// fall back to the first `bin_paths` entry. Locks down the `or_else`
+    /// branch in the single-segment case.
+    #[test]
+    fn single_segment_falls_back_to_bin_when_lib_path_absent() {
+        use crate::types::CrateInfo;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let caller = dir.path().join("caller");
+        fs::create_dir_all(caller.join("src")).expect("caller src");
+        fs::write(caller.join("src/lib.rs"), "").expect("caller lib.rs");
+
+        let bin_only = dir.path().join("bin_only");
+        fs::create_dir_all(bin_only.join("src")).expect("bin_only src");
+        fs::write(bin_only.join("src/main.rs"), "fn main() {}").expect("bin_only main.rs");
+
+        let crates = vec![
+            CrateInfo {
+                name: "caller".to_string(),
+                path: caller.clone(),
+                lib_path: Some(PathBuf::from("src/lib.rs")),
+                bin_paths: vec![],
+            },
+            CrateInfo {
+                name: "bin_only".to_string(),
+                path: bin_only.clone(),
+                lib_path: None,
+                bin_paths: vec![("bin_only".to_string(), PathBuf::from("src/main.rs"))],
+            },
+        ];
+
+        let current = caller.join("src/lib.rs");
+        let result = resolve_module_path(
+            &["bin_only".to_string()],
+            &current,
+            &caller.join("src"),
+            &crates,
+        );
+        let resolved = result.expect("bin-only single-segment must resolve to first bin path");
+        assert!(
+            resolved.ends_with("bin_only/src/main.rs")
+                || resolved.ends_with("bin_only\\src\\main.rs"),
+            "expected bin_only/src/main.rs, got {resolved:?}"
+        );
+    }
+
+    /// Empty entry point: when both `lib_path` is `None` and `bin_paths` is
+    /// empty, a single-segment path must return `None`. Locks down the
+    /// invariant documented in `resolve_module_path`'s doc comment.
+    #[test]
+    fn single_segment_returns_none_when_no_entry_point() {
+        use crate::types::CrateInfo;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let caller = dir.path().join("caller");
+        fs::create_dir_all(caller.join("src")).expect("caller src");
+        fs::write(caller.join("src/lib.rs"), "").expect("caller lib.rs");
+
+        let ghost = dir.path().join("ghost");
+        fs::create_dir_all(&ghost).expect("ghost dir");
+
+        let crates = vec![
+            CrateInfo {
+                name: "caller".to_string(),
+                path: caller.clone(),
+                lib_path: Some(PathBuf::from("src/lib.rs")),
+                bin_paths: vec![],
+            },
+            CrateInfo {
+                name: "ghost".to_string(),
+                path: ghost,
+                lib_path: None,
+                bin_paths: vec![],
+            },
+        ];
+
+        let current = caller.join("src/lib.rs");
+        let result = resolve_module_path(
+            &["ghost".to_string()],
+            &current,
+            &caller.join("src"),
+            &crates,
+        );
+        assert!(
+            result.is_none(),
+            "single-segment must return None when neither lib_path nor bin_paths is set, got {result:?}"
+        );
+    }
+
     /// Self-reference: a file using its OWN crate's name in an import path
     /// (e.g. `use rivets::Foo` from inside `rivets`) must resolve identically
     /// to the `crate::Foo` form. The new arm should find the caller's own
