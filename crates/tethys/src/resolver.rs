@@ -20,8 +20,9 @@ use crate::types::CrateInfo;
 /// * `workspace_crates` - All discovered crates in the workspace. When `path[0]`
 ///   matches a `CrateInfo::name` (with `-` → `_` normalization to convert Cargo
 ///   manifest names to Rust module names): a single-segment path resolves to
-///   the target crate's entry-point file (`lib_path` or first bin); a
-///   multi-segment path recurses into that crate's `src/` as the new `crate_root`.
+///   the target crate's entry-point file (`lib_path` or first bin; `None` if
+///   neither is set); a multi-segment path recurses into that crate's `src/`
+///   as the new `crate_root`.
 ///
 /// # Returns
 /// * `Some(PathBuf)` - Resolved file path within the workspace
