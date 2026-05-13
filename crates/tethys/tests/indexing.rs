@@ -12,6 +12,20 @@ use tethys::{SymbolId, Tethys};
 fn workspace_with_files(files: &[(&str, &str)]) -> (TempDir, Tethys) {
     let dir = tempfile::tempdir().expect("failed to create temp dir");
 
+    // Default Cargo.toml so the workspace is a valid single-crate package.
+    // Tethys's resolver looks up per-file crate_root via `cargo::get_crate_for_file`;
+    // a workspace with no Cargo.toml has an empty crate list and Pass-2-imports
+    // is skipped for every file. Tests that want that behavior can omit by
+    // passing files that don't include this path.
+    let cargo_toml_path = dir.path().join("Cargo.toml");
+    if !files.iter().any(|(p, _)| *p == "Cargo.toml") {
+        fs::write(
+            &cargo_toml_path,
+            "[package]\nname = \"test_workspace\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+        )
+        .expect("failed to write default Cargo.toml");
+    }
+
     for (path, content) in files {
         let full_path = dir.path().join(path);
         if let Some(parent) = full_path.parent() {

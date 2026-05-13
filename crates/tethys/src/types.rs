@@ -15,7 +15,7 @@
 //! | Span | Optional | Tree-sitter provides it, but not all sources do |
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -156,6 +156,13 @@ impl Language {
 /// Information about a Rust crate discovered from Cargo.toml.
 ///
 /// Used to determine crate roots for module path resolution.
+///
+/// **Computing source directories:** use [`CrateInfo::src_root`] rather than
+/// hardcoding `<path>/src` — that hardcode is the bug class fixed by
+/// `rivets-6aoc`, and re-introducing it at a new call site silently breaks
+/// multi-crate workspaces whose root has no `src/` directory. The accessor
+/// derives the directory from `lib_path` / `bin_paths` so non-standard layouts
+/// (e.g. `lib.path = "custom/lib.rs"`, `src/bin/X.rs`) resolve correctly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CrateInfo {
     /// Crate name from `[package].name`
@@ -166,6 +173,50 @@ pub struct CrateInfo {
     pub lib_path: Option<PathBuf>,
     /// Binary entry points: (name, path relative to crate)
     pub bin_paths: Vec<(String, PathBuf)>,
+}
+
+impl CrateInfo {
+    /// Returns the directory containing this crate's source modules.
+    ///
+    /// Derivation order, falling through on `None`:
+    /// 1. `lib_path.parent()` joined onto crate path — for crates with a lib target.
+    /// 2. First `bin_paths` entry's parent — for bin-only crates (where source
+    ///    modules live next to the bin entry, e.g., `src/` for `src/main.rs`
+    ///    or `src/bin/` for `src/bin/myapp.rs`).
+    /// 3. `<path>/src` — pathological last resort. Reachable only when a
+    ///    `Cargo.toml` has `[package]` but no `[lib]`, no `[[bin]]`, no
+    ///    discoverable `src/lib.rs`, and no discoverable `src/main.rs`. Cargo
+    ///    emits a build-time warning for this configuration but the manifest
+    ///    parser does not reject it, so the path is returned defensively. The
+    ///    returned path is unverified — callers should treat the result as a
+    ///    candidate, not a guaranteed-existent directory.
+    ///
+    /// When the derived `lib_path`/`bin_path` has no meaningful parent (e.g.,
+    /// `lib.rs` at the crate root), returns the crate's own path.
+    #[must_use]
+    pub fn src_root(&self) -> PathBuf {
+        if let Some(rel) = &self.lib_path {
+            return Self::dir_of(&self.path, rel);
+        }
+        if let Some((_, rel)) = self.bin_paths.first() {
+            return Self::dir_of(&self.path, rel);
+        }
+        // Pathological: no lib AND no bins. Surface the anomaly to the
+        // operator since downstream resolution will silently fail.
+        tracing::warn!(
+            crate_name = %self.name,
+            crate_path = %self.path.display(),
+            "CrateInfo has no lib_path AND no bin_paths; src_root falling back to <path>/src (path may not exist on disk)"
+        );
+        self.path.join("src")
+    }
+
+    fn dir_of(crate_path: &Path, rel: &Path) -> PathBuf {
+        match rel.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => crate_path.join(parent),
+            _ => crate_path.to_path_buf(),
+        }
+    }
 }
 
 /// Symbol kinds tracked by Tethys.
@@ -2147,6 +2198,75 @@ mod tests {
         };
         assert_eq!(stats.total_lsp_resolved(), 0);
         assert!(!stats.has_lsp_errors());
+    }
+
+    fn crate_info_full(lib_path: Option<&str>, bin_paths: Vec<(&str, &str)>) -> CrateInfo {
+        CrateInfo {
+            name: "test_crate".to_string(),
+            path: PathBuf::from("/ws/crates/test_crate"),
+            lib_path: lib_path.map(PathBuf::from),
+            bin_paths: bin_paths
+                .into_iter()
+                .map(|(n, p)| (n.to_string(), PathBuf::from(p)))
+                .collect(),
+        }
+    }
+
+    fn crate_info(lib_path: Option<&str>) -> CrateInfo {
+        crate_info_full(lib_path, vec![])
+    }
+
+    #[test]
+    fn src_root_returns_lib_path_parent_for_standard_layout() {
+        let ci = crate_info(Some("src/lib.rs"));
+        assert_eq!(ci.src_root(), PathBuf::from("/ws/crates/test_crate/src"));
+    }
+
+    /// A non-standard `lib_path` must NOT silently get `src` appended. An impl
+    /// that hardcodes `"src"` regardless of `lib_path` would fail this test.
+    #[test]
+    fn src_root_follows_non_standard_lib_path_layout() {
+        let ci = crate_info(Some("custom/nested/lib.rs"));
+        assert_eq!(
+            ci.src_root(),
+            PathBuf::from("/ws/crates/test_crate/custom/nested")
+        );
+    }
+
+    /// `lib_path = Some("lib.rs")` with no parent directory: `src_root` is the
+    /// crate path itself, not `<path>/src` and not `<path>/`.
+    #[test]
+    fn src_root_returns_crate_path_when_lib_path_has_no_parent() {
+        let ci = crate_info(Some("lib.rs"));
+        assert_eq!(ci.src_root(), PathBuf::from("/ws/crates/test_crate"));
+    }
+
+    /// Bin-only crate with the standard `src/main.rs` layout. `src_root`
+    /// derives from the bin's parent (`src/`), not from a hardcoded fallback.
+    #[test]
+    fn src_root_derives_from_first_bin_when_lib_path_is_none() {
+        let ci = crate_info_full(None, vec![("test_crate", "src/main.rs")]);
+        assert_eq!(ci.src_root(), PathBuf::from("/ws/crates/test_crate/src"));
+    }
+
+    /// Bin-only crate with a non-standard bin location (`src/bin/myapp.rs`).
+    /// An impl that hardcodes `"src"` for the `lib_path = None` case would
+    /// return `<path>/src`, missing the actual bin parent (`<path>/src/bin`).
+    #[test]
+    fn src_root_follows_non_standard_bin_path_layout() {
+        let ci = crate_info_full(None, vec![("myapp", "src/bin/myapp.rs")]);
+        assert_eq!(
+            ci.src_root(),
+            PathBuf::from("/ws/crates/test_crate/src/bin")
+        );
+    }
+
+    /// Pathological: no lib AND no bins. Cargo rejects this, but defensive
+    /// fallback returns `<path>/src` so callers always get a `PathBuf`.
+    #[test]
+    fn src_root_falls_back_to_src_when_no_lib_and_no_bins() {
+        let ci = crate_info_full(None, vec![]);
+        assert_eq!(ci.src_root(), PathBuf::from("/ws/crates/test_crate/src"));
     }
 }
 

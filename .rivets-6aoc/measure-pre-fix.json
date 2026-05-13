@@ -1,0 +1,12 @@
+{
+  "label": "pre-fix-with-fallback",
+  "total_refs": 21481,
+  "resolved_refs": 6456,
+  "unresolved_refs": 15025,
+  "intra_crate_resolved": 5985,
+  "cross_crate_resolved": 305,
+  "file_deps_total": 374,
+  "file_deps_intra_crate": 285,
+  "file_deps_cross_crate": 76,
+  "unresolved_crate_refs": 28
+}

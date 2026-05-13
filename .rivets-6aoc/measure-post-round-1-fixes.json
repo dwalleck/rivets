@@ -1,0 +1,12 @@
+{
+  "label": "post-round-1-fixes",
+  "total_refs": 21661,
+  "resolved_refs": 6630,
+  "unresolved_refs": 15031,
+  "intra_crate_resolved": 6161,
+  "cross_crate_resolved": 296,
+  "file_deps_total": 393,
+  "file_deps_intra_crate": 307,
+  "file_deps_cross_crate": 72,
+  "unresolved_crate_refs": 31
+}

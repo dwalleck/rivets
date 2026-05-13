@@ -1,0 +1,12 @@
+{
+  "label": "post-fix-with-fallback",
+  "total_refs": 21627,
+  "resolved_refs": 6566,
+  "unresolved_refs": 15061,
+  "intra_crate_resolved": 6156,
+  "cross_crate_resolved": 296,
+  "file_deps_total": 383,
+  "file_deps_intra_crate": 307,
+  "file_deps_cross_crate": 72,
+  "unresolved_crate_refs": 31
+}

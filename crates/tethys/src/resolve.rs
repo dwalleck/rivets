@@ -63,36 +63,61 @@ impl Tethys {
             by_file.entry(ref_.file_id).or_default().push(ref_);
         }
 
-        let crate_root = self.workspace_root.join("src");
-
         for (file_id, refs) in by_file {
-            resolved_count += self.resolve_refs_for_file(file_id, refs, &crate_root)?;
+            resolved_count += self.resolve_refs_for_file(file_id, refs)?;
         }
 
         Ok(resolved_count)
     }
 
     /// Resolve references for a single file using its imports.
-    fn resolve_refs_for_file(
-        &self,
-        file_id: FileId,
-        refs: Vec<Reference>,
-        crate_root: &Path,
-    ) -> Result<usize> {
+    ///
+    /// `crate_root` is derived per file via [`crate::cargo::get_crate_for_file`] +
+    /// [`crate::types::CrateInfo::src_root`] — `crate::` paths in a sub-crate file
+    /// resolve under that crate's own source root, not the workspace root.
+    ///
+    /// For files outside any known crate (e.g., workspace-root example/bench
+    /// directories), the file's parent directory is used as a sentinel
+    /// `crate_root`. `crate::*` paths in such files are semantic no-ops in
+    /// Rust and the sentinel won't accidentally resolve them; `self::`/`super::`
+    /// arms continue to work off the file path directly, and the
+    /// path-agnostic fallback (`fallback_symbol_search`) still has a chance
+    /// to resolve qualified references via `get_symbol_by_qualified_name`.
+    fn resolve_refs_for_file(&self, file_id: FileId, refs: Vec<Reference>) -> Result<usize> {
         let imports = self.db.get_imports_for_file(file_id)?;
         if imports.is_empty() {
             return Ok(0);
         }
 
         // Get the current file's path for relative path resolution
-        let current_file_path = if let Some(f) = self.db.get_file_by_id(file_id)? {
-            Some(self.workspace_root.join(&f.path))
-        } else {
+        let Some(file_record) = self.db.get_file_by_id(file_id)? else {
             warn!(
                 file_id = %file_id,
                 "File not found during reference resolution - possible database inconsistency"
             );
-            None
+            return Ok(0);
+        };
+        let current_file_path = self.workspace_root.join(&file_record.path);
+
+        // Per-file crate_root: derived from the file's owning crate via
+        // get_crate_for_file + CrateInfo::src_root(). When the file isn't in
+        // any known crate, fall back to its parent directory as a sentinel —
+        // `crate::*` paths there have no valid anchor, but the rest of the
+        // resolver pipeline (self::/super:: arms, workspace-crate arm,
+        // fallback_symbol_search) continues to work.
+        let crate_root = if let Some(crate_info) =
+            crate::cargo::get_crate_for_file(&current_file_path, &self.crates)
+        {
+            crate_info.src_root()
+        } else {
+            debug!(
+                file_id = %file_id,
+                file = %current_file_path.display(),
+                "File not in any known crate; using file parent as sentinel crate_root"
+            );
+            current_file_path
+                .parent()
+                .map_or_else(|| self.workspace_root.clone(), Path::to_path_buf)
         };
 
         // Build import structures
@@ -101,8 +126,8 @@ impl Tethys {
         let ctx = ResolveContext {
             explicit_imports: &explicit_imports,
             glob_imports: &glob_imports,
-            current_file_path: current_file_path.as_deref(),
-            crate_root,
+            current_file_path: Some(&current_file_path),
+            crate_root: &crate_root,
             file_id,
         };
 

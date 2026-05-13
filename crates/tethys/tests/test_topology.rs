@@ -15,8 +15,20 @@ use tempfile::TempDir;
 use tethys::Tethys;
 
 /// Create a temporary workspace with the given files.
+///
+/// Auto-writes a default `Cargo.toml` if the caller doesn't include one.
+/// Without `Cargo.toml`, tethys's per-file `crate_root` lookup finds no
+/// crate and skips Pass-2-imports / dep-graph computation entirely.
 fn workspace_with_files(files: &[(&str, &str)]) -> (TempDir, Tethys) {
     let dir = tempfile::tempdir().expect("failed to create temp dir");
+
+    if !files.iter().any(|(p, _)| *p == "Cargo.toml") {
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"test_topology\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+        )
+        .expect("failed to write default Cargo.toml");
+    }
 
     for (path, content) in files {
         let full_path = dir.path().join(path);
