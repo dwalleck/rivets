@@ -693,6 +693,7 @@ impl Drop for LspClient {
 /// paths with spaces (e.g., `C:\Program Files\...`) would fail URI
 /// construction regardless of what the LSP server accepts.
 fn percent_encode_path(s: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         // RFC 3986 unreserved set, plus `/` (path separator) and `:` (drive-letter
@@ -702,8 +703,9 @@ fn percent_encode_path(s: &str) -> String {
             _ => {
                 let mut buf = [0u8; 4];
                 for b in c.encode_utf8(&mut buf).bytes() {
-                    use std::fmt::Write;
-                    let _ = write!(out, "%{b:02X}");
+                    out.push('%');
+                    out.push(HEX[(b >> 4) as usize] as char);
+                    out.push(HEX[(b & 0xF) as usize] as char);
                 }
             }
         }
@@ -872,6 +874,13 @@ mod tests {
         assert_eq!(extracted.unwrap().uri.as_str(), link.target_uri.as_str());
     }
 
+    /// Loose smoke test for `path_to_uri` end-to-end. Kept as a backstop
+    /// for obvious mis-formatting (URI doesn't start with `file://`, has
+    /// backslashes) even though it can't catch the bug class the new
+    /// exact-string `format_uri_*` tests catch — both its assertions pass
+    /// for the malformed `file://///?/C:/...` form that rivets-714v fixed.
+    /// The exact-string tests are the structural-correctness fence; this
+    /// one is just defense-in-depth.
     #[test]
     fn path_to_uri_creates_valid_file_uri() {
         // Test with a path that exists (current directory)
@@ -920,6 +929,18 @@ mod tests {
         let path = Path::new("/home/user/file.rs");
         let uri = format_uri(path).expect("format_uri should succeed");
         assert_eq!(uri.as_str(), "file:///home/user/file.rs");
+    }
+
+    /// Unix counterpart to `format_uri_percent_encodes_spaces`: paths with
+    /// spaces on Unix go through the same `percent_encode_path` helper and
+    /// must produce the same `%20` encoding. Without this test, the encoding
+    /// path was effectively only verified on Windows.
+    #[test]
+    #[cfg(not(windows))]
+    fn format_uri_percent_encodes_spaces_unix() {
+        let path = Path::new("/home/user/my project/file.rs");
+        let uri = format_uri(path).expect("format_uri should succeed");
+        assert_eq!(uri.as_str(), "file:///home/user/my%20project/file.rs");
     }
 
     /// rivets-714v claim C8: spaces in paths are percent-encoded as `%20`.

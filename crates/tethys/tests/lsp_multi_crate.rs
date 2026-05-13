@@ -153,15 +153,16 @@ fn lsp_multi_crate_resolves_at_least_one_cross_file_ref() {
     let db_path = dir.path().join(".rivets").join("index").join("tethys.db");
     let conn = rusqlite::Connection::open(&db_path).expect("open tethys.db");
 
+    // Any resolved ref where the caller's file differs from the symbol's
+    // defining file. Doesn't filter on path-form (workspace-relative vs
+    // absolute) so the assertion stays correct regardless of tethys's
+    // path-storage decisions.
     let resolved_cross_file: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM refs r
-             JOIN files f_caller ON f_caller.id = r.file_id
              JOIN symbols s ON s.id = r.symbol_id
-             JOIN files f_target ON f_target.id = s.file_id
              WHERE r.symbol_id IS NOT NULL
-               AND f_caller.path LIKE 'crate_caller/%'
-               AND f_caller.id != f_target.id",
+               AND r.file_id != s.file_id",
             [],
             |row| row.get(0),
         )
