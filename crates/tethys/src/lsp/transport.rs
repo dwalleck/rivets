@@ -680,35 +680,96 @@ impl Drop for LspClient {
 
 /// Convert a filesystem path to an LSP URI.
 ///
+/// Percent-encode RFC 3986 non-unreserved characters in a file URI path.
+///
+/// Preserves the unreserved set (`A-Za-z0-9-._~`) plus the path-segment
+/// structural characters `/` (separator) and `:` (drive-letter colon on
+/// Windows). Everything else — spaces, `#`, `%`, `?`, `[`, `]`, non-ASCII
+/// Unicode bytes — is percent-encoded as UTF-8 bytes per RFC 3986 §2.5.
+///
+/// Without this encoding, `lsp_types::Uri::from_str` rejects strings
+/// containing unencoded reserved characters with "unexpected character at
+/// index N." That rejection happens locally, before any LSP wire send, so
+/// paths with spaces (e.g., `C:\Program Files\...`) would fail URI
+/// construction regardless of what the LSP server accepts.
+fn percent_encode_path(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        // RFC 3986 unreserved set, plus `/` (path separator) and `:` (drive-letter
+        // colon on Windows). Everything else gets percent-encoded as UTF-8 bytes.
+        match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '.' | '_' | '~' | '/' | ':' => out.push(c),
+            _ => {
+                let mut buf = [0u8; 4];
+                for b in c.encode_utf8(&mut buf).bytes() {
+                    use std::fmt::Write;
+                    let _ = write!(out, "%{b:02X}");
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Format an absolute path as a `file://` URI without performing any
+/// filesystem I/O.
+///
+/// On Windows, strips the `\\?\` extended-length prefix that
+/// `Path::canonicalize` adds to every path it returns. RFC 8089 file URIs
+/// can't represent this prefix; rust-analyzer rejects URIs containing it
+/// with `-32603 url is not a file` (rivets-714v).
+///
+/// Percent-encodes RFC 3986 non-unreserved characters (spaces, `#`, etc.)
+/// so paths like `C:\Program Files\foo.rs` produce a valid URI rather than
+/// failing local `Uri::from_str` parsing.
+///
+/// On Unix: `/home/user/file.rs` -> `file:///home/user/file.rs`.
+/// On Windows: `\\?\C:\Users\file.rs` -> `file:///C:/Users/file.rs`.
+/// On Windows: `C:\Program Files\foo.rs` -> `file:///C:/Program%20Files/foo.rs`.
+///
+/// The caller is expected to have canonicalized the path (or be intentionally
+/// passing an as-given absolute path). Violating this isn't a panic — the
+/// returned URI is defensible but may not resolve to the intended file
+/// through the LSP server.
+///
+/// UNC paths (`\\?\UNC\server\share\...`) are out of scope; see rivets-276h.
+fn format_uri(path: &Path) -> Result<Uri> {
+    let path_str = path.to_str().ok_or_else(|| {
+        LspError::InvalidPath(format!("path contains invalid UTF-8: {}", path.display()))
+    })?;
+
+    #[cfg(windows)]
+    let uri_string = {
+        // Strip the `\\?\` extended-length prefix that canonicalize() adds.
+        // Without this strip, format!("file:///{}", ...) would produce
+        // `file://///?/C:/...` which rust-analyzer rejects.
+        let stripped = path_str.strip_prefix(r"\\?\").unwrap_or(path_str);
+        let normalized = stripped.replace('\\', "/");
+        format!("file:///{}", percent_encode_path(&normalized))
+    };
+
+    #[cfg(not(windows))]
+    let uri_string = format!("file://{}", percent_encode_path(path_str));
+
+    uri_string
+        .parse()
+        .map_err(|e| LspError::InvalidPath(format!("invalid URI '{uri_string}': {e}")))
+}
+
 /// Creates a `file://` URI from the given path. On Unix, this produces URIs like
 /// `file:///home/user/project/src/main.rs`. On Windows, it handles drive letters
-/// appropriately.
+/// appropriately and strips canonicalize's `\\?\` extended-length prefix.
+///
+/// Returns `InvalidPath` if the path doesn't exist (canonicalize fails) or
+/// contains invalid UTF-8.
 fn path_to_uri(path: &Path) -> Result<Uri> {
-    // Canonicalize the path to get an absolute path
     let absolute_path = path.canonicalize().map_err(|e| {
         LspError::InvalidPath(format!(
             "cannot canonicalize path '{}': {e}",
             path.display()
         ))
     })?;
-
-    // Convert to string, handling platform differences
-    let path_str = absolute_path.to_str().ok_or_else(|| {
-        LspError::InvalidPath(format!("path contains invalid UTF-8: {}", path.display()))
-    })?;
-
-    // Build the file URI
-    // On Unix: /home/user/file.rs -> file:///home/user/file.rs
-    // On Windows: C:\Users\file.rs -> file:///C:/Users/file.rs
-    #[cfg(windows)]
-    let uri_string = format!("file:///{}", path_str.replace('\\', "/"));
-
-    #[cfg(not(windows))]
-    let uri_string = format!("file://{path_str}");
-
-    uri_string
-        .parse()
-        .map_err(|e| LspError::InvalidPath(format!("invalid URI '{uri_string}': {e}")))
+    format_uri(&absolute_path)
 }
 
 #[cfg(test)]
@@ -825,6 +886,76 @@ mod tests {
         assert!(
             !uri_str.contains('\\'),
             "URI should not contain backslashes"
+        );
+    }
+
+    /// rivets-714v claim C1: `format_uri` strips the `\\?\` extended-length
+    /// prefix that `Path::canonicalize` adds on Windows. Without this strip,
+    /// the URI becomes `file://///?/C:/...` which rust-analyzer rejects with
+    /// `-32603 url is not a file`. Synthetic path input — no filesystem I/O.
+    #[test]
+    #[cfg(windows)]
+    fn format_uri_strips_extended_length_prefix() {
+        let path = Path::new(r"\\?\C:\Users\dwall\repos\rivets\file.rs");
+        let uri = format_uri(path).expect("format_uri should succeed");
+        assert_eq!(uri.as_str(), "file:///C:/Users/dwall/repos/rivets/file.rs");
+    }
+
+    /// rivets-714v claim C2: regular drive-letter paths (no `\\?\` prefix)
+    /// continue to produce `file:///C:/...` — no regression on the working
+    /// shape.
+    #[test]
+    #[cfg(windows)]
+    fn format_uri_handles_regular_drive_letter_path() {
+        let path = Path::new(r"C:\foo\bar.rs");
+        let uri = format_uri(path).expect("format_uri should succeed");
+        assert_eq!(uri.as_str(), "file:///C:/foo/bar.rs");
+    }
+
+    /// rivets-714v claim C3: Unix absolute paths produce `file:///<path>` —
+    /// the Unix branch is unaffected by the Windows-only `\\?\` strip.
+    #[test]
+    #[cfg(not(windows))]
+    fn format_uri_handles_unix_absolute_path() {
+        let path = Path::new("/home/user/file.rs");
+        let uri = format_uri(path).expect("format_uri should succeed");
+        assert_eq!(uri.as_str(), "file:///home/user/file.rs");
+    }
+
+    /// rivets-714v claim C8: spaces in paths are percent-encoded as `%20`.
+    /// Without encoding, `lsp_types::Uri::from_str` rejects the URI locally
+    /// before any LSP wire send. Affects users with workspaces under
+    /// `C:\Program Files\` and similar locations.
+    #[test]
+    #[cfg(windows)]
+    fn format_uri_percent_encodes_spaces() {
+        let path = Path::new(r"C:\Program Files\foo.rs");
+        let uri = format_uri(path).expect("format_uri should succeed");
+        assert_eq!(uri.as_str(), "file:///C:/Program%20Files/foo.rs");
+    }
+
+    /// Non-ASCII Unicode is percent-encoded as UTF-8 bytes per RFC 3986 §2.5.
+    /// `日` (U+65E5) is `E6 97 A5` in UTF-8 → `%E6%97%A5`. Regression sentinel
+    /// for "encoding silently drops or corrupts non-ASCII characters."
+    #[test]
+    #[cfg(windows)]
+    fn format_uri_percent_encodes_unicode_as_utf8_bytes() {
+        let path = Path::new(r"C:\日本\foo.rs");
+        let uri = format_uri(path).expect("format_uri should succeed");
+        assert_eq!(uri.as_str(), "file:///C:/%E6%97%A5%E6%9C%AC/foo.rs");
+    }
+
+    /// rivets-714v claim C7: composed `path_to_uri` preserves the
+    /// `InvalidPath` error path when `canonicalize()` fails (non-existent
+    /// path). Regression check that the fix doesn't accidentally hide
+    /// upstream errors.
+    #[test]
+    fn path_to_uri_returns_invalid_path_for_nonexistent() {
+        let nonexistent = std::env::temp_dir().join("rivets-714v-does-not-exist-xyzzy-marker");
+        let result = path_to_uri(&nonexistent);
+        assert!(
+            matches!(result, Err(LspError::InvalidPath(_))),
+            "expected InvalidPath error, got {result:?}"
         );
     }
 }
