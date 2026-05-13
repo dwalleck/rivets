@@ -1,18 +1,19 @@
-//! Integration regression test for rivets-714v: tethys's `--lsp` flag must
-//! work on multi-crate Cargo workspaces.
+//! Integration regression tests for `tethys index --lsp` on multi-crate
+//! Cargo workspaces.
 //!
-//! Pre-fix (before rivets-714v slice 1): tethys's `path_to_uri` leaked
-//! `\\?\` extended-length prefixes (from `Path::canonicalize` on Windows)
-//! into LSP `file://` URIs, and didn't percent-encode RFC 3986 reserved
-//! characters. rust-analyzer rejected the malformed URIs with
-//! `-32603 url is not a file`; Pass 3 resolved zero references.
+//! Asserts two invariants of LSP URI construction in `format_uri`:
 //!
-//! Post-fix: `format_uri` strips the prefix and percent-encodes. rust-analyzer
-//! accepts the URIs and Pass 3 can proceed.
+//! 1. End-to-end indexing of a multi-crate Windows workspace emits zero
+//!    `url is not a file` / `-32603` errors. A regression that re-introduces
+//!    `\\?\` prefix leakage, drops percent-encoding, or otherwise produces
+//!    URIs rust-analyzer rejects would fail this test.
 //!
-//! Fixture matches `.rivets-714v/probe.py`. Uses the same subprocess +
-//! stderr-grep mechanism — the probe is the empirical reproduction; this
-//! test is its permanent form.
+//! 2. After indexing the 2-crate fixture, the DB contains at least one
+//!    resolved cross-file reference. Distinguishes "errors silently swallowed"
+//!    (1 alone is satisfied vacuously) from "Pass-3 LSP is actually working."
+//!
+//! Tests are `#[ignore]`d by default because they shell out to the `tethys`
+//! binary and require `rust-analyzer` on PATH; opt in with `--ignored`.
 
 #![cfg(windows)]
 
@@ -20,24 +21,34 @@ use std::fs;
 use std::process::Command;
 use tempfile::TempDir;
 
-/// Check if rust-analyzer is available in PATH.
-fn rust_analyzer_available() -> bool {
-    Command::new("where")
+/// Panic with an actionable message if `rust-analyzer` is not on PATH.
+///
+/// Returning silently here would let the test report PASS while verifying
+/// nothing — `#[ignore]` already gates these tests, so by the time this
+/// runs the caller has explicitly opted in with `--ignored` and expects
+/// the test to actually execute. A silent-skip would turn the regression
+/// fence into a no-op on any environment missing the binary.
+fn require_rust_analyzer() {
+    let available = Command::new("where")
         .arg("rust-analyzer")
         .output()
         .map(|output| output.status.success())
-        .unwrap_or(false)
+        .unwrap_or(false);
+    assert!(
+        available,
+        "rust-analyzer not found on PATH — install it or filter this test \
+         out with `--skip lsp_multi_crate` instead of letting it false-pass"
+    );
 }
 
 /// Build a 2-crate Cargo workspace where `crate_caller` depends on
 /// `crate_target` and calls a method on a `crate_target::Widget` — an
 /// in-workspace cross-file reference that Pass-3 LSP must resolve.
 ///
-/// Diverges from `.rivets-714v/probe.py`'s fixture (which used external
-/// `std::HashMap` and had no in-workspace cross-file refs). The probe's
-/// shape was inherited from rivets-3d0s where the question was different;
-/// for rivets-714v's C6 claim, we need an intra-workspace edge so the
-/// resolved-ref count is observable in the DB.
+/// The intra-workspace edge is what makes the resolved-ref assertion
+/// observable in the DB; an external-only dependency (e.g. `std::HashMap`)
+/// wouldn't produce a row whose `file_id` differs from the symbol's
+/// defining file.
 fn build_2_crate_fixture(dir: &TempDir) {
     let files = [
         (
@@ -68,29 +79,23 @@ fn build_2_crate_fixture(dir: &TempDir) {
     ];
     for (rel, content) in files {
         let p = dir.path().join(rel);
-        fs::create_dir_all(p.parent().unwrap()).expect("create dir");
+        fs::create_dir_all(p.parent().expect("relative path has parent")).expect("create dir");
         fs::write(&p, content).expect("write file");
     }
 }
 
-/// rivets-714v claim C5: end-to-end `tethys index --lsp` on a 2-crate
-/// Windows workspace emits zero `url is not a file -32603` errors after
-/// the fix.
+/// `tethys index --lsp` on a multi-crate Windows workspace emits zero
+/// `url is not a file` / `-32603` errors.
 ///
-/// Mechanism: run tethys as a subprocess (matching the prove-it-prototype
-/// probe shape), capture stderr, count matches of the error pattern. The
-/// probe captured 4 matches pre-fix; this test asserts 0 matches post-fix.
-///
-/// A regression that re-introduces the `\\?\` URI malformation, drops
-/// percent-encoding, or otherwise breaks the URI construction would fail
-/// this test because rust-analyzer would re-reject the URIs.
+/// Runs tethys as a subprocess against the 2-crate fixture, captures
+/// stdout+stderr, and asserts no line matches the error pattern. A
+/// regression that re-introduces `\\?\` URI malformation or drops
+/// percent-encoding would fail this because rust-analyzer would reject
+/// the URIs.
 #[test]
 #[ignore = "requires rust-analyzer installed; subprocess invokes tethys binary"]
 fn lsp_multi_crate_emits_no_url_errors() {
-    if !rust_analyzer_available() {
-        eprintln!("Skipping test: rust-analyzer not available");
-        return;
-    }
+    require_rust_analyzer();
 
     let dir = tempfile::tempdir().expect("create tempdir");
     build_2_crate_fixture(&dir);
@@ -104,6 +109,17 @@ fn lsp_multi_crate_emits_no_url_errors() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Assert success before grepping. Without this, a future regression
+    // that crashes tethys early (before any LSP request is made) would
+    // pass vacuously: zero error lines emitted because zero requests
+    // attempted.
+    assert!(
+        output.status.success(),
+        "tethys index --lsp exited {:?}\nstdout: {stdout}\nstderr: {stderr}",
+        output.status
+    );
+
     let combined = format!("{stdout}\n{stderr}");
     let url_errors: Vec<&str> = combined
         .lines()
@@ -112,29 +128,24 @@ fn lsp_multi_crate_emits_no_url_errors() {
 
     assert!(
         url_errors.is_empty(),
-        "expected zero 'url is not a file' errors after rivets-714v fix; got {}:\n{}",
+        "expected zero 'url is not a file' errors; got {}:\n{}",
         url_errors.len(),
         url_errors.join("\n")
     );
 }
 
-/// rivets-714v claim C6: after the fix, indexing the 2-crate fixture with
-/// `--lsp` produces at least one cross-file reference resolved in the DB.
+/// Indexing the 2-crate fixture with `--lsp` resolves at least one
+/// cross-file reference in the DB.
 ///
-/// The threshold of ≥1 is the floor that distinguishes "URI fix masks errors
-/// but doesn't actually let Pass 3 do its job" from "URI fix unblocks
-/// Pass 3." A regression that silently swallows URI errors without fixing
-/// them would pass the C5 (no errors) test but fail this one.
-///
-/// Queries the DB directly rather than using tethys's in-process API,
-/// matching the probe's mechanism for independent verification.
+/// The threshold of ≥1 distinguishes "URI errors silently swallowed" (the
+/// no-errors test above is satisfied vacuously) from "Pass-3 LSP actually
+/// works." Queried out of the DB directly rather than via tethys's
+/// in-process API, so the assertion holds independent of any code path
+/// the production binary might take.
 #[test]
 #[ignore = "requires rust-analyzer installed; subprocess invokes tethys binary"]
 fn lsp_multi_crate_resolves_at_least_one_cross_file_ref() {
-    if !rust_analyzer_available() {
-        eprintln!("Skipping test: rust-analyzer not available");
-        return;
-    }
+    require_rust_analyzer();
 
     let dir = tempfile::tempdir().expect("create tempdir");
     build_2_crate_fixture(&dir);
@@ -177,10 +188,7 @@ fn lsp_multi_crate_resolves_at_least_one_cross_file_ref() {
     assert!(
         resolved_cross_file >= 1,
         "expected ≥1 resolved cross-file reference on the 2-crate fixture; \
-         got {resolved_cross_file}. \
-         Note: Pass-3 LSP resolution is what makes this work; pre-rivets-714v, \
-         malformed URIs caused rust-analyzer to reject every request and this \
-         count was always 0. Even Pass-2-fallback can produce cross-file edges, \
-         so this floor is conservative — it should be easy to meet post-fix."
+         got {resolved_cross_file}. Even Pass-2 fallback can produce \
+         cross-file edges, so this floor is conservative."
     );
 }
