@@ -26,19 +26,44 @@ Two automated reviewers commented: **claude-review** (1 PR-level comment with 3 
 
 **Decision: defer, filed as rivets-ml05** (P4 bug). The fix shape (wrap the relevant indexing section in a transaction) requires design work around the streaming batch_writer's chunked-commit pattern and is out of scope for rivets-lcb6. Adopting the same pattern as call_edges is the strictly-better choice here (no-fix-now would leave file_deps stale, which is the very bug we're fixing).
 
-## Gemini #4 — N+1 in `compute_all_dependencies` for deleted-from-disk files (REJECT)
+## Gemini #4 — orphan-file handling in `compute_all_dependencies` (DEFER, FILE)
 
-**Where:** Comment cited `crates/tethys/src/indexing.rs:139`. Function `compute_all_dependencies` does exist at line 943 (I initially doubted this; gemini was right).
+**Where:** Comment cited `crates/tethys/src/indexing.rs:139`. Function `compute_all_dependencies` exists at line 943 (gemini was right about the name; my initial doubt was wrong).
 
 **Finding:** "`compute_all_dependencies` in streaming mode may re-calculate dependencies for stale entries (files in DB but deleted from disk). Consider eagerly loading all indexed items into a map for comparison against the disk."
 
-**Decision: reject.** Three reasons:
+**Decision: defer, filed as rivets-dhxo.**
 
-1. **Not the bug class this PR fixes.** rivets-lcb6 is about `file_deps` accumulating stale rows across runs via UPSERT. The clear-then-repopulate cycle now removes all stale rows regardless of whether the file still exists on disk. If a file was deleted from disk and lingers as an orphan in the DB, that's a separate cleanup concern.
-2. **The scenario described is uncommon.** `db/files.rs` cascades deletes when a file is removed from indexing (lines 145-146 in this file remove symbols and imports for the file_id). Deleted-from-disk files don't typically linger in DB after a re-index.
-3. **N+1 performance is a separate optimization.** `compute_all_dependencies` does per-file queries by design; whether that's the right architecture is a coupling-graph perf question, not part of the resolver-correctness epic.
+### Round-1 verdict was wrong
 
-If gemini's underlying concern about orphan files is real, it should be filed as its own issue — but it doesn't block rivets-lcb6.
+I initially rejected this on cascade-cleanup grounds: "`db/files.rs:145-146` cascades deletes when a file is removed from indexing; deleted-from-disk files don't typically linger after a re-index." That reasoning is incorrect.
+
+Pressure-tested by reading the actual code path:
+
+1. The `DELETE FROM symbols / imports` in `db/files.rs:145-146` lives inside `index_file_atomic` and only fires when an EXISTING file is RE-indexed (the `updated > 0` branch). It does NOT fire for files **deleted from disk** because the indexer never processes them.
+2. `FileChange::Deleted` IS detected in `reindex.rs:122`, but only by `get_stale_files()` — an observation API that is NOT called from `index_with_options`.
+3. Nowhere in `index_with_options` is there any `DELETE FROM files` for orphan entries. So orphan files linger.
+4. `compute_all_dependencies` iterates `self.db.list_all_files()` (line 944) which includes those orphans. For each, it loads the stale stored imports + refs and calls `compute_dependencies_from_stored`, which re-inserts `file_deps` rows with the orphan as `from_file_id`.
+
+### Path asymmetry
+
+| Path | Affected? |
+|---|---|
+| `tethys index --rebuild` (any mode) | No — `db.reset()` wipes the DB; no orphans |
+| `tethys index` non-streaming (default) | No — `compute_dependencies` runs per disk-file in the parse loop |
+| `tethys index` streaming | **Yes** — `compute_all_dependencies` iterates `list_all_files()` |
+
+### Why still defer (rather than fix in this PR)
+
+Three reasons stand from round-1:
+
+1. **Different bug class from rivets-lcb6** (UPSERT accumulation across runs vs. orphan-file handling in streaming).
+2. **Not introduced by this PR.** Pre-existing in streaming mode. `clear_all_file_deps` even partially mitigates by wiping `file_deps` each run, but `compute_all_dependencies` immediately re-inserts from orphans.
+3. **Fix needs its own design** — likely add an `cleanup_orphan_files` pass before resolver passes run, using the same staleness check as `reindex.rs::classify_indexed_file`. Filed as **rivets-dhxo** (P3 bug).
+
+### Correction lesson
+
+My round-1 rejection conflated **scope** (legitimate reason to defer) with **validity** (which I asserted incorrectly). The cascade-cleanup claim was a guess from the symbol/import DELETEs without verifying that those DELETEs fire on orphan-file deletion specifically. They don't. Verifying the actual code path took 3 greps and would have caught this in round-1.
 
 ## Gemini #5 — Streaming-mode coverage gap (ACCEPT)
 
@@ -57,7 +82,11 @@ The clear's position before the streaming/non-streaming branch is now a meaningf
 | 1. Drop issue-ID refs from comments | claude | Accept, applied |
 | 2. Tighten `file_deps_removed` assertion | claude | Accept, applied |
 | 3. Non-transactional clear | claude | Defer → rivets-ml05 |
-| 4. N+1 in `compute_all_dependencies` for stale files | gemini | Reject (not in scope) |
+| 4. Orphan-file handling in `compute_all_dependencies` | gemini | Defer → rivets-dhxo (corrected from initial reject) |
 | 5. Streaming-mode test coverage | gemini | Accept, applied (rstest parameterization, 4 cases) |
 
-**Net diff vs. round-0:** ~30 lines of test additions/changes, 8 lines of comment cleanup, 1 new tracker issue (rivets-ml05).
+**Net diff vs. round-0:** ~30 lines of test additions/changes, 8 lines of comment cleanup, 2 new tracker issues (rivets-ml05 atomicity, rivets-dhxo orphan-file streaming).
+
+## Correction note (post round-1, pre round-2)
+
+Gemini #4 was initially marked "reject" on the basis that `db/files.rs:145-146`'s cascade DELETEs would clean up orphan files. Verification showed those DELETEs only fire on RE-index of an existing file, not on file deletion from disk. Updated verdict above; new tracker rivets-dhxo filed.
