@@ -132,10 +132,11 @@ impl Tethys {
 
         // Clear file_deps before per-file dependency computation so stale rows
         // from prior runs don't accumulate via the UPSERT in
-        // `insert_file_dependency` (rivets-lcb6). Mirrors `clear_all_call_edges`
-        // at the start of the populate phase below; positioned earlier here
-        // because file_deps is written during per-file processing, not
-        // post-hoc like call_edges.
+        // `insert_file_dependency`. Mirrors `clear_all_call_edges` at the
+        // start of the populate phase below; positioned earlier here because
+        // file_deps is written during per-file processing (streaming and
+        // non-streaming branches both call `insert_file_dependency` later),
+        // not post-hoc like call_edges.
         self.db.clear_all_file_deps()?;
 
         if options.use_streaming() {

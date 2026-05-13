@@ -8,11 +8,11 @@ use crate::error::Result;
 use crate::types::FileId;
 
 impl Index {
-    /// Clear all file dependencies (for full rebuild and inter-run idempotency).
+    /// Clear all file-level dependencies.
     ///
-    /// Mirrors `clear_all_call_edges`. Called from `index_with_options` before
-    /// per-file dependency computation so stale edges from prior runs don't
-    /// accumulate via the UPSERT in `insert_file_dependency` (rivets-lcb6).
+    /// Call before re-indexing to prevent stale edges from prior runs
+    /// accumulating via the `ON CONFLICT … DO UPDATE` in
+    /// `insert_file_dependency`. Mirrors `clear_all_call_edges`.
     pub fn clear_all_file_deps(&self) -> Result<()> {
         trace!("Clearing all file deps");
         let conn = self.connection()?;
