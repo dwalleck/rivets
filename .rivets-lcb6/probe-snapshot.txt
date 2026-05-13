@@ -1,0 +1,3 @@
+baseline = 395
+after_reindex_1 = 395 (delta 0)
+after_reindex_2 = 395 (delta 0)

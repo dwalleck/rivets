@@ -1,12 +1,26 @@
 //! File dependency CRUD operations for the Tethys index.
 
 use rusqlite::params;
+use tracing::trace;
 
 use super::Index;
 use crate::error::Result;
 use crate::types::FileId;
 
 impl Index {
+    /// Clear all file dependencies (for full rebuild and inter-run idempotency).
+    ///
+    /// Mirrors `clear_all_call_edges`. Called from `index_with_options` before
+    /// per-file dependency computation so stale edges from prior runs don't
+    /// accumulate via the UPSERT in `insert_file_dependency` (rivets-lcb6).
+    pub fn clear_all_file_deps(&self) -> Result<()> {
+        trace!("Clearing all file deps");
+        let conn = self.connection()?;
+
+        conn.execute("DELETE FROM file_deps", [])?;
+        Ok(())
+    }
+
     /// Insert or update a file-level dependency.
     ///
     /// Records that `from_file_id` depends on `to_file_id`.
