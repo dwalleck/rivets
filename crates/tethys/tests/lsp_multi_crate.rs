@@ -151,7 +151,13 @@ fn lsp_multi_crate_resolves_at_least_one_cross_file_ref() {
     );
 
     let db_path = dir.path().join(".rivets").join("index").join("tethys.db");
-    let conn = rusqlite::Connection::open(&db_path).expect("open tethys.db");
+    // Read-only flags: if db_path is wrong (e.g., tethys changes its DB
+    // location), open fails immediately with a clear error rather than
+    // silently creating an empty DB and returning 0 cross-file refs (which
+    // would falsely look like a regression while hiding the root cause).
+    let conn =
+        rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open tethys.db (read-only)");
 
     // Any resolved ref where the caller's file differs from the symbol's
     // defining file. Doesn't filter on path-form (workspace-relative vs

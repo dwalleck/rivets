@@ -14,6 +14,7 @@ use lsp_types::{
     notification::{DidOpenTextDocument, Notification},
     request::{GotoDefinition, Initialize, References, Shutdown},
 };
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tracing::{debug, trace, warn};
@@ -680,6 +681,44 @@ impl Drop for LspClient {
 
 /// Convert a filesystem path to an LSP URI.
 ///
+/// `AsciiSet` of characters that must be percent-encoded in a file URI path.
+///
+/// Encodes everything outside RFC 3986's unreserved set (`A-Za-z0-9-._~`)
+/// EXCEPT `/` (path separator) and `:` (drive-letter colon on Windows), which
+/// are required to be unencoded for the URI to retain its path structure.
+///
+/// Defined as `CONTROLS` plus every ASCII byte in the reserved/sub-delim/gen-delim
+/// sets that aren't `/` or `:`. Non-ASCII Unicode is encoded as UTF-8 bytes
+/// automatically by `utf8_percent_encode`.
+const PATH_PERCENT_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'!')
+    .add(b'"')
+    .add(b'#')
+    .add(b'$')
+    .add(b'%')
+    .add(b'&')
+    .add(b'\'')
+    .add(b'(')
+    .add(b')')
+    .add(b'*')
+    .add(b'+')
+    .add(b',')
+    .add(b';')
+    .add(b'<')
+    .add(b'=')
+    .add(b'>')
+    .add(b'?')
+    .add(b'@')
+    .add(b'[')
+    .add(b'\\')
+    .add(b']')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}');
+
 /// Percent-encode RFC 3986 non-unreserved characters in a file URI path.
 ///
 /// Preserves the unreserved set (`A-Za-z0-9-._~`) plus the path-segment
@@ -692,25 +731,12 @@ impl Drop for LspClient {
 /// index N." That rejection happens locally, before any LSP wire send, so
 /// paths with spaces (e.g., `C:\Program Files\...`) would fail URI
 /// construction regardless of what the LSP server accepts.
+///
+/// Delegates to the `percent-encoding` crate (already a dependency); the
+/// `PATH_PERCENT_ENCODE_SET` above lists exactly the ASCII bytes that
+/// require encoding.
 fn percent_encode_path(s: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        // RFC 3986 unreserved set, plus `/` (path separator) and `:` (drive-letter
-        // colon on Windows). Everything else gets percent-encoded as UTF-8 bytes.
-        match c {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '.' | '_' | '~' | '/' | ':' => out.push(c),
-            _ => {
-                let mut buf = [0u8; 4];
-                for b in c.encode_utf8(&mut buf).bytes() {
-                    out.push('%');
-                    out.push(HEX[(b >> 4) as usize] as char);
-                    out.push(HEX[(b & 0xF) as usize] as char);
-                }
-            }
-        }
-    }
-    out
+    utf8_percent_encode(s, PATH_PERCENT_ENCODE_SET).to_string()
 }
 
 /// Format an absolute path as a `file://` URI without performing any
