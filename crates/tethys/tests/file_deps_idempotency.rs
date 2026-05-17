@@ -1,4 +1,4 @@
-//! Integration tests for `file_deps` inter-run idempotency (rivets-lcb6).
+//! Integration tests for `file_deps` inter-run idempotency.
 //!
 //! Pre-fix: `file_deps` was UPSERT-only with no `DELETE` between index runs.
 //! Two `tethys index` invocations on the same workspace would accumulate

@@ -12,7 +12,14 @@ impl Index {
     ///
     /// Call before re-indexing to prevent stale edges from prior runs
     /// accumulating via the `ON CONFLICT … DO UPDATE` in
-    /// `insert_file_dependency`. Mirrors `clear_all_call_edges`.
+    /// `insert_file_dependency`.
+    ///
+    /// Mirrors [`Index::clear_all_call_edges`] in shape, but positioned
+    /// differently in `index_with_options`: this clear runs *before*
+    /// per-file processing because `insert_file_dependency` is invoked
+    /// during the parse loop. `clear_all_call_edges` runs *after* all
+    /// resolution passes because `populate_call_edges` derives edges
+    /// from the post-resolution `refs` table.
     pub fn clear_all_file_deps(&self) -> Result<()> {
         trace!("Clearing all file deps");
         let conn = self.connection()?;
