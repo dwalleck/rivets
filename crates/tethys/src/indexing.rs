@@ -130,6 +130,21 @@ impl Tethys {
         let total_files = source_files.len();
         let workspace_root = self.workspace_root.clone();
 
+        // Clear file_deps before per-file dependency computation so stale rows
+        // from prior runs don't accumulate via the UPSERT in
+        // `insert_file_dependency`. Mirrors `clear_all_call_edges` at the
+        // start of the populate phase below; positioned earlier here because
+        // file_deps is written during per-file processing, not post-hoc like
+        // call_edges.
+        self.db.clear_all_file_deps().map_err(|e| {
+            warn!(
+                error = %e,
+                phase = "pre_clear_file_deps",
+                "failed to clear stale file deps before re-index"
+            );
+            e
+        })?;
+
         if options.use_streaming() {
             // =====================================================================
             // STREAMING MODE: Parse in parallel, write immediately to background thread

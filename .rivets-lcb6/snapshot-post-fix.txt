@@ -1,0 +1,40 @@
+rivets-lcb6 post-fix measurement on rivets workspace
+Captured: 2026-05-12 (immediately after the fix landed)
+Workspace: C:\Users\dwall\repos\rivets (120 files, 2630 symbols, 21840 refs)
+
+Resolution rate (refs table):
+  total:      21840
+  resolved:    6689 (30.6%)
+  unresolved: 15151
+
+Baseline (project_resolver_baseline_2026_05_12.md, captured 2026-05-12 morning):
+  total:      21777
+  resolved:    6675 (30.7%)
+  unresolved: 15102
+
+Drift: +63 total / +14 resolved / +49 unresolved.
+Cause: 1 new file in the workspace between baseline and re-measurement
+       (119 -> 120 files; likely the diagnostic dir or new test file).
+The fix doesn't change within-run output — only inter-run idempotency.
+
+file_deps idempotency (the actual fix target):
+  After 1st `tethys index --rebuild`:
+    row_count:     396
+    ref_count_sum: 2837
+  After 2nd `tethys index --rebuild` (no intervening source changes):
+    row_count:     396
+    ref_count_sum: 2837
+
+  Pre-fix on the same workspace with non-rebuild re-index, ref_count_sum
+  would have grown on every re-index due to UPSERT accumulation. The
+  regression tests at crates/tethys/tests/file_deps_idempotency.rs pin
+  this invariant on a synthetic 2-crate fixture; this snapshot is the
+  real-world confirmation on the rivets workspace itself.
+
+Reproduction:
+  cargo build --release --bin tethys
+  .\target\release\tethys.exe index --rebuild
+  sqlite3 .\.rivets\index\tethys.db "SELECT COUNT(*), SUM(ref_count) FROM file_deps;"
+  .\target\release\tethys.exe index --rebuild
+  sqlite3 .\.rivets\index\tethys.db "SELECT COUNT(*), SUM(ref_count) FROM file_deps;"
+  # Both queries should print identical results.

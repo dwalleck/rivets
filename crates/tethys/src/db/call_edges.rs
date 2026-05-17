@@ -9,7 +9,13 @@ use super::Index;
 use crate::error::Result;
 
 impl Index {
-    /// Clear all call edges (for full rebuild).
+    /// Clear all call edges before a full rebuild.
+    ///
+    /// Must run *after* all resolution passes because
+    /// [`Index::populate_call_edges`] derives edges from the
+    /// post-resolution `refs` table. Counterpart to
+    /// [`Index::clear_all_file_deps`], which runs *before* per-file
+    /// processing — the two clears are not interchangeable in ordering.
     pub fn clear_all_call_edges(&self) -> Result<()> {
         trace!("Clearing all call edges");
         let conn = self.connection()?;
