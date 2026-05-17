@@ -124,8 +124,14 @@ impl Index {
         // Acquires and releases the connection guard internally.
         let imports_per_file = self.build_imports_per_file_crate(file_crate_map)?;
 
-        // Re-acquire the connection for the inserts.
-        let conn = self.connection()?;
+        // Re-acquire the connection (with mutable access for the transaction)
+        // and wrap the insert loop in an explicit transaction. The project
+        // pattern (see `files.rs::upsert_file_with_symbols`, `architecture.rs::
+        // repopulate_architecture`) wraps bulk inserts this way so SQLite issues
+        // one fsync at commit time instead of N — significant on workspaces
+        // with thousands of cross-file edges.
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
         let mut inserted = 0usize;
         let mut dropped = 0usize;
         for (from_fid_i64, to_fid_i64, ref_count) in aggregated {
@@ -151,7 +157,7 @@ impl Index {
                 }
             };
             if keep {
-                conn.execute(
+                tx.execute(
                     "INSERT INTO file_deps (from_file_id, to_file_id, ref_count)
                      VALUES (?1, ?2, ?3)
                      ON CONFLICT(from_file_id, to_file_id) DO UPDATE SET
@@ -163,6 +169,7 @@ impl Index {
                 dropped += 1;
             }
         }
+        tx.commit()?;
 
         trace!(
             file_deps_inserted = inserted,
@@ -232,8 +239,13 @@ impl Index {
 ///
 /// Handles both Rust (`::`-separated, e.g. `tethys::db::Index`) and C#
 /// (`.`-separated, e.g. `MyApp.Services`) syntax by splitting at whichever
-/// separator appears first. Returns the whole string when neither
-/// separator is present.
+/// separator appears first.
+///
+/// Returns the whole string when neither separator is present — that's the
+/// degenerate-correct case for bare crate-name imports like `use serde;`
+/// or `use crate_b;` where the whole `source_module` IS the first segment.
+/// Callers that need a prefix specifically should still check
+/// `segment != source_module` to distinguish bare names from prefixed ones.
 fn first_path_segment(s: &str) -> &str {
     let pos_colons = s.find("::");
     let pos_dot = s.find('.');
