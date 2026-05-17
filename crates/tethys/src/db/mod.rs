@@ -32,6 +32,7 @@ mod symbols;
 
 // Re-export helper functions and SQL constants used by other modules
 pub(crate) use architecture::PackageInsert;
+pub(crate) use call_edges::ORPHAN_PSEUDO_CRATE_PREFIX;
 pub(crate) use files::normalize_path;
 pub(crate) use graph::DEFAULT_MAX_DEPTH;
 pub(crate) use helpers::{
