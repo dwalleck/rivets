@@ -146,12 +146,22 @@ pub fn shared_helper(x: u32) -> u32 {
 
 /// Companion to the test above, exercising the *fallthrough* branch of
 /// `fallback_symbol_search`. When `shared_helper` exists only in `crate_b`
-/// (no same-crate candidate), the resolver must drop through to the unscoped
-/// `search_unique_symbol_by_name` and resolve to `crate_b`. This is correct
-/// behavior — there's no phantom risk because there's no ambiguity. A
-/// regression that broke the fallthrough (e.g., returning `None` after the
-/// same-crate miss instead of continuing) would orphan this reference and
-/// fail the positive assertion below.
+/// (no same-crate candidate), the resolver must drop through to the
+/// unscoped `search_unique_symbol_by_name` and resolve the ref to
+/// `crate_b`'s symbol. A regression that broke the fallthrough (e.g.,
+/// returning `None` after the same-crate miss instead of continuing)
+/// would orphan this reference (`refs.symbol_id IS NULL`) and fail the
+/// assertion below.
+///
+/// The assertion targets `refs` (resolver output), not `file_deps`
+/// (aggregation output), because under the rivets-3d0s K-hybrid filter the
+/// cross-crate edge is intentionally dropped from `file_deps` when the
+/// caller lacks an import into the target's crate — even though the ref
+/// itself resolves. The resolver's job (resolve the symbol) and the
+/// aggregator's job (produce trustworthy cross-crate file deps) are now
+/// separately observable. This test pins the resolver leg; the
+/// K-hybrid `file_deps` filter is fenced by
+/// `tests/file_deps_corroboration.rs` (rivets-3d0s slice 2).
 ///
 /// Pair with `fallback_routes_unqualified_ref_to_same_crate_not_cross_crate`:
 /// that test pins the *priority* leg (same-crate wins); this test pins the
@@ -217,32 +227,36 @@ pub fn shared_helper(x: u32) -> u32 {
     tethys.index().expect("index should succeed");
 
     let conn = open_db(&tethys);
-    let edges: Vec<(String, String)> = conn
+    // Query refs joined with symbols + files: find a resolved reference
+    // originating in crate_a/src/lib.rs whose target symbol's file is in
+    // crate_b/src/lib.rs. This proves the resolver fell through to the
+    // unscoped path and resolved the cross-crate target — independent of
+    // whether the K-hybrid filter chose to aggregate it into file_deps.
+    let cross_crate_resolved_refs: Vec<(String, String, String)> = conn
         .prepare(
-            "SELECT f1.path, f2.path
-             FROM file_deps d
-             JOIN files f1 ON f1.id = d.from_file_id
-             JOIN files f2 ON f2.id = d.to_file_id",
+            "SELECT s.name, f_caller.path, f_target.path
+             FROM refs r
+             JOIN symbols s     ON s.id = r.symbol_id
+             JOIN files f_caller ON f_caller.id = r.file_id
+             JOIN files f_target ON f_target.id = s.file_id
+             WHERE r.symbol_id IS NOT NULL
+               AND f_caller.path = 'crate_a/src/lib.rs'
+               AND f_target.path = 'crate_b/src/lib.rs'",
         )
-        .expect("prepare file_deps query")
-        .query_map(params![], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("prepare refs query")
+        .query_map(params![], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
         .expect("query")
         .collect::<Result<Vec<_>, _>>()
         .expect("collect");
 
-    // The unqualified `shared_helper(42)` call has NO same-crate candidate
-    // (crate_a defines none). The resolver's same-crate scoping must return
-    // `None`, fall through to the unscoped path, find the unique workspace
-    // candidate in crate_b, and produce the cross-crate edge. A regression
-    // that fails to fall through (e.g., early-returns after the same-crate
-    // miss) would orphan the reference and this assertion would fail.
-    let fallthrough_edge_present = edges
+    let resolved_to_shared_helper = cross_crate_resolved_refs
         .iter()
-        .any(|(from, to)| from == "crate_a/src/lib.rs" && to == "crate_b/src/lib.rs");
+        .any(|(name, _, _)| name == "shared_helper");
     assert!(
-        fallthrough_edge_present,
-        "expected fallthrough edge crate_a/src/lib.rs -> crate_b/src/lib.rs from the \
-         unqualified shared_helper(...) call (only candidate is in crate_b); got: {edges:?}"
+        resolved_to_shared_helper,
+        "expected the unqualified shared_helper(42) call in crate_a/src/lib.rs to fall \
+         through to unscoped resolution and find crate_b's shared_helper; got resolved \
+         cross-crate refs: {cross_crate_resolved_refs:?}"
     );
 }
 
