@@ -451,33 +451,7 @@ impl Tethys {
         // a type the caller never imported), but the aggregation refuses
         // to record it as a file-level dependency without corroborating
         // import evidence.
-        let file_crate_map: HashMap<crate::types::FileId, String> = self
-            .db
-            .list_all_files()?
-            .into_iter()
-            .map(|file| {
-                let abs_path = self.workspace_root.join(&file.path);
-                let crate_name = crate::cargo::get_crate_for_file(&abs_path, &self.crates)
-                    .map_or_else(
-                        || {
-                            // Orphan file: bucket by top-level directory as a
-                            // pseudo-crate so it participates in the filter
-                            // consistently. `bruno-examples/types.rs` becomes
-                            // `orphan:bruno-examples`; files at the workspace
-                            // root with no parent become `orphan:` (rare).
-                            let top = file
-                                .path
-                                .components()
-                                .next()
-                                .and_then(|c| c.as_os_str().to_str())
-                                .unwrap_or("");
-                            format!("orphan:{top}")
-                        },
-                        |info| info.name.clone(),
-                    );
-                (file.id, crate_name)
-            })
-            .collect();
+        let file_crate_map = self.build_file_crate_map()?;
         let file_deps_from_calls = self
             .db
             .populate_file_deps_from_call_edges(&file_crate_map)?;
@@ -522,6 +496,44 @@ impl Tethys {
             lsp_sessions,
             arch_phase,
         })
+    }
+
+    /// Build a map of `FileId` -> crate name for every indexed file.
+    ///
+    /// Used by the K-hybrid filter in
+    /// [`crate::db::Index::populate_file_deps_from_call_edges`]
+    /// (rivets-3d0s). Cargo-known files use the canonical crate name from
+    /// [`crate::types::CrateInfo`]; orphan files (outside any
+    /// `Cargo.toml`-known crate) get a pseudo-crate name prefixed with
+    /// [`crate::db::call_edges::ORPHAN_PSEUDO_CRATE_PREFIX`] based on
+    /// their top-level directory (e.g., `bruno-examples/types.rs` becomes
+    /// `orphan:bruno-examples`; files at the workspace root become
+    /// `orphan:<filename>`). The pseudo-crate prefix is centralized as
+    /// [`crate::db::ORPHAN_PSEUDO_CRATE_PREFIX`].
+    fn build_file_crate_map(&self) -> Result<HashMap<crate::types::FileId, String>> {
+        let map = self
+            .db
+            .list_all_files()?
+            .into_iter()
+            .map(|file| {
+                let abs_path = self.workspace_root.join(&file.path);
+                let crate_name = crate::cargo::get_crate_for_file(&abs_path, &self.crates)
+                    .map_or_else(
+                        || {
+                            let top = file
+                                .path
+                                .components()
+                                .next()
+                                .and_then(|c| c.as_os_str().to_str())
+                                .unwrap_or("");
+                            format!("{}{}", crate::db::ORPHAN_PSEUDO_CRATE_PREFIX, top)
+                        },
+                        |info| info.name.clone(),
+                    );
+                (file.id, crate_name)
+            })
+            .collect();
+        Ok(map)
     }
 
     /// Parse a single file for parallel indexing (Phase 1a).

@@ -89,7 +89,7 @@ This handles all production-reachable shapes from the prove-it-prototype probe.
   files with imports tracked:           38
 
 === FILTER DECISIONS ===
-  intra-crate kept (C3):                    309
+  intra-crate kept (C1):                    309
   cross-crate kept (import corroborated):     5
   cross-crate DROPPED (no import):           73
   orphan kept (conservative):                 0

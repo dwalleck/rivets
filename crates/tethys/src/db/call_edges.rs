@@ -12,6 +12,14 @@ use super::Index;
 use crate::error::Result;
 use crate::types::FileId;
 
+/// Pseudo-crate prefix used to bucket orphan files (those outside any
+/// Cargo-known crate) for the K-hybrid filter in
+/// [`Index::populate_file_deps_from_call_edges`]. The full pseudo-crate
+/// name is `orphan:<top-level-directory>`. Exposed as a `pub(crate)`
+/// constant so the indexer's `file_crate_map` builder and the K-hybrid
+/// unit tests agree on the format without duplicating the literal.
+pub(crate) const ORPHAN_PSEUDO_CRATE_PREFIX: &str = "orphan:";
+
 impl Index {
     /// Clear all call edges before a full rebuild.
     ///
@@ -72,16 +80,22 @@ impl Index {
     ///
     /// `file_crate_map` maps each `FileId` to its crate name. Cargo-known
     /// files use the canonical crate name; orphan files (outside any
-    /// `Cargo.toml`-known crate) use the pseudo-crate name `orphan:<top-dir>`
-    /// so they participate in the filter consistently. Callers MUST
-    /// populate every `FileId` referenced by `call_edges`; missing entries
-    /// fall into a conservative keep-the-edge branch with a `warn!` log,
-    /// not silent acceptance.
+    /// `Cargo.toml`-known crate) use the pseudo-crate name prefixed with
+    /// [`ORPHAN_PSEUDO_CRATE_PREFIX`] so they participate in the filter
+    /// consistently. Callers MUST populate every `FileId` referenced by
+    /// `call_edges`; missing entries fall into a conservative
+    /// keep-the-edge branch with a `warn!` log, not silent acceptance.
     ///
     /// Uses upsert semantics to merge with `file_deps` already inserted from
     /// import statements during the per-file processing phase.
     ///
     /// Returns the count of `file_deps` rows inserted or updated.
+    ///
+    /// **API stability:** the `file_crate_map` parameter is a workspace-
+    /// internal contract. The function is `pub` (rather than `pub(crate)`)
+    /// because tethys's integration tests live in a separate test binary
+    /// per Rust convention, but external consumers outside the tethys
+    /// crate should treat the signature as unstable.
     pub fn populate_file_deps_from_call_edges(
         &self,
         file_crate_map: &HashMap<FileId, String>,
@@ -272,6 +286,10 @@ mod k_hybrid_filter_tests {
             .expect("symbol")
     }
 
+    // Takes `&Index` (not `&mut`) because `connection()` is `&self` —
+    // call_edges has no high-level insert helper, so the test inserts
+    // directly via the raw SQLite connection. This intentional asymmetry
+    // with `upsert`/`insert_sym` reflects the underlying API surface.
     fn insert_call_edge(index: &Index, from_sym: SymbolId, to_sym: SymbolId) {
         index
             .connection()
