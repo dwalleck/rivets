@@ -96,7 +96,7 @@ impl Index {
     /// truly path-less and kept conservatively (logged at warn level).
     ///
     /// Returns the count of file_deps rows inserted/updated.
-    pub fn populate_file_deps_from_call_edges_corroborated(
+    pub fn populate_file_deps_from_call_edges(
         &self,
         file_crate_map: &HashMap<FileId, String>,
     ) -> Result<usize> {
@@ -208,7 +208,7 @@ let call_edges_count = self.db.populate_call_edges()?;
 if call_edges_count > 0 {
     tracing::debug!(call_edges = call_edges_count, "Populated call graph edges");
 }
-let file_deps_from_calls = self.db.populate_file_deps_from_call_edges_corroborated(&file_crate_map)?;
+let file_deps_from_calls = self.db.populate_file_deps_from_call_edges(&file_crate_map)?;
 ```
 
 ```rust
@@ -298,7 +298,7 @@ Additionally asserts:
 //!
 //! A cross-crate method call whose name collides with a workspace symbol in
 //! a NON-imported crate must not produce a cross-crate file_deps edge. The
-//! filter at `populate_file_deps_from_call_edges_corroborated` ensures this.
+//! filter at `populate_file_deps_from_call_edges` ensures this.
 
 use rstest::rstest;
 use rusqlite::Connection;
@@ -421,7 +421,7 @@ fn audit_drops_cross_crate_call_without_import() {
 
 **Verification:**
 - [ ] `cargo nextest run --test file_deps_corroboration` passes
-- [ ] **Falsifiability check:** temporarily replace `populate_file_deps_from_call_edges_corroborated` body with a delegation to the original SQL aggregation (passthrough). Re-run test. Test must FAIL with phantom_count > 0. Restore slice 1; test passes.
+- [ ] **Falsifiability check:** temporarily replace `populate_file_deps_from_call_edges` body with a delegation to the original SQL aggregation (passthrough). Re-run test. Test must FAIL with phantom_count > 0. Restore slice 1; test passes.
 - [ ] All resolver_routing tests still pass (`cargo nextest run -p tethys --test resolver_routing`)
 - [ ] Full workspace test suite passes (`cargo nextest run -p tethys`)
 
@@ -445,7 +445,7 @@ All loops have explicit complexity statements. All within budget at production s
 All fixtures designed against named plausible bugs, not happy paths.
 
 ### Every doc-comment precondition
-1. **`populate_file_deps_from_call_edges_corroborated`'s `file_crate_map` parameter**: "MUST populate every FileId in call_edges." Classified as **load-bearing for correctness** (missing entries silently keep edges). Enforcement: `warn!` log at filter time when a missing entry is encountered. Acceptable because the failure mode is "conservative keep" not "wrong data" — the warn surfaces the gap in production logs.
+1. **`populate_file_deps_from_call_edges`'s `file_crate_map` parameter**: "MUST populate every FileId in call_edges." Classified as **load-bearing for correctness** (missing entries silently keep edges). Enforcement: `warn!` log at filter time when a missing entry is encountered. Acceptable because the failure mode is "conservative keep" not "wrong data" — the warn surfaces the gap in production logs.
 2. **`crate_name_from_rust_segment` helper**: no caller-side precondition; pure function returning a String. The "known_crates" set is reconstructed per call from the map's values — acceptable for the small set sizes we expect (< 100 crates per workspace).
 3. **Slice 2's test fixture builder**: no preconditions exposed.
 
