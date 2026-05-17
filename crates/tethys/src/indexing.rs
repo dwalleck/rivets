@@ -445,9 +445,12 @@ impl Tethys {
         // Derive file-level dependencies from call edges.
         // K-hybrid filter (rivets-3d0s): intra-crate edges always count;
         // cross-crate edges only count when the caller file has an import
-        // into the callee file's crate. Eliminates phantom edges from
-        // workspace-wide name collisions (e.g., `.len()` resolving to a
-        // workspace method on a type the caller never imported).
+        // into the callee file's crate. Filters phantom edges out at the
+        // file_deps aggregation step — the resolver still produces the
+        // call_edge (e.g., `.len()` resolving to a workspace method on
+        // a type the caller never imported), but the aggregation refuses
+        // to record it as a file-level dependency without corroborating
+        // import evidence.
         let file_crate_map: HashMap<crate::types::FileId, String> = self
             .db
             .list_all_files()?

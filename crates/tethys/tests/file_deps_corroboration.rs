@@ -159,7 +159,9 @@ fn k_hybrid_drops_cross_crate_call_without_import_corroboration() {
     // C8: legitimate cross-crate edge from crate_caller into crate_target
     // IS preserved (the source has `use crate_target::Helper` — imports-derived
     // file_deps captures the dependency, and the call-derived edge passes
-    // corroboration).
+    // corroboration). Assert the EXACT expected edge rather than
+    // `!is_empty()` so a partial regression that drops some but not all
+    // edges still fails the test.
     let legitimate_edges: Vec<(String, String)> = conn
         .prepare(
             "SELECT f1.path, f2.path
@@ -173,9 +175,13 @@ fn k_hybrid_drops_cross_crate_call_without_import_corroboration() {
         .expect("query legit")
         .collect::<Result<Vec<_>, _>>()
         .expect("collect legit");
+    let expected = (
+        "crate_caller/src/lib.rs".to_string(),
+        "crate_target/src/lib.rs".to_string(),
+    );
     assert!(
-        !legitimate_edges.is_empty(),
-        "K-hybrid filter must preserve cross-crate edges with corroborating import; \
-         expected at least one crate_caller/* -> crate_target/* edge, got: {legitimate_edges:?}"
+        legitimate_edges.contains(&expected),
+        "K-hybrid filter must preserve the exact cross-crate edge with corroborating import; \
+         expected {expected:?} in: {legitimate_edges:?}"
     );
 }

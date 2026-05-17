@@ -113,6 +113,7 @@ impl Index {
         // Re-acquire the connection for the inserts.
         let conn = self.connection()?;
         let mut inserted = 0usize;
+        let mut dropped = 0usize;
         for (from_fid_i64, to_fid_i64, ref_count) in aggregated {
             let from_file = FileId::from(from_fid_i64);
             let to_file = FileId::from(to_fid_i64);
@@ -128,6 +129,8 @@ impl Index {
                     warn!(
                         from_file_id = from_fid_i64,
                         to_file_id = to_fid_i64,
+                        from_crate_missing = from_crate.is_none(),
+                        to_crate_missing = to_crate.is_none(),
                         "K-hybrid filter: file missing from crate map, keeping edge conservatively"
                     );
                     true
@@ -142,11 +145,14 @@ impl Index {
                     params![from_fid_i64, to_fid_i64, ref_count],
                 )?;
                 inserted += 1;
+            } else {
+                dropped += 1;
             }
         }
 
         trace!(
             file_deps_inserted = inserted,
+            file_deps_dropped_by_k_hybrid = dropped,
             "Populated file deps from call edges (K-hybrid filter applied)"
         );
 
@@ -155,7 +161,7 @@ impl Index {
 
     /// Build a map of `FileId` -> set of workspace crate names the file imports from.
     ///
-    /// Parses the first `::`-segment of each row's `source_module` in the
+    /// Parses the first path segment of each row's `source_module` in the
     /// `imports` table and matches it against known crate names from
     /// `file_crate_map`'s values, with `_` -> `-` normalization (Rust uses
     /// underscores in module paths while Cargo crate names often use
@@ -163,6 +169,13 @@ impl Index {
     /// the `rivets-jsonl` crate). Imports whose first segment doesn't match
     /// any workspace crate (e.g., `std::*`, `serde::*`) are ignored — they
     /// cannot corroborate any cross-workspace-crate edge.
+    ///
+    /// First-segment extraction handles both Rust (`::`-separated, e.g.
+    /// `tethys::db::Index`) and C# (`.`-separated, e.g. `MyApp.Services`)
+    /// import path syntax. Today tethys treats all C# files as one
+    /// pseudo-crate per top-level directory (no `.csproj` discovery), so
+    /// the C# handling is mainly future-proofing for when multi-project
+    /// C# workspace support lands.
     fn build_imports_per_file_crate(
         &self,
         file_crate_map: &HashMap<FileId, String>,
@@ -178,7 +191,7 @@ impl Index {
 
         let mut result: HashMap<FileId, HashSet<String>> = HashMap::new();
         for (file_id_i64, source_module) in rows {
-            let first = source_module.split("::").next().unwrap_or("");
+            let first = first_path_segment(&source_module);
             if first.is_empty() {
                 continue;
             }
@@ -199,6 +212,24 @@ impl Index {
         }
         Ok(result)
     }
+}
+
+/// Extract the first path segment from an import's `source_module`.
+///
+/// Handles both Rust (`::`-separated, e.g. `tethys::db::Index`) and C#
+/// (`.`-separated, e.g. `MyApp.Services`) syntax by splitting at whichever
+/// separator appears first. Returns the whole string when neither
+/// separator is present.
+fn first_path_segment(s: &str) -> &str {
+    let pos_colons = s.find("::");
+    let pos_dot = s.find('.');
+    let pos = match (pos_colons, pos_dot) {
+        (None, None) => return s,
+        (Some(c), None) => c,
+        (None, Some(d)) => d,
+        (Some(c), Some(d)) => c.min(d),
+    };
+    &s[..pos]
 }
 
 #[cfg(test)]
@@ -419,6 +450,94 @@ mod k_hybrid_filter_tests {
         assert_eq!(
             inserted, 0,
             "external imports must not corroborate workspace cross-crate edges"
+        );
+    }
+
+    /// Defensive branch: when a `FileId` referenced by `call_edges` is
+    /// missing from `file_crate_map`, the filter falls into a conservative
+    /// keep-the-edge path with a `warn!` log. This documents production
+    /// behavior if the caller ever constructs an incomplete map (which
+    /// shouldn't happen in normal operation since the map is built from
+    /// `list_all_files`). Test the fallback explicitly so a future
+    /// refactor doesn't silently flip the conservative behavior to a
+    /// silent drop.
+    #[test]
+    fn k_hybrid_keeps_edge_conservatively_when_file_missing_from_crate_map() {
+        let (_dir, mut index) = fresh_index();
+
+        let caller_file = upsert(&mut index, "crates/crate_a/src/lib.rs");
+        let target_file = upsert(&mut index, "crates/crate_b/src/lib.rs");
+
+        let caller_sym = insert_sym(&mut index, caller_file, "caller_fn", SymbolKind::Function);
+        let target_sym = insert_sym(&mut index, target_file, "thing", SymbolKind::Function);
+
+        insert_call_edge(&index, caller_sym, target_sym);
+
+        // Deliberately incomplete file_crate_map: target_file omitted.
+        let mut file_crate_map: HashMap<FileId, String> = HashMap::new();
+        file_crate_map.insert(caller_file, "crate_a".to_string());
+
+        let inserted = index
+            .populate_file_deps_from_call_edges(&file_crate_map)
+            .expect("populate");
+        assert_eq!(
+            inserted, 1,
+            "missing-entry must take the conservative-keep branch, not silently drop"
+        );
+        assert_eq!(
+            count_file_deps(&index, caller_file, target_file),
+            1,
+            "the kept edge must actually appear in file_deps"
+        );
+    }
+
+    /// Edge case: when the `imports` table has zero rows (e.g., a workspace
+    /// of pure data crates with no `use` statements), every cross-crate
+    /// call edge must be dropped (no import can corroborate). Intra-crate
+    /// edges are unaffected.
+    #[test]
+    fn k_hybrid_empty_imports_table_drops_all_cross_crate_keeps_intra() {
+        let (_dir, mut index) = fresh_index();
+
+        let crate_a_caller = upsert(&mut index, "crates/crate_a/src/lib.rs");
+        let crate_a_target = upsert(&mut index, "crates/crate_a/src/helper.rs");
+        let crate_b_target = upsert(&mut index, "crates/crate_b/src/lib.rs");
+
+        let caller_sym = insert_sym(
+            &mut index,
+            crate_a_caller,
+            "caller_fn",
+            SymbolKind::Function,
+        );
+        let helper_sym = insert_sym(&mut index, crate_a_target, "helper", SymbolKind::Function);
+        let cross_sym = insert_sym(&mut index, crate_b_target, "cross", SymbolKind::Function);
+
+        insert_call_edge(&index, caller_sym, helper_sym);
+        insert_call_edge(&index, caller_sym, cross_sym);
+
+        // Note: no insert_import calls. imports table stays empty.
+
+        let mut file_crate_map: HashMap<FileId, String> = HashMap::new();
+        file_crate_map.insert(crate_a_caller, "crate_a".to_string());
+        file_crate_map.insert(crate_a_target, "crate_a".to_string());
+        file_crate_map.insert(crate_b_target, "crate_b".to_string());
+
+        let inserted = index
+            .populate_file_deps_from_call_edges(&file_crate_map)
+            .expect("populate");
+        assert_eq!(
+            inserted, 1,
+            "with no imports, only the intra-crate edge must survive"
+        );
+        assert_eq!(
+            count_file_deps(&index, crate_a_caller, crate_a_target),
+            1,
+            "intra-crate edge must be kept regardless of imports table state"
+        );
+        assert_eq!(
+            count_file_deps(&index, crate_a_caller, crate_b_target),
+            0,
+            "cross-crate edge must be dropped when no import can corroborate it"
         );
     }
 }
