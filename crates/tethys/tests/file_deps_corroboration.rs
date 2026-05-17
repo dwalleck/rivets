@@ -185,3 +185,90 @@ fn k_hybrid_drops_cross_crate_call_without_import_corroboration() {
          expected {expected:?} in: {legitimate_edges:?}"
     );
 }
+
+/// One-Cargo-crate workspace plus a non-Cargo orphan directory with a `.rs`
+/// file that exposes a symbol the caller could otherwise collide with. The
+/// orphan file is bucketed by `ORPHAN_PSEUDO_CRATE_PREFIX` + top-level
+/// directory name; the K-hybrid filter must treat
+/// `caller_crate -> orphan_pseudo_crate` as cross-crate and drop it (no
+/// Rust `use` statement can import from an orphan directory, so
+/// corroboration is structurally impossible).
+fn build_orphan_dir_workspace() -> (TempDir, Tethys) {
+    workspace_with_files(&[
+        (
+            "Cargo.toml",
+            r#"
+[workspace]
+members = ["crate_caller"]
+resolver = "2"
+"#,
+        ),
+        (
+            "crate_caller/Cargo.toml",
+            r#"
+[package]
+name = "crate_caller"
+version = "0.1.0"
+edition = "2021"
+"#,
+        ),
+        (
+            "crate_caller/src/lib.rs",
+            r"
+pub fn caller_fn(some_input: &[i32]) -> usize {
+    some_input.len()
+}
+",
+        ),
+        (
+            // Non-Cargo orphan directory at workspace root. Tethys will
+            // index any `.rs` file under the workspace, bucketing this one
+            // as `orphan:examples`.
+            "examples/oddball.rs",
+            r"
+pub struct OrphanThing;
+
+impl OrphanThing {
+    pub fn len(&self) -> usize {
+        0
+    }
+}
+",
+        ),
+    ])
+}
+
+/// Plan claim C10 regression fence at the integration level (slice 2 only
+/// covered C7+C8 at end-to-end; C10 was unit-tested but not full-pipeline).
+///
+/// The orphan file `examples/oddball.rs` defines `OrphanThing::len()`. The
+/// caller's `.len()` call on a slice would, pre-K-hybrid, resolve to that
+/// (it's the unique workspace `len` method). Post-K-hybrid: there's no
+/// import from `crate_caller` into the `orphan:examples` pseudo-crate
+/// (impossible by construction — Rust can't `use orphan_dir::*`), so the
+/// filter must drop the cross-pseudo-crate edge.
+#[test]
+fn k_hybrid_drops_workspace_crate_to_orphan_dir_phantom_edge() {
+    let (_dir, mut tethys) = build_orphan_dir_workspace();
+    tethys.index().expect("index should succeed");
+
+    let conn = open_db(&tethys);
+    let phantom_edges: Vec<(String, String)> = conn
+        .prepare(
+            "SELECT f1.path, f2.path
+             FROM file_deps d
+             JOIN files f1 ON f1.id = d.from_file_id
+             JOIN files f2 ON f2.id = d.to_file_id
+             WHERE f1.path LIKE 'crate_caller/%' AND f2.path LIKE 'examples/%'",
+        )
+        .expect("prepare phantom query")
+        .query_map(params![], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("query phantom")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect phantom");
+    assert!(
+        phantom_edges.is_empty(),
+        "K-hybrid must drop cross-pseudo-crate file_deps from Cargo crate to orphan dir \
+         (no Rust `use` can corroborate an orphan-dir import); got: {phantom_edges:?}"
+    );
+}
