@@ -1105,10 +1105,6 @@ mod tests {
         assert_eq!(result, "bar");
     }
 
-    // ========================================================================
-    // src_root_for_file Tests
-    // ========================================================================
-
     /// Orphan-file branch: when the file is outside every discovered crate,
     /// the helper falls back to the file's parent directory as a sentinel.
     /// Locks the `cargo::get_crate_for_file` -> `None` arm at the unit level
