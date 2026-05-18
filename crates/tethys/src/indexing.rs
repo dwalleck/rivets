@@ -912,7 +912,7 @@ impl Tethys {
     ) -> Result<()> {
         use std::collections::HashSet;
 
-        let crate_root = self.crate_root_for_file(current_file, "compute_dependencies");
+        let src_root = self.src_root_for_file(current_file, "compute_dependencies");
 
         // Build a set of actually referenced names (both direct names and path prefixes)
         let mut referenced_names: HashSet<&str> = HashSet::new();
@@ -948,7 +948,7 @@ impl Tethys {
 
             // Resolve the module path to a file
             if let Some(resolved) =
-                resolve_module_path(&import_stmt.path, current_file, &crate_root, self.crates())
+                resolve_module_path(&import_stmt.path, current_file, &src_root, self.crates())
             {
                 // Make the path relative to workspace root
                 let dep_path = self.relative_path(&resolved).to_path_buf();
@@ -1088,7 +1088,7 @@ impl Tethys {
     ) -> Result<()> {
         use std::collections::HashSet;
 
-        let crate_root = self.crate_root_for_file(current_file, "compute_dependencies_from_stored");
+        let src_root = self.src_root_for_file(current_file, "compute_dependencies_from_stored");
 
         // Build a set of actually referenced names
         let refs_set: HashSet<&str> = reference_names.iter().map(String::as_str).collect();
@@ -1110,7 +1110,7 @@ impl Tethys {
             }
 
             if let Some(resolved) =
-                resolve_module_path(&import_stmt.path, current_file, &crate_root, self.crates())
+                resolve_module_path(&import_stmt.path, current_file, &src_root, self.crates())
             {
                 let dep_path = self.relative_path(&resolved).to_path_buf();
                 depended_files.insert(dep_path);

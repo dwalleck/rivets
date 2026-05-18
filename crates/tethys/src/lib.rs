@@ -723,11 +723,11 @@ impl Tethys {
     /// fallback `debug!` log line so operators can correlate orphan-file
     /// warnings to the originating call site.
     ///
-    /// **Naming note:** This is the *source-root* used as a module-resolution
-    /// anchor, NOT the crate's directory. The similarly-named
-    /// [`Tethys::get_crate_root_for_file`] returns the crate directory
-    /// (Cargo.toml's parent) and has different semantics.
-    pub(crate) fn crate_root_for_file(&self, file: &Path, caller: &'static str) -> PathBuf {
+    /// **Not to be confused with** [`Tethys::get_crate_root_for_file`],
+    /// which returns the crate's directory (Cargo.toml's parent). This
+    /// method returns the *source-root* (lib-path-derived) used as a
+    /// module-resolution anchor — a deliberately different thing.
+    pub(crate) fn src_root_for_file(&self, file: &Path, caller: &'static str) -> PathBuf {
         // Uses the free `cargo::get_crate_for_file`, not `self.get_crate_for_file`,
         // because the latter canonicalizes — that's a syscall the pre-rivets-6jxv
         // call sites deliberately avoided (refs/imports/file-deps pipelines run
@@ -739,7 +739,7 @@ impl Tethys {
             debug!(
                 operation = caller,
                 file = %file.display(),
-                "File not in any known crate; using file parent as sentinel crate_root"
+                "File not in any known crate; using file parent as sentinel src_root"
             );
             file.parent()
                 .map_or_else(|| self.workspace_root.clone(), Path::to_path_buf)

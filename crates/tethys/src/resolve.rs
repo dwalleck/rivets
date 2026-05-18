@@ -101,12 +101,12 @@ impl Tethys {
         };
         let current_file_path = self.workspace_root.join(&file_record.path);
 
-        // See `Tethys::crate_root_for_file` for the contract. The orphan-file
+        // See `Tethys::src_root_for_file` for the contract. The orphan-file
         // `debug!` it emits previously included a `file_id` field at this
         // call site; the rivets-6jxv extraction dropped that for log-shape
         // parity with the indexing.rs sites. Recover the file_id via path
         // lookup if needed during incident triage.
-        let crate_root = self.crate_root_for_file(&current_file_path, "resolve_refs_for_file");
+        let src_root = self.src_root_for_file(&current_file_path, "resolve_refs_for_file");
 
         // Build import structures
         let (explicit_imports, glob_imports) = Self::build_import_maps(&imports);
@@ -115,7 +115,7 @@ impl Tethys {
             explicit_imports: &explicit_imports,
             glob_imports: &glob_imports,
             current_file_path: Some(&current_file_path),
-            crate_root: &crate_root,
+            crate_root: &src_root,
             file_id,
         };
 
