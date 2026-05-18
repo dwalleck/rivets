@@ -101,26 +101,12 @@ impl Tethys {
         };
         let current_file_path = self.workspace_root.join(&file_record.path);
 
-        // Per-file crate_root: derived from the file's owning crate via
-        // get_crate_for_file + CrateInfo::src_root(). When the file isn't in
-        // any known crate, fall back to its parent directory as a sentinel —
-        // `crate::*` paths there have no valid anchor, but the rest of the
-        // resolver pipeline (self::/super:: arms, workspace-crate arm,
-        // fallback_symbol_search) continues to work.
-        let crate_root = if let Some(crate_info) =
-            crate::cargo::get_crate_for_file(&current_file_path, &self.crates)
-        {
-            crate_info.src_root()
-        } else {
-            debug!(
-                file_id = %file_id,
-                file = %current_file_path.display(),
-                "File not in any known crate; using file parent as sentinel crate_root"
-            );
-            current_file_path
-                .parent()
-                .map_or_else(|| self.workspace_root.clone(), Path::to_path_buf)
-        };
+        // Per-file crate_root: see `Tethys::crate_root_for_file` for the
+        // crate-info-derived src_root + parent-dir sentinel fallback contract.
+        // The sentinel keeps `crate::*` paths semantically inert in
+        // import-less workspace-root files while letting `self::`/`super::`
+        // and the path-agnostic fallback search continue to work.
+        let crate_root = self.crate_root_for_file(&current_file_path, "resolve_refs_for_file");
 
         // Build import structures
         let (explicit_imports, glob_imports) = Self::build_import_maps(&imports);

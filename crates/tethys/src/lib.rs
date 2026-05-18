@@ -705,6 +705,46 @@ impl Tethys {
         self.get_crate_for_file(file_path).map(|c| c.path.as_path())
     }
 
+    /// Returns the per-file source-root anchor used by the resolver and
+    /// dep-graph computation.
+    ///
+    /// For files inside a discovered crate, this is the crate's
+    /// [`CrateInfo::src_root`] (`lib_path.parent()`-derived, not a hardcoded
+    /// `src/` — that's the rivets-6aoc bug class).
+    ///
+    /// For files outside any discovered crate (e.g., workspace-root
+    /// `examples/`, `benches/`, orphan files under a non-member directory),
+    /// falls back to the file's parent directory as a sentinel. `crate::*`
+    /// paths in such files are semantic no-ops in Rust and the sentinel won't
+    /// accidentally resolve them; `self::`/`super::` arms continue to work
+    /// off the file path directly.
+    ///
+    /// `caller` is recorded as a structured `operation` field on the
+    /// fallback `debug!` log line so operators can correlate orphan-file
+    /// warnings to the originating call site.
+    ///
+    /// **Naming note:** This is the *source-root* used as a module-resolution
+    /// anchor, NOT the crate's directory. The similarly-named
+    /// [`Tethys::get_crate_root_for_file`] returns the crate directory
+    /// (Cargo.toml's parent) and has different semantics.
+    pub(crate) fn crate_root_for_file(
+        &self,
+        file: &Path,
+        caller: &'static str,
+    ) -> PathBuf {
+        if let Some(crate_info) = cargo::get_crate_for_file(file, &self.crates) {
+            crate_info.src_root()
+        } else {
+            debug!(
+                operation = caller,
+                file = %file.display(),
+                "File not in any known crate; using file parent as sentinel crate_root"
+            );
+            file.parent()
+                .map_or_else(|| self.workspace_root.clone(), Path::to_path_buf)
+        }
+    }
+
     // === Database ===
 
     /// Get path to the `SQLite` database file.

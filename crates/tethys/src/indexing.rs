@@ -912,19 +912,7 @@ impl Tethys {
     ) -> Result<()> {
         use std::collections::HashSet;
 
-        let crate_root = if let Some(crate_info) =
-            crate::cargo::get_crate_for_file(current_file, self.crates())
-        {
-            crate_info.src_root()
-        } else {
-            debug!(
-                file = %current_file.display(),
-                "compute_dependencies: file not in any known crate; using file parent as sentinel crate_root"
-            );
-            current_file
-                .parent()
-                .map_or_else(|| self.workspace_root.clone(), Path::to_path_buf)
-        };
+        let crate_root = self.crate_root_for_file(current_file, "compute_dependencies");
 
         // Build a set of actually referenced names (both direct names and path prefixes)
         let mut referenced_names: HashSet<&str> = HashSet::new();
@@ -1100,19 +1088,8 @@ impl Tethys {
     ) -> Result<()> {
         use std::collections::HashSet;
 
-        let crate_root = if let Some(crate_info) =
-            crate::cargo::get_crate_for_file(current_file, self.crates())
-        {
-            crate_info.src_root()
-        } else {
-            debug!(
-                file = %current_file.display(),
-                "compute_dependencies_from_stored: file not in any known crate; using file parent as sentinel crate_root"
-            );
-            current_file
-                .parent()
-                .map_or_else(|| self.workspace_root.clone(), Path::to_path_buf)
-        };
+        let crate_root =
+            self.crate_root_for_file(current_file, "compute_dependencies_from_stored");
 
         // Build a set of actually referenced names
         let refs_set: HashSet<&str> = reference_names.iter().map(String::as_str).collect();
