@@ -163,6 +163,12 @@ impl Language {
 /// multi-crate workspaces whose root has no `src/` directory. The accessor
 /// derives the directory from `lib_path` / `bin_paths` so non-standard layouts
 /// (e.g. `lib.path = "custom/lib.rs"`, `src/bin/X.rs`) resolve correctly.
+///
+/// **Resolving a single-segment workspace-crate path** (e.g. `use foo;`):
+/// use [`CrateInfo::entry_point_file`] rather than open-coding the
+/// `lib_path` / `bin_paths.first()` fallback chain. That open-coding is
+/// the design-tax pattern fixed by `rivets-i8qn` — duplicated chains
+/// drift independently when one site is updated and the others aren't.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CrateInfo {
     /// Crate name from `[package].name`
@@ -216,6 +222,26 @@ impl CrateInfo {
             Some(parent) if !parent.as_os_str().is_empty() => crate_path.join(parent),
             _ => crate_path.to_path_buf(),
         }
+    }
+
+    /// Returns this crate's entry-point file path on disk, if one is declared.
+    ///
+    /// A single-segment workspace-crate import (e.g. `use foo;`) refers to the
+    /// crate itself, which on disk is the entry-point file — not the `src/`
+    /// directory. Derivation order, falling through on `None`:
+    /// 1. `lib_path` joined onto crate path — for crates with a library target.
+    /// 2. First `bin_paths` entry joined onto crate path — for bin-only crates.
+    /// 3. `None` — no `[lib]` and no `[[bin]]` declared.
+    ///
+    /// The returned path is **not** checked for on-disk existence; callers
+    /// whose contract guarantees existence (e.g., `resolver::resolve_module_path`)
+    /// must add `.filter(|p| p.exists())` themselves.
+    #[must_use]
+    pub fn entry_point_file(&self) -> Option<PathBuf> {
+        self.lib_path
+            .as_ref()
+            .or_else(|| self.bin_paths.first().map(|(_, p)| p))
+            .map(|p| self.path.join(p))
     }
 }
 
@@ -2267,6 +2293,58 @@ mod tests {
     fn src_root_falls_back_to_src_when_no_lib_and_no_bins() {
         let ci = crate_info_full(None, vec![]);
         assert_eq!(ci.src_root(), PathBuf::from("/ws/crates/test_crate/src"));
+    }
+
+    /// Standard layout: `lib_path = Some(...)` wins over any bin entries.
+    /// Locks in the precedence contract directly at the unit level — a buggy
+    /// impl that reversed the order (`bin_paths.first().or_else(|| lib_path...)`)
+    /// would still pass a lib-only fixture, so this test deliberately includes
+    /// a bin entry to assert that lib takes precedence.
+    #[test]
+    fn entry_point_file_returns_lib_path_when_both_lib_and_bin_present() {
+        let ci = crate_info_full(Some("src/lib.rs"), vec![("test_crate", "src/main.rs")]);
+        assert_eq!(
+            ci.entry_point_file(),
+            Some(PathBuf::from("/ws/crates/test_crate/src/lib.rs"))
+        );
+    }
+
+    /// Bin-only crate: `lib_path = None`, fallback to first bin's full path.
+    /// Locks in the contract that the resolver's single-segment arm relies on.
+    #[test]
+    fn entry_point_file_falls_back_to_first_bin_when_lib_path_absent() {
+        let ci = crate_info_full(None, vec![("test_crate", "src/main.rs")]);
+        assert_eq!(
+            ci.entry_point_file(),
+            Some(PathBuf::from("/ws/crates/test_crate/src/main.rs"))
+        );
+    }
+
+    /// First-bin precedence when multiple bins are declared. Mirrors the
+    /// existing inline `bin_paths.first()` behavior the accessor replaces.
+    #[test]
+    fn entry_point_file_picks_first_bin_when_multiple_present() {
+        let ci = crate_info_full(
+            None,
+            vec![
+                ("first", "src/bin/first.rs"),
+                ("second", "src/bin/second.rs"),
+            ],
+        );
+        assert_eq!(
+            ci.entry_point_file(),
+            Some(PathBuf::from("/ws/crates/test_crate/src/bin/first.rs"))
+        );
+    }
+
+    /// Pathological: no lib AND no bins -> `None`. This is the *only* shape
+    /// where `entry_point_file()` returns `None`; callers can rely on this to
+    /// distinguish "no entry point declared" from "entry point missing on disk"
+    /// (the latter requires their own `.exists()` check).
+    #[test]
+    fn entry_point_file_returns_none_when_no_lib_and_no_bins() {
+        let ci = crate_info_full(None, vec![]);
+        assert_eq!(ci.entry_point_file(), None);
     }
 }
 

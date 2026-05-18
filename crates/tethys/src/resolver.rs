@@ -52,19 +52,10 @@ pub fn resolve_module_path(
             // Single-segment path (e.g. `use rivets;`) refers to the crate
             // itself, which on disk is the entry-point file — not the src/ dir.
             // Filter on `.exists()` to mirror `resolve_as_module`'s guarantee
-            // that returned paths exist on disk.
-            //
-            // TODO(rivets-i8qn): the lib_path/bin_paths fallback chain below
-            // duplicates what an `entry_point_file()` accessor on `CrateInfo`
-            // would encapsulate. Replace this block with `target.entry_point_file()`
-            // once that accessor lands.
+            // that returned paths exist on disk (the accessor itself does not
+            // check existence).
             if path.len() == 1 {
-                return target
-                    .lib_path
-                    .as_ref()
-                    .or_else(|| target.bin_paths.first().map(|(_, p)| p))
-                    .map(|p| target.path.join(p))
-                    .filter(|p| p.exists());
+                return target.entry_point_file().filter(|p| p.exists());
             }
 
             let other_src = target.src_root();
