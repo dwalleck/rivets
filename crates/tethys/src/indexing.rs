@@ -1088,8 +1088,7 @@ impl Tethys {
     ) -> Result<()> {
         use std::collections::HashSet;
 
-        let crate_root =
-            self.crate_root_for_file(current_file, "compute_dependencies_from_stored");
+        let crate_root = self.crate_root_for_file(current_file, "compute_dependencies_from_stored");
 
         // Build a set of actually referenced names
         let refs_set: HashSet<&str> = reference_names.iter().map(String::as_str).collect();

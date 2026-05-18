@@ -727,11 +727,7 @@ impl Tethys {
     /// anchor, NOT the crate's directory. The similarly-named
     /// [`Tethys::get_crate_root_for_file`] returns the crate directory
     /// (Cargo.toml's parent) and has different semantics.
-    pub(crate) fn crate_root_for_file(
-        &self,
-        file: &Path,
-        caller: &'static str,
-    ) -> PathBuf {
+    pub(crate) fn crate_root_for_file(&self, file: &Path, caller: &'static str) -> PathBuf {
         if let Some(crate_info) = cargo::get_crate_for_file(file, &self.crates) {
             crate_info.src_root()
         } else {
