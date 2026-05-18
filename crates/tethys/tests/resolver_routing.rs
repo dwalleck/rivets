@@ -30,9 +30,12 @@ use common::{open_db, workspace_with_files};
 ///    leg load-bearing: an import-only resolver would produce the former but
 ///    not the latter.
 ///
-/// The Pass-2 resolver in `resolve_refs_for_file` short-circuits when a file
-/// has no imports, so the fixture deliberately includes an unrelated
-/// `use crate::imports_module::imported_fn` to ensure fallback runs.
+/// The fixture includes an unrelated `use crate::imports_module::imported_fn`
+/// to give the imports table a non-trivial row for `crate_a/src/lib.rs` —
+/// useful as a positive control alongside the fallback path. (Pre-rivets-dn35
+/// this was load-bearing because `resolve_refs_for_file` short-circuited on
+/// `imports.is_empty()`; the short-circuit is now gone but the import-having
+/// fixture still tests the realistic shape.)
 #[test]
 fn fallback_routes_unqualified_ref_to_same_crate_not_cross_crate() {
     let (_dir, mut tethys) = workspace_with_files(&[
