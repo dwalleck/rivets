@@ -72,17 +72,14 @@ impl Tethys {
 
     /// Resolve references for a single file using its imports.
     ///
-    /// `src_root` is derived per file via [`crate::cargo::get_crate_for_file`] +
-    /// [`crate::types::CrateInfo::src_root`] — `crate::` paths in a sub-crate file
-    /// resolve under that crate's own source root, not the workspace root.
-    ///
-    /// For files outside any known crate (e.g., workspace-root example/bench
-    /// directories), the file's parent directory is used as a sentinel
-    /// `src_root`. `crate::*` paths in such files are semantic no-ops in
-    /// Rust and the sentinel won't accidentally resolve them; `self::`/`super::`
-    /// arms continue to work off the file path directly, and the
-    /// path-agnostic fallback (`fallback_symbol_search`) still has a chance
-    /// to resolve qualified references via `get_symbol_by_qualified_name`.
+    /// The per-file `src_root` anchor comes from [`Tethys::src_root_for_file`].
+    /// The resolver needs it so that `crate::*` paths in a sub-crate file
+    /// resolve under that crate's own source root rather than the workspace
+    /// root. For orphan files (helper falls back to the file's parent),
+    /// `crate::*` becomes a semantic no-op as in Rust itself; `self::`/`super::`
+    /// arms keep working off `current_file` directly, and the path-agnostic
+    /// `fallback_symbol_search` still has a chance to resolve qualified
+    /// references via `get_symbol_by_qualified_name`.
     fn resolve_refs_for_file(&self, file_id: FileId, refs: Vec<Reference>) -> Result<usize> {
         let imports = self.db.get_imports_for_file(file_id)?;
         // Do NOT short-circuit on imports.is_empty(): try_resolve_reference's

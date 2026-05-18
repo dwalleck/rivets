@@ -896,12 +896,11 @@ impl Tethys {
     /// Dependencies that can't be resolved (target file not yet indexed) are added to
     /// `pending` for retry in subsequent passes.
     ///
-    /// `crate_root` is derived per file via [`crate::cargo::get_crate_for_file`] +
-    /// [`crate::types::CrateInfo::src_root`]. For files outside any known crate
-    /// (e.g., workspace-root example/bench dirs), the file's parent directory is
-    /// used as a sentinel `crate_root`: `crate::*` paths in such files have no
-    /// valid anchor, but `self::`/`super::` (resolved off `current_file` directly)
-    /// continue to produce dep edges.
+    /// The per-file `src_root` anchor is derived by [`Tethys::src_root_for_file`],
+    /// which falls back to the file's parent directory for files outside any
+    /// known crate. In such cases `crate::*` paths have no valid anchor, but
+    /// `self::`/`super::` (resolved off `current_file` directly) continue to
+    /// produce dep edges.
     fn compute_dependencies(
         &self,
         current_file: &Path,
@@ -1077,7 +1076,7 @@ impl Tethys {
     ///
     /// Similar to `compute_dependencies` but takes pre-processed data rather than
     /// `ExtractedReference` objects. Used in streaming mode. See
-    /// `compute_dependencies` for the `crate_root` derivation rationale.
+    /// [`Tethys::src_root_for_file`] for the per-file anchor contract.
     fn compute_dependencies_from_stored(
         &self,
         current_file: &Path,
