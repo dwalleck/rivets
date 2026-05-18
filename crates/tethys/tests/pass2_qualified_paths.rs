@@ -349,3 +349,145 @@ pub fn external_thing_044i() {}
          Got resolved_to_external={resolved_to_external}"
     );
 }
+
+/// Shape s-extern: refs prefixed with an external-crate name
+/// (`std::collections::HashMap`) MUST NOT be phantom-resolved by the new
+/// fallback. The implicit-crate retry must not stumble onto a same-named
+/// submodule and corrupt the answer. To defeat that bug class, the
+/// fixture intentionally adds a `std_helper` submodule with a similarly
+/// std-prefixed name — only the qualified call into the local helper
+/// should resolve.
+#[test]
+fn qualified_external_crate_stays_unresolved() {
+    let (_dir, mut tethys) = workspace_with_files(&[
+        (
+            "Cargo.toml",
+            r#"
+[package]
+name = "crate_a"
+version = "0.1.0"
+edition = "2021"
+"#,
+        ),
+        (
+            "src/lib.rs",
+            r"
+mod std_helper;
+
+pub fn entry() {
+    let _ = std::collections::HashMap::<u32, u32>::new();
+    std_helper::do_local_044i();
+}
+",
+        ),
+        (
+            "src/std_helper.rs",
+            r"
+pub fn do_local_044i() {}
+",
+        ),
+    ]);
+
+    tethys.index().expect("index should succeed");
+
+    let conn = open_db(&tethys);
+
+    // Any ref whose text starts with `std::` and that the resolver linked
+    // to a symbol is a phantom resolution. The new fallback's implicit-crate
+    // and workspace-crate-prefix arms both return None for `std`, so the
+    // count must be zero.
+    let std_resolved: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM refs r JOIN files f ON f.id = r.file_id
+             WHERE f.path = 'src/lib.rs'
+               AND r.reference_name LIKE 'std::%'
+               AND r.symbol_id IS NOT NULL",
+            params![],
+            |row| row.get(0),
+        )
+        .expect("count");
+
+    assert_eq!(
+        std_resolved, 0,
+        "external-crate-prefixed ref `std::collections::HashMap` MUST stay \
+         unresolved (no workspace symbol to bind to). Got std_resolved={std_resolved}"
+    );
+
+    // Sanity: the same-shape local call still resolves. If this regresses
+    // the test no longer tells us anything useful about the std::-stays-unresolved
+    // claim.
+    let local_resolved: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM refs r JOIN files f ON f.id = r.file_id
+             JOIN symbols s ON s.id = r.symbol_id
+             WHERE f.path = 'src/lib.rs' AND s.name = 'do_local_044i'",
+            params![],
+            |row| row.get(0),
+        )
+        .expect("count");
+
+    assert!(
+        local_resolved >= 1,
+        "sanity precondition: `std_helper::do_local_044i()` must resolve \
+         locally (otherwise this test isn't pinning std::-stays-unresolved)"
+    );
+}
+
+/// Shape s-crate: explicit `crate::sub::Item` from an import-less file
+/// resolves via the `crate::` arm of `resolve_module_path`. Plausible bug
+/// class this defeats: the implicit-crate-prepend retry inadvertently
+/// produces `crate::crate::sub::Item` and shadows the correct path. The
+/// `qualified_module_fallback` code branches on `path[0] == "crate"` to
+/// skip the implicit-prepend specifically to avoid this.
+#[test]
+fn qualified_crate_prefix_resolves() {
+    let (_dir, mut tethys) = workspace_with_files(&[
+        (
+            "Cargo.toml",
+            r#"
+[package]
+name = "crate_a"
+version = "0.1.0"
+edition = "2021"
+"#,
+        ),
+        (
+            "src/lib.rs",
+            r"
+mod sub_044i;
+
+pub fn entry() {
+    let _: crate::sub_044i::ThingFour;
+}
+",
+        ),
+        (
+            "src/sub_044i.rs",
+            r"
+pub struct ThingFour;
+",
+        ),
+    ]);
+
+    tethys.index().expect("index should succeed");
+
+    let conn = open_db(&tethys);
+
+    let resolved_to_target: i64 = conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM refs r
+             JOIN files f ON f.id = r.file_id
+             JOIN symbols s ON s.id = r.symbol_id
+             WHERE f.path = 'src/lib.rs' AND s.name = 'ThingFour'",
+            params![],
+            |row| row.get(0),
+        )
+        .expect("count");
+
+    assert!(
+        resolved_to_target >= 1,
+        "ref `crate::sub_044i::ThingFour` MUST resolve via the explicit \
+         `crate::` arm of resolve_module_path. Got resolved_to_target={resolved_to_target}"
+    );
+}
