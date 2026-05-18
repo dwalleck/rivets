@@ -896,12 +896,11 @@ impl Tethys {
     /// Dependencies that can't be resolved (target file not yet indexed) are added to
     /// `pending` for retry in subsequent passes.
     ///
-    /// `crate_root` is derived per file via [`crate::cargo::get_crate_for_file`] +
-    /// [`crate::types::CrateInfo::src_root`]. For files outside any known crate
-    /// (e.g., workspace-root example/bench dirs), the file's parent directory is
-    /// used as a sentinel `crate_root`: `crate::*` paths in such files have no
-    /// valid anchor, but `self::`/`super::` (resolved off `current_file` directly)
-    /// continue to produce dep edges.
+    /// The per-file `src_root` anchor is derived by [`Tethys::src_root_for_file`],
+    /// which falls back to the file's parent directory for files outside any
+    /// known crate. In such cases `crate::*` paths have no valid anchor, but
+    /// `self::`/`super::` (resolved off `current_file` directly) continue to
+    /// produce dep edges.
     fn compute_dependencies(
         &self,
         current_file: &Path,
@@ -912,19 +911,7 @@ impl Tethys {
     ) -> Result<()> {
         use std::collections::HashSet;
 
-        let crate_root = if let Some(crate_info) =
-            crate::cargo::get_crate_for_file(current_file, self.crates())
-        {
-            crate_info.src_root()
-        } else {
-            debug!(
-                file = %current_file.display(),
-                "compute_dependencies: file not in any known crate; using file parent as sentinel crate_root"
-            );
-            current_file
-                .parent()
-                .map_or_else(|| self.workspace_root.clone(), Path::to_path_buf)
-        };
+        let src_root = self.src_root_for_file(current_file, "compute_dependencies");
 
         // Build a set of actually referenced names (both direct names and path prefixes)
         let mut referenced_names: HashSet<&str> = HashSet::new();
@@ -960,7 +947,7 @@ impl Tethys {
 
             // Resolve the module path to a file
             if let Some(resolved) =
-                resolve_module_path(&import_stmt.path, current_file, &crate_root, self.crates())
+                resolve_module_path(&import_stmt.path, current_file, &src_root, self.crates())
             {
                 // Make the path relative to workspace root
                 let dep_path = self.relative_path(&resolved).to_path_buf();
@@ -1089,7 +1076,7 @@ impl Tethys {
     ///
     /// Similar to `compute_dependencies` but takes pre-processed data rather than
     /// `ExtractedReference` objects. Used in streaming mode. See
-    /// `compute_dependencies` for the `crate_root` derivation rationale.
+    /// [`Tethys::src_root_for_file`] for the per-file anchor contract.
     fn compute_dependencies_from_stored(
         &self,
         current_file: &Path,
@@ -1100,19 +1087,7 @@ impl Tethys {
     ) -> Result<()> {
         use std::collections::HashSet;
 
-        let crate_root = if let Some(crate_info) =
-            crate::cargo::get_crate_for_file(current_file, self.crates())
-        {
-            crate_info.src_root()
-        } else {
-            debug!(
-                file = %current_file.display(),
-                "compute_dependencies_from_stored: file not in any known crate; using file parent as sentinel crate_root"
-            );
-            current_file
-                .parent()
-                .map_or_else(|| self.workspace_root.clone(), Path::to_path_buf)
-        };
+        let src_root = self.src_root_for_file(current_file, "compute_dependencies_from_stored");
 
         // Build a set of actually referenced names
         let refs_set: HashSet<&str> = reference_names.iter().map(String::as_str).collect();
@@ -1134,7 +1109,7 @@ impl Tethys {
             }
 
             if let Some(resolved) =
-                resolve_module_path(&import_stmt.path, current_file, &crate_root, self.crates())
+                resolve_module_path(&import_stmt.path, current_file, &src_root, self.crates())
             {
                 let dep_path = self.relative_path(&resolved).to_path_buf();
                 depended_files.insert(dep_path);

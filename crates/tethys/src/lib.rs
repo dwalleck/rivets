@@ -705,6 +705,44 @@ impl Tethys {
         self.get_crate_for_file(file_path).map(|c| c.path.as_path())
     }
 
+    /// Returns the per-file source-root anchor used by the resolver and
+    /// dep-graph computation.
+    ///
+    /// For files inside a discovered crate, this is the crate's
+    /// [`CrateInfo::src_root`] (`lib_path.parent()`-derived, not a hardcoded
+    /// `src/` — that's the rivets-6aoc bug class).
+    ///
+    /// For files outside any discovered crate (e.g., workspace-root
+    /// `examples/`, `benches/`, orphan files under a non-member directory),
+    /// falls back to the file's parent directory as a sentinel. `crate::*`
+    /// paths in such files are semantic no-ops in Rust and the sentinel won't
+    /// accidentally resolve them; `self::`/`super::` arms continue to work
+    /// off the file path directly.
+    ///
+    /// `caller` is recorded as a structured `operation` field on the
+    /// fallback `debug!` log line so operators can correlate orphan-file
+    /// warnings to the originating call site.
+    ///
+    /// **Not to be confused with** [`Tethys::get_crate_root_for_file`],
+    /// which returns the crate's directory (Cargo.toml's parent). This
+    /// method returns the *source-root* (lib-path-derived) used as a
+    /// module-resolution anchor — a deliberately different thing.
+    pub(crate) fn src_root_for_file(&self, file: &Path, caller: &'static str) -> PathBuf {
+        // Intentionally skips `self.get_crate_for_file`'s canonicalize() — callers
+        // work with pre-canonicalized paths and the extra syscall per file adds up.
+        if let Some(crate_info) = cargo::get_crate_for_file(file, &self.crates) {
+            crate_info.src_root()
+        } else {
+            debug!(
+                operation = caller,
+                file = %file.display(),
+                "File not in any known crate; using file parent as sentinel src_root"
+            );
+            file.parent()
+                .map_or_else(|| self.workspace_root.clone(), Path::to_path_buf)
+        }
+    }
+
     // === Database ===
 
     /// Get path to the `SQLite` database file.
@@ -1065,6 +1103,26 @@ mod tests {
     fn build_qualified_name_with_none_path() {
         let result = Tethys::build_qualified_name("bar", None);
         assert_eq!(result, "bar");
+    }
+
+    /// Orphan-file branch: when the file is outside every discovered crate,
+    /// the helper falls back to the file's parent directory as a sentinel.
+    /// Locks the `cargo::get_crate_for_file` -> `None` arm at the unit level
+    /// — the integration tests primarily exercise the success arm via real
+    /// workspace fixtures with discovered crates.
+    #[test]
+    fn src_root_for_file_falls_back_to_parent_for_orphan_file() {
+        let workspace = temp_workspace();
+        let tethys = Tethys::new(workspace.path()).expect("Tethys::new should succeed");
+        let canonical_ws = workspace
+            .path()
+            .canonicalize()
+            .expect("workspace canonicalizes");
+        let orphan = canonical_ws.join("not_a_crate").join("foo.rs");
+
+        let result = tethys.src_root_for_file(&orphan, "test");
+
+        assert_eq!(result, canonical_ws.join("not_a_crate"));
     }
 
     // ========================================================================

@@ -28,7 +28,7 @@ pub(crate) struct ResolveContext<'a> {
     pub(crate) explicit_imports: &'a HashMap<&'a str, (&'a str, &'a str)>,
     pub(crate) glob_imports: &'a [&'a str],
     pub(crate) current_file_path: Option<&'a Path>,
-    pub(crate) crate_root: &'a Path,
+    pub(crate) src_root: &'a Path,
     pub(crate) file_id: FileId,
 }
 
@@ -72,17 +72,14 @@ impl Tethys {
 
     /// Resolve references for a single file using its imports.
     ///
-    /// `crate_root` is derived per file via [`crate::cargo::get_crate_for_file`] +
-    /// [`crate::types::CrateInfo::src_root`] — `crate::` paths in a sub-crate file
-    /// resolve under that crate's own source root, not the workspace root.
-    ///
-    /// For files outside any known crate (e.g., workspace-root example/bench
-    /// directories), the file's parent directory is used as a sentinel
-    /// `crate_root`. `crate::*` paths in such files are semantic no-ops in
-    /// Rust and the sentinel won't accidentally resolve them; `self::`/`super::`
-    /// arms continue to work off the file path directly, and the
-    /// path-agnostic fallback (`fallback_symbol_search`) still has a chance
-    /// to resolve qualified references via `get_symbol_by_qualified_name`.
+    /// The per-file `src_root` anchor comes from [`Tethys::src_root_for_file`].
+    /// The resolver needs it so that `crate::*` paths in a sub-crate file
+    /// resolve under that crate's own source root rather than the workspace
+    /// root. For orphan files (helper falls back to the file's parent),
+    /// `crate::*` becomes a semantic no-op as in Rust itself; `self::`/`super::`
+    /// arms keep working off `current_file` directly, and the path-agnostic
+    /// `fallback_symbol_search` still has a chance to resolve qualified
+    /// references via `get_symbol_by_qualified_name`.
     fn resolve_refs_for_file(&self, file_id: FileId, refs: Vec<Reference>) -> Result<usize> {
         let imports = self.db.get_imports_for_file(file_id)?;
         // Do NOT short-circuit on imports.is_empty(): try_resolve_reference's
@@ -101,26 +98,9 @@ impl Tethys {
         };
         let current_file_path = self.workspace_root.join(&file_record.path);
 
-        // Per-file crate_root: derived from the file's owning crate via
-        // get_crate_for_file + CrateInfo::src_root(). When the file isn't in
-        // any known crate, fall back to its parent directory as a sentinel —
-        // `crate::*` paths there have no valid anchor, but the rest of the
-        // resolver pipeline (self::/super:: arms, workspace-crate arm,
-        // fallback_symbol_search) continues to work.
-        let crate_root = if let Some(crate_info) =
-            crate::cargo::get_crate_for_file(&current_file_path, &self.crates)
-        {
-            crate_info.src_root()
-        } else {
-            debug!(
-                file_id = %file_id,
-                file = %current_file_path.display(),
-                "File not in any known crate; using file parent as sentinel crate_root"
-            );
-            current_file_path
-                .parent()
-                .map_or_else(|| self.workspace_root.clone(), Path::to_path_buf)
-        };
+        // `file_id` is not forwarded to the helper's `debug!`; recover it via
+        // path lookup during incident triage if needed.
+        let src_root = self.src_root_for_file(&current_file_path, "resolve_refs_for_file");
 
         // Build import structures
         let (explicit_imports, glob_imports) = Self::build_import_maps(&imports);
@@ -129,7 +109,7 @@ impl Tethys {
             explicit_imports: &explicit_imports,
             glob_imports: &glob_imports,
             current_file_path: Some(&current_file_path),
-            crate_root: &crate_root,
+            src_root: &src_root,
             file_id,
         };
 
@@ -192,7 +172,7 @@ impl Tethys {
             ref_name,
             ctx.explicit_imports,
             ctx.current_file_path,
-            ctx.crate_root,
+            ctx.src_root,
             is_qualified,
         )? {
             trace!(
@@ -211,7 +191,7 @@ impl Tethys {
                 ref_name,
                 source_module,
                 ctx.current_file_path,
-                ctx.crate_root,
+                ctx.src_root,
                 is_qualified,
             )? {
                 trace!(
@@ -259,7 +239,7 @@ impl Tethys {
         ref_name: &str,
         explicit_imports: &HashMap<&str, (&str, &str)>,
         current_file_path: Option<&Path>,
-        crate_root: &Path,
+        src_root: &Path,
         is_qualified: bool,
     ) -> Result<Option<Symbol>> {
         let lookup_name = if is_qualified {
@@ -289,7 +269,7 @@ impl Tethys {
             &search_name,
             source_module,
             current_file_path,
-            crate_root,
+            src_root,
             is_qualified,
         )
     }
@@ -303,11 +283,11 @@ impl Tethys {
         symbol_name: &str,
         source_module: &str,
         current_file_path: Option<&Path>,
-        crate_root: &Path,
+        src_root: &Path,
         use_qualified_search: bool,
     ) -> Result<Option<Symbol>> {
         let Some(target_file_id) =
-            self.resolve_module_to_file_id(source_module, current_file_path, crate_root)?
+            self.resolve_module_to_file_id(source_module, current_file_path, src_root)?
         else {
             return Ok(None);
         };
@@ -325,7 +305,7 @@ impl Tethys {
         &self,
         source_module: &str,
         current_file_path: Option<&Path>,
-        crate_root: &Path,
+        src_root: &Path,
     ) -> Result<Option<FileId>> {
         let Some(current_path) = current_file_path else {
             trace!(
@@ -338,7 +318,7 @@ impl Tethys {
         let path_segments: Vec<String> = source_module.split("::").map(String::from).collect();
 
         let Some(resolved_file) =
-            resolve_module_path(&path_segments, current_path, crate_root, self.crates())
+            resolve_module_path(&path_segments, current_path, src_root, self.crates())
         else {
             trace!(
                 source_module = %source_module,
