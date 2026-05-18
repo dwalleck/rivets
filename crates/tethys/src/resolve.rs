@@ -85,9 +85,11 @@ impl Tethys {
     /// to resolve qualified references via `get_symbol_by_qualified_name`.
     fn resolve_refs_for_file(&self, file_id: FileId, refs: Vec<Reference>) -> Result<usize> {
         let imports = self.db.get_imports_for_file(file_id)?;
-        if imports.is_empty() {
-            return Ok(0);
-        }
+        // Do NOT short-circuit on imports.is_empty(): try_resolve_reference's
+        // fallback_symbol_search (same-crate prefix + unscoped unique lookup) and
+        // get_symbol_by_qualified_name paths resolve workspace-internal refs
+        // without needing any `use` statement (rivets-dn35). The explicit/glob
+        // import paths become no-ops on empty maps, which is correct.
 
         // Get the current file's path for relative path resolution
         let Some(file_record) = self.db.get_file_by_id(file_id)? else {
