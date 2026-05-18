@@ -101,11 +101,11 @@ impl Tethys {
         };
         let current_file_path = self.workspace_root.join(&file_record.path);
 
-        // Per-file crate_root: see `Tethys::crate_root_for_file` for the
-        // crate-info-derived src_root + parent-dir sentinel fallback contract.
-        // The sentinel keeps `crate::*` paths semantically inert in
-        // import-less workspace-root files while letting `self::`/`super::`
-        // and the path-agnostic fallback search continue to work.
+        // See `Tethys::crate_root_for_file` for the contract. The orphan-file
+        // `debug!` it emits previously included a `file_id` field at this
+        // call site; the rivets-6jxv extraction dropped that for log-shape
+        // parity with the indexing.rs sites. Recover the file_id via path
+        // lookup if needed during incident triage.
         let crate_root = self.crate_root_for_file(&current_file_path, "resolve_refs_for_file");
 
         // Build import structures

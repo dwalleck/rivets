@@ -728,6 +728,11 @@ impl Tethys {
     /// [`Tethys::get_crate_root_for_file`] returns the crate directory
     /// (Cargo.toml's parent) and has different semantics.
     pub(crate) fn crate_root_for_file(&self, file: &Path, caller: &'static str) -> PathBuf {
+        // Uses the free `cargo::get_crate_for_file`, not `self.get_crate_for_file`,
+        // because the latter canonicalizes — that's a syscall the pre-rivets-6jxv
+        // call sites deliberately avoided (refs/imports/file-deps pipelines run
+        // against pre-canonicalized paths and re-canonicalizing per file would
+        // be wasted I/O).
         if let Some(crate_info) = cargo::get_crate_for_file(file, &self.crates) {
             crate_info.src_root()
         } else {
