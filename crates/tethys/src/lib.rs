@@ -1106,6 +1106,30 @@ mod tests {
     }
 
     // ========================================================================
+    // src_root_for_file Tests
+    // ========================================================================
+
+    /// Orphan-file branch: when the file is outside every discovered crate,
+    /// the helper falls back to the file's parent directory as a sentinel.
+    /// Locks the `cargo::get_crate_for_file` -> `None` arm at the unit level
+    /// — the integration tests primarily exercise the success arm via real
+    /// workspace fixtures with discovered crates.
+    #[test]
+    fn src_root_for_file_falls_back_to_parent_for_orphan_file() {
+        let workspace = temp_workspace();
+        let tethys = Tethys::new(workspace.path()).expect("Tethys::new should succeed");
+        let canonical_ws = workspace
+            .path()
+            .canonicalize()
+            .expect("workspace canonicalizes");
+        let orphan = canonical_ws.join("not_a_crate").join("foo.rs");
+
+        let result = tethys.src_root_for_file(&orphan, "test");
+
+        assert_eq!(result, canonical_ws.join("not_a_crate"));
+    }
+
+    // ========================================================================
     // uri_to_path Tests
     // ========================================================================
 
