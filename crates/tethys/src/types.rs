@@ -166,7 +166,9 @@ impl Language {
 ///
 /// **Resolving a single-segment workspace-crate path** (e.g. `use foo;`):
 /// use [`CrateInfo::entry_point_file`] rather than open-coding the
-/// `lib_path` / `bin_paths.first()` fallback chain.
+/// `lib_path` / `bin_paths.first()` fallback chain. That open-coding is
+/// the design-tax pattern fixed by `rivets-i8qn` — duplicated chains
+/// drift independently when one site is updated and the others aren't.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CrateInfo {
     /// Crate name from `[package].name`
@@ -2293,9 +2295,14 @@ mod tests {
         assert_eq!(ci.src_root(), PathBuf::from("/ws/crates/test_crate/src"));
     }
 
+    /// Standard layout: `lib_path = Some(...)` wins over any bin entries.
+    /// Locks in the precedence contract directly at the unit level — a buggy
+    /// impl that reversed the order (`bin_paths.first().or_else(|| lib_path...)`)
+    /// would still pass a lib-only fixture, so this test deliberately includes
+    /// a bin entry to assert that lib takes precedence.
     #[test]
-    fn entry_point_file_returns_lib_path_joined_when_present() {
-        let ci = crate_info(Some("src/lib.rs"));
+    fn entry_point_file_returns_lib_path_when_both_lib_and_bin_present() {
+        let ci = crate_info_full(Some("src/lib.rs"), vec![("test_crate", "src/main.rs")]);
         assert_eq!(
             ci.entry_point_file(),
             Some(PathBuf::from("/ws/crates/test_crate/src/lib.rs"))
