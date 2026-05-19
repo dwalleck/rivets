@@ -1,0 +1,19 @@
+======================================================================
+ycaq acceptance #6 measurement (post-PR-67 K-hybrid)
+======================================================================
+total file_deps rows:        347
+  intra-crate:               330
+  cross-crate (both known):  9
+  orphan (unknown crate):    8
+
+=== Cross-crate corroboration (the ycaq #6 metric) ===
+  cross-crate edges:          9
+  corroborated by import:     9
+  PHANTOM (no import):        0
+  phantom rate:               0.00%  (target: < 1%)
+  -> ycaq #6 PASS
+
+=== FORBIDDEN-pair check (Cargo dep-graph violations) ===
+  FORBIDDEN-pair edges:       0  (rivets-3d0s threshold: <= 5)
+    of those, corroborated:   0  (should be 0 in a buildable workspace)
+

@@ -222,12 +222,132 @@ impl Tethys {
             return Ok(true);
         }
 
+        // Qualified-path module fallback (rivets-044i). Only fires for refs that
+        // both (a) contain `::` and (b) survived every prior path. Interprets the
+        // prefix as a module path, looks the tail up in the resolved file.
+        if is_qualified
+            && let Some(symbol) =
+                self.qualified_module_fallback(ref_name, ctx.current_file_path, ctx.src_root)?
+        {
+            trace!(
+                ref_id = ref_.id,
+                ref_name = %ref_name,
+                symbol_id = %symbol.id,
+                "Resolved reference via qualified module fallback"
+            );
+            self.db.resolve_reference(ref_.id, symbol.id)?;
+            return Ok(true);
+        }
+
         trace!(
             ref_name = %ref_name,
             file_id = %ctx.file_id,
             "Reference remains unresolved (likely external crate)"
         );
         Ok(false)
+    }
+
+    /// Resolve a qualified reference by interpreting its prefix as a module
+    /// path and querying the resulting file for the tail symbol (rivets-044i).
+    ///
+    /// Used after every import-based and same-crate fallback has missed. The
+    /// existing `get_symbol_by_qualified_name` literal-string match cannot
+    /// resolve refs like `helper::do_thing` from an import-less file because
+    /// stored `symbols.qualified_name` is module-stripped (free fns store
+    /// `name`; methods store `parent_name::name`). This method bridges that
+    /// gap by translating the prefix to a `file_id` via
+    /// [`resolve_module_path`] and then looking up the tail in that specific
+    /// file.
+    ///
+    /// Tries each prefix split from longest to shortest. For each split,
+    /// attempts two interpretations in order:
+    /// 1. **Implicit-crate**: prepend `crate::` (skipped when the first
+    ///    segment is already `crate`/`self`/`super`). This handles Rust 2018+
+    ///    paths like `helper::foo` from an import-less file in the same crate.
+    /// 2. **As-written**: the prefix passed through unchanged. This lets the
+    ///    `crate::`/`self::`/`super::`/workspace-crate arms of
+    ///    [`resolve_module_path`] fire.
+    ///
+    /// Returns `Ok(None)` for: unqualified names, `current_file_path = None`,
+    /// external-crate prefixes that `resolve_module_path` can't translate,
+    /// and any ref whose tail doesn't match a symbol in the resolved file.
+    ///
+    /// # Acceptable ambiguity
+    ///
+    /// When a workspace contains both `<crate_root>/<seg>.rs` AND a sibling
+    /// module file along the same prefix, Interpretation A (the implicit-crate
+    /// retry) wins because [`resolve_module_path`] returns the first on-disk
+    /// match. The resolved tail must additionally exist in that file as a
+    /// symbol with the exact `qualified_name` produced by the indexer, so a
+    /// phantom resolution requires *both* a colliding file path *and* a
+    /// colliding tail symbol — the same bounded-ambiguity class as
+    /// `fallback_symbol_search`'s same-crate prefix arm, and accepted under
+    /// design-v3 C5/C6.
+    fn qualified_module_fallback(
+        &self,
+        ref_name: &str,
+        current_file_path: Option<&Path>,
+        src_root: &Path,
+    ) -> Result<Option<Symbol>> {
+        // `current_file_path` is Option because Pass-2 sometimes lacks a path
+        // for synthetic refs; silent decline keeps resolution best-effort
+        // rather than panicking on a propagated None.
+        let Some(current_file) = current_file_path else {
+            return Ok(None);
+        };
+
+        let segments: Vec<&str> = ref_name.split("::").collect();
+        // Defense-in-depth: the `is_qualified` gate at the only current call
+        // site guarantees `segments.len() >= 2`. Hand-rolled future callers
+        // get a safe decline instead of an empty-loop silent success.
+        if segments.len() < 2 {
+            return Ok(None);
+        }
+
+        let crates = self.crates();
+        for split in (1..segments.len()).rev() {
+            let prefix = &segments[..split];
+            let tail = segments[split..].join("::");
+
+            let mut file_id = None;
+
+            if !matches!(prefix[0], "crate" | "self" | "super") {
+                let mut with_crate: Vec<String> = Vec::with_capacity(prefix.len() + 1);
+                with_crate.push("crate".to_string());
+                with_crate.extend(prefix.iter().map(|s| (*s).to_string()));
+                if let Some(resolved) =
+                    resolve_module_path(&with_crate, current_file, src_root, crates)
+                {
+                    let relative = self.relative_path(&resolved);
+                    file_id = self.db.get_file_id(&relative)?;
+                }
+            }
+
+            if file_id.is_none() {
+                let as_owned: Vec<String> = prefix.iter().map(|s| (*s).to_string()).collect();
+                if let Some(resolved) =
+                    resolve_module_path(&as_owned, current_file, src_root, crates)
+                {
+                    let relative = self.relative_path(&resolved);
+                    file_id = self.db.get_file_id(&relative)?;
+                }
+            }
+
+            let Some(file_id) = file_id else { continue };
+            if let Some(sym) = self
+                .db
+                .search_symbol_by_qualified_name_in_file(&tail, file_id)?
+            {
+                return Ok(Some(sym));
+            }
+        }
+
+        trace!(
+            ref_name = %ref_name,
+            segments = segments.len(),
+            "qualified_module_fallback: no prefix split resolved"
+        );
+        Ok(None)
     }
 
     /// Resolve a reference via explicit import lookup.
