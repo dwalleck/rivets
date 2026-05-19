@@ -116,3 +116,103 @@ pub fn entry() {
         "ref to helper::a() must survive cascade (it's still in source) — got {a_refs}"
     );
 }
+
+/// Count attribute rows whose owning symbol has the given name.
+fn count_attrs_for_symbol(conn: &Connection, symbol_name: &str) -> i64 {
+    conn.query_row(
+        "SELECT COUNT(*) FROM attributes a
+         JOIN symbols s ON s.id = a.symbol_id
+         WHERE s.name = ?1",
+        [symbol_name],
+        |row| row.get(0),
+    )
+    .expect("count attrs by symbol name")
+}
+
+/// Count symbol rows by name.
+fn count_symbols_by_name(conn: &Connection, symbol_name: &str) -> i64 {
+    conn.query_row(
+        "SELECT COUNT(*) FROM symbols WHERE name = ?1",
+        [symbol_name],
+        |row| row.get(0),
+    )
+    .expect("count symbols by name")
+}
+
+/// Pin claim C2: removing an attributed symbol from source cascade-deletes
+/// the symbol AND its `attributes` rows via
+/// `attributes.symbol_id REFERENCES symbols(id) ON DELETE CASCADE`.
+///
+/// Stress shape (two attributed symbols, remove one): defeats a "cascade
+/// too aggressive" bug class — if the cascade clobbered all of the file's
+/// attributes instead of just the removed symbol's, the `keep` assertions
+/// would catch it.
+#[test]
+fn attributes_cascade_on_symbol_removal() {
+    let (dir, mut tethys) = workspace_with_files(&[
+        (
+            "Cargo.toml",
+            r#"
+[package]
+name = "wsix_attrs"
+version = "0.0.0"
+edition = "2021"
+"#,
+        ),
+        (
+            "src/lib.rs",
+            r"
+#[allow(dead_code)]
+pub fn target() {}
+
+#[allow(dead_code)]
+pub fn keep() {}
+",
+        ),
+    ]);
+
+    tethys.index().expect("initial index should succeed");
+
+    let conn = open_db(&tethys);
+    let target_attrs_pre = count_attrs_for_symbol(&conn, "target");
+    let keep_attrs_pre = count_attrs_for_symbol(&conn, "keep");
+    assert!(
+        target_attrs_pre >= 1,
+        "fixture should index target's #[allow] attribute — got {target_attrs_pre}"
+    );
+    assert!(
+        keep_attrs_pre >= 1,
+        "fixture should index keep's #[allow] attribute — got {keep_attrs_pre}"
+    );
+    drop(conn);
+
+    // Remove the `target` fn from source.
+    std::fs::write(
+        dir.path().join("src/lib.rs"),
+        r"
+#[allow(dead_code)]
+pub fn keep() {}
+",
+    )
+    .expect("rewrite src/lib.rs");
+
+    tethys.index().expect("re-index should succeed");
+
+    let conn = open_db(&tethys);
+    let target_sym_post = count_symbols_by_name(&conn, "target");
+    let target_attrs_post = count_attrs_for_symbol(&conn, "target");
+    let keep_attrs_post = count_attrs_for_symbol(&conn, "keep");
+
+    assert_eq!(
+        target_sym_post, 0,
+        "target symbol must be gone after source removal — got {target_sym_post}"
+    );
+    assert_eq!(
+        target_attrs_post, 0,
+        "target's attributes must cascade-delete with the symbol — got {target_attrs_post}"
+    );
+    assert_eq!(
+        keep_attrs_post, keep_attrs_pre,
+        "keep's attributes MUST NOT cascade-delete (cascade was too aggressive) — pre={keep_attrs_pre} post={keep_attrs_post}"
+    );
+}
