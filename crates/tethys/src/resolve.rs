@@ -226,11 +226,8 @@ impl Tethys {
         // both (a) contain `::` and (b) survived every prior path. Interprets the
         // prefix as a module path, looks the tail up in the resolved file.
         if is_qualified
-            && let Some(symbol) = self.qualified_module_fallback(
-                ref_name,
-                ctx.current_file_path,
-                ctx.src_root,
-            )?
+            && let Some(symbol) =
+                self.qualified_module_fallback(ref_name, ctx.current_file_path, ctx.src_root)?
         {
             trace!(
                 ref_id = ref_.id,
