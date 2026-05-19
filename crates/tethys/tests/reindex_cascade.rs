@@ -102,6 +102,7 @@ pub fn entry() {
     let refs_post = count_lib_refs_by_target_names(&conn, &["a", "b", "c"]);
     let b_refs = count_lib_refs_by_target_names(&conn, &["b"]);
     let a_refs = count_lib_refs_by_target_names(&conn, &["a"]);
+    let c_refs = count_lib_refs_by_target_names(&conn, &["c"]);
 
     assert_eq!(
         refs_post, 2,
@@ -114,6 +115,14 @@ pub fn entry() {
     assert_eq!(
         a_refs, 1,
         "ref to helper::a() must survive cascade (it's still in source) — got {a_refs}"
+    );
+    // Explicit symmetric coverage of the third surviving ref. `c_refs` is
+    // derivable from the prior three assertions today, but spelling it out
+    // defends against future mutations to `count_lib_refs_by_target_names`'s
+    // IN-clause that would silently break that arithmetic.
+    assert_eq!(
+        c_refs, 1,
+        "ref to helper::c() must survive cascade (it's still in source) — got {c_refs}"
     );
 }
 
