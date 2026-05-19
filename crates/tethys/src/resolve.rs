@@ -274,23 +274,35 @@ impl Tethys {
     /// Returns `Ok(None)` for: unqualified names, `current_file_path = None`,
     /// external-crate prefixes that `resolve_module_path` can't translate,
     /// and any ref whose tail doesn't match a symbol in the resolved file.
+    ///
+    /// # Acceptable ambiguity
+    ///
+    /// When a workspace contains both `<crate_root>/<seg>.rs` AND a sibling
+    /// module file along the same prefix, Interpretation A (the implicit-crate
+    /// retry) wins because [`resolve_module_path`] returns the first on-disk
+    /// match. The resolved tail must additionally exist in that file as a
+    /// symbol with the exact `qualified_name` produced by the indexer, so a
+    /// phantom resolution requires *both* a colliding file path *and* a
+    /// colliding tail symbol — the same bounded-ambiguity class as
+    /// `fallback_symbol_search`'s same-crate prefix arm, and accepted under
+    /// design-v3 C5/C6.
     fn qualified_module_fallback(
         &self,
         ref_name: &str,
         current_file_path: Option<&Path>,
         src_root: &Path,
     ) -> Result<Option<Symbol>> {
-        // Load-bearing for correctness: every caller that reaches this method
-        // either provides a real path or the function declines safely.
+        // `current_file_path` is Option because Pass-2 sometimes lacks a path
+        // for synthetic refs; silent decline keeps resolution best-effort
+        // rather than panicking on a propagated None.
         let Some(current_file) = current_file_path else {
             return Ok(None);
         };
 
         let segments: Vec<&str> = ref_name.split("::").collect();
-        // Load-bearing for correctness: a single-segment "qualified" ref
-        // (impossible per the `is_qualified` gate at the call site, but defended
-        // in depth) would loop zero times and return None. Explicit early-exit
-        // preserves that property on hand-rolled paths through this method.
+        // Defense-in-depth: the `is_qualified` gate at the only current call
+        // site guarantees `segments.len() >= 2`. Hand-rolled future callers
+        // get a safe decline instead of an empty-loop silent success.
         if segments.len() < 2 {
             return Ok(None);
         }
@@ -302,7 +314,6 @@ impl Tethys {
 
             let mut file_id = None;
 
-            // Interpretation A: implicit-crate prepend.
             if !matches!(prefix[0], "crate" | "self" | "super") {
                 let mut with_crate: Vec<String> = Vec::with_capacity(prefix.len() + 1);
                 with_crate.push("crate".to_string());
@@ -315,7 +326,6 @@ impl Tethys {
                 }
             }
 
-            // Interpretation B: as-written.
             if file_id.is_none() {
                 let as_owned: Vec<String> = prefix.iter().map(|s| (*s).to_string()).collect();
                 if let Some(resolved) =
@@ -335,6 +345,11 @@ impl Tethys {
             }
         }
 
+        trace!(
+            ref_name = %ref_name,
+            segments = segments.len(),
+            "qualified_module_fallback: no prefix split resolved"
+        );
         Ok(None)
     }
 
