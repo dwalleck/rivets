@@ -63,11 +63,15 @@ that resolved purely via Pass 1 (same-file).
 All probes, falsifiers, and regression fences pass against the
 post-fix binary:
 
-- `pass2_qualified_paths.rs` (5 tests, all pass — claims 1, 2, 3, 4, 5)
+- `pass2_qualified_paths.rs` (8 tests, all pass — claims 1, 2, 3, 4, 5 + 3 added by
+  the round-1 review-decisions commit `cc6dd0c`: `longest_prefix_wins_over_shorter`
+  pins the loop-direction invariant, `prefix_resolves_but_tail_missing_stays_unresolved`
+  pins the tail-miss branch, `self_and_super_paths_resolve_via_as_written` pins the
+  `matches!` gate for `self::*` / `super::*` paths)
 - `pass2_no_imports.rs` (1 test, passes — claim 6)
 - `file_deps_corroboration.rs` (2 tests, pass — claim 7)
 - `resolver_routing.rs` (4 tests, pass — claim 8)
-- Full `cargo nextest run -p tethys` (631 tests, all pass)
+- Full `cargo nextest run -p tethys` (636 tests, all pass post round-1 additions)
 - Phantom-rate probe (claim 7 oracle) — 0.00%
 - 0gom Section 3 probe (claim 8 oracle) — 0 violations
 - Indexing wall time (claim 1 budget) — −10% vs baseline

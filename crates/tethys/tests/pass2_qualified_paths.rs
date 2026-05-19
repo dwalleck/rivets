@@ -765,8 +765,11 @@ pub fn other_thing_044i() {}
 /// `self::sibling` from `src/parent/child.rs` reaches `src/parent/sibling.rs`.
 /// `resolve_super_path` joins to the caller's grandparent directory, so
 /// `super::cousin` from `src/parent/child.rs` reaches `src/cousin.rs` (NOT
-/// `src/parent/cousin.rs`). The fixture lays files where each interpretation
-/// expects them.
+/// `src/parent/cousin.rs` — Rust spec would say the latter). The fixture
+/// lays files where each interpretation expects them. The divergence is
+/// preexisting tethys behavior, not introduced by rivets-044i, and is
+/// tracked separately as rivets-nkjd; when that issue closes, this test
+/// fixture (and likely this docstring) will need adjusting.
 #[test]
 fn self_and_super_paths_resolve_via_as_written() {
     let (_dir, mut tethys) = workspace_with_files(&[
