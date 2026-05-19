@@ -200,24 +200,35 @@ fn smoke() {
         )
         .expect("count definitions");
 
-    let unresolved_refs_in_test: i64 = conn
+    // No-phantoms fence: any cross-file ref in the test file that binds to
+    // a `make_widget_044i` or `Widget` symbol must target crate_a/src/lib.rs,
+    // since the fixture has exactly one definition of each there. Catches
+    // the bug class where Pass 2 phantom-resolves to a same-named symbol
+    // outside the expected target file — which the prior round-1 disjunctive
+    // `(unresolved == 0) || (resolved >= 1)` was structurally incapable of
+    // catching.
+    let phantom_resolved: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM refs r JOIN files f ON f.id = r.file_id
-             WHERE f.path = 'crate_b/tests/it.rs' AND r.symbol_id IS NULL
-             AND r.reference_name LIKE '%make_widget_044i%'",
+            "SELECT COUNT(*) FROM refs r
+             JOIN files f_caller ON f_caller.id = r.file_id
+             JOIN symbols s ON s.id = r.symbol_id
+             JOIN files f_target ON f_target.id = s.file_id
+             WHERE f_caller.path = 'crate_b/tests/it.rs'
+               AND s.name IN ('make_widget_044i', 'Widget')
+               AND f_target.path != 'crate_a/src/lib.rs'",
             params![],
             |row| row.get(0),
         )
-        .expect("count unresolved refs");
+        .expect("count phantoms");
 
     assert_eq!(
         definition_exists, 1,
         "oracle precondition: make_widget_044i must be indexed in crate_a/src/lib.rs"
     );
-    assert!(
-        unresolved_refs_in_test == 0 || resolved_to_target >= 1,
-        "either the ref resolves to make_widget_044i (got {resolved_to_target}) or \
-         it remains unresolved without phantoms (got unresolved={unresolved_refs_in_test})"
+    assert_eq!(
+        phantom_resolved, 0,
+        "no ref in crate_b/tests/it.rs that resolves to `make_widget_044i` or \
+         `Widget` should bind outside crate_a/src/lib.rs. Got phantom_resolved={phantom_resolved}"
     );
 
     assert!(
