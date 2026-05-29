@@ -255,17 +255,29 @@ fn snapshot_clear_all_tables(conn: &Connection) -> ClearAllSnapshot {
     }
 }
 
-/// Pin claim C3: re-indexing an unchanged workspace produces stable counts in
-/// `call_edges` and `file_deps`, and a stable `SUM(file_deps.ref_count)`.
-/// Catches regression of the `clear_all_X` discipline (rivets-lcb6's fix
-/// for `file_deps`, plus the parallel `call_edges` path).
+/// Pin claim C3: re-indexing an unchanged workspace keeps `call_edges` and
+/// `file_deps` row counts stable, and — the load-bearing check — keeps
+/// `SUM(file_deps.ref_count)` stable. This fences rivets-lcb6's
+/// `clear_all_file_deps` fix.
 ///
-/// The `SUM(ref_count)` check defeats a specific UPSERT-aggregate-growth
-/// bug class: if `clear_all_file_deps` were removed, `file_deps`'s row
-/// count would not grow (the same dep is detected each run), but the
-/// `ref_count` aggregate would increment via the `ON CONFLICT DO UPDATE
-/// SET ref_count = ref_count + 1` clause and silently double on each
-/// re-index. The row-count assertion alone would miss that.
+/// `file_deps` keys on `(from_file_id, to_file_id)`, and per-file re-index
+/// UPDATEs the `files` row rather than deleting it, so file IDs are stable and
+/// the rows survive across runs. This fixture has no `use` import (only
+/// `mod helper;` plus a call), so its single `file_deps` row is produced by
+/// `populate_file_deps_from_call_edges`, not the import-path
+/// `insert_file_dependency`. If `clear_all_file_deps` were removed, the row
+/// count would stay flat (same file pair re-detected) while the aggregate grew
+/// on each re-index: that path's UPSERT runs
+/// `ref_count = file_deps.ref_count + excluded.ref_count`, silently
+/// incrementing the stale row. Only the `SUM(ref_count)` check catches that;
+/// the row-count assertion alone would miss it.
+///
+/// The `call_edges` count is a weaker companion check. `call_edges` keys on
+/// `symbol_id`s, which are deleted and recreated on every re-index, so the
+/// `symbols(id) ON DELETE CASCADE` chain already clears the table — removing
+/// `clear_all_call_edges` would not grow it. This fixture therefore does not
+/// fence the `call_edges` clear; its count assertion only guards against a
+/// gross regression that left edge rows orphaned.
 #[test]
 fn clear_all_tables_stable_under_reindex() {
     let (_dir, mut tethys) = workspace_with_files(&[
