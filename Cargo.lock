@@ -1612,7 +1612,6 @@ dependencies = [
  "criterion",
  "lsp-types",
  "percent-encoding",
- "petgraph",
  "proptest",
  "rayon",
  "rstest",
