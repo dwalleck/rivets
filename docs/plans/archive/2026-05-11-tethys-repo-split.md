@@ -10,13 +10,15 @@
 
 **Why this shape:** Phase A is a normal merge to `main` that can sit for days or be reverted cheaply. The irreversible work (history rewrite + new remote) is concentrated in phase C so cancellation is binary — either you've pushed to the new remote or you haven't. Phase E only runs after the new repo is healthy.
 
+**⚠️ Counts in this plan are point-in-time snapshots (refreshed 2026-05-29).** Commit counts, issue counts, and doc-file lists drift as the repo evolves — at last refresh: **557 commits / 226 touching tethys / 53 tethys-labeled issues / 19 tethys-only docs**. Every such number below is paired with the command that regenerates it; **always re-derive at execution time** rather than trusting the literal.
+
 ---
 
 ## Pre-flight decisions
 
 These must be answered before starting phase C. Phase A is safe to run regardless.
 
-1. **History strategy.** Full preserved history via `git filter-repo` (default in this plan) vs. clean single-commit cut. **Recommended:** full history — 123 of 385 commits touch tethys, and blame is valuable on an active codebase.
+1. **History strategy.** Full preserved history via `git filter-repo` (default in this plan) vs. clean single-commit cut. **Recommended:** full history — 226 of 557 commits touch tethys (as of 2026-05-29; re-derive with `git rev-list --count HEAD -- crates/tethys` before running — the repo is active), and blame is valuable on an active codebase.
 2. **Issue tracking in new repo.** Options: (a) GitHub Issues, (b) own `.rivets/issues.jsonl` with rivets as an external dev tool, (c) something else. Affects Tasks 15, 16–20.
 3. **New-repo workspace shape.** (a) Single crate at root, or (b) Cargo workspace with room for future crates (e.g. `tethys-core`, `tethys-cli`, language plugins). **Recommended:** start single-crate; promote to workspace later if needed. Affects Task 10's `--path-rename` and Task 13's CI.
 4. **crates.io publishing timing.** (a) Split first, then publish, or (b) publish a `0.1.0` from this repo to claim the name, then split. **Recommended:** (a) — simpler if the `tethys` crate name is available.
@@ -31,7 +33,7 @@ These must be answered before starting phase C. Phase A is safe to run regardles
    - (b) **Convert to `external_ref` URL** pointing back to the remaining-side's issue. Preserves traceability for `blocks` and `parent-child`.
    - (c) **Document in body text.** Append a note like "Originally a `blocks` dep on rivets-XXXX in monorepo era."
    **Recommended:** (b) for `blocks`/`parent-child` (load-bearing), (c) for `related` (looser). Affects Task 17.
-8. **`docs/` migration.** The `docs/` directory contains 16 tethys-only files (`design/tethys-*.md`, `spikes/2026-01-22-tethys-sqlite-petgraph.md`, and plans for blast-radius, cross-file-resolution, cargo-toml-parsing, module-path-*, phase3-graph-operations, tethys-quality-alignment, lsp-session-result, and tethys-architecture-analysis), 4 rivets-only files, and 7 cross-cutting files. Options for tethys-only docs:
+8. **`docs/` migration.** The `docs/` directory contains 19 tethys-only files (`design/tethys-*.md`, `spikes/2026-01-22-tethys-sqlite-petgraph.md`, and plans for blast-radius, cross-file-resolution, cargo-toml-parsing, module-path-*, phase3-graph-operations, tethys-quality-alignment, lsp-session-result, tethys-architecture-analysis, csharp-integration, and tethys-overview-*), plus rivets-only and cross-cutting files (re-classify at execution — these counts drift). Options for tethys-only docs:
    - (a) **Don't move.** Leave them in rivets as historical artifacts; the new tethys repo starts with no design history.
    - (b) **Move without history.** `cp` to the new repo in phase E, `git rm` from rivets. New repo gets the files but `git log <file>` is empty.
    - (c) **Move with history via `git filter-repo`.** Include the tethys-only doc paths in Task 10's filter alongside `crates/tethys`. New repo gets full per-file `git log`/`git blame`.
@@ -75,7 +77,7 @@ Replace each `*.workspace = true` line in `[dependencies]` and `[dev-dependencie
 
 | Dep | Replace with |
 |---|---|
-| `petgraph.workspace = true` | `petgraph = "0.6"` |
+| `petgraph.workspace = true` | **Remove this line** — see note below (do *not* inline) |
 | `serde.workspace = true` | `serde = { version = "1.0", features = ["derive"] }` |
 | `serde_json.workspace = true` | `serde_json = "1.0"` |
 | `thiserror.workspace = true` | `thiserror = "2.0"` |
@@ -86,6 +88,8 @@ Replace each `*.workspace = true` line in `[dependencies]` and `[dev-dependencie
 | `tempfile.workspace = true` | `tempfile = "3.18"` |
 | `rstest.workspace = true` | `rstest = "0.26"` |
 | `proptest.workspace = true` | `proptest = "1.6"` |
+
+**Note on `petgraph`:** Per `crates/tethys/CLAUDE.md`, petgraph is declared in tethys's `Cargo.toml` but *intentionally unused* — all graph traversal runs as recursive SQLite CTEs. Confirm with `grep -rn 'petgraph' crates/tethys/src crates/tethys/benches` (expect zero hits), then **delete** the `petgraph.workspace = true` line rather than inlining it. Inlining would ship a dead dependency that the new repo's `cargo machete`/clippy would flag. If the grep *does* find usages, inline `petgraph = "0.6"` as the other rows show and update this note. (This is also why Task 21 can safely drop `petgraph` from the rivets workspace — nothing else references it.)
 
 **Step 3: Verify build still works**
 
@@ -297,16 +301,18 @@ EOF
 
 **STOP.** Before proceeding to phase C, confirm with the user:
 
-- Decision 1 (history strategy): **default = full history**
-- Decision 2 (issue tracking): _user answer required_ — affects Tasks 15, 16–20
-- Decision 3 (workspace shape): _user answer required_ — affects Task 10 path-rename and Task 13 CI
-- Decision 4 (crates.io timing): _user answer required_
-- Decision 5 (tag handling): _user answer required_
-- Decision 6 (issue ID strategy): _user answer required if decision 2 = (b) JSONL_ — affects Tasks 18, 19
-- Decision 7 (cross-repo dep resolution): _user answer required_ — affects Task 17
-- Decision 8 (docs migration strategy): _user answer required_ — affects Tasks 8, 10, 23
+**Decisions recorded 2026-05-31:**
 
-Record the answers in this section, then proceed.
+- Decision 1 (history strategy): **full history** (`git filter-repo`)
+- Decision 2 (issue tracking): **(b) own `.rivets/issues.jsonl`** — affects Tasks 15, 16–20
+- Decision 3 (workspace shape): **(a) single crate at root** — affects Task 10 path-rename, Task 13 CI
+- Decision 4 (crates.io timing): **(a) split first, then publish**
+- Decision 5 (tag handling): **(b) drop all tags during filter, cut fresh `v0.1.0` post-split**
+- Decision 6 (issue ID strategy): **(c) rename to `tethys-*` + store original `rivets-*` in `external_ref`** — affects Tasks 18, 19
+- Decision 7 (cross-repo dep resolution): **(b) convert cross-boundary deps to `external_ref`** — affects Task 17
+- Decision 8 (docs migration): **(c) move tethys-only docs with history via filter-repo** — affects Tasks 8, 10, 23
+
+These answers are locked in; proceed to phase C only after PR #76 (phase A) merges to `main`.
 
 ---
 
@@ -324,7 +330,7 @@ Record the answers in this section, then proceed.
 
 **Step 1: Extract the candidate tethys-only doc list**
 
-The known tethys-only docs as of this plan-write are 16 files. Verify nothing new has been added since:
+The known tethys-only docs are 19 files (refreshed 2026-05-29). This list grows as tethys work continues — **always re-derive** with the commands below rather than trusting the static list:
 
 ```bash
 # Files with "tethys" in path or content
@@ -335,7 +341,7 @@ ls docs/plans/ | grep -iE '(tethys|lsp|cross-file|module-path|cargo-toml|blast-r
 ls docs/spikes/
 ```
 
-Expected result (16 files):
+Expected result (19 files):
 
 ```
 docs/design/tethys-code-intelligence.md
@@ -344,6 +350,7 @@ docs/spikes/2026-01-22-tethys-sqlite-petgraph.md
 docs/plans/2026-01-22-blast-radius-analysis-design.md
 docs/plans/2026-01-25-phase3-graph-operations-design.md
 docs/plans/2026-01-25-phase3-graph-operations-impl.md
+docs/plans/2026-01-27-csharp-integration.md
 docs/plans/2026-01-28-cross-file-resolution.md
 docs/plans/2026-02-01-cargo-toml-parsing-design.md
 docs/plans/2026-02-01-cargo-toml-parsing.md
@@ -353,10 +360,22 @@ docs/plans/2026-03-18-tethys-quality-alignment-design.md
 docs/plans/2026-03-18-tethys-quality-alignment.md
 docs/plans/2026-03-19-lsp-session-result-design.md
 docs/plans/2026-03-19-lsp-session-result.md
+docs/plans/2026-04-06-tethys-overview-command.md
+docs/plans/2026-04-06-tethys-overview-review-fixes.md
 docs/plans/2026-05-10-tethys-architecture-analysis.md
 ```
 
 **Exclusion:** `docs/plans/2026-05-11-tethys-repo-split.md` (this plan) is *not* in the list — it stays in rivets as the meta-doc describing the split, and is deleted post-merge per the post-merge checklist.
+
+**⚠️ Untracked-doc trap:** `git filter-repo` only sees *committed* history. Any tethys doc still untracked (`git status` shows `??`) is silently dropped by the filter even when listed in `tethys-paths.txt`. As of 2026-05-29 these three are untracked and **must be committed before Task 10** (ideally folded into the Phase-A PR, Task 6):
+
+```
+docs/plans/2026-01-27-csharp-integration.md
+docs/plans/2026-04-06-tethys-overview-command.md
+docs/plans/2026-04-06-tethys-overview-review-fixes.md
+```
+
+Re-run `git status --porcelain docs/ crates/tethys/` immediately before Task 10 and commit anything still untracked, or it won't migrate.
 
 **Step 2: Classify the cross-cutting docs**
 
@@ -392,16 +411,44 @@ This artifact drives both Task 10 (filter) and Task 23 (rivets-side cleanup).
 
 **Step 4: Build `tethys-paths.txt` per decision 8**
 
-If **decision 8 = (c)** (recommended — move with history), create `tethys-paths.txt` in the parent of the future scratch clone with the 16 doc paths from Step 1, plus `crates/tethys`:
+`tethys-paths.txt` is the filter's **allowlist** — `git filter-repo` keeps *only* the listed paths and deletes everything else, **including repo-root tooling**. So the list must cover not just code and docs but every root-level file the standalone repo needs to function.
+
+**Base entries (ALWAYS included, regardless of decision 8) — verified present at repo root 2026-05-29:**
 
 ```
 crates/tethys
+.github
+deny.toml
+.gitignore
+.rustfmt.toml
+rust-toolchain.toml
+```
+
+Why each is load-bearing:
+- `.github` — carries the CI workflow Task 13 edits. **Without this line the workflow is deleted and Task 13 has nothing to edit.**
+- `deny.toml` — backs `cargo deny check` (RUSTSEC/license gate).
+- `.gitignore` — keeps `/target` and friends out of the new repo.
+- `.rustfmt.toml` — formatting config; CI runs `cargo fmt --check`, so without it formatting drifts and CI may fail.
+- `rust-toolchain.toml` — pins the toolchain. Critical here: tethys is `edition = "2024"` / `rust-version = "1.94.0"`, and this is the only file that *enforces* that toolchain in the standalone repo.
+
+Re-check the root for any tooling added since with `ls -a` (candidates: `clippy.toml`, `.cargo/`) and append them. The root `Cargo.lock` is intentionally *omitted* — it's the workspace lock with rivets's deps; a fresh standalone lock regenerates on first build (commit it in Phase D).
+
+**If decision 8 = (c)** (recommended — move docs with history), append the 19 tethys-only doc paths from Step 1, giving **25 lines** total:
+
+```
+crates/tethys
+.github
+deny.toml
+.gitignore
+.rustfmt.toml
+rust-toolchain.toml
 docs/design/tethys-code-intelligence.md
 docs/design/tethys-architecture-analysis.md
 docs/spikes/2026-01-22-tethys-sqlite-petgraph.md
 docs/plans/2026-01-22-blast-radius-analysis-design.md
 docs/plans/2026-01-25-phase3-graph-operations-design.md
 docs/plans/2026-01-25-phase3-graph-operations-impl.md
+docs/plans/2026-01-27-csharp-integration.md
 docs/plans/2026-01-28-cross-file-resolution.md
 docs/plans/2026-02-01-cargo-toml-parsing-design.md
 docs/plans/2026-02-01-cargo-toml-parsing.md
@@ -411,12 +458,12 @@ docs/plans/2026-03-18-tethys-quality-alignment-design.md
 docs/plans/2026-03-18-tethys-quality-alignment.md
 docs/plans/2026-03-19-lsp-session-result-design.md
 docs/plans/2026-03-19-lsp-session-result.md
+docs/plans/2026-04-06-tethys-overview-command.md
+docs/plans/2026-04-06-tethys-overview-review-fixes.md
 docs/plans/2026-05-10-tethys-architecture-analysis.md
 ```
 
-If **decision 8 = (a)** (don't move), `tethys-paths.txt` contains only `crates/tethys`.
-
-If **decision 8 = (b)** (move without history), `tethys-paths.txt` contains only `crates/tethys` (the docs will be `cp`'d into the new repo after the filter in Task 10 step 4).
+**If decision 8 = (a)** (don't move) or **(b)** (move without history), `tethys-paths.txt` contains only the **6 base entries**. For (b), the docs are `cp`'d into the new repo after the filter in Task 10 step 4.
 
 **Step 5: No commit needed in source rivets repo** — the manifest is a working doc, and `tethys-paths.txt` lives outside the repo. The manifest itself can be committed as part of Task 23's cleanup PR if you want it preserved as a record of the split (recommended).
 
@@ -463,7 +510,7 @@ Expected: no remotes (we removed origin).
 ls -l ../tethys-paths.txt && wc -l ../tethys-paths.txt
 ```
 
-Expected: 17 lines for decision 8 = (c), 1 line for decision 8 = (a) or (b).
+Expected: 25 lines for decision 8 = (c), 6 lines for decision 8 = (a) or (b) (the base allowlist: `crates/tethys`, `.github`, `deny.toml`, `.gitignore`, `.rustfmt.toml`, `rust-toolchain.toml`).
 
 **Step 1: Run the filter**
 
@@ -493,7 +540,7 @@ git filter-repo \
 ```
 
 **Path-rename mechanics:**
-- `crates/tethys/:` — trailing colon means "rename prefix to empty" — hoists `crates/tethys/*` files to repo root. Docs paths under `docs/` are not affected (they aren't matched by the rename prefix), so they keep their `docs/design/...`, `docs/plans/...`, `docs/spikes/...` paths in the new repo.
+- `crates/tethys/:` — trailing colon means "rename prefix to empty" — hoists `crates/tethys/*` files to repo root. Docs paths under `docs/` are not affected (they aren't matched by the rename prefix), so they keep their `docs/design/...`, `docs/plans/...`, `docs/spikes/...` paths in the new repo. Root tooling (`.github/`, `deny.toml`, `.gitignore`, `.rustfmt.toml`, `rust-toolchain.toml`) is likewise unaffected by the rename and stays at the repo root, exactly where the standalone repo needs it.
 - `crates/tethys/:crates/tethys/` — keeps the nested path inside a workspace structure.
 - `--paths-from-file` reads one path per line; each entry behaves like `--path <line>` (substring/prefix match against the full path).
 
@@ -508,10 +555,10 @@ git tag -l | xargs -r git tag -d
 **Step 3: Audit result**
 
 Run: `git log --oneline | wc -l`
-Expected: ~123+ commits (tethys-touching subset; slightly higher if decision 8 = (c) because docs-only commits now survive too).
+Expected: ~226+ commits (tethys-touching subset as of 2026-05-29; slightly higher with decision 8 = (c) because docs-only commits survive too). **Get the live baseline before filtering** by running `git rev-list --count HEAD -- crates/tethys` on the mirror clone — don't trust this static number.
 
 Run: `git ls-files | head -20`
-Expected: `Cargo.toml`, `src/lib.rs`, `tests/`, `benches/`, `LICENSE-MIT`, `LICENSE-APACHE`, `README.md` at the repo root; plus a populated `docs/design/`, `docs/plans/`, `docs/spikes/` tree if decision 8 = (c).
+Expected: `Cargo.toml`, `src/lib.rs`, `tests/`, `benches/`, `LICENSE-MIT`, `LICENSE-APACHE`, `README.md`, `CLAUDE.md` at the repo root (all hoisted from `crates/tethys/`), plus the `.github/`, `deny.toml`, `.gitignore`, `.rustfmt.toml`, and `rust-toolchain.toml` tooling carried over by the base allowlist; plus a populated `docs/design/`, `docs/plans/`, `docs/spikes/` tree if decision 8 = (c).
 
 Run: `git ls-files | grep -E '^(crates|src|tests)/' | head`
 Expected: nothing under `crates/` for single-crate option (a). Single-crate root has `src/` and `tests/` directly.
@@ -557,32 +604,31 @@ Expected: no workspace block, or workspace block with only this crate as member 
 
 **STOP.** This creates externally-visible state. Confirm with the user before running. **Do not push if Task 11 had any failures.**
 
-**Step 1: Create the new GitHub repository**
+**Step 1: Create the new GitHub repository (empty)**
 
 ```bash
 gh repo create dwalleck/tethys \
   --description "Code intelligence cache and query interface" \
   --public \
-  --license "MIT" \
   --homepage "https://github.com/dwalleck/tethys"
 ```
 
-(`--license MIT` creates an initial commit with a LICENSE file — we'll force-push past it. If you want a fully clean history, omit `--license` and create the repo empty, then push.)
+Create it **empty** — do *not* pass `--license`. Task 4 already added `LICENSE-MIT` and `LICENSE-APACHE` (now hoisted to the new repo root by the filter), so `--license MIT` would add a *conflicting third* `LICENSE` file **and** an initial commit you'd have to force past. An empty repo lets the first push land cleanly with no force at all.
 
 **Step 2: Configure and push**
 
 ```bash
 git remote add origin https://github.com/dwalleck/tethys.git
 git branch -M main
-git push -u origin main --force-with-lease
+git push -u origin main
 ```
 
-`--force-with-lease`: Safe-force-push variant — fails if the remote was modified by anyone else since we last saw it. Use plain `--force` only if you created the repo fully empty.
+No `--force` is needed against an empty repo. (If you accidentally created the repo with a license/README, use plain `git push -u origin main --force` — `--force-with-lease` is unreliable here because the local clone has never fetched the remote's initial commit, so the lease has no baseline to check against.)
 
 **Step 3: Verify push**
 
 Run: `gh repo view dwalleck/tethys --web`
-Expected: opens the new repo; shows ~123 commits, files at root.
+Expected: opens the new repo; shows ~226 commits (live count from Task 10), files at root.
 
 **Step 4: Tag a fresh release (if decision-5 = b)**
 
@@ -600,6 +646,8 @@ git push origin v0.1.0
 **Files (in new tethys repo):**
 - Modify: `.github/workflows/ci.yml` (still has rivets-wide config)
 
+**Note on the Claude workflows:** `.github/` also carries `claude.yml` and `claude-code-review.yml`, copied into the new repo by the `.github` allowlist entry. **This is intentional — keep them.** Verified 2026-05-31 to contain no rivets/tethys/workspace-specific references, so they need no adaptation; leave them as-is (do not delete).
+
 **Step 1: Strip workspace-wide flags**
 
 In the new repo, edit `.github/workflows/ci.yml`:
@@ -607,6 +655,9 @@ In the new repo, edit `.github/workflows/ci.yml`:
 - Replace `cargo nextest run --all-features --workspace` with `cargo nextest run --all-features` (line ~128).
 - Replace `cargo test --doc --all-features --workspace` with `cargo test --doc --all-features` (line ~131).
 - Replace `cargo build --release --all-features --workspace` with `cargo build --release --all-features` (line ~155).
+- Replace `cargo tarpaulin ... --workspace ...` with the same minus `--workspace` (line ~215, the coverage job) — this `--workspace` was missed in earlier drafts.
+
+Line numbers drift; **match on the command text, not the cited line**. A quick `grep -n -- '--workspace' .github/workflows/ci.yml` will surface every occurrence to strip.
 
 **Step 2: Update binary upload steps**
 
@@ -699,7 +750,7 @@ EOF
 
 ## Phase E — Cleanup in rivets
 
-> **Issue-migration sub-phase (Tasks 15–19):** Tethys issues currently live in `.rivets/issues.jsonl`. As of plan-write time: 38 issues labeled `tethys` (25 closed, 12 open, 1 in_progress) plus ~13 issues that *mention* tethys without the label. The parent epic is `rivets-j9bu` ("Tethys: Codebase Intelligence Engine"). The `rivets` CLI has no export/import command, so migration is mechanical (jq / scripted JSONL rewrite) or done via `gh issue create` if going to GitHub Issues. `.rivets/index/tethys.db` is *not* checked in — it's a local-only secondary index regenerated from the JSONL on first command and can be ignored throughout the migration.
+> **Issue-migration sub-phase (Tasks 15–19):** Tethys issues currently live in `.rivets/issues.jsonl`. As of 2026-05-29: **53** issues carry the `tethys` label (out of 302 total), plus ~47 more that *mention* tethys without the label. **These counts only grow — re-derive them at migration time (Task 16); never trust these literals, and recompute the open/closed/in_progress split fresh.** The parent epic is `rivets-j9bu` ("Tethys: Codebase Intelligence Engine"). The `rivets` CLI has no export/import command, so migration is mechanical (jq / scripted JSONL rewrite) or done via `gh issue create` if going to GitHub Issues. `.rivets/index/tethys.db` is *not* checked in — it's a local-only secondary index regenerated from the JSONL on first command and can be ignored throughout the migration.
 
 ### Task 16: Audit which issues belong in which repo
 
@@ -712,7 +763,7 @@ EOF
 grep '"labels":\[[^]]*"tethys"' .rivets/issues.jsonl > /tmp/tethys-labeled.jsonl
 wc -l /tmp/tethys-labeled.jsonl
 ```
-Expected: ~38 lines.
+Expected: ~53 lines (as of 2026-05-29 — this count only grows; use the live number).
 
 **Step 2: Find issues that mention tethys without the label**
 
@@ -722,7 +773,7 @@ grep -i tethys .rivets/issues.jsonl \
   > /tmp/tethys-mentions.jsonl
 wc -l /tmp/tethys-mentions.jsonl
 ```
-Expected: ~13 lines.
+Expected: ~47 lines (as of 2026-05-29; re-derive).
 
 **Step 3: Triage the unlabeled mentions**
 
@@ -853,7 +904,7 @@ GitHub Issues has no first-class dep graph; the common convention is task-list c
 ```bash
 gh issue list --repo dwalleck/tethys --state all --limit 100 | wc -l
 ```
-Expected: ~38 issues.
+Expected: ~53 issues (match against the live label count from Task 16, not this literal).
 
 #### Path B: decision 2 = (b) `.rivets/issues.jsonl`
 
@@ -898,9 +949,10 @@ rivets show <id>    # verify external_ref / body notes on a few migrated issues
 git add .rivets/
 git commit -m "chore: migrate tethys issues from rivets monorepo
 
-Migrated 38 tethys-labeled issues (25 closed, 12 open, 1 in_progress)
-plus N additional issues identified during audit. See migration manifest
-for ID mappings and cross-repo dependency resolutions."
+Migrated <N> tethys-labeled issues (~53 as of 2026-05-29; substitute the
+live count and status split from Task 16) plus <M> additional issues
+identified during audit. See migration manifest for ID mappings and
+cross-repo dependency resolutions."
 git push
 ```
 
@@ -927,7 +979,7 @@ If the issue is **already closed**, update only `external_ref`:
 rivets update rivets-XXX --external-ref "<new-url-or-id-from-mapping>"
 ```
 
-(If the CLI lacks an `--external-ref` flag, edit the JSONL directly: each issue is a single line; rewrite the `"external_ref":null` field to the new URL.)
+(Verified 2026-05-29: `rivets update` *does* accept `--external-ref` — `crates/rivets/src/cli/args.rs:178` — and the `external_ref` field exists on the domain `Issue` — `crates/rivets/src/domain/mod.rs:87`. No JSONL hand-editing required. This also confirms **decisions 6(c) and 7(b) are implementable without a schema change**, since both rely on `external_ref`.)
 
 If the issue is **open or in_progress**, close it with a migration reason:
 
@@ -951,7 +1003,7 @@ git add .rivets/issues.jsonl
 git commit -m "chore: close tethys issues migrated to standalone repo
 
 External refs point to the new tethys repo for traceability.
-38 tethys-labeled issues + N cross-cutting issues processed."
+~53 tethys-labeled issues (live count from Task 16) + N cross-cutting issues processed."
 ```
 
 ---
@@ -1089,7 +1141,7 @@ git commit -m "docs: drop tethys references from CLAUDE.md post-extraction"
 **Files:**
 - Modify: `README.md`
 - Modify: `docs/README.md`, `docs/architecture.md`, `docs/data-flow.md`, `docs/design/code-intelligence.md`, `docs/module-structure.md`, `docs/task-dependency-graph.md`, `docs/terminology.md` (trim tethys sections from cross-cutting docs)
-- Delete (if decision 8 = (b) or (c)): the 16 tethys-only docs listed below
+- Delete (if decision 8 = (b) or (c)): the 19 tethys-only docs listed below
 
 **Step 1: Strip tethys mentions from rivets `README.md`**
 
@@ -1103,7 +1155,7 @@ Remove any sections describing tethys as part of rivets. Add a brief note pointi
 
 If decision 8 = (a) (don't move docs), skip this step — the tethys-only docs stay in rivets as historical artifacts and are *not* in the new repo.
 
-Otherwise, `git rm` the 16 files that moved to the new repo. These match the `tethys-paths.txt` entries from Task 8 except for the `crates/tethys` entry (which is removed by Task 20):
+Otherwise, `git rm` the 19 tethys-only docs that moved to the new repo. These are the `docs/` entries in `tethys-paths.txt` from Task 8 — *not* `crates/tethys` (removed by Task 20) and *not* the root-tooling entries `.github`/`deny.toml`/`.gitignore`/`.rustfmt.toml`/`rust-toolchain.toml` (those are shared tooling that stays in rivets; the filter *copies* them into the new repo, it doesn't *move* them):
 
 ```bash
 git rm docs/design/tethys-code-intelligence.md
@@ -1112,6 +1164,7 @@ git rm docs/spikes/2026-01-22-tethys-sqlite-petgraph.md
 git rm docs/plans/2026-01-22-blast-radius-analysis-design.md
 git rm docs/plans/2026-01-25-phase3-graph-operations-design.md
 git rm docs/plans/2026-01-25-phase3-graph-operations-impl.md
+git rm docs/plans/2026-01-27-csharp-integration.md
 git rm docs/plans/2026-01-28-cross-file-resolution.md
 git rm docs/plans/2026-02-01-cargo-toml-parsing-design.md
 git rm docs/plans/2026-02-01-cargo-toml-parsing.md
@@ -1121,6 +1174,8 @@ git rm docs/plans/2026-03-18-tethys-quality-alignment-design.md
 git rm docs/plans/2026-03-18-tethys-quality-alignment.md
 git rm docs/plans/2026-03-19-lsp-session-result-design.md
 git rm docs/plans/2026-03-19-lsp-session-result.md
+git rm docs/plans/2026-04-06-tethys-overview-command.md
+git rm docs/plans/2026-04-06-tethys-overview-review-fixes.md
 git rm docs/plans/2026-05-10-tethys-architecture-analysis.md
 ```
 
@@ -1148,7 +1203,7 @@ grep -ri tethys docs/
 git add README.md docs/
 git commit -m "docs: remove tethys content and update cross-cutting docs
 
-The 16 tethys-only design docs and plans have moved to the new tethys
+The 19 tethys-only design docs and plans have moved to the new tethys
 repository (with full git history, via git filter-repo). Cross-cutting
 docs are trimmed to remove tethys-specific sections."
 ```
