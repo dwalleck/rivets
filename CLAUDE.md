@@ -89,19 +89,14 @@ cargo run -- <subcommand>    # Run rivets CLI
 
 ### Lint Suppression Gotchas
 
-- **Dead code on `pub` items pending a consumer**: use `#[allow(dead_code)]`, NOT `#[expect(dead_code)]`. `pub` items in a library crate don't trigger `dead_code` in the test binary target (they're considered API surface), so `#[expect]` fires as "unfulfilled" under `-D warnings`. See `crates/tethys/src/graph/mod.rs` and `graph/types.rs` for the established pattern.
-- **`pub(crate)` in a lib crate is NOT visible to the bin crate's tests in the same package.** Lib and bin are separate compilation units. If a constructor needs to be reachable from `#[cfg(test)]` blocks in a bin module of a lib+bin package (e.g. `tethys`), keep it `pub` with a doc comment explaining the intent, not `pub(crate)`.
-
-### Test Concurrency with SQLite
-
-Nextest is process-per-test. Tests that share an external resource (most often a SQLite DB file from the rivets workspace itself, e.g., `module_path_integration` tests in `tethys`) race across processes. Mitigations: (a) SQLite connections in this repo set `busy_timeout(30s)` in `Index::open` so writers wait gracefully instead of erroring; (b) when multiple tests would call `tethys.index()` against the same workspace, **consolidate them into one `#[test]` with multiple assertions** rather than relying on the busy timeout — the test runs once per binary, no race.
+- **Dead code on `pub` items pending a consumer**: use `#[allow(dead_code)]`, NOT `#[expect(dead_code)]`. `pub` items in a library crate don't trigger `dead_code` in the test binary target (they're considered API surface), so `#[expect]` fires as "unfulfilled" under `-D warnings`.
+- **`pub(crate)` in a lib crate is NOT visible to the bin crate's tests in the same package.** Lib and bin are separate compilation units. If a constructor needs to be reachable from `#[cfg(test)]` blocks in a bin module of a lib+bin package (e.g. `rivets` or `rivets-mcp`), keep it `pub` with a doc comment explaining the intent, not `pub(crate)`.
 
 ### Crate-specific
 
 ```bash
 cargo nextest run -p rivets-jsonl   # JSONL library tests only
 cargo nextest run -p rivets         # Core + CLI tests only
-cargo nextest run -p tethys         # Code intelligence tests only
 cargo nextest run -p rivets-mcp     # MCP server tests only
 ```
 
@@ -155,7 +150,6 @@ Scopes must be lowercase. Common scopes:
 - `storage`: Storage layer and persistence
 - `mcp`: MCP server functionality
 - `jsonl`: JSONL library
-- `tethys`: Code intelligence engine
 
 ### Breaking Changes
 
@@ -173,14 +167,15 @@ refactor(mcp): simplify tool registration
 
 ## Architecture
 
-Cargo workspace with 4 crates:
+Cargo workspace with 3 crates:
 
 | Crate | Type | Purpose |
 |-------|------|---------|
 | `rivets` | bin + lib | Core issue tracker: domain model, storage, CLI, commands |
 | `rivets-jsonl` | lib | JSONL file format library (atomic writes, streaming reads, queries) |
 | `rivets-mcp` | bin + lib | MCP server exposing rivets tools to AI assistants |
-| `tethys` | bin + lib | Code intelligence engine (symbol graphs, LSP integration, dependency analysis) |
+
+> **Tethys** (code intelligence engine) has moved to [its own repository](https://github.com/dwalleck/tethys).
 
 ### Key directories in `rivets` crate
 
@@ -190,28 +185,11 @@ Cargo workspace with 4 crates:
 - `src/storage/` - Persistence layer (JSONL-backed)
 - `src/output/` - CLI output formatting
 
-### Key directories in `tethys` crate
-
-- `src/cli/` - Per-subcommand modules (`index`, `search`, `coupling`, `callers`, …)
-- `src/db/` - SQLite storage layer (`schema`, `files`, `symbols`, `refs`, `architecture`, …)
-- `src/languages/` - Per-language tree-sitter extractors (`rust`, `csharp`, `common`)
-- `src/graph/` - Graph traversal queries (`SymbolGraphOps`, `FileGraphOps`)
-- `src/lsp/` - LSP-based reference refinement (rust-analyzer integration)
-- `src/indexing.rs` - Indexing pipeline orchestration on `Tethys`
-
-### Tethys resolver internals
-
-- 3 passes: Pass 1 tree-sitter same-file (`indexing.rs::store_references`), Pass 2 imports+fallback (`resolve.rs::resolve_cross_file_references`), Pass 3 LSP (`--lsp`, fills `symbol_id IS NULL` only).
-- Pass 2 resolution chain for a single ref (`resolve.rs::try_resolve_reference`): (a) explicit imports, (b) glob imports, (c) `fallback_symbol_search` (same-crate prefix → unscoped unique for unqualified; `get_symbol_by_qualified_name` literal match for qualified), (d) `qualified_module_fallback` for qualified refs only (rivets-044i: longest-prefix split, `resolve_module_path` on prefix, `search_symbol_by_qualified_name_in_file` on tail). Import-less files reach (c) and (d) — the historic `imports.is_empty()` short-circuit was removed by rivets-dn35.
-- **Provenance gotcha:** Pass 2's `resolve_reference` clears `reference_name` to NULL on resolve (in `db/references.rs::resolve_reference`). `reference_name IS NULL` does NOT attribute provenance to any pass. To measure which pass resolved which refs: toggle a branch in `resolve.rs` (e.g., `if false && let Some(symbol) = fallback_symbol_search(...)`), rebuild release, wipe DB, re-index, diff resolved counts. No other way without a schema change.
-- ALLOWED cross-crate Cargo deps in this workspace: `rivets→rivets-jsonl`, `rivets-mcp→rivets`, `rivets-mcp→rivets-jsonl`. Other ordered pairs are phantom-by-definition for resolver probes.
-- Known multi-crate resolver bugs to be aware of: `rivets-6aoc` and `rivets-34tv` (hardcoded `src/` join in `resolve.rs::resolve_cross_file_references`, `indexing.rs::compute_dependencies`, `indexing.rs::compute_dependencies_from_stored`, and the workspace-crate arm of `resolver.rs::resolve_module_path`); `rivets-714v` (`--lsp` multi-crate path bug). Run `rivets show <id>` for current state.
-
 ## Documentation Conventions
 
 - Design specs: `docs/design/<feature>.md` (no date prefix)
 - Implementation plans: `docs/plans/YYYY-MM-DD-<feature>.md`
-- Long-lived research/comparison docs live next to the crate they discuss (e.g., `crates/tethys/KIROGRAPH-COMPARISON.md`), not in `docs/`.
+- Long-lived research/comparison docs live next to the crate they discuss, not in `docs/`.
 - The `docs/superpowers/` paths some plugin skills (brainstorming, writing-plans) suggest by default do NOT match this convention — override them when invoking those skills.
 
 ### Issue diagnostic directories (`.<issue-id>/`)
@@ -407,14 +385,14 @@ When documentation or API design promises invariants, write tests that verify th
 
 ```rust
 #[test]
-fn file_count_equals_language_sum() {
-    // Invariant: file_count == sum(files_by_language) + skipped_unknown
-    let stats = tethys.get_stats().expect("get_stats failed");
-    let language_sum: usize = stats.files_by_language.values().sum();
+fn status_counts_sum_to_total() {
+    // Invariant: total issues == sum of issues grouped by status
+    let stats = storage.stats().expect("stats failed");
+    let status_sum: usize = stats.by_status.values().sum();
     assert_eq!(
-        stats.file_count,
-        language_sum + stats.skipped_unknown_languages,
-        "file_count should equal sum of language counts + skipped"
+        stats.total,
+        status_sum,
+        "total should equal the sum of per-status counts"
     );
 }
 ```
@@ -426,7 +404,7 @@ Use `.expect("descriptive message")` instead of `.unwrap()` in tests for clearer
 ```rust
 // Good - failure message explains context
 let result = parser.parse(input).expect("parser should handle valid input");
-let file = tethys.get_file_by_path(&path).expect("file should exist after indexing");
+let issue = storage.get(&id).expect("issue should exist after creation");
 
 // Avoid - failures give no context
 let result = parser.parse(input).unwrap();
