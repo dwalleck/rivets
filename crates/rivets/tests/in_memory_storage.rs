@@ -1005,3 +1005,92 @@ async fn test_sync_after_jsonl_round_trip() {
 
     temp_dir.close().unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Deterministic serialization
+//
+// `.rivets/issues.jsonl` is committed to git, so byte-stable output is a
+// correctness property, not cosmetics. `export_all` collects from a `HashMap`,
+// whose iteration order differs per instance, so without an explicit sort every
+// save reshuffles the whole file. Observed in a downstream repo: a single
+// `create` moved 131 of 132 issues to new lines, which made routine merges
+// collide across the entire file instead of on the one changed line.
+// ---------------------------------------------------------------------------
+
+/// Read a JSONL file and return the `id` of each line, in file order.
+fn ids_in_file_order(path: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let v: serde_json::Value = serde_json::from_str(l).expect("each line is valid JSON");
+            v["id"]
+                .as_str()
+                .expect("every line carries an id")
+                .to_string()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn save_to_jsonl_orders_lines_by_id() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    for n in 0..25 {
+        storage
+            .create(create_test_issue(&format!("Issue {n}")))
+            .await
+            .unwrap();
+    }
+
+    let temp_dir = tempdir().unwrap();
+    let file_path = temp_dir.path().join("sorted.jsonl");
+    save_to_jsonl(storage.as_ref(), &file_path).await.unwrap();
+
+    let ids = ids_in_file_order(&file_path);
+    let mut expected = ids.clone();
+    expected.sort();
+    assert_eq!(ids, expected, "JSONL lines must be written in id order");
+    assert_eq!(ids.len(), 25, "every issue should be written exactly once");
+
+    temp_dir.close().unwrap();
+}
+
+#[tokio::test]
+async fn save_to_jsonl_is_byte_stable_across_reloads() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    for n in 0..25 {
+        storage
+            .create(create_test_issue(&format!("Issue {n}")))
+            .await
+            .unwrap();
+    }
+
+    let temp_dir = tempdir().unwrap();
+
+    // Each `load_from_jsonl` builds a fresh `HashMap` with its own iteration
+    // order, so an unsorted writer diverges on the very first reload.
+    let first = temp_dir.path().join("round0.jsonl");
+    save_to_jsonl(storage.as_ref(), &first).await.unwrap();
+    let baseline = std::fs::read_to_string(&first).unwrap();
+    assert!(!baseline.is_empty(), "baseline must not be empty");
+
+    let mut previous = first;
+    for round in 1..=3 {
+        let (loaded, warnings) = load_from_jsonl(&previous, "test".to_string())
+            .await
+            .unwrap();
+        assert!(warnings.is_empty(), "round {round} produced warnings");
+
+        let next = temp_dir.path().join(format!("round{round}.jsonl"));
+        save_to_jsonl(loaded.as_ref(), &next).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&next).unwrap(),
+            baseline,
+            "round {round}: save output must be byte-identical to the baseline"
+        );
+        previous = next;
+    }
+
+    temp_dir.close().unwrap();
+}

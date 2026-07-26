@@ -249,6 +249,14 @@ pub async fn save_to_jsonl(storage: &dyn IssueStorage, path: &Path) -> Result<()
     // Export all issues
     let mut issues = storage.export_all().await?;
 
+    // Sort issues by id for deterministic serialization.
+    // `export_all` collects from a `HashMap`, so line order otherwise varies between
+    // saves even when nothing changed. Because `.rivets/issues.jsonl` is committed to
+    // git, that reshuffle makes every mutation look like a whole-file rewrite: real
+    // diffs become unreviewable, and two branches that each touched one issue collide
+    // across the entire file instead of on the lines they actually changed.
+    issues.sort_by(|a, b| a.id.cmp(&b.id));
+
     // Write each issue as a JSON line
     for issue in &mut issues {
         // Sort dependencies for deterministic serialization.
