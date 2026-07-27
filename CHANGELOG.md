@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Renamed `MigrationField` persistence accessors to reflect emitted and migration-only JSONL field names.
 - Upgraded `rmcp` to 1.8.0 to clear RUSTSEC-2026-0189 while preserving stdio transport.
+- Upgraded `anyhow` to 1.0.103 to clear RUSTSEC-2026-0190 surfaced by Cargo Deny CI.
 
 ## [0.1.0] - 2025-12-17
 
