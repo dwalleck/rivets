@@ -75,6 +75,7 @@
 
 mod graph;
 mod inner;
+mod issue_record;
 mod jsonl;
 mod sorting;
 mod trait_impl;
@@ -85,6 +86,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 // Re-export public API
+pub use issue_record::MigrationField;
 pub use jsonl::{LoadWarning, load_from_jsonl, save_to_jsonl};
 
 /// Thread-safe in-memory storage.

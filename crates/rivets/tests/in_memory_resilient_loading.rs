@@ -14,7 +14,7 @@
 use chrono::Utc;
 use rivets::domain::{DependencyType, Issue, IssueId, IssueStatus, IssueType, NewIssue};
 use rivets::storage::in_memory::{
-    LoadWarning, load_from_jsonl, new_in_memory_storage, save_to_jsonl,
+    LoadWarning, MigrationField, load_from_jsonl, new_in_memory_storage, save_to_jsonl,
 };
 use std::io::Write;
 use tempfile::NamedTempFile;
@@ -459,6 +459,7 @@ mod load_from_jsonl_tests {
                 LoadWarning::OrphanedDependency { .. } => has_orphaned = true,
                 LoadWarning::InvalidIssueData { .. } => has_invalid = true,
                 LoadWarning::CircularDependency { .. } => {}
+                LoadWarning::MigrationConflict { .. } => {}
             }
         }
 
@@ -560,6 +561,34 @@ mod load_from_jsonl_tests {
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].depends_on_id.as_str(), "test-1");
         assert_eq!(deps[0].dep_type, DependencyType::Blocks);
+    }
+
+    #[tokio::test]
+    async fn conflicting_legacy_and_canonical_fields_report_the_field() {
+        let content = r#"{"id":"test-conflict","title":"Conflict","description":"Test","status":"open","priority":2,"issue_type":"task","issue_kind":"feature","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":null,"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#;
+        let file = create_temp_jsonl_file(content);
+
+        let (storage, warnings) = load_from_jsonl(file.path(), "test".to_string())
+            .await
+            .unwrap();
+
+        assert!(storage.export_all().await.unwrap().is_empty());
+        assert_eq!(warnings.len(), 1);
+        match &warnings[0] {
+            LoadWarning::MigrationConflict {
+                issue_id,
+                line_number,
+                field,
+            } => {
+                assert_eq!(issue_id.as_str(), "test-conflict");
+                assert_eq!(*line_number, 1);
+                assert_eq!(*field, MigrationField::IssueKind);
+                assert_eq!(field.name(), "issue_kind");
+                assert_eq!(field.legacy_name(), "issue_type");
+                assert_eq!(field.canonical_name(), "issue_kind");
+            }
+            warning => panic!("Expected MigrationConflict warning, got {warning:?}"),
+        }
     }
 
     #[tokio::test]
@@ -816,6 +845,25 @@ mod round_trip_tests {
 
         let deps = storage3.get_dependencies(&issue2.id).await.unwrap();
         assert_eq!(deps.len(), 1);
+    }
+    #[tokio::test]
+    async fn saving_unchanged_current_records_is_byte_stable() {
+        let original = concat!(
+            r#"{"id":"test-a","title":"First","description":"Test","status":"open","priority":1,"issue_type":"bug","assignee":"alice","labels":["backend"],"design":"Plan","acceptance_criteria":"Done","notes":"History","external_ref":"GH-1","dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null}"#,
+            "\n",
+            r#"{"id":"test-b","title":"Second","description":"Test","status":"in_progress","priority":2,"issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":null,"dependencies":[{"depends_on_id":"test-a","dep_type":"blocks"}],"created_at":"2026-01-03T00:00:00Z","updated_at":"2026-01-04T00:00:00Z","closed_at":null}"#,
+            "\n",
+        );
+        let file = create_temp_jsonl_file(original);
+
+        let (storage, warnings) = load_from_jsonl(file.path(), "test".to_string())
+            .await
+            .unwrap();
+        assert!(warnings.is_empty());
+
+        save_to_jsonl(storage.as_ref(), file.path()).await.unwrap();
+
+        assert_eq!(std::fs::read(file.path()).unwrap(), original.as_bytes());
     }
 }
 

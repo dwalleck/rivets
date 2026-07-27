@@ -5,7 +5,8 @@
 
 use super::graph::has_cycle_impl;
 use super::inner::InMemoryStorageInner;
-use crate::domain::{Issue, IssueId};
+use super::issue_record::{IssueRecord, IssueRecordError, MigrationField};
+use crate::domain::IssueId;
 use crate::error::{Error, Result, StorageError};
 use crate::storage::IssueStorage;
 use rivets_jsonl::{Warning as JsonlWarning, read_jsonl_resilient};
@@ -51,6 +52,17 @@ use tokio::sync::Mutex;
 ///         rivets::storage::in_memory::LoadWarning::InvalidIssueData { issue_id, line_number, error } => {
 ///             eprintln!("Skipped invalid issue {} at line {}: {}", issue_id, line_number, error);
 ///         }
+///         rivets::storage::in_memory::LoadWarning::MigrationConflict {
+///             issue_id, field, ..
+///         } => {
+///             eprintln!(
+///                 "Skipped issue {}: fields {} and {} conflict for {}",
+///                 issue_id,
+///                 field.legacy_name(),
+///                 field.canonical_name(),
+///                 field.name()
+///             );
+///         }
 ///     }
 /// }
 /// # Ok(())
@@ -77,6 +89,16 @@ pub enum LoadWarning {
     /// are loaded but one dependency edge is omitted.
     /// **Common causes**: Manual JSONL editing, bugs in earlier versions.
     CircularDependency { from: IssueId, to: IssueId },
+
+    /// Legacy and canonical persisted fields disagree for one domain field
+    ///
+    /// **Effect**: The entire issue is skipped rather than choosing one value.
+    /// **Common causes**: Interrupted migrations or conflicting manual edits.
+    MigrationConflict {
+        issue_id: IssueId,
+        line_number: usize,
+        field: MigrationField,
+    },
 
     /// Issue data failed validation (invalid priority, title length, etc.)
     ///
@@ -133,15 +155,14 @@ pub async fn load_from_jsonl(
     path: &Path,
     prefix: String,
 ) -> Result<(Box<dyn IssueStorage>, Vec<LoadWarning>)> {
-    // First pass: Use rivets-jsonl for resilient parsing
-    let (parsed_issues, jsonl_warnings) =
-        read_jsonl_resilient::<Issue, _>(path)
-            .await
-            .map_err(|e| match e {
-                rivets_jsonl::Error::Io(io_err) => Error::Io(io_err),
-                rivets_jsonl::Error::Json(json_err) => Error::Json(json_err),
-                rivets_jsonl::Error::InvalidFormat(msg) => StorageError::InvalidFormat(msg).into(),
-            })?;
+    // First pass: resiliently parse persistence DTOs, never domain Issues.
+    let (parsed_records, jsonl_warnings) = read_jsonl_resilient::<IssueRecord, _>(path)
+        .await
+        .map_err(|e| match e {
+            rivets_jsonl::Error::Io(io_err) => Error::Io(io_err),
+            rivets_jsonl::Error::Json(json_err) => Error::Json(json_err),
+            rivets_jsonl::Error::InvalidFormat(msg) => StorageError::InvalidFormat(msg).into(),
+        })?;
 
     let mut warnings = Vec::new();
 
@@ -164,21 +185,29 @@ pub async fn load_from_jsonl(
         }
     }
 
-    // Validate issues and filter out invalid ones
-    // Note: line_number here is the record index (1-based) within successfully parsed records,
-    // not the actual file line number if there were malformed/skipped lines.
+    // Convert and validate persisted records at the compatibility boundary.
+    // Note: line_number here is the record index (1-based) within successfully
+    // parsed records, not the actual file line number after malformed lines.
     let mut issues = Vec::new();
-    for (index, issue) in parsed_issues.into_iter().enumerate() {
-        let record_number = index + 1; // 1-based indexing for user-friendly messages
-        if let Err(validation_error) = issue.validate() {
-            warnings.push(LoadWarning::InvalidIssueData {
-                issue_id: issue.id.clone(),
-                line_number: record_number,
-                error: validation_error,
-            });
-            continue;
+    for (index, record) in parsed_records.into_iter().enumerate() {
+        let record_number = index + 1;
+        match record.into_domain() {
+            Ok(issue) => issues.push(issue),
+            Err(IssueRecordError::MigrationConflict { issue_id, field }) => {
+                warnings.push(LoadWarning::MigrationConflict {
+                    issue_id,
+                    line_number: record_number,
+                    field,
+                });
+            }
+            Err(IssueRecordError::InvalidData { issue_id, error }) => {
+                warnings.push(LoadWarning::InvalidIssueData {
+                    issue_id,
+                    line_number: record_number,
+                    error,
+                });
+            }
         }
-        issues.push(issue);
     }
 
     // Create storage and import issues
@@ -258,13 +287,14 @@ pub async fn save_to_jsonl(storage: &dyn IssueStorage, path: &Path) -> Result<()
     issues.sort_by(|a, b| a.id.cmp(&b.id));
 
     // Write each issue as a JSON line
-    for issue in &mut issues {
+    for mut issue in issues {
         // Sort dependencies for deterministic serialization.
         // This ensures consistent JSONL output across saves, preventing spurious
         // diffs in version control when dependencies are added/removed in different orders.
         issue.dependencies.sort();
 
-        let json = serde_json::to_string(&issue).map_err(StorageError::Serialization)?;
+        let record = IssueRecord::from(issue);
+        let json = serde_json::to_string(&record).map_err(StorageError::Serialization)?;
 
         writer.write_all(json.as_bytes()).await.map_err(Error::Io)?;
 

@@ -48,7 +48,7 @@ impl From<&str> for IssueId {
 /// Note: Dependencies are managed by the storage backend and accessed via
 /// `IssueStorage::get_dependencies()` rather than being stored on the Issue
 /// itself. This prevents data duplication and ensures a single source of truth.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Issue {
     /// Unique identifier for the issue
     pub id: IssueId,
