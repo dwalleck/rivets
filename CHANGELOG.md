@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Renamed `MigrationField` persistence accessors to reflect emitted and migration-only JSONL field names.
+- Upgraded `rmcp` to 1.8.0 to clear RUSTSEC-2026-0189 while preserving stdio transport.
 
 ## [0.1.0] - 2025-12-17
 

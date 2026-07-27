@@ -422,24 +422,18 @@ impl Default for RivetsMcpServer {
     }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for RivetsMcpServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::V_2024_11_05,
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info: Implementation {
-                name: "rivets-mcp".into(),
-                version: env!("CARGO_PKG_VERSION").into(),
-                title: None,
-                icons: None,
-                website_url: None,
-            },
-            instructions: Some(
-                "Rivets MCP server for issue tracking. Call set_context first to set the workspace."
-                    .into(),
-            ),
-        }
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_protocol_version(ProtocolVersion::V_2024_11_05)
+            .with_server_info(Implementation::new(
+                "rivets-mcp",
+                env!("CARGO_PKG_VERSION"),
+            ))
+            .with_instructions(
+                "Rivets MCP server for issue tracking. Call set_context first to set the workspace.",
+            )
     }
 }
 

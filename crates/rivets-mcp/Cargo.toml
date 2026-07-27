@@ -22,7 +22,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # MCP protocol
-rmcp = { version = "0.8", features = ["server", "transport-io"] }
+rmcp = { version = "1.4", features = ["server", "transport-io"] }
 
 # Core rivets
 rivets = { workspace = true }
