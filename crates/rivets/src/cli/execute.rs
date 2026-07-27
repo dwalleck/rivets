@@ -479,13 +479,24 @@ fn output_batch_result(
 }
 
 /// Build a lifecycle reason Note.
+///
+/// A provided but whitespace-only reason is rejected rather than prefixed,
+/// which would otherwise append an immutable content-free Note.
 fn build_reason_note(
     reason: Option<&str>,
     prefix: &str,
 ) -> std::result::Result<Option<crate::domain::NoteContent>, crate::domain::NoteError> {
-    reason
-        .map(|reason| crate::domain::NoteContent::new(format!("{prefix}: {reason}")))
-        .transpose()
+    match reason {
+        Some(reason) => {
+            let reason = reason.trim();
+            if reason.is_empty() {
+                Err(crate::domain::NoteError::EmptyContent)
+            } else {
+                crate::domain::NoteContent::new(format!("{prefix}: {reason}")).map(Some)
+            }
+        }
+        None => Ok(None),
+    }
 }
 
 /// Return an error if a batch operation had any failures.

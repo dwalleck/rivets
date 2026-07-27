@@ -104,7 +104,8 @@ impl Note {
         &self.content
     }
 
-    /// Return the system-assigned creation timestamp.
+    /// Return the creation timestamp assigned when this Note was constructed
+    /// (system time for appends, the legacy `updated_at` for migrated records).
     pub fn created_at(&self) -> &DateTime<Utc> {
         &self.created_at
     }

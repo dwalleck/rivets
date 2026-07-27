@@ -391,6 +391,7 @@ Total: ~2-3 MB
 - HashMap<IssueId, Issue>: ~1 MB
   └─ Issue struct: ~1 KB each
      ├─ Strings: title (50), description (200), Note content (100 each)
+     ├─ Enums: 1 byte each
      ├─ Timestamps: Issue timestamps plus one per Note
      ├─ Collections: Vec<Note> and Vec<Dependency>
 

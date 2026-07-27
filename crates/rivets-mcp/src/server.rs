@@ -24,7 +24,7 @@ use tokio::sync::RwLock;
 /// Convert a rivets error to an appropriate MCP error.
 ///
 /// Maps error types to appropriate MCP error codes:
-/// - `NoContext`, `InvalidArgument` -> `invalid_params` (user needs to fix their request)
+/// - `NoContext`, `InvalidArgument`, `InvalidNote` -> `invalid_params` (user needs to fix their request)
 /// - `IssueNotFound` -> `invalid_params` (requested resource doesn't exist)
 /// - Other errors -> `internal_error`
 fn to_mcp_error(e: &Error) -> McpError {

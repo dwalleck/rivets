@@ -570,7 +570,8 @@ fn test_cli_notes_append_and_survive_restart(initialized_dir: TempDir) {
             .expect("Note timestamp should be a string");
         let human_timestamp = chrono::DateTime::parse_from_rfc3339(timestamp)
             .expect("JSON Note timestamp should be RFC 3339")
-            .to_rfc3339();
+            .format("%Y-%m-%d %H:%M")
+            .to_string();
         assert!(
             human.contains(&human_timestamp),
             "human output should include Note timestamp {human_timestamp}"
@@ -742,6 +743,44 @@ fn test_cli_close_and_reopen_reasons_append_notes(initialized_dir: TempDir) {
     assert_eq!(issue["notes"][1]["content"], "Reopened: Regression found");
     assert_eq!(issue["notes"][1]["created_at"], issue["updated_at"]);
     assert_eq!(issue["status"], "open");
+}
+
+#[rstest]
+fn test_cli_rejects_blank_lifecycle_reasons(initialized_dir: TempDir) {
+    let issue_id = create_issue(initialized_dir.path(), "Blank reasons", &[]);
+
+    let blank_close = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["close", &issue_id, "--reason", "   "],
+    );
+    assert!(!blank_close.status.success());
+    assert!(
+        String::from_utf8_lossy(&blank_close.stderr).contains("Note content cannot be empty"),
+        "close with blank reason should reject empty Note content"
+    );
+
+    let close = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["close", &issue_id, "--reason", "Fixed"],
+    );
+    assert!(close.status.success());
+
+    let blank_reopen = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["reopen", &issue_id, "--reason", "   "],
+    );
+    assert!(!blank_reopen.status.success());
+    assert!(
+        String::from_utf8_lossy(&blank_reopen.stderr).contains("Note content cannot be empty"),
+        "reopen with blank reason should reject empty Note content"
+    );
+
+    let shown = run_rivets_in_dir(initialized_dir.path(), &["--json", "show", &issue_id]);
+    let shown: serde_json::Value =
+        serde_json::from_slice(&shown.stdout).expect("show output should be JSON");
+    assert_eq!(shown[0]["notes"][0]["content"], "Closed: Fixed");
+    assert_eq!(shown[0]["notes"].as_array().map(Vec::len), Some(1));
+    assert_eq!(shown[0]["status"], "closed");
 }
 
 // ============================================================================

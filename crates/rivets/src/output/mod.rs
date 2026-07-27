@@ -207,7 +207,14 @@ fn print_notes_section<W: Write>(
     writeln!(w)?;
     writeln!(w, "{} ({}):", bold("Notes", config), notes.len())?;
     for note in notes {
-        writeln!(w, "  {}", dimmed(&note.created_at().to_rfc3339(), config))?;
+        writeln!(
+            w,
+            "  {}",
+            dimmed(
+                &note.created_at().format("%Y-%m-%d %H:%M").to_string(),
+                config
+            )
+        )?;
         for line in wrap_text(note.content(), width.saturating_sub(4)) {
             writeln!(w, "    {line}")?;
         }
