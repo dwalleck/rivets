@@ -56,11 +56,10 @@ use tokio::sync::Mutex;
 ///             issue_id, field, ..
 ///         } => {
 ///             eprintln!(
-///                 "Skipped issue {}: fields {} and {} conflict for {}",
+///                 "Skipped issue {}: emitted field {} conflicts with accepted migration field {}",
 ///                 issue_id,
-///                 field.legacy_name(),
-///                 field.canonical_name(),
-///                 field.name()
+///                 field.emitted_name(),
+///                 field.accepted_migration_name()
 ///             );
 ///         }
 ///     }
@@ -90,7 +89,7 @@ pub enum LoadWarning {
     /// **Common causes**: Manual JSONL editing, bugs in earlier versions.
     CircularDependency { from: IssueId, to: IssueId },
 
-    /// Legacy and canonical persisted fields disagree for one domain field
+    /// Emitted and migration-only persisted fields disagree
     ///
     /// **Effect**: The entire issue is skipped rather than choosing one value.
     /// **Common causes**: Interrupted migrations or conflicting manual edits.
