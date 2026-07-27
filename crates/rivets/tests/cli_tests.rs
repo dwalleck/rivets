@@ -578,6 +578,47 @@ fn test_cli_ready_with_issues(initialized_dir: TempDir) {
     assert!(stdout.contains("Ready issue 2"));
 }
 
+#[rstest]
+fn test_cli_ready_filters_by_type_and_label(initialized_dir: TempDir) {
+    let expected_id = create_issue(
+        initialized_dir.path(),
+        "Ready agent task",
+        &["--type", "task", "--labels", "ready-for-agent"],
+    );
+    create_issue(
+        initialized_dir.path(),
+        "Ready task with another label",
+        &["--type", "task", "--labels", "needs-triage"],
+    );
+    create_issue(
+        initialized_dir.path(),
+        "Ready agent feature",
+        &["--type", "feature", "--labels", "ready-for-agent"],
+    );
+
+    let output = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "--json",
+            "ready",
+            "--type",
+            "task",
+            "--label",
+            "ready-for-agent",
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "Ready filtering failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let issues: Vec<serde_json::Value> =
+        serde_json::from_slice(&output.stdout).expect("Ready output should be valid JSON");
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0]["id"], expected_id);
+}
+
 // ============================================================================
 // Dependency Command Tests
 // ============================================================================

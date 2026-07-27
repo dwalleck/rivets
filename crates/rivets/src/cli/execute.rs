@@ -808,10 +808,16 @@ pub async fn execute_ready(
     use crate::output;
 
     // Only create filter if we have filtering criteria; limit is applied after via truncate
-    let filter = if args.assignee.is_some() || args.priority.is_some() {
+    let filter = if args.assignee.is_some()
+        || args.priority.is_some()
+        || args.issue_type.is_some()
+        || args.label.is_some()
+    {
         Some(IssueFilter {
             assignee: args.assignee.clone(),
             priority: args.priority,
+            issue_type: args.issue_type.map(Into::into),
+            label: args.label.clone(),
             ..Default::default()
         })
     } else {

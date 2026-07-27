@@ -4,6 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Use `rivets ready` to see available work, `rivets list` to see all issues.**
 
+## Agent skills
+
+### Issue tracker
+
+Issues live in Rivets at `.rivets/issues.jsonl`; use the connected Rivets MCP tools or the `rivets` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the five default canonical triage labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This repo uses a single-context domain-doc layout. See `docs/agents/domain.md`.
+
 ## Project Overview
 
 Rivets is a Rust implementation of the Beads project tracking system - a CLI tool for AI-native issue tracking with dependency graphs, stored as JSONL files alongside code.
@@ -52,8 +66,11 @@ rivets create \
   --priority 2 \
   --description "Detailed description here" \
   --design "Implementation approach" \
-  --acceptance "- [ ] Criterion 1\n- [ ] Criterion 2"
+  --acceptance "- [ ] Criterion 1
+- [ ] Criterion 2"
 ```
+
+**Multi-line values**: rivets stores flag values verbatim and does NOT interpret `\n` escapes — and neither does bash inside double quotes, so `--acceptance "a\nb"` stores literal `\n` text. Use a real newline inside the quotes (as above), or bash ANSI-C quoting: `--acceptance $'- [ ] a\n- [ ] b'`.
 
 ### Managing Dependencies
 
