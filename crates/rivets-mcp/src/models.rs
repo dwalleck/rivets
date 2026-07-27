@@ -3,7 +3,7 @@
 //! This module contains types for MCP tool inputs and outputs.
 //! They wrap or transform rivets domain types for MCP compatibility.
 
-use rivets::domain::{Dependency, DependencyType, Issue, IssueStatus, IssueType};
+use rivets::domain::{Dependency, DependencyType, Issue, IssueKind, IssueStatus};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -27,8 +27,8 @@ pub struct ReadyParams {
     /// Filter by priority level.
     pub priority: Option<u8>,
 
-    /// Filter by issue type.
-    pub issue_type: Option<String>,
+    /// Filter by issue kind.
+    pub issue_kind: Option<String>,
 
     /// Filter by assignee.
     pub assignee: Option<String>,
@@ -49,8 +49,8 @@ pub struct ListParams {
     /// Filter by priority level.
     pub priority: Option<u8>,
 
-    /// Filter by issue type.
-    pub issue_type: Option<String>,
+    /// Filter by issue kind.
+    pub issue_kind: Option<String>,
 
     /// Filter by assignee.
     pub assignee: Option<String>,
@@ -94,8 +94,8 @@ pub struct CreateParams {
     /// Priority level (0-4, default 2).
     pub priority: Option<u8>,
 
-    /// Issue type (bug, feature, task, epic, chore).
-    pub issue_type: Option<String>,
+    /// Issue kind (bug, feature, task, epic, chore).
+    pub issue_kind: Option<String>,
 
     /// Assignee.
     pub assignee: Option<String>,
@@ -124,6 +124,9 @@ pub struct UpdateParams {
 
     /// New priority.
     pub priority: Option<u8>,
+
+    /// New issue kind.
+    pub issue_kind: Option<String>,
 
     /// New assignee.
     pub assignee: Option<String>,
@@ -307,8 +310,8 @@ pub struct McpIssue {
     /// Priority level (0-4).
     pub priority: u8,
 
-    /// Issue type.
-    pub issue_type: String,
+    /// Issue kind.
+    pub issue_kind: String,
 
     /// Assignee, if any.
     pub assignee: Option<String>,
@@ -349,7 +352,7 @@ impl From<Issue> for McpIssue {
             description: issue.description,
             status: status_to_str(issue.status).to_string(),
             priority: issue.priority,
-            issue_type: issue_type_to_str(issue.issue_type).to_string(),
+            issue_kind: issue_kind_to_str(issue.issue_kind).to_string(),
             assignee: issue.assignee,
             labels: issue.labels,
             design: issue.design,
@@ -427,13 +430,13 @@ fn status_to_str(status: IssueStatus) -> &'static str {
     }
 }
 
-fn issue_type_to_str(issue_type: IssueType) -> &'static str {
-    match issue_type {
-        IssueType::Bug => "bug",
-        IssueType::Feature => "feature",
-        IssueType::Task => "task",
-        IssueType::Epic => "epic",
-        IssueType::Chore => "chore",
+fn issue_kind_to_str(issue_kind: IssueKind) -> &'static str {
+    match issue_kind {
+        IssueKind::Bug => "bug",
+        IssueKind::Feature => "feature",
+        IssueKind::Task => "task",
+        IssueKind::Epic => "epic",
+        IssueKind::Chore => "chore",
     }
 }
 
@@ -460,15 +463,15 @@ pub fn parse_status(s: &str) -> Option<IssueStatus> {
     }
 }
 
-/// Parse an issue type string into an `IssueType`.
+/// Parse an issue kind string into an `IssueKind`.
 #[must_use]
-pub fn parse_issue_type(s: &str) -> Option<IssueType> {
+pub fn parse_issue_kind(s: &str) -> Option<IssueKind> {
     match s.to_lowercase().as_str() {
-        "bug" => Some(IssueType::Bug),
-        "feature" => Some(IssueType::Feature),
-        "task" => Some(IssueType::Task),
-        "epic" => Some(IssueType::Epic),
-        "chore" => Some(IssueType::Chore),
+        "bug" => Some(IssueKind::Bug),
+        "feature" => Some(IssueKind::Feature),
+        "task" => Some(IssueKind::Task),
+        "epic" => Some(IssueKind::Epic),
+        "chore" => Some(IssueKind::Chore),
         _ => None,
     }
 }
@@ -504,15 +507,15 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bug("bug", Some(IssueType::Bug))]
-    #[case::feature("feature", Some(IssueType::Feature))]
-    #[case::task("task", Some(IssueType::Task))]
-    #[case::epic("epic", Some(IssueType::Epic))]
-    #[case::chore("chore", Some(IssueType::Chore))]
-    #[case::uppercase("BUG", Some(IssueType::Bug))]
+    #[case::bug("bug", Some(IssueKind::Bug))]
+    #[case::feature("feature", Some(IssueKind::Feature))]
+    #[case::task("task", Some(IssueKind::Task))]
+    #[case::epic("epic", Some(IssueKind::Epic))]
+    #[case::chore("chore", Some(IssueKind::Chore))]
+    #[case::uppercase("BUG", Some(IssueKind::Bug))]
     #[case::invalid("invalid", None)]
-    fn test_parse_issue_type(#[case] input: &str, #[case] expected: Option<IssueType>) {
-        assert_eq!(parse_issue_type(input), expected);
+    fn test_parse_issue_kind(#[case] input: &str, #[case] expected: Option<IssueKind>) {
+        assert_eq!(parse_issue_kind(input), expected);
     }
 
     #[rstest]

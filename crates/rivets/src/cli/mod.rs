@@ -22,7 +22,7 @@
 //! # Example
 //!
 //! ```bash
-//! rivets create --title "Fix bug" --priority 1 --type bug
+//! rivets create --title "Fix bug" --priority 1 --kind bug
 //! rivets list --status open --priority 1
 //! rivets update proj-abc --status in_progress
 //! rivets close proj-abc --reason "Fixed in PR #123"
@@ -47,7 +47,7 @@ pub use args::{
 
 // Re-export types
 pub use types::{
-    BatchError, BatchResult, DependencyTypeArg, IssueStatusArg, IssueTypeArg, SortOrderArg,
+    BatchError, BatchResult, DependencyTypeArg, IssueKindArg, IssueStatusArg, SortOrderArg,
     SortPolicyArg,
 };
 
@@ -360,7 +360,7 @@ mod tests {
             Some(Commands::Create(args)) => {
                 assert!(args.title.is_none());
                 assert_eq!(args.priority, 2); // default
-                assert_eq!(args.issue_type, IssueTypeArg::Task); // default
+                assert_eq!(args.issue_kind, IssueKindArg::Task); // default
             }
             _ => panic!("Expected Create command"),
         }
@@ -377,7 +377,7 @@ mod tests {
             "Detailed desc",
             "--priority",
             "1",
-            "--type",
+            "--kind",
             "bug",
             "--assignee",
             "alice",
@@ -391,7 +391,7 @@ mod tests {
                 assert_eq!(args.title, Some("Fix bug".to_string()));
                 assert_eq!(args.description, Some("Detailed desc".to_string()));
                 assert_eq!(args.priority, 1);
-                assert_eq!(args.issue_type, IssueTypeArg::Bug);
+                assert_eq!(args.issue_kind, IssueKindArg::Bug);
                 assert_eq!(args.assignee, Some("alice".to_string()));
                 assert_eq!(args.labels, vec!["urgent", "backend"]);
             }
@@ -428,7 +428,7 @@ mod tests {
             "open",
             "--priority",
             "1",
-            "--type",
+            "--kind",
             "bug",
             "--assignee",
             "bob",
@@ -441,7 +441,7 @@ mod tests {
             Some(Commands::List(args)) => {
                 assert_eq!(args.status, Some(IssueStatusArg::Open));
                 assert_eq!(args.priority, Some(1));
-                assert_eq!(args.issue_type, Some(IssueTypeArg::Bug));
+                assert_eq!(args.issue_kind, Some(IssueKindArg::Bug));
                 assert_eq!(args.assignee, Some("bob".to_string()));
                 assert_eq!(args.limit, 10);
             }

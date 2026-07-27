@@ -5,7 +5,7 @@
 //! semantics, and sort policies.
 
 use rivets::domain::{
-    DependencyType, IssueFilter, IssueId, IssueStatus, IssueType, IssueUpdate, MAX_PRIORITY,
+    DependencyType, IssueFilter, IssueId, IssueKind, IssueStatus, IssueUpdate, MAX_PRIORITY,
     NewIssue, SortPolicy,
 };
 use rivets::error::Error;
@@ -19,7 +19,7 @@ fn create_test_issue(title: &str) -> NewIssue {
         title: title.to_string(),
         description: "Test description".to_string(),
         priority: 2,
-        issue_type: IssueType::Task,
+        issue_kind: IssueKind::Task,
         assignee: None,
         labels: vec![],
         design: None,
@@ -35,7 +35,7 @@ fn create_test_issue_with_priority(title: &str, priority: u8) -> NewIssue {
         title: title.to_string(),
         description: "Test description".to_string(),
         priority,
-        issue_type: IssueType::Task,
+        issue_kind: IssueKind::Task,
         assignee: None,
         labels: vec![],
         design: None,

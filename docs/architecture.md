@@ -108,7 +108,7 @@ pub trait IssueStorage: Send + Sync {
 
 ### 4. Domain Layer (rivets-06w, rivets-x1e)
 - **Core Types**: Issue, Dependency, IssueFilter, NewIssue, IssueUpdate
-- **Enums**: Status, Priority, IssueType, DependencyType
+- **Enums**: Status, Priority, IssueKind, DependencyType
 - **Hash-based IDs**: SHA256 → Base36 encoding with adaptive length (4-6 chars)
 - **ID Format**: `{prefix}-{hash}` (e.g., "rivets-a3f8")
 

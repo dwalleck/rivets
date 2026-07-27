@@ -40,7 +40,7 @@
 //!
 //! ```no_run
 //! use rivets::storage::{IssueStorage, StorageBackend, create_storage};
-//! use rivets::domain::{NewIssue, IssueType};
+//! use rivets::domain::{IssueKind, NewIssue};
 //!
 //! #[tokio::main(flavor = "current_thread")]
 //! async fn main() -> anyhow::Result<()> {
@@ -53,7 +53,7 @@
 //!         title: "Implement feature X".to_string(),
 //!         description: "Add new functionality".to_string(),
 //!         priority: 1,
-//!         issue_type: IssueType::Feature,
+//!         issue_kind: IssueKind::Feature,
 //!         assignee: Some("alice".to_string()),
 //!         labels: vec![],
 //!         design: None,
@@ -246,7 +246,7 @@ pub trait IssueStorage: Send + Sync {
     ///
     /// # Arguments
     ///
-    /// * `filter` - Optional filter to narrow results by status, priority, type, assignee, or label
+    /// * `filter` - Optional filter to narrow results by status, priority, kind, assignee, or label
     /// * `sort_policy` - Sort order for results (defaults to Hybrid if None)
     async fn ready_to_work(
         &self,
@@ -650,7 +650,7 @@ impl MockStorage {
     /// let expected = MockStorage::create_test_issue(IssueId::new(MOCK_ISSUE_ID));
     /// ```
     pub fn create_test_issue(id: IssueId) -> Issue {
-        use crate::domain::{IssueStatus, IssueType};
+        use crate::domain::{IssueKind, IssueStatus};
         use chrono::Utc;
 
         Issue {
@@ -659,7 +659,7 @@ impl MockStorage {
             description: "Test description".to_string(),
             status: IssueStatus::Open,
             priority: 1,
-            issue_type: IssueType::Task,
+            issue_kind: IssueKind::Task,
             assignee: None,
             labels: vec![],
             design: None,
@@ -794,7 +794,7 @@ impl IssueStorage for MockStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::IssueType;
+    use crate::domain::IssueKind;
 
     #[tokio::test]
     async fn test_trait_object_usage() {
@@ -805,7 +805,7 @@ mod tests {
             title: "Test".to_string(),
             description: "Test".to_string(),
             priority: 1,
-            issue_type: IssueType::Task,
+            issue_kind: IssueKind::Task,
             assignee: None,
             labels: vec![],
             design: None,
@@ -884,7 +884,7 @@ mod tests {
             title: "Original Title".to_string(),
             description: "Original description".to_string(),
             priority: 2,
-            issue_type: IssueType::Task,
+            issue_kind: IssueKind::Task,
             assignee: None,
             labels: vec![],
             design: None,
@@ -934,7 +934,7 @@ mod tests {
             title: "Test Issue".to_string(),
             description: "".to_string(),
             priority: 2,
-            issue_type: IssueType::Task,
+            issue_kind: IssueKind::Task,
             assignee: None,
             labels: vec![],
             design: None,
@@ -969,7 +969,7 @@ mod tests {
             title: "Test Issue".to_string(),
             description: "".to_string(),
             priority: 2,
-            issue_type: IssueType::Task,
+            issue_kind: IssueKind::Task,
             assignee: None,
             labels: vec![],
             design: None,

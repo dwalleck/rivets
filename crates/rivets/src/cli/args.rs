@@ -5,7 +5,7 @@
 
 use clap::{Parser, Subcommand};
 
-use super::types::{DependencyTypeArg, IssueStatusArg, IssueTypeArg, SortOrderArg, SortPolicyArg};
+use super::types::{DependencyTypeArg, IssueKindArg, IssueStatusArg, SortOrderArg, SortPolicyArg};
 use super::validators::{
     validate_description, validate_issue_id, validate_label, validate_prefix, validate_title,
 };
@@ -47,9 +47,9 @@ pub struct CreateArgs {
     #[arg(short, long, value_parser = clap::value_parser!(u8).range(MIN_PRIORITY as i64..=MAX_PRIORITY as i64), default_value = "2")]
     pub priority: u8,
 
-    /// Issue type
-    #[arg(short = 't', long = "type", value_enum, default_value = "task")]
-    pub issue_type: IssueTypeArg,
+    /// Issue kind
+    #[arg(short = 'k', long = "kind", value_enum, default_value = "task")]
+    pub issue_kind: IssueKindArg,
 
     /// Assignee username
     #[arg(short, long)]
@@ -90,9 +90,9 @@ pub struct ListArgs {
     #[arg(short, long, value_parser = clap::value_parser!(u8).range(MIN_PRIORITY as i64..=MAX_PRIORITY as i64))]
     pub priority: Option<u8>,
 
-    /// Filter by issue type
-    #[arg(short = 't', long = "type", value_enum)]
-    pub issue_type: Option<IssueTypeArg>,
+    /// Filter by issue kind
+    #[arg(short = 'k', long = "kind", value_enum)]
+    pub issue_kind: Option<IssueKindArg>,
 
     /// Filter by assignee
     #[arg(short, long)]
@@ -149,6 +149,10 @@ pub struct UpdateArgs {
     /// New priority
     #[arg(short, long, value_parser = clap::value_parser!(u8).range(MIN_PRIORITY as i64..=MAX_PRIORITY as i64))]
     pub priority: Option<u8>,
+
+    /// New issue kind
+    #[arg(short = 'k', long = "kind", value_enum)]
+    pub issue_kind: Option<IssueKindArg>,
 
     /// New assignee
     ///
@@ -212,6 +216,7 @@ impl UpdateArgs {
             || self.description.is_some()
             || self.status.is_some()
             || self.priority.is_some()
+            || self.issue_kind.is_some()
             || self.assignee.is_some()
             || self.no_assignee
             || self.design.is_some()
@@ -268,9 +273,9 @@ pub struct ReadyArgs {
     #[arg(short, long, value_parser = clap::value_parser!(u8).range(MIN_PRIORITY as i64..=MAX_PRIORITY as i64))]
     pub priority: Option<u8>,
 
-    /// Filter by issue type
-    #[arg(short = 't', long = "type", value_enum)]
-    pub issue_type: Option<IssueTypeArg>,
+    /// Filter by issue kind
+    #[arg(short = 'k', long = "kind", value_enum)]
+    pub issue_kind: Option<IssueKindArg>,
 
     /// Filter by label
     #[arg(short, long)]
@@ -449,6 +454,7 @@ mod tests {
                 description: None,
                 status: None,
                 priority: None,
+                issue_kind: None,
                 assignee: None,
                 no_assignee: false,
                 design: None,
@@ -489,6 +495,13 @@ mod tests {
         fn test_has_updates_priority() {
             let mut args = create_empty_update_args();
             args.priority = Some(1);
+            assert!(args.has_updates());
+        }
+
+        #[test]
+        fn test_has_updates_issue_kind() {
+            let mut args = create_empty_update_args();
+            args.issue_kind = Some(IssueKindArg::Bug);
             assert!(args.has_updates());
         }
 

@@ -19,10 +19,10 @@ use crate::context::Context;
 use crate::error::{Error, Result};
 use crate::models::{
     BlockedIssueResponse, McpIssue, SetContextResponse, WhereAmIResponse, dep_type_to_str,
-    parse_dep_type, parse_issue_type, parse_status,
+    parse_dep_type, parse_issue_kind, parse_status,
 };
 use rivets::domain::{
-    DependencyType, IssueFilter, IssueId, IssueStatus, IssueType, IssueUpdate, NewIssue,
+    DependencyType, IssueFilter, IssueId, IssueKind, IssueStatus, IssueUpdate, NewIssue,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -44,11 +44,11 @@ fn validate_status(status: &str) -> Result<IssueStatus> {
     })
 }
 
-/// Parse and validate an issue type string.
-fn validate_issue_type(issue_type: &str) -> Result<IssueType> {
-    parse_issue_type(issue_type).ok_or_else(|| Error::InvalidArgument {
-        field: "issue_type",
-        value: issue_type.to_string(),
+/// Parse and validate an issue kind string.
+fn validate_issue_kind(issue_kind: &str) -> Result<IssueKind> {
+    parse_issue_kind(issue_kind).ok_or_else(|| Error::InvalidArgument {
+        field: "issue_kind",
+        value: issue_kind.to_string(),
         valid_values: "bug, feature, task, epic, chore",
     })
 }
@@ -149,14 +149,14 @@ impl Tools {
         &self,
         limit: Option<usize>,
         priority: Option<u8>,
-        issue_type: Option<&str>,
+        issue_kind: Option<&str>,
         assignee: Option<String>,
         label: Option<String>,
         workspace_root: Option<&str>,
     ) -> Result<Vec<McpIssue>> {
         debug!("Finding ready issues");
         // Validate enum values before acquiring locks
-        let issue_type = issue_type.map(validate_issue_type).transpose()?;
+        let issue_kind = issue_kind.map(validate_issue_kind).transpose()?;
 
         // Release context lock before acquiring storage lock to prevent deadlocks
         let storage = {
@@ -167,7 +167,7 @@ impl Tools {
 
         let filter = IssueFilter {
             priority,
-            issue_type,
+            issue_kind,
             assignee,
             label,
             limit: Some(limit.unwrap_or(DEFAULT_QUERY_LIMIT)),
@@ -193,7 +193,7 @@ impl Tools {
         &self,
         status: Option<&str>,
         priority: Option<u8>,
-        issue_type: Option<&str>,
+        issue_kind: Option<&str>,
         assignee: Option<String>,
         label: Option<String>,
         limit: Option<usize>,
@@ -202,7 +202,7 @@ impl Tools {
         debug!("Listing issues");
         // Validate enum values before acquiring locks
         let status = status.map(validate_status).transpose()?;
-        let issue_type = issue_type.map(validate_issue_type).transpose()?;
+        let issue_kind = issue_kind.map(validate_issue_kind).transpose()?;
 
         let storage = {
             let context = self.context.read().await;
@@ -213,7 +213,7 @@ impl Tools {
         let filter = IssueFilter {
             status,
             priority,
-            issue_type,
+            issue_kind,
             assignee,
             label,
             limit: Some(limit.unwrap_or(DEFAULT_QUERY_LIMIT)),
@@ -272,7 +272,7 @@ impl Tools {
     ///
     /// # Errors
     ///
-    /// Returns an error if no context is set, invalid `issue_type`, or storage operations fail.
+    /// Returns an error if no context is set, invalid `issue_kind`, or storage operations fail.
     #[allow(clippy::too_many_arguments)]
     #[instrument(skip(self, description, labels, design, acceptance_criteria), fields(%title))]
     pub async fn create(
@@ -280,7 +280,7 @@ impl Tools {
         title: String,
         description: Option<String>,
         priority: Option<u8>,
-        issue_type: Option<&str>,
+        issue_kind: Option<&str>,
         assignee: Option<String>,
         labels: Option<Vec<String>>,
         design: Option<String>,
@@ -288,11 +288,11 @@ impl Tools {
         workspace_root: Option<&str>,
     ) -> Result<McpIssue> {
         debug!("Creating issue");
-        // Validate issue_type before acquiring locks
-        let issue_type = issue_type
-            .map(validate_issue_type)
+        // Validate issue_kind before acquiring locks
+        let issue_kind = issue_kind
+            .map(validate_issue_kind)
             .transpose()?
-            .unwrap_or(IssueType::Task);
+            .unwrap_or(IssueKind::Task);
 
         let storage = {
             let context = self.context.read().await;
@@ -304,7 +304,7 @@ impl Tools {
             title,
             description: description.unwrap_or_default(),
             priority: priority.unwrap_or(2),
-            issue_type,
+            issue_kind,
             assignee,
             labels: labels.unwrap_or_default(),
             design,
@@ -340,6 +340,7 @@ impl Tools {
         description: Option<String>,
         status: Option<&str>,
         priority: Option<u8>,
+        issue_kind: Option<&str>,
         assignee: Option<Option<String>>,
         design: Option<String>,
         acceptance_criteria: Option<String>,
@@ -349,8 +350,9 @@ impl Tools {
         workspace_root: Option<&str>,
     ) -> Result<McpIssue> {
         debug!("Updating issue");
-        // Validate status before acquiring locks
+        // Validate enum values before acquiring locks
         let status = status.map(validate_status).transpose()?;
+        let issue_kind = issue_kind.map(validate_issue_kind).transpose()?;
 
         let storage = {
             let context = self.context.read().await;
@@ -364,6 +366,7 @@ impl Tools {
             description,
             status,
             priority,
+            issue_kind,
             assignee,
             design,
             acceptance_criteria,
@@ -735,7 +738,7 @@ mod tests {
         assert_eq!(issue.title, "Test Issue");
         assert_eq!(issue.description, "Test description");
         assert_eq!(issue.priority, 1);
-        assert_eq!(issue.issue_type, "task");
+        assert_eq!(issue.issue_kind, "task");
         assert_eq!(issue.assignee, Some("alice".to_string()));
 
         // Show the issue
@@ -772,6 +775,7 @@ mod tests {
                 None,
                 Some("in_progress"),
                 Some(0),
+                None, // issue_kind
                 None,
                 None,
                 None,

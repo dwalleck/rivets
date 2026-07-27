@@ -31,7 +31,7 @@ cargo install rivets
 rivets init
 
 # Create an issue
-rivets create --title "Add user authentication" --type feature
+rivets create --title "Add user authentication" --kind feature
 
 # See what's ready to work on
 rivets ready
@@ -48,7 +48,7 @@ rivets close RIVETS-1
 ### Managing Issues
 
 ```bash
-rivets create --title "Fix login bug" --type bug --priority 1
+rivets create --title "Fix login bug" --kind bug --priority 1
 rivets list                          # List all open issues
 rivets list --status in_progress     # Filter by status
 rivets show RIVETS-1                 # View issue details

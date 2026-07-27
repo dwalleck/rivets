@@ -12,7 +12,7 @@
 //! - Round-trip persistence through save and load
 
 use chrono::Utc;
-use rivets::domain::{DependencyType, Issue, IssueId, IssueStatus, IssueType, NewIssue};
+use rivets::domain::{DependencyType, Issue, IssueId, IssueKind, IssueStatus, NewIssue};
 use rivets::storage::in_memory::{
     LoadWarning, MigrationField, load_from_jsonl, new_in_memory_storage, save_to_jsonl,
 };
@@ -36,7 +36,7 @@ fn create_test_issue(title: &str) -> NewIssue {
         title: title.to_string(),
         description: "Test description".to_string(),
         priority: 2,
-        issue_type: IssueType::Task,
+        issue_kind: IssueKind::Task,
         assignee: None,
         labels: vec![],
         design: None,
@@ -501,7 +501,7 @@ mod load_from_jsonl_tests {
             description: "Complete description".to_string(),
             status: IssueStatus::InProgress,
             priority: 1,
-            issue_type: IssueType::Feature,
+            issue_kind: IssueKind::Feature,
             assignee: Some("alice".to_string()),
             labels: vec!["backend".to_string(), "urgent".to_string()],
             design: Some("Design notes here".to_string()),
@@ -532,7 +532,7 @@ mod load_from_jsonl_tests {
         assert_eq!(loaded.description, "Complete description");
         assert_eq!(loaded.status, IssueStatus::InProgress);
         assert_eq!(loaded.priority, 1);
-        assert_eq!(loaded.issue_type, IssueType::Feature);
+        assert_eq!(loaded.issue_kind, IssueKind::Feature);
         assert_eq!(loaded.assignee, Some("alice".to_string()));
         assert_eq!(loaded.labels, vec!["backend", "urgent"]);
         assert_eq!(loaded.design, Some("Design notes here".to_string()));
@@ -564,8 +564,8 @@ mod load_from_jsonl_tests {
     }
 
     #[tokio::test]
-    async fn conflicting_emitted_and_migration_fields_report_distinct_names() {
-        let content = r#"{"id":"test-conflict","title":"Conflict","description":"Test","status":"open","priority":2,"issue_type":"task","issue_kind":"feature","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":null,"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#;
+    async fn conflicting_canonical_and_legacy_kind_fields_report_distinct_names() {
+        let content = r#"{"id":"test-conflict","title":"Conflict","description":"Test","status":"open","priority":2,"issue_kind":"feature","issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":null,"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#;
         let file = create_temp_jsonl_file(content);
 
         let (storage, warnings) = load_from_jsonl(file.path(), "test".to_string())
@@ -589,8 +589,8 @@ mod load_from_jsonl_tests {
                 assert_eq!(issue_id.as_str(), "test-conflict");
                 assert_eq!(*line_number, 1);
                 assert_eq!(*field, MigrationField::IssueKind);
-                assert_eq!(field.emitted_name(), "issue_type");
-                assert_eq!(field.accepted_migration_name(), "issue_kind");
+                assert_eq!(field.emitted_name(), "issue_kind");
+                assert_eq!(field.accepted_migration_name(), "issue_type");
                 assert_ne!(field.emitted_name(), field.accepted_migration_name());
             }
             warning => panic!("Expected MigrationConflict warning, got {warning:?}"),
@@ -853,7 +853,7 @@ mod round_trip_tests {
         assert_eq!(deps.len(), 1);
     }
     #[tokio::test]
-    async fn saving_unchanged_current_records_is_byte_stable() {
+    async fn saving_legacy_kind_records_canonicalizes_once() {
         let original = concat!(
             r#"{"id":"test-a","title":"First","description":"Test","status":"open","priority":1,"issue_type":"bug","assignee":"alice","labels":["backend"],"design":"Plan","acceptance_criteria":"Done","notes":"History","external_ref":"GH-1","dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null}"#,
             "\n",
@@ -864,16 +864,30 @@ mod round_trip_tests {
 
         let (storage, warnings) = load_from_jsonl(file.path(), "test".to_string())
             .await
-            .expect("current-format records should load without error");
+            .expect("legacy records should load without error");
         assert!(warnings.is_empty());
 
         save_to_jsonl(storage.as_ref(), file.path())
             .await
             .expect("save should succeed");
 
+        let canonical =
+            std::fs::read(file.path()).expect("canonical saved file should be readable");
+        let canonical_text = String::from_utf8(canonical.clone()).expect("JSONL should be UTF-8");
+        assert!(!canonical_text.contains("\"issue_type\""));
+        assert!(canonical_text.contains("\"issue_kind\":\"bug\""));
+        assert!(canonical_text.contains("\"issue_kind\":\"task\""));
+
+        let (reloaded, warnings) = load_from_jsonl(file.path(), "test".to_string())
+            .await
+            .expect("canonical records should reload");
+        assert!(warnings.is_empty());
+        save_to_jsonl(reloaded.as_ref(), file.path())
+            .await
+            .expect("repeat canonical save should succeed");
         assert_eq!(
-            std::fs::read(file.path()).expect("saved file should be readable"),
-            original.as_bytes()
+            std::fs::read(file.path()).expect("repeat saved file should be readable"),
+            canonical
         );
     }
 }
