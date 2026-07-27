@@ -268,6 +268,14 @@ pub struct ReadyArgs {
     #[arg(short, long, value_parser = clap::value_parser!(u8).range(MIN_PRIORITY as i64..=MAX_PRIORITY as i64))]
     pub priority: Option<u8>,
 
+    /// Filter by issue type
+    #[arg(short = 't', long = "type", value_enum)]
+    pub issue_type: Option<IssueTypeArg>,
+
+    /// Filter by label
+    #[arg(short, long)]
+    pub label: Option<String>,
+
     /// Maximum number of issues to display
     #[arg(short = 'n', long, default_value = "10")]
     pub limit: usize,
