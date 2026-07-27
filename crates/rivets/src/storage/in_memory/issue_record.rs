@@ -7,22 +7,33 @@ use serde::{Deserialize, Serialize};
 /// A domain field with legacy and canonical persisted representations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MigrationField {
+    /// The issue's kind, persisted today as `issue_type` and migrating to `issue_kind`.
     IssueKind,
 }
 
 impl MigrationField {
+    /// The name used to refer to this field itself in diagnostics.
+    ///
+    /// Distinct in purpose from [`Self::legacy_name`] and [`Self::canonical_name`],
+    /// which name the two *persisted* spellings. For [`Self::IssueKind`] it happens
+    /// to coincide with the canonical spelling.
     pub const fn name(self) -> &'static str {
         match self {
             Self::IssueKind => "issue_kind",
         }
     }
 
+    /// The older persisted spelling — still the only one rivets writes.
     pub const fn legacy_name(self) -> &'static str {
         match self {
             Self::IssueKind => "issue_type",
         }
     }
 
+    /// The persisted spelling this field is migrating toward.
+    ///
+    /// Accepted on load but never written; see the `issue_kind` field on
+    /// `IssueRecord`.
     pub const fn canonical_name(self) -> &'static str {
         match self {
             Self::IssueKind => "issue_kind",
@@ -55,6 +66,10 @@ pub(super) struct IssueRecord {
     status: IssueStatus,
     priority: u8,
     issue_type: IssueType,
+    /// Read-only migration field: accepted on load so a half-migrated record can be
+    /// detected, never written back. Emitting it would add a canonical field to every
+    /// record, changing the on-disk shape and breaking byte-stable saves; `into_domain`
+    /// folds it into `issue_type` instead.
     #[serde(default, skip_serializing)]
     issue_kind: Option<IssueType>,
     assignee: Option<String>,
@@ -158,6 +173,7 @@ impl From<Issue> for IssueRecord {
             status,
             priority,
             issue_type,
+            // Never serialized; the domain carries only `issue_type`.
             issue_kind: None,
             assignee,
             labels,
