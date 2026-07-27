@@ -157,7 +157,7 @@ This project uses [Conventional Commits](https://www.conventionalcommits.org/en/
 - `ci`: CI/CD configuration
 - `chore`: Maintenance tasks
 
-**Note:** CI's "Validate Commits" job (`.github/workflows/ci.yml`) enforces these via regex. Commits using non-listed types like `plan(...)` or `design(...)` from the gilfoyle workflow fail this check — pre-existing known noise on branches that use those types. If Validate Commits is red, inspect offending commit subjects before assuming new breakage.
+**Note:** These are a convention, not a gate — CI no longer validates commit subjects. Follow them for readable history, but a non-listed type (e.g. `plan(...)` or `design(...)` from the gilfoyle workflow) will not fail a build.
 
 ### Suggested Scopes (Optional)
 
