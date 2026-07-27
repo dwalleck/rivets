@@ -570,9 +570,15 @@ mod load_from_jsonl_tests {
 
         let (storage, warnings) = load_from_jsonl(file.path(), "test".to_string())
             .await
-            .unwrap();
+            .expect("load should succeed and report the conflict as a warning");
 
-        assert!(storage.export_all().await.unwrap().is_empty());
+        assert!(
+            storage
+                .export_all()
+                .await
+                .expect("export_all should succeed")
+                .is_empty()
+        );
         assert_eq!(warnings.len(), 1);
         match &warnings[0] {
             LoadWarning::MigrationConflict {
@@ -858,12 +864,17 @@ mod round_trip_tests {
 
         let (storage, warnings) = load_from_jsonl(file.path(), "test".to_string())
             .await
-            .unwrap();
+            .expect("current-format records should load without error");
         assert!(warnings.is_empty());
 
-        save_to_jsonl(storage.as_ref(), file.path()).await.unwrap();
+        save_to_jsonl(storage.as_ref(), file.path())
+            .await
+            .expect("save should succeed");
 
-        assert_eq!(std::fs::read(file.path()).unwrap(), original.as_bytes());
+        assert_eq!(
+            std::fs::read(file.path()).expect("saved file should be readable"),
+            original.as_bytes()
+        );
     }
 }
 
