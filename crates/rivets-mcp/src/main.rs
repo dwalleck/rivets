@@ -11,7 +11,10 @@ use tracing_subscriber::EnvFilter;
 async fn main() -> anyhow::Result<()> {
     // Initialize tracing to stderr (stdout is used for MCP protocol)
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("rivets_mcp=info,rivets=info")),
+        )
         .with_writer(std::io::stderr)
         .init();
 

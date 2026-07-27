@@ -9,12 +9,120 @@
 
 use rivets_mcp::context::Context;
 use rivets_mcp::error::Error;
-use rivets_mcp::models::{CreateParams, McpIssue, McpResourceTarget};
+use rivets_mcp::models::{
+    CreateParams, IssueKindInput, ListParams, McpIssue, McpIssueKind, McpResourceTarget,
+    ReadyParams, UpdateParams,
+};
 use rivets_mcp::tools::Tools;
 use rstest::rstest;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::RwLock;
+
+fn kind_input(value: Option<&str>) -> IssueKindInput {
+    let issue_kind = value.map(|value| match value {
+        "bug" => McpIssueKind::Bug,
+        "feature" => McpIssueKind::Feature,
+        "task" => McpIssueKind::Task,
+        "epic" => McpIssueKind::Epic,
+        "chore" => McpIssueKind::Chore,
+        invalid => panic!("invalid test Issue Kind: {invalid}"),
+    });
+    IssueKindInput::canonical(issue_kind)
+}
+
+fn ready_params(
+    limit: Option<usize>,
+    priority: Option<u8>,
+    issue_kind: Option<&str>,
+    assignee: Option<String>,
+    label: Option<String>,
+    workspace_root: Option<&str>,
+) -> ReadyParams {
+    ReadyParams {
+        limit,
+        priority,
+        kind: kind_input(issue_kind),
+        assignee,
+        label,
+        workspace_root: workspace_root.map(str::to_string),
+    }
+}
+
+fn list_params(
+    status: Option<&str>,
+    priority: Option<u8>,
+    issue_kind: Option<&str>,
+    assignee: Option<String>,
+    label: Option<String>,
+    limit: Option<usize>,
+    workspace_root: Option<&str>,
+) -> ListParams {
+    ListParams {
+        status: status.map(str::to_string),
+        priority,
+        kind: kind_input(issue_kind),
+        assignee,
+        label,
+        limit,
+        workspace_root: workspace_root.map(str::to_string),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_params(
+    title: String,
+    description: Option<String>,
+    priority: Option<u8>,
+    issue_kind: Option<&str>,
+    assignee: Option<String>,
+    labels: Option<Vec<String>>,
+    design: Option<String>,
+    acceptance: Option<String>,
+    workspace_root: Option<&str>,
+) -> CreateParams {
+    CreateParams {
+        title,
+        description,
+        priority,
+        kind: kind_input(issue_kind),
+        assignee,
+        labels,
+        design,
+        acceptance,
+        initial_note: None,
+        workspace_root: workspace_root.map(str::to_string),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn update_params(
+    issue_id: &str,
+    title: Option<String>,
+    description: Option<String>,
+    status: Option<&str>,
+    priority: Option<u8>,
+    issue_kind: Option<&str>,
+    assignee: Option<String>,
+    design: Option<String>,
+    acceptance_criteria: Option<String>,
+    labels: Option<Vec<String>>,
+    workspace_root: Option<&str>,
+) -> UpdateParams {
+    UpdateParams {
+        issue_id: issue_id.to_string(),
+        status: status.map(str::to_string),
+        priority,
+        kind: kind_input(issue_kind),
+        assignee,
+        title,
+        description,
+        design,
+        acceptance_criteria,
+        labels,
+        workspace_root: workspace_root.map(str::to_string),
+    }
+}
 
 mod helpers {
     use super::*;
@@ -55,18 +163,17 @@ storage:
     /// Create an issue and return it.
     pub async fn create_issue(tools: &Tools, title: &str) -> McpIssue {
         tools
-            .create(CreateParams {
-                title: title.to_string(),
-                description: Some(format!("Description for {title}")),
-                priority: Some(2),
-                issue_kind: Some(str::to_owned("task")),
-                assignee: None,
-                labels: None,
-                design: None,
-                acceptance: None,
-                initial_note: None,
-                workspace_root: None,
-            })
+            .create(create_params(
+                title.to_string(),
+                Some(format!("Description for {title}")),
+                Some(2),
+                Some("task"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ))
             .await
             .expect("create should succeed")
     }
@@ -197,18 +304,17 @@ storage:
             .map(|l| l.iter().copied().map(str::to_string).collect());
 
         let issue = tools
-            .create(CreateParams {
-                title: setup.title.to_string(),
-                description: Some(format!("Description for {}", setup.title)),
-                priority: setup.priority,
-                issue_kind: setup.issue_kind.map(str::to_owned),
-                assignee: setup.assignee.map(str::to_string),
+            .create(create_params(
+                setup.title.to_string(),
+                Some(format!("Description for {}", setup.title)),
+                setup.priority,
+                setup.issue_kind,
+                setup.assignee.map(str::to_string),
                 labels,
-                design: None,
-                acceptance: None,
-                initial_note: None,
-                workspace_root: None,
-            })
+                None,
+                None,
+                None,
+            ))
             .await
             .expect("create should succeed");
 
@@ -249,19 +355,19 @@ async fn test_issue_lifecycle_create_update_close() {
 
     // Update to in_progress
     let updated = tools
-        .update(
+        .update(update_params(
             &created.id,
             None,
             None,
             Some("in_progress"),
             Some(1),
             None, // issue_kind
-            Some(Some("alice".to_string())),
+            Some("alice".to_string()),
             None,
             None,
             None, // labels
             None, // workspace_root
-        )
+        ))
         .await
         .expect("update should succeed");
 
@@ -300,7 +406,7 @@ async fn test_notes_create_append_validate_and_survive_context_restart() {
             title: "Note history".to_string(),
             description: None,
             priority: None,
-            issue_kind: None,
+            kind: kind_input(None),
             assignee: None,
             labels: None,
             design: None,
@@ -371,18 +477,17 @@ async fn test_create_issue_with_all_fields() {
     set_context(&tools, workspace.path()).await;
 
     let issue = tools
-        .create(CreateParams {
-            title: "Full Issue".to_string(),
-            description: Some("Detailed description".to_string()),
-            priority: Some(0),
-            issue_kind: Some(str::to_owned("feature")),
-            assignee: Some("bob".to_string()),
-            labels: Some(vec!["urgent".to_string(), "frontend".to_string()]),
-            design: Some("Technical design notes".to_string()),
-            acceptance: Some("- [ ] Criteria 1\n- [ ] Criteria 2".to_string()),
-            initial_note: None,
-            workspace_root: None,
-        })
+        .create(create_params(
+            "Full Issue".to_string(),
+            Some("Detailed description".to_string()),
+            Some(0),
+            Some("feature"),
+            Some("bob".to_string()),
+            Some(vec!["urgent".to_string(), "frontend".to_string()]),
+            Some("Technical design notes".to_string()),
+            Some("- [ ] Criteria 1\n- [ ] Criteria 2".to_string()),
+            None,
+        ))
         .await
         .expect("create should succeed");
 
@@ -409,18 +514,17 @@ async fn test_create_all_issue_kinds() {
 
     for issue_kind in kinds {
         let issue = tools
-            .create(CreateParams {
-                title: format!("A {issue_kind}"),
-                description: None,
-                priority: None,
-                issue_kind: Some(str::to_owned(issue_kind)),
-                assignee: None,
-                labels: None,
-                design: None,
-                acceptance: None,
-                initial_note: None,
-                workspace_root: None,
-            })
+            .create(create_params(
+                format!("A {issue_kind}"),
+                None,
+                None,
+                Some(issue_kind),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ))
             .await
             .expect("create should succeed");
 
@@ -430,7 +534,15 @@ async fn test_create_all_issue_kinds() {
         assert!(response.get("issue_type").is_none());
 
         let filtered = tools
-            .list(None, None, Some(issue_kind), None, None, None, None)
+            .list(list_params(
+                None,
+                None,
+                Some(issue_kind),
+                None,
+                None,
+                None,
+                None,
+            ))
             .await
             .expect("kind filter should succeed");
         assert_eq!(filtered.len(), 1);
@@ -441,7 +553,7 @@ async fn test_create_all_issue_kinds() {
     let restarted = create_tools();
     set_context(&restarted, workspace.path()).await;
     let list = restarted
-        .list(None, None, None, None, None, None, None)
+        .list(list_params(None, None, None, None, None, None, None))
         .await
         .expect("list after restart should succeed");
     assert_eq!(list.len(), 5);
@@ -467,7 +579,7 @@ async fn test_update_reclassifies_only_kind_and_persists_across_context_restart(
     .await;
 
     let updated = tools
-        .update(
+        .update(update_params(
             &created.id,
             None,
             None,
@@ -479,7 +591,7 @@ async fn test_update_reclassifies_only_kind_and_persists_across_context_restart(
             None,
             None,
             None,
-        )
+        ))
         .await
         .expect("kind update should succeed");
 
@@ -542,7 +654,7 @@ async fn test_multi_workspace_context_switching() {
 
     // Verify workspace B has only one issue
     let issues_b = tools
-        .list(None, None, None, None, None, None, None)
+        .list(list_params(None, None, None, None, None, None, None))
         .await
         .expect("list should succeed");
     assert_eq!(issues_b.len(), 1);
@@ -551,7 +663,7 @@ async fn test_multi_workspace_context_switching() {
     // Switch back to workspace A
     set_context(&tools, workspace_a.path()).await;
     let issues_a = tools
-        .list(None, None, None, None, None, None, None)
+        .list(list_params(None, None, None, None, None, None, None))
         .await
         .expect("list should succeed");
     assert_eq!(issues_a.len(), 1);
@@ -574,7 +686,7 @@ async fn test_workspace_root_parameter_override() {
 
     // Current context is B, but query A using workspace_root parameter
     let issues_a = tools
-        .list(
+        .list(list_params(
             None,
             None,
             None,
@@ -582,7 +694,7 @@ async fn test_workspace_root_parameter_override() {
             None,
             None,
             Some(&workspace_a.path().display().to_string()),
-        )
+        ))
         .await
         .expect("list should succeed");
 
@@ -611,14 +723,14 @@ async fn test_workspace_isolation() {
 
     // Verify counts
     let issues_b = tools
-        .list(None, None, None, None, None, None, None)
+        .list(list_params(None, None, None, None, None, None, None))
         .await
         .unwrap();
     assert_eq!(issues_b.len(), 2);
 
     set_context(&tools, workspace_a.path()).await;
     let issues_a = tools
-        .list(None, None, None, None, None, None, None)
+        .list(list_params(None, None, None, None, None, None, None))
         .await
         .unwrap();
     assert_eq!(issues_a.len(), 3);
@@ -633,7 +745,9 @@ async fn test_workspace_isolation() {
 async fn test_error_no_context() {
     let tools = create_tools();
 
-    let result = tools.list(None, None, None, None, None, None, None).await;
+    let result = tools
+        .list(list_params(None, None, None, None, None, None, None))
+        .await;
 
     assert!(result.is_err());
     match result.unwrap_err() {
@@ -650,7 +764,15 @@ async fn test_error_invalid_status() {
     set_context(&tools, workspace.path()).await;
 
     let result = tools
-        .list(Some("not_a_status"), None, None, None, None, None, None)
+        .list(list_params(
+            Some("not_a_status"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ))
         .await;
 
     assert!(result.is_err());
@@ -658,38 +780,6 @@ async fn test_error_invalid_status() {
         Error::InvalidArgument { field, value, .. } => {
             assert_eq!(field, "status");
             assert_eq!(value, "not_a_status");
-        }
-        e => panic!("Expected InvalidArgument error, got: {e:?}"),
-    }
-}
-
-/// Test error response for an invalid issue kind.
-#[tokio::test]
-async fn test_error_invalid_issue_kind() {
-    let workspace = create_temp_workspace();
-    let tools = create_tools();
-    set_context(&tools, workspace.path()).await;
-
-    let result = tools
-        .create(CreateParams {
-            title: "Test".to_string(),
-            description: None,
-            priority: None,
-            issue_kind: Some(str::to_owned("invalid_kind")),
-            assignee: None,
-            labels: None,
-            design: None,
-            acceptance: None,
-            initial_note: None,
-            workspace_root: None,
-        })
-        .await;
-
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        Error::InvalidArgument { field, value, .. } => {
-            assert_eq!(field, "issue_kind");
-            assert_eq!(value, "invalid_kind");
         }
         e => panic!("Expected InvalidArgument error, got: {e:?}"),
     }
@@ -783,7 +873,7 @@ async fn test_error_workspace_not_initialized() {
 
     // Try to access B without initializing it
     let result = tools
-        .list(
+        .list(list_params(
             None,
             None,
             None,
@@ -791,7 +881,7 @@ async fn test_error_workspace_not_initialized() {
             None,
             None,
             Some(&workspace_b.path().display().to_string()),
-        )
+        ))
         .await;
 
     assert!(result.is_err());
@@ -876,7 +966,7 @@ async fn test_ready_excludes_blocked() {
 
     // Ready should only return the blocker (dependent is blocked)
     let ready = tools
-        .ready(None, None, None, None, None, None)
+        .ready(ready_params(None, None, None, None, None, None))
         .await
         .expect("ready should succeed");
 
@@ -996,7 +1086,7 @@ async fn test_ready_excludes_blocked() {
         expected_titles: Some(vec!["Open P0"]),
     }
 )]
-#[case::status_and_type(
+#[case::status_and_kind(
     ListFilterCase {
         setup: vec![
             IssueSetup::new("Open Bug").with_issue_kind("bug"),
@@ -1032,7 +1122,7 @@ async fn test_ready_excludes_blocked() {
         expected_titles: Some(vec!["Open Urgent"]),
     }
 )]
-#[case::priority_and_type(
+#[case::priority_and_kind(
     ListFilterCase {
         setup: vec![
             IssueSetup::new("P0 Bug").with_priority(0).with_issue_kind("bug"),
@@ -1068,7 +1158,7 @@ async fn test_ready_excludes_blocked() {
         expected_titles: Some(vec!["P0 Urgent"]),
     }
 )]
-#[case::type_and_assignee(
+#[case::kind_and_assignee(
     ListFilterCase {
         setup: vec![
             IssueSetup::new("Bug Alice").with_issue_kind("bug").with_assignee("alice"),
@@ -1080,7 +1170,7 @@ async fn test_ready_excludes_blocked() {
         expected_titles: Some(vec!["Bug Alice"]),
     }
 )]
-#[case::type_and_label(
+#[case::kind_and_label(
     ListFilterCase {
         setup: vec![
             IssueSetup::new("Bug Urgent").with_issue_kind("bug").with_labels(vec!["urgent"]),
@@ -1107,7 +1197,7 @@ async fn test_ready_excludes_blocked() {
 // -------------------------------------------------------------------------
 // Three-way filter combinations
 // -------------------------------------------------------------------------
-#[case::status_priority_type(
+#[case::status_priority_kind(
     ListFilterCase {
         setup: vec![
             IssueSetup::new("Open P0 Bug").with_priority(0).with_issue_kind("bug"),
@@ -1133,7 +1223,7 @@ async fn test_ready_excludes_blocked() {
         expected_titles: Some(vec!["Open P0 Alice"]),
     }
 )]
-#[case::status_type_label(
+#[case::status_kind_label(
     ListFilterCase {
         setup: vec![
             IssueSetup::new("Open Bug Urgent").with_issue_kind("bug").with_labels(vec!["urgent"]),
@@ -1146,7 +1236,7 @@ async fn test_ready_excludes_blocked() {
         expected_titles: Some(vec!["Open Bug Urgent"]),
     }
 )]
-#[case::priority_type_assignee(
+#[case::priority_kind_assignee(
     ListFilterCase {
         setup: vec![
             IssueSetup::new("P0 Bug Alice").with_priority(0).with_issue_kind("bug").with_assignee("alice"),
@@ -1172,7 +1262,7 @@ async fn test_ready_excludes_blocked() {
         expected_titles: Some(vec!["P0 Alice Urgent"]),
     }
 )]
-#[case::type_assignee_label(
+#[case::kind_assignee_label(
     ListFilterCase {
         setup: vec![
             IssueSetup::new("Bug Alice Urgent").with_issue_kind("bug").with_assignee("alice").with_labels(vec!["urgent"]),
@@ -1188,12 +1278,12 @@ async fn test_ready_excludes_blocked() {
 // -------------------------------------------------------------------------
 // Four-way and five-way filter combinations
 // -------------------------------------------------------------------------
-#[case::four_way_status_priority_type_assignee(
+#[case::four_way_status_priority_kind_assignee(
     ListFilterCase {
         setup: vec![
             IssueSetup::new("Target").with_priority(0).with_issue_kind("bug").with_assignee("alice"),
             IssueSetup::new("Wrong Priority").with_priority(2).with_issue_kind("bug").with_assignee("alice"),
-            IssueSetup::new("Wrong Type").with_priority(0).with_issue_kind("feature").with_assignee("alice"),
+            IssueSetup::new("Wrong Kind").with_priority(0).with_issue_kind("feature").with_assignee("alice"),
             IssueSetup::new("Wrong Assignee").with_priority(0).with_issue_kind("bug").with_assignee("bob"),
             IssueSetup::new("Closed Match").with_priority(0).with_issue_kind("bug").with_assignee("alice").closed(),
         ],
@@ -1208,7 +1298,7 @@ async fn test_ready_excludes_blocked() {
             IssueSetup::new("Perfect Match").with_priority(0).with_issue_kind("bug").with_assignee("alice").with_labels(vec!["urgent"]),
             IssueSetup::new("Wrong Label").with_priority(0).with_issue_kind("bug").with_assignee("alice").with_labels(vec!["normal"]),
             IssueSetup::new("Wrong Assignee").with_priority(0).with_issue_kind("bug").with_assignee("bob").with_labels(vec!["urgent"]),
-            IssueSetup::new("Wrong Type").with_priority(0).with_issue_kind("feature").with_assignee("alice").with_labels(vec!["urgent"]),
+            IssueSetup::new("Wrong Kind").with_priority(0).with_issue_kind("feature").with_assignee("alice").with_labels(vec!["urgent"]),
             IssueSetup::new("Wrong Priority").with_priority(2).with_issue_kind("bug").with_assignee("alice").with_labels(vec!["urgent"]),
             IssueSetup::new("Closed Match").with_priority(0).with_issue_kind("bug").with_assignee("alice").with_labels(vec!["urgent"]).closed(),
         ],
@@ -1269,7 +1359,7 @@ async fn test_list_filters(#[case] test_case: ListFilterCase) {
 
     // Apply filter
     let results = tools
-        .list(
+        .list(list_params(
             test_case.filter.status,
             test_case.filter.priority,
             test_case.filter.issue_kind,
@@ -1277,7 +1367,7 @@ async fn test_list_filters(#[case] test_case: ListFilterCase) {
             test_case.filter.label.map(str::to_string),
             test_case.filter.limit,
             None,
-        )
+        ))
         .await
         .expect("list should succeed");
 
@@ -1325,38 +1415,37 @@ async fn test_assignee_clearing() {
 
     // Create issue with assignee
     let created = tools
-        .create(CreateParams {
-            title: "Assigned Issue".to_string(),
-            description: None,
-            priority: None,
-            issue_kind: None,
-            assignee: Some("alice".to_string()),
-            labels: None,
-            design: None,
-            acceptance: None,
-            initial_note: None,
-            workspace_root: None,
-        })
+        .create(create_params(
+            "Assigned Issue".to_string(),
+            None,
+            None,
+            None,
+            Some("alice".to_string()),
+            None,
+            None,
+            None,
+            None,
+        ))
         .await
         .unwrap();
 
     assert_eq!(created.assignee, Some("alice".to_string()));
 
-    // Clear assignee by passing Some(None) - which comes from empty string in server layer
+    // Empty string clears the assignee at the MCP parameter boundary.
     let updated = tools
-        .update(
+        .update(update_params(
             &created.id,
             None,
             None,
             None,
             None,
-            None,       // issue_kind
-            Some(None), // This clears the assignee
+            None, // issue_kind
+            Some(String::new()),
             None,
             None,
             None, // labels
             None, // workspace_root
-        )
+        ))
         .await
         .unwrap();
 
@@ -1371,24 +1460,23 @@ async fn test_assignee_update_vs_noop() {
     set_context(&tools, workspace.path()).await;
 
     let created = tools
-        .create(CreateParams {
-            title: "Test".to_string(),
-            description: None,
-            priority: None,
-            issue_kind: None,
-            assignee: Some("original".to_string()),
-            labels: None,
-            design: None,
-            acceptance: None,
-            initial_note: None,
-            workspace_root: None,
-        })
+        .create(create_params(
+            "Test".to_string(),
+            None,
+            None,
+            None,
+            Some("original".to_string()),
+            None,
+            None,
+            None,
+            None,
+        ))
         .await
         .unwrap();
 
     // Update with None (no change)
     let unchanged = tools
-        .update(
+        .update(update_params(
             &created.id,
             None,
             None,
@@ -1400,26 +1488,26 @@ async fn test_assignee_update_vs_noop() {
             None,
             None, // labels
             None, // workspace_root
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(unchanged.assignee, Some("original".to_string()));
 
-    // Update with Some(Some("new"))
+    // Update the assignee.
     let changed = tools
-        .update(
+        .update(update_params(
             &created.id,
             None,
             None,
             None,
             None,
             None, // issue_kind
-            Some(Some("new".to_string())),
+            Some("new".to_string()),
             None,
             None,
             None, // labels
             None, // workspace_root
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(changed.assignee, Some("new".to_string()));
@@ -1470,7 +1558,7 @@ async fn test_persistence_across_sessions() {
         set_context(&tools, workspace.path()).await;
 
         let issues = tools
-            .list(None, None, None, None, None, None, None)
+            .list(list_params(None, None, None, None, None, None, None))
             .await
             .expect("list should succeed");
 
@@ -1493,7 +1581,7 @@ async fn test_update_persistence() {
         issue_id = issue.id.clone();
 
         tools
-            .update(
+            .update(update_params(
                 &issue_id,
                 Some("Updated Title".to_string()),
                 None,
@@ -1505,7 +1593,7 @@ async fn test_update_persistence() {
                 None,
                 None, // labels
                 None, // workspace_root
-            )
+            ))
             .await
             .unwrap();
     }
@@ -1587,7 +1675,7 @@ async fn test_update_persistence() {
 // -------------------------------------------------------------------------
 // Two-way filter combinations
 // -------------------------------------------------------------------------
-#[case::priority_and_type(
+#[case::priority_and_kind(
     ReadyFilterCase {
         setup: vec![
             IssueSetup::new("P0 Bug").with_priority(0).with_issue_kind("bug"),
@@ -1623,7 +1711,7 @@ async fn test_update_persistence() {
         expected_titles: Some(vec!["P0 Urgent"]),
     }
 )]
-#[case::type_and_assignee(
+#[case::kind_and_assignee(
     ReadyFilterCase {
         setup: vec![
             IssueSetup::new("Bug Alice").with_issue_kind("bug").with_assignee("alice"),
@@ -1635,7 +1723,7 @@ async fn test_update_persistence() {
         expected_titles: Some(vec!["Bug Alice"]),
     }
 )]
-#[case::type_and_label(
+#[case::kind_and_label(
     ReadyFilterCase {
         setup: vec![
             IssueSetup::new("Bug Urgent").with_issue_kind("bug").with_labels(vec!["urgent"]),
@@ -1662,7 +1750,7 @@ async fn test_update_persistence() {
 // -------------------------------------------------------------------------
 // Three-way filter combinations
 // -------------------------------------------------------------------------
-#[case::priority_type_assignee(
+#[case::priority_kind_assignee(
     ReadyFilterCase {
         setup: vec![
             IssueSetup::new("P0 Bug Alice").with_priority(0).with_issue_kind("bug").with_assignee("alice"),
@@ -1675,7 +1763,7 @@ async fn test_update_persistence() {
         expected_titles: Some(vec!["P0 Bug Alice"]),
     }
 )]
-#[case::priority_type_label(
+#[case::priority_kind_label(
     ReadyFilterCase {
         setup: vec![
             IssueSetup::new("P0 Bug Urgent").with_priority(0).with_issue_kind("bug").with_labels(vec!["urgent"]),
@@ -1701,7 +1789,7 @@ async fn test_update_persistence() {
         expected_titles: Some(vec!["P0 Alice Urgent"]),
     }
 )]
-#[case::type_assignee_label(
+#[case::kind_assignee_label(
     ReadyFilterCase {
         setup: vec![
             IssueSetup::new("Bug Alice Urgent").with_issue_kind("bug").with_assignee("alice").with_labels(vec!["urgent"]),
@@ -1723,7 +1811,7 @@ async fn test_update_persistence() {
             IssueSetup::new("Perfect Match").with_priority(0).with_issue_kind("bug").with_assignee("alice").with_labels(vec!["urgent"]),
             IssueSetup::new("Wrong Label").with_priority(0).with_issue_kind("bug").with_assignee("alice").with_labels(vec!["normal"]),
             IssueSetup::new("Wrong Assignee").with_priority(0).with_issue_kind("bug").with_assignee("bob").with_labels(vec!["urgent"]),
-            IssueSetup::new("Wrong Type").with_priority(0).with_issue_kind("feature").with_assignee("alice").with_labels(vec!["urgent"]),
+            IssueSetup::new("Wrong Kind").with_priority(0).with_issue_kind("feature").with_assignee("alice").with_labels(vec!["urgent"]),
             IssueSetup::new("Wrong Priority").with_priority(2).with_issue_kind("bug").with_assignee("alice").with_labels(vec!["urgent"]),
         ],
         filter: FilterParams::new().with_priority(0).with_issue_kind("bug").with_assignee("alice").with_label("urgent"),
@@ -1794,14 +1882,14 @@ async fn test_ready_filters(#[case] test_case: ReadyFilterCase) {
 
     // Apply filter
     let results = tools
-        .ready(
+        .ready(ready_params(
             test_case.filter.limit,
             test_case.filter.priority,
             test_case.filter.issue_kind,
             test_case.filter.assignee.map(str::to_string),
             test_case.filter.label.map(str::to_string),
             None,
-        )
+        ))
         .await
         .expect("ready should succeed");
 
@@ -1863,15 +1951,15 @@ async fn test_empty_filter_results() {
 
     // Filter for a combination that doesn't exist
     let results = tools
-        .list(
+        .list(list_params(
             Some("open"),
             Some(0),      // P0 priority - none of our issues have this
-            Some("epic"), // Epic type - none of our issues have this
+            Some("epic"), // Epic Kind - none of our issues have this
             Some("nonexistent-user".to_string()),
             Some("nonexistent-label".to_string()),
             None,
             None,
-        )
+        ))
         .await
         .expect("list should succeed even with no matches");
 
@@ -1883,14 +1971,14 @@ async fn test_empty_filter_results() {
 
     // Also test ready with non-matching filter
     let ready_results = tools
-        .ready(
+        .ready(ready_params(
             None,
             Some(0),
             Some("epic"),
             Some("nonexistent-user".to_string()),
             None,
             None,
-        )
+        ))
         .await
         .expect("ready should succeed even with no matches");
 
@@ -1920,7 +2008,7 @@ async fn test_multiple_labels_filter() {
 
     // Filter by "backend" - should only find the multi-label issue
     let results = tools
-        .list(
+        .list(list_params(
             None,
             None,
             None,
@@ -1928,7 +2016,7 @@ async fn test_multiple_labels_filter() {
             Some("backend".to_string()),
             None,
             None,
-        )
+        ))
         .await
         .expect("list should succeed");
 
@@ -1940,7 +2028,7 @@ async fn test_multiple_labels_filter() {
 
     // Filter by "frontend" - should find all three
     let frontend_results = tools
-        .list(
+        .list(list_params(
             None,
             None,
             None,
@@ -1948,7 +2036,7 @@ async fn test_multiple_labels_filter() {
             Some("frontend".to_string()),
             None,
             None,
-        )
+        ))
         .await
         .expect("list should succeed");
 
@@ -1960,7 +2048,7 @@ async fn test_multiple_labels_filter() {
 
     // Filter by "urgent" - should find 2
     let urgent_results = tools
-        .list(
+        .list(list_params(
             None,
             None,
             None,
@@ -1968,7 +2056,7 @@ async fn test_multiple_labels_filter() {
             Some("urgent".to_string()),
             None,
             None,
-        )
+        ))
         .await
         .expect("list should succeed");
 
@@ -1989,18 +2077,17 @@ async fn test_assignee_case_sensitivity() {
 
     // Create issue with mixed-case assignee
     let issue = tools
-        .create(CreateParams {
-            title: "Alice's Task".to_string(),
-            description: None,
-            priority: None,
-            issue_kind: None,
-            assignee: Some("Alice".to_string()), // Mixed case
-            labels: None,
-            design: None,
-            acceptance: None,
-            initial_note: None,
-            workspace_root: None,
-        })
+        .create(create_params(
+            "Alice's Task".to_string(),
+            None,
+            None,
+            None,
+            Some("Alice".to_string()), // Mixed case
+            None,
+            None,
+            None,
+            None,
+        ))
         .await
         .expect("create should succeed");
 
@@ -2008,7 +2095,7 @@ async fn test_assignee_case_sensitivity() {
 
     // Filter with exact case - should match
     let exact_match = tools
-        .list(
+        .list(list_params(
             None,
             None,
             None,
@@ -2016,7 +2103,7 @@ async fn test_assignee_case_sensitivity() {
             None,
             None,
             None,
-        )
+        ))
         .await
         .expect("list should succeed");
 
@@ -2028,7 +2115,7 @@ async fn test_assignee_case_sensitivity() {
 
     // Filter with different case - behavior documented here
     let lowercase_match = tools
-        .list(
+        .list(list_params(
             None,
             None,
             None,
@@ -2036,7 +2123,7 @@ async fn test_assignee_case_sensitivity() {
             None,
             None,
             None,
-        )
+        ))
         .await
         .expect("list should succeed");
 
@@ -2050,7 +2137,7 @@ async fn test_assignee_case_sensitivity() {
 
     // Also test uppercase
     let uppercase_match = tools
-        .list(
+        .list(list_params(
             None,
             None,
             None,
@@ -2058,7 +2145,7 @@ async fn test_assignee_case_sensitivity() {
             None,
             None,
             None,
-        )
+        ))
         .await
         .expect("list should succeed");
 
@@ -2078,18 +2165,17 @@ async fn test_unicode_support() {
 
     // Create issue with Japanese title
     let japanese_issue = tools
-        .create(CreateParams {
-            title: "バグ修正".to_string(), // "Bug fix" in Japanese
-            description: Some("これはテストです".to_string()), // "This is a test"
-            priority: Some(1),
-            issue_kind: Some("bug".to_string()),
-            assignee: None,
-            labels: None,
-            design: None,
-            acceptance: None,
-            initial_note: None,
-            workspace_root: None,
-        })
+        .create(create_params(
+            "バグ修正".to_string(),               // "Bug fix" in Japanese
+            Some("これはテストです".to_string()), // "This is a test"
+            Some(1),
+            Some("bug"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        ))
         .await
         .expect("create with Japanese title should succeed");
 
@@ -2105,18 +2191,17 @@ async fn test_unicode_support() {
 
     // Create issue with emoji label
     let emoji_issue = tools
-        .create(CreateParams {
-            title: "Hot Fix".to_string(),
-            description: None,
-            priority: Some(0),
-            issue_kind: Some(str::to_owned("bug")),
-            assignee: None,
-            labels: Some(vec!["🔥hotfix".to_string(), "critical".to_string()]),
-            design: None,
-            acceptance: None,
-            initial_note: None,
-            workspace_root: None,
-        })
+        .create(create_params(
+            "Hot Fix".to_string(),
+            None,
+            Some(0),
+            Some("bug"),
+            None,
+            Some(vec!["🔥hotfix".to_string(), "critical".to_string()]),
+            None,
+            None,
+            None,
+        ))
         .await
         .expect("create with emoji label should succeed");
 
@@ -2124,7 +2209,7 @@ async fn test_unicode_support() {
 
     // Filter by emoji label
     let emoji_filtered = tools
-        .list(
+        .list(list_params(
             None,
             None,
             None,
@@ -2132,7 +2217,7 @@ async fn test_unicode_support() {
             Some("🔥hotfix".to_string()),
             None,
             None,
-        )
+        ))
         .await
         .expect("list with emoji label filter should succeed");
 
@@ -2141,26 +2226,8 @@ async fn test_unicode_support() {
 
     // Create issue with accented assignee name
     let accented_issue = tools
-        .create(CreateParams {
-            title: "Accented Assignee Task".to_string(),
-            description: None,
-            priority: None,
-            issue_kind: None,
-            assignee: Some("José García".to_string()),
-            labels: None,
-            design: None,
-            acceptance: None,
-            initial_note: None,
-            workspace_root: None,
-        })
-        .await
-        .expect("create with accented assignee should succeed");
-
-    assert_eq!(accented_issue.assignee, Some("José García".to_string()));
-
-    // Filter by accented assignee
-    let accented_filtered = tools
-        .list(
+        .create(create_params(
+            "Accented Assignee Task".to_string(),
             None,
             None,
             None,
@@ -2168,7 +2235,24 @@ async fn test_unicode_support() {
             None,
             None,
             None,
-        )
+            None,
+        ))
+        .await
+        .expect("create with accented assignee should succeed");
+
+    assert_eq!(accented_issue.assignee, Some("José García".to_string()));
+
+    // Filter by accented assignee
+    let accented_filtered = tools
+        .list(list_params(
+            None,
+            None,
+            None,
+            Some("José García".to_string()),
+            None,
+            None,
+            None,
+        ))
         .await
         .expect("list with accented assignee filter should succeed");
 
@@ -2177,7 +2261,7 @@ async fn test_unicode_support() {
 
     // Verify all issues are in the list
     let all_issues = tools
-        .list(None, None, None, None, None, None, None)
+        .list(list_params(None, None, None, None, None, None, None))
         .await
         .expect("list all should succeed");
 
@@ -2202,25 +2286,24 @@ async fn test_unicode_titles_in_list() {
 
     for title in &titles {
         tools
-            .create(CreateParams {
-                title: (*title).to_string(),
-                description: None,
-                priority: None,
-                issue_kind: None,
-                assignee: None,
-                labels: None,
-                design: None,
-                acceptance: None,
-                initial_note: None,
-                workspace_root: None,
-            })
+            .create(create_params(
+                (*title).to_string(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ))
             .await
             .expect("create with unicode title should succeed");
     }
 
     // List all and verify they're all present
     let all_issues = tools
-        .list(None, None, None, None, None, None, None)
+        .list(list_params(None, None, None, None, None, None, None))
         .await
         .expect("list should succeed");
 
@@ -2256,7 +2339,15 @@ async fn test_invalid_status_values(#[case] invalid_value: &str, #[case] expecte
     set_context(&tools, workspace.path()).await;
 
     let result = tools
-        .list(Some(invalid_value), None, None, None, None, None, None)
+        .list(list_params(
+            Some(invalid_value),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ))
         .await;
 
     assert!(
@@ -2292,90 +2383,61 @@ async fn test_invalid_status_values(#[case] invalid_value: &str, #[case] expecte
     }
 }
 
-/// Test invalid `issue_kind` values return appropriate errors.
+/// Invalid Issue Kind values fail at every MCP parameter boundary.
 #[rstest]
-#[case::invalid_kind("invalid", "issue_kind")]
-#[case::story_kind("story", "issue_kind")]
-#[case::spike_kind("spike", "issue_kind")]
-#[case::enhancement_kind("enhancement", "issue_kind")]
-#[case::defect_kind("defect", "issue_kind")]
-#[tokio::test]
-async fn test_invalid_issue_kind_values(#[case] invalid_value: &str, #[case] expected_field: &str) {
-    let workspace = create_temp_workspace();
-    let tools = create_tools();
-    set_context(&tools, workspace.path()).await;
+#[case::invalid_kind("invalid")]
+#[case::story_kind("story")]
+#[case::spike_kind("spike")]
+#[case::enhancement_kind("enhancement")]
+#[case::defect_kind("defect")]
+fn test_invalid_issue_kind_values(#[case] invalid_value: &str) {
+    let requests = [
+        (
+            "ready",
+            serde_json::from_value::<ReadyParams>(serde_json::json!({
+                "issue_kind": invalid_value
+            }))
+            .map(|_| ()),
+        ),
+        (
+            "list",
+            serde_json::from_value::<ListParams>(serde_json::json!({
+                "issue_kind": invalid_value
+            }))
+            .map(|_| ()),
+        ),
+        (
+            "create",
+            serde_json::from_value::<CreateParams>(serde_json::json!({
+                "title": "Test",
+                "issue_kind": invalid_value
+            }))
+            .map(|_| ()),
+        ),
+        (
+            "update",
+            serde_json::from_value::<UpdateParams>(serde_json::json!({
+                "issue_id": "test-issue",
+                "issue_kind": invalid_value
+            }))
+            .map(|_| ()),
+        ),
+    ];
 
-    // Test in list filter
-    let list_result = tools
-        .list(None, None, Some(invalid_value), None, None, None, None)
-        .await;
-
-    assert!(
-        list_result.is_err(),
-        "Expected error for invalid issue_kind in list: {invalid_value}"
-    );
-    match list_result.unwrap_err() {
-        Error::InvalidArgument {
-            field,
-            value,
-            valid_values,
-        } => {
-            assert_eq!(field, expected_field);
-            assert_eq!(value, invalid_value);
+    for (tool, result) in requests {
+        let error = result.expect_err("invalid Issue Kind should not reach the tool");
+        let message = error.to_string();
+        assert!(
+            message.contains(invalid_value),
+            "{tool} error should identify invalid value: {message}"
+        );
+        for valid_kind in ["bug", "feature", "task", "epic", "chore"] {
             assert!(
-                valid_values.contains("bug"),
-                "Error should mention valid kind 'bug'"
-            );
-            assert!(
-                valid_values.contains("feature"),
-                "Error should mention valid kind 'feature'"
-            );
-            assert!(
-                valid_values.contains("task"),
-                "Error should mention valid kind 'task'"
-            );
-            assert!(
-                valid_values.contains("epic"),
-                "Error should mention valid kind 'epic'"
-            );
-            assert!(
-                valid_values.contains("chore"),
-                "Error should mention valid kind 'chore'"
+                message.contains(valid_kind),
+                "{tool} error should name valid Kind {valid_kind}: {message}"
             );
         }
-        e => panic!("Expected InvalidArgument error, got: {e:?}"),
     }
-
-    // Test in create
-    let create_result = tools
-        .create(CreateParams {
-            title: "Test".to_string(),
-            description: None,
-            priority: None,
-            issue_kind: Some(str::to_owned(invalid_value)),
-            assignee: None,
-            labels: None,
-            design: None,
-            acceptance: None,
-            initial_note: None,
-            workspace_root: None,
-        })
-        .await;
-
-    assert!(
-        create_result.is_err(),
-        "Expected error for invalid issue_kind in create: {invalid_value}"
-    );
-
-    // Test in ready filter
-    let ready_result = tools
-        .ready(None, None, Some(invalid_value), None, None, None)
-        .await;
-
-    assert!(
-        ready_result.is_err(),
-        "Expected error for invalid issue_kind in ready: {invalid_value}"
-    );
 }
 
 /// Test invalid `dep_type` values return appropriate errors.
@@ -2446,7 +2508,7 @@ async fn test_invalid_status_in_update(#[case] invalid_value: &str) {
     let issue = create_issue(&tools, "Test Issue").await;
 
     let result = tools
-        .update(
+        .update(update_params(
             &issue.id,
             None,
             None,
@@ -2458,7 +2520,7 @@ async fn test_invalid_status_in_update(#[case] invalid_value: &str) {
             None,
             None, // labels
             None, // workspace_root
-        )
+        ))
         .await;
 
     assert!(
@@ -2483,7 +2545,15 @@ async fn test_error_message_format() {
 
     // Test status error message format
     let result = tools
-        .list(Some("bogus_status"), None, None, None, None, None, None)
+        .list(list_params(
+            Some("bogus_status"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ))
         .await;
 
     let error = result.unwrap_err();
@@ -2517,18 +2587,17 @@ async fn test_complete_issue_lifecycle_all_states() {
 
     // Create issue (starts as open)
     let created = tools
-        .create(CreateParams {
-            title: "Lifecycle Issue".to_string(),
-            description: Some("Testing full lifecycle".to_string()),
-            priority: Some(2),
-            issue_kind: Some(str::to_owned("feature")),
-            assignee: Some("developer".to_string()),
-            labels: Some(vec!["lifecycle-test".to_string()]),
-            design: Some("Design notes here".to_string()),
-            acceptance: Some("- [ ] Criteria 1".to_string()),
-            initial_note: None,
-            workspace_root: None,
-        })
+        .create(create_params(
+            "Lifecycle Issue".to_string(),
+            Some("Testing full lifecycle".to_string()),
+            Some(2),
+            Some("feature"),
+            Some("developer".to_string()),
+            Some(vec!["lifecycle-test".to_string()]),
+            Some("Design notes here".to_string()),
+            Some("- [ ] Criteria 1".to_string()),
+            None,
+        ))
         .await
         .expect("create should succeed");
 
@@ -2537,7 +2606,7 @@ async fn test_complete_issue_lifecycle_all_states() {
 
     // Transition to in_progress
     let in_progress = tools
-        .update(
+        .update(update_params(
             &created.id,
             None,
             None,
@@ -2549,7 +2618,7 @@ async fn test_complete_issue_lifecycle_all_states() {
             None,
             None, // labels
             None, // workspace_root
-        )
+        ))
         .await
         .expect("update to in_progress should succeed");
 
@@ -2557,7 +2626,7 @@ async fn test_complete_issue_lifecycle_all_states() {
 
     // Transition to blocked
     let blocked = tools
-        .update(
+        .update(update_params(
             &created.id,
             None,
             None,
@@ -2569,7 +2638,7 @@ async fn test_complete_issue_lifecycle_all_states() {
             None,
             None, // labels
             None, // workspace_root
-        )
+        ))
         .await
         .expect("update to blocked should succeed");
 
@@ -2582,7 +2651,7 @@ async fn test_complete_issue_lifecycle_all_states() {
 
     // Back to in_progress
     let resumed = tools
-        .update(
+        .update(update_params(
             &created.id,
             None,
             None,
@@ -2594,7 +2663,7 @@ async fn test_complete_issue_lifecycle_all_states() {
             None,
             None, // labels
             None, // workspace_root
-        )
+        ))
         .await
         .expect("update back to in_progress should succeed");
 
@@ -2634,24 +2703,23 @@ async fn test_update_preserves_unmodified_fields() {
 
     // Create issue with all fields
     let created = tools
-        .create(CreateParams {
-            title: "Original Title".to_string(),
-            description: Some("Original Description".to_string()),
-            priority: Some(1),
-            issue_kind: Some(str::to_owned("bug")),
-            assignee: Some("alice".to_string()),
-            labels: Some(vec!["label1".to_string(), "label2".to_string()]),
-            design: Some("Original Design".to_string()),
-            acceptance: Some("Original Criteria".to_string()),
-            initial_note: None,
-            workspace_root: None,
-        })
+        .create(create_params(
+            "Original Title".to_string(),
+            Some("Original Description".to_string()),
+            Some(1),
+            Some("bug"),
+            Some("alice".to_string()),
+            Some(vec!["label1".to_string(), "label2".to_string()]),
+            Some("Original Design".to_string()),
+            Some("Original Criteria".to_string()),
+            None,
+        ))
         .await
         .expect("create should succeed");
 
     // Update only the title
     let updated = tools
-        .update(
+        .update(update_params(
             &created.id,
             Some("New Title".to_string()),
             None, // Don't update description
@@ -2663,7 +2731,7 @@ async fn test_update_preserves_unmodified_fields() {
             None, // Don't update acceptance
             None, // labels
             None, // workspace_root
-        )
+        ))
         .await
         .expect("update should succeed");
 
@@ -2701,7 +2769,7 @@ async fn test_rapid_workspace_context_switching() {
             set_context(&tools, workspace.path()).await;
 
             let issues = tools
-                .list(None, None, None, None, None, None, None)
+                .list(list_params(None, None, None, None, None, None, None))
                 .await
                 .expect("list should succeed");
 
@@ -2719,7 +2787,7 @@ async fn test_error_response_formats() {
 
     // Test NoContext error format
     let no_context_err = tools
-        .list(None, None, None, None, None, None, None)
+        .list(list_params(None, None, None, None, None, None, None))
         .await
         .unwrap_err();
     let no_context_msg = no_context_err.to_string();
@@ -2741,7 +2809,15 @@ async fn test_error_response_formats() {
 
     // Test InvalidArgument error format
     let invalid_arg_err = tools
-        .list(Some("bogus"), None, None, None, None, None, None)
+        .list(list_params(
+            Some("bogus"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ))
         .await
         .unwrap_err();
     let invalid_arg_msg = invalid_arg_err.to_string();
@@ -2775,18 +2851,17 @@ async fn test_all_tools_with_storage_backend() {
 
     // 3. create
     let created = tools
-        .create(CreateParams {
-            title: "Integration Test Issue".to_string(),
-            description: Some("Full integration test".to_string()),
-            priority: Some(1),
-            issue_kind: Some(str::to_owned("task")),
-            assignee: Some("tester".to_string()),
-            labels: Some(vec!["integration".to_string()]),
-            design: Some("Design".to_string()),
-            acceptance: Some("Criteria".to_string()),
-            initial_note: None,
-            workspace_root: None,
-        })
+        .create(create_params(
+            "Integration Test Issue".to_string(),
+            Some("Full integration test".to_string()),
+            Some(1),
+            Some("task"),
+            Some("tester".to_string()),
+            Some(vec!["integration".to_string()]),
+            Some("Design".to_string()),
+            Some("Criteria".to_string()),
+            None,
+        ))
         .await
         .expect("create should succeed");
     assert!(!created.id.is_empty());
@@ -2801,21 +2876,21 @@ async fn test_all_tools_with_storage_backend() {
 
     // 5. list
     let listed = tools
-        .list(None, None, None, None, None, None, None)
+        .list(list_params(None, None, None, None, None, None, None))
         .await
         .expect("list should succeed");
     assert!(!listed.is_empty());
 
     // 6. ready
     let ready = tools
-        .ready(None, None, None, None, None, None)
+        .ready(ready_params(None, None, None, None, None, None))
         .await
         .expect("ready should succeed");
     assert!(!ready.is_empty());
 
     // 7. update
     let updated = tools
-        .update(
+        .update(update_params(
             &created.id,
             Some("Updated Title".to_string()),
             None,
@@ -2827,7 +2902,7 @@ async fn test_all_tools_with_storage_backend() {
             None,
             None, // labels
             None, // workspace_root
-        )
+        ))
         .await
         .expect("update should succeed");
     assert_eq!(updated.title, "Updated Title");
@@ -2835,18 +2910,17 @@ async fn test_all_tools_with_storage_backend() {
 
     // 8. Create another issue for dependency testing
     let blocker = tools
-        .create(CreateParams {
-            title: "Blocker Issue".to_string(),
-            description: None,
-            priority: None,
-            issue_kind: None,
-            assignee: None,
-            labels: None,
-            design: None,
-            acceptance: None,
-            initial_note: None,
-            workspace_root: None,
-        })
+        .create(create_params(
+            "Blocker Issue".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ))
         .await
         .expect("create blocker should succeed");
 
@@ -2910,7 +2984,7 @@ async fn test_dependency_chain() {
 
     // Only C should be ready (not blocked)
     let ready = tools
-        .ready(None, None, None, None, None, None)
+        .ready(ready_params(None, None, None, None, None, None))
         .await
         .expect("ready should succeed");
 
@@ -2968,7 +3042,7 @@ async fn test_closing_blocker_unblocks_dependent() {
 
     // Verify dependent is now ready
     let ready = tools
-        .ready(None, None, None, None, None, None)
+        .ready(ready_params(None, None, None, None, None, None))
         .await
         .expect("ready should succeed");
     assert!(
@@ -2990,7 +3064,7 @@ async fn test_issue_counts_accurate() {
     let issue3 = create_issue(&tools, "To Close").await;
 
     tools
-        .update(
+        .update(update_params(
             &issue2.id,
             None,
             None,
@@ -3002,7 +3076,7 @@ async fn test_issue_counts_accurate() {
             None,
             None, // labels
             None, // workspace_root
-        )
+        ))
         .await
         .unwrap();
 
@@ -3013,27 +3087,51 @@ async fn test_issue_counts_accurate() {
 
     // Verify counts
     let all = tools
-        .list(None, None, None, None, None, None, None)
+        .list(list_params(None, None, None, None, None, None, None))
         .await
         .unwrap();
     assert_eq!(all.len(), 3, "Should have 3 total issues");
 
     let open = tools
-        .list(Some("open"), None, None, None, None, None, None)
+        .list(list_params(
+            Some("open"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ))
         .await
         .unwrap();
     assert_eq!(open.len(), 1, "Should have 1 open issue");
     assert_eq!(open[0].id, issue1.id);
 
     let in_progress = tools
-        .list(Some("in_progress"), None, None, None, None, None, None)
+        .list(list_params(
+            Some("in_progress"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ))
         .await
         .unwrap();
     assert_eq!(in_progress.len(), 1, "Should have 1 in_progress issue");
     assert_eq!(in_progress[0].id, issue2.id);
 
     let closed = tools
-        .list(Some("closed"), None, None, None, None, None, None)
+        .list(list_params(
+            Some("closed"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ))
         .await
         .unwrap();
     assert_eq!(closed.len(), 1, "Should have 1 closed issue");

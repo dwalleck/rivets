@@ -83,18 +83,7 @@ impl RivetsMcpServer {
         &self,
         Parameters(params): Parameters<ReadyParams>,
     ) -> Result<CallToolResult, McpError> {
-        match self
-            .tools
-            .ready(
-                params.limit,
-                params.priority,
-                params.issue_kind.as_deref(),
-                params.assignee,
-                params.label,
-                params.workspace_root.as_deref(),
-            )
-            .await
-        {
+        match self.tools.ready(params).await {
             Ok(issues) => Ok(CallToolResult::success(vec![Content::json(issues)?])),
             Err(e) => Err(to_mcp_error(&e)),
         }
@@ -108,19 +97,7 @@ impl RivetsMcpServer {
         &self,
         Parameters(params): Parameters<ListParams>,
     ) -> Result<CallToolResult, McpError> {
-        match self
-            .tools
-            .list(
-                params.status.as_deref(),
-                params.priority,
-                params.issue_kind.as_deref(),
-                params.assignee,
-                params.label,
-                params.limit,
-                params.workspace_root.as_deref(),
-            )
-            .await
-        {
+        match self.tools.list(params).await {
             Ok(issues) => Ok(CallToolResult::success(vec![Content::json(issues)?])),
             Err(e) => Err(to_mcp_error(&e)),
         }
@@ -180,31 +157,7 @@ impl RivetsMcpServer {
         &self,
         Parameters(params): Parameters<UpdateParams>,
     ) -> Result<CallToolResult, McpError> {
-        // Convert assignee to Option<Option<String>> for clearing support:
-        // - None -> None (don't update assignee)
-        // - Some("") -> Some(None) (clear assignee)
-        // - Some("alice") -> Some(Some("alice")) (set assignee)
-        let assignee = params
-            .assignee
-            .map(|a| if a.is_empty() { None } else { Some(a) });
-
-        match self
-            .tools
-            .update(
-                &params.issue_id,
-                params.title,
-                params.description,
-                params.status.as_deref(),
-                params.priority,
-                params.issue_kind.as_deref(),
-                assignee,
-                params.design,
-                params.acceptance_criteria,
-                params.labels,
-                params.workspace_root.as_deref(),
-            )
-            .await
-        {
+        match self.tools.update(params).await {
             Ok(issue) => Ok(CallToolResult::success(vec![Content::json(issue)?])),
             Err(e) => Err(to_mcp_error(&e)),
         }
@@ -558,6 +511,30 @@ mod tests {
         assert_eq!(tools.len(), 19);
     }
 
+    #[test]
+    fn test_kind_tool_schemas_publish_only_canonical_field() {
+        let server = RivetsMcpServer::new();
+        let tools = server.tool_router.list_all();
+
+        for tool_name in ["ready", "list", "create", "update"] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool.name == tool_name)
+                .expect("Kind-aware tool should be registered");
+            let schema = serde_json::to_string(&tool.input_schema)
+                .expect("tool input schema should serialize");
+
+            assert!(
+                schema.contains("\"issue_kind\""),
+                "{tool_name} schema should publish issue_kind: {schema}"
+            );
+            assert!(
+                !schema.contains("\"issue_type\""),
+                "{tool_name} schema should hide migration-only issue_type: {schema}"
+            );
+        }
+    }
+
     // =========================================================================
     // Tool dispatch integration tests
     // =========================================================================
@@ -649,36 +626,14 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_list_with_invalid_issue_kind_returns_invalid_params() {
-        let server = RivetsMcpServer::new();
+    #[test]
+    fn test_list_params_reject_invalid_issue_kind() {
+        let error = serde_json::from_value::<ListParams>(serde_json::json!({
+            "issue_kind": "invalid_kind"
+        }))
+        .expect_err("invalid Issue Kind should fail at the MCP parameter boundary");
 
-        let temp = std::env::temp_dir().join("rivets-test-invalid-kind");
-        std::fs::create_dir_all(temp.join(".rivets")).ok();
-        std::fs::write(temp.join(".rivets/rivets.jsonl"), "").ok();
-
-        let _ = server
-            .set_context(Parameters(SetContextParams {
-                workspace_root: temp.display().to_string(),
-            }))
-            .await;
-
-        let result = server
-            .list(Parameters(ListParams {
-                issue_kind: Some("invalid_kind".to_string()),
-                ..Default::default()
-            }))
-            .await;
-
-        std::fs::remove_dir_all(&temp).ok();
-
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.message.contains("Invalid issue_kind"),
-            "Expected InvalidArgument error for issue_kind, got: {}",
-            err.message
-        );
+        assert!(error.to_string().contains("invalid_kind"));
     }
 
     #[tokio::test]

@@ -5,7 +5,9 @@
 
 use super::graph::has_cycle_impl;
 use super::inner::InMemoryStorageInner;
-use super::issue_record::{IssueRecord, IssueRecordError, MigrationField};
+use super::issue_record::{
+    CanonicalIssueRecord, IssueRecord, IssueRecordConversion, IssueRecordError, MigrationField,
+};
 use crate::domain::IssueId;
 use crate::error::{Error, Result, StorageError};
 use crate::storage::IssueStorage;
@@ -60,7 +62,7 @@ use tokio::sync::Mutex;
 ///             issue_id, field, ..
 ///         } => {
 ///             eprintln!(
-///                 "Skipped issue {}: emitted field {} conflicts with accepted migration field {}",
+///                 "Loaded issue {} using {} because it conflicts with migration field {}",
 ///                 issue_id,
 ///                 field.emitted_name(),
 ///                 field.accepted_migration_name()
@@ -93,9 +95,9 @@ pub enum LoadWarning {
     /// **Common causes**: Manual JSONL editing, bugs in earlier versions.
     CircularDependency { from: IssueId, to: IssueId },
 
-    /// Emitted and migration-only persisted fields disagree
+    /// Emitted and migration-only persisted fields disagree.
     ///
-    /// **Effect**: The entire issue is skipped rather than choosing one value.
+    /// **Effect**: The canonical emitted field wins and the issue remains loaded.
     /// **Common causes**: Interrupted migrations or conflicting manual edits.
     MigrationConflict {
         issue_id: IssueId,
@@ -198,13 +200,18 @@ pub async fn load_from_jsonl(
     let mut issues = Vec::new();
     for (line_number, record) in parsed_records {
         match record.into_domain() {
-            Ok(issue) => issues.push(issue),
-            Err(IssueRecordError::MigrationConflict { issue_id, field }) => {
-                warnings.push(LoadWarning::MigrationConflict {
-                    issue_id,
-                    line_number,
-                    field,
-                });
+            Ok(IssueRecordConversion {
+                issue,
+                migration_conflict,
+            }) => {
+                if let Some(field) = migration_conflict {
+                    warnings.push(LoadWarning::MigrationConflict {
+                        issue_id: issue.id.clone(),
+                        line_number,
+                        field,
+                    });
+                }
+                issues.push(issue);
             }
             Err(IssueRecordError::InvalidData { issue_id, error }) => {
                 warnings.push(LoadWarning::InvalidIssueData {
@@ -299,7 +306,7 @@ pub async fn save_to_jsonl(storage: &dyn IssueStorage, path: &Path) -> Result<()
         // diffs in version control when dependencies are added/removed in different orders.
         issue.dependencies.sort();
 
-        let record = IssueRecord::from(issue);
+        let record = CanonicalIssueRecord::from(issue);
         let json = serde_json::to_string(&record).map_err(StorageError::Serialization)?;
 
         writer.write_all(json.as_bytes()).await.map_err(Error::Io)?;

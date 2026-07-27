@@ -322,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn test_type_icon() {
+    fn test_kind_icon() {
         let config = OutputConfig::default();
         assert_eq!(kind_icon(IssueKind::Task, &config), "◇");
         assert_eq!(kind_icon(IssueKind::Bug, &config), "●");
@@ -357,7 +357,7 @@ mod tests {
     }
 
     #[test]
-    fn test_colored_type_icon_without_colors() {
+    fn test_colored_kind_icon_without_colors() {
         let config = OutputConfig::new(80, false, false);
         let bug = colored_kind_icon(IssueKind::Bug, &config);
         assert_eq!(bug, "●");
@@ -375,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn test_colored_type_icon_with_colors() {
+    fn test_colored_kind_icon_with_colors() {
         with_colors_enabled(|| {
             let config = OutputConfig::new(80, false, true);
             let bug = colored_kind_icon(IssueKind::Bug, &config);
@@ -405,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn test_colored_type_icon_ascii_mode() {
+    fn test_colored_kind_icon_ascii_mode() {
         let config = OutputConfig::new(80, true, false);
         assert_eq!(colored_kind_icon(IssueKind::Bug, &config), "*");
         assert_eq!(colored_kind_icon(IssueKind::Feature, &config), "+");

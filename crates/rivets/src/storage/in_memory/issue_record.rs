@@ -33,16 +33,10 @@ impl MigrationField {
 
 #[derive(Debug)]
 pub(super) enum IssueRecordError {
-    MigrationConflict {
-        issue_id: IssueId,
-        field: MigrationField,
-    },
-    InvalidData {
-        issue_id: IssueId,
-        error: String,
-    },
+    InvalidData { issue_id: IssueId, error: String },
 }
 
+<<<<<<< HEAD
 #[derive(Debug, Serialize, Deserialize)]
 struct NoteRecord {
     content: String,
@@ -164,24 +158,28 @@ fn is_default_next_resource_id(value: &u64) -> bool {
     *value == DEFAULT_NEXT_RESOURCE_ID
 }
 
-/// The current on-disk Issue shape.
+pub(super) struct IssueRecordConversion {
+    pub(super) issue: Issue,
+    pub(super) migration_conflict: Option<MigrationField>,
+}
+
+/// A compatibility DTO for decoding persisted Issue records.
 ///
-/// This DTO owns all serde behavior for JSONL persistence. The domain [`Issue`]
-/// remains independently serializable for JSON output, but loading persisted
-/// records must pass through [`IssueRecord::into_domain`].
-#[derive(Debug, Serialize, Deserialize)]
+/// Optional canonical and legacy Kind fields are confined to this read seam.
+/// Canonical writes use [`CanonicalIssueRecord`], whose Kind is required.
+#[derive(Debug, Deserialize)]
 pub(super) struct IssueRecord {
     id: IssueId,
     title: String,
     description: String,
     status: IssueStatus,
     priority: u8,
-    /// Canonical field. Optional while decoding so legacy-only records reach
-    /// `into_domain`; canonical writes always populate it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Canonical field. Optional only while decoding so legacy-only records
+    /// can reach `into_domain`.
+    #[serde(default)]
     issue_kind: Option<IssueKind>,
-    /// Legacy read-only field accepted during migration and never written back.
-    #[serde(default, skip_serializing)]
+    /// Legacy read-only field accepted during migration.
+    #[serde(default)]
     issue_type: Option<IssueKind>,
     assignee: Option<String>,
     labels: Vec<String>,
@@ -209,7 +207,7 @@ pub(super) struct IssueRecord {
 }
 
 impl IssueRecord {
-    pub(super) fn into_domain(self) -> Result<Issue, IssueRecordError> {
+    pub(super) fn into_domain(self) -> Result<IssueRecordConversion, IssueRecordError> {
         let Self {
             id,
             title,
@@ -231,15 +229,10 @@ impl IssueRecord {
             updated_at,
             closed_at,
         } = self;
-        let issue_kind = match (issue_kind, issue_type) {
-            (Some(issue_kind), None) | (None, Some(issue_kind)) => issue_kind,
-            (Some(issue_kind), Some(issue_type)) if issue_kind == issue_type => issue_kind,
-            (Some(_), Some(_)) => {
-                return Err(IssueRecordError::MigrationConflict {
-                    issue_id: id,
-                    field: MigrationField::IssueKind,
-                });
-            }
+        let (issue_kind, migration_conflict) = match (issue_kind, issue_type) {
+            (Some(issue_kind), None) | (None, Some(issue_kind)) => (issue_kind, None),
+            (Some(issue_kind), Some(issue_type)) if issue_kind == issue_type => (issue_kind, None),
+            (Some(issue_kind), Some(_)) => (issue_kind, Some(MigrationField::IssueKind)),
             (None, None) => {
                 return Err(IssueRecordError::InvalidData {
                     issue_id: id,
@@ -344,11 +337,43 @@ impl IssueRecord {
                 error,
             })?;
 
-        Ok(issue)
+        Ok(IssueRecordConversion {
+            issue,
+            migration_conflict,
+        })
     }
 }
 
-impl From<Issue> for IssueRecord {
+/// The canonical Issue shape written to disk.
+#[derive(Debug, Serialize)]
+pub(super) struct CanonicalIssueRecord {
+    id: IssueId,
+    title: String,
+    description: String,
+    status: IssueStatus,
+    priority: u8,
+    issue_kind: IssueKind,
+    assignee: Option<String>,
+    labels: Vec<String>,
+    design: Option<String>,
+    acceptance_criteria: Option<String>,
+    notes: PersistedNotes,
+    /// Canonical Associated Resource collection.
+    resources: Vec<ResourceRecord>,
+    /// Monotonic resource identifier sequence. Emitted only once resources
+    /// exist so resource-free records do not grow a sequence field.
+    #[serde(
+        default = "default_next_resource_id",
+        skip_serializing_if = "is_default_next_resource_id"
+    )]
+    next_resource_id: u64,
+    dependencies: Vec<Dependency>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    closed_at: Option<DateTime<Utc>>,
+}
+
+impl From<Issue> for CanonicalIssueRecord {
     fn from(issue: Issue) -> Self {
         let Issue {
             id,
@@ -376,9 +401,7 @@ impl From<Issue> for IssueRecord {
             description,
             status,
             priority,
-            issue_kind: Some(issue_kind),
-            // Accepted only during loading; canonical writes never emit `issue_type`.
-            issue_type: None,
+            issue_kind,
             assignee,
             labels,
             design,
@@ -386,8 +409,6 @@ impl From<Issue> for IssueRecord {
             notes: PersistedNotes::Canonical(notes.into_iter().map(Into::into).collect()),
             resources: resources.into_iter().map(Into::into).collect(),
             next_resource_id,
-            // Accepted only during loading; canonical writes never emit `external_ref`.
-            external_ref: None,
             dependencies,
             created_at,
             updated_at,

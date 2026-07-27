@@ -791,7 +791,7 @@ mod load_from_jsonl_tests {
     }
 
     #[tokio::test]
-    async fn conflicting_canonical_and_legacy_kind_fields_report_distinct_names() {
+    async fn conflicting_canonical_and_legacy_kind_fields_keep_canonical_record() {
         let content = r#"{"id":"test-conflict","title":"Conflict","description":"Test","status":"open","priority":2,"issue_kind":"feature","issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":null,"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#;
         let file = create_temp_jsonl_file(content);
 
@@ -799,13 +799,13 @@ mod load_from_jsonl_tests {
             .await
             .expect("load should succeed and report the conflict as a warning");
 
-        assert!(
-            storage
-                .export_all()
-                .await
-                .expect("export_all should succeed")
-                .is_empty()
-        );
+        let issues = storage
+            .export_all()
+            .await
+            .expect("export_all should succeed");
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].id.as_str(), "test-conflict");
+        assert_eq!(issues[0].issue_kind, IssueKind::Feature);
         assert_eq!(warnings.len(), 1);
         match &warnings[0] {
             LoadWarning::MigrationConflict {
