@@ -160,8 +160,8 @@ sequenceDiagram
 ### JSONL Format Example
 
 ```json
-{"id":"rivets-a3f8","title":"Implement feature X","description":"...","status":"open","priority":2,"issue_type":"feature","created_at":"2025-11-17T10:00:00Z","updated_at":"2025-11-17T10:00:00Z","dependencies":[{"depends_on_id":"rivets-x9k2","dep_type":"blocks"}],"labels":["backend","api"]}
-{"id":"rivets-x9k2","title":"Fix bug Y","description":"...","status":"in_progress","priority":1,"issue_type":"bug","created_at":"2025-11-17T09:00:00Z","updated_at":"2025-11-17T11:00:00Z","dependencies":[],"labels":["urgent"]}
+{"id":"rivets-a3f8","title":"Implement feature X","description":"...","status":"open","priority":2,"issue_kind":"feature","created_at":"2025-11-17T10:00:00Z","updated_at":"2025-11-17T10:00:00Z","dependencies":[{"depends_on_id":"rivets-x9k2","dep_type":"blocks"}],"labels":["backend","api"]}
+{"id":"rivets-x9k2","title":"Fix bug Y","description":"...","status":"in_progress","priority":1,"issue_kind":"bug","created_at":"2025-11-17T09:00:00Z","updated_at":"2025-11-17T11:00:00Z","dependencies":[],"labels":["urgent"]}
 ```
 
 ### Error Recovery Strategies

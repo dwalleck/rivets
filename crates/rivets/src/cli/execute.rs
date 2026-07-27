@@ -179,7 +179,7 @@ pub async fn execute_create(
         title,
         description: args.description.clone().unwrap_or_default(),
         priority: args.priority,
-        issue_type: args.issue_type.into(),
+        issue_kind: args.issue_kind.into(),
         assignee: args.assignee.clone(),
         labels: args.labels.clone(),
         design: args.design.clone(),
@@ -217,7 +217,7 @@ pub async fn execute_list(
     let filter = IssueFilter {
         status: args.status.map(|s| s.into()),
         priority: args.priority,
-        issue_type: args.issue_type.map(|t| t.into()),
+        issue_kind: args.issue_kind.map(|t| t.into()),
         assignee: args.assignee.clone(),
         label: args.label.clone(),
         limit: None,
@@ -292,7 +292,7 @@ pub async fn execute_show(
                         "description": issue.description,
                         "status": format!("{}", issue.status),
                         "priority": issue.priority,
-                        "issue_type": format!("{}", issue.issue_type),
+                        "issue_kind": format!("{}", issue.issue_kind),
                         "assignee": issue.assignee,
                         "labels": issue.labels,
                         "design": issue.design,
@@ -362,6 +362,7 @@ pub async fn execute_update(
             description: args.description.clone(),
             status: args.status.map(|s| s.into()),
             priority: args.priority,
+            issue_kind: args.issue_kind.map(Into::into),
             assignee: if args.no_assignee {
                 Some(None) // Clear the assignee
             } else {
@@ -810,13 +811,13 @@ pub async fn execute_ready(
     // Only create filter if we have filtering criteria; limit is applied after via truncate
     let filter = if args.assignee.is_some()
         || args.priority.is_some()
-        || args.issue_type.is_some()
+        || args.issue_kind.is_some()
         || args.label.is_some()
     {
         Some(IssueFilter {
             assignee: args.assignee.clone(),
             priority: args.priority,
-            issue_type: args.issue_type.map(Into::into),
+            issue_kind: args.issue_kind.map(Into::into),
             label: args.label.clone(),
             ..Default::default()
         })
@@ -1513,7 +1514,7 @@ pub async fn execute_stats(
 mod tests {
     use super::*;
     use crate::cli::types::BatchResult;
-    use crate::domain::{Issue, IssueId, IssueStatus, IssueType};
+    use crate::domain::{Issue, IssueId, IssueKind, IssueStatus};
     use crate::error::Error;
     use chrono::Utc;
     use rstest::rstest;
@@ -1527,7 +1528,7 @@ mod tests {
             description: String::new(),
             status: IssueStatus::Open,
             priority: 2,
-            issue_type: IssueType::Task,
+            issue_kind: IssueKind::Task,
             assignee: None,
             labels: vec![],
             design: None,
@@ -2044,6 +2045,7 @@ mod tests {
                 description: None,
                 status: None,
                 priority: None,
+                issue_kind: None,
                 assignee: None,
                 no_assignee: false,
                 design: None,

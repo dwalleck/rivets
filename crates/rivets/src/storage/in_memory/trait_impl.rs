@@ -17,7 +17,7 @@ use petgraph::visit::EdgeRef;
 /// Check if an issue matches all criteria in the filter.
 ///
 /// This is shared logic used by both `list()` and `ready_to_work()` to apply
-/// optional filters for status, priority, type, assignee, and label.
+/// optional filters for status, priority, kind, assignee, and label.
 fn matches_filter(issue: &Issue, filter: &IssueFilter) -> bool {
     filter
         .status
@@ -27,9 +27,9 @@ fn matches_filter(issue: &Issue, filter: &IssueFilter) -> bool {
             .priority
             .is_none_or(|priority| issue.priority == priority)
         && filter
-            .issue_type
+            .issue_kind
             .as_ref()
-            .is_none_or(|issue_type| &issue.issue_type == issue_type)
+            .is_none_or(|issue_kind| &issue.issue_kind == issue_kind)
         && filter
             .assignee
             .as_ref()
@@ -95,7 +95,7 @@ impl IssueStorage for InMemoryStorage {
             description: new_issue.description,
             status: IssueStatus::Open,
             priority: new_issue.priority,
-            issue_type: new_issue.issue_type,
+            issue_kind: new_issue.issue_kind,
             assignee: new_issue.assignee,
             labels: new_issue.labels,
             design: new_issue.design,
@@ -153,6 +153,9 @@ impl IssueStorage for InMemoryStorage {
                 return Err(Error::InvalidPriority(priority));
             }
             issue.priority = priority;
+        }
+        if let Some(issue_kind) = updates.issue_kind {
+            issue.issue_kind = issue_kind;
         }
         if let Some(assignee_opt) = updates.assignee {
             issue.assignee = assignee_opt;
@@ -542,7 +545,7 @@ impl IssueStorage for InMemoryStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{IssueFilter, IssueStatus, IssueType};
+    use crate::domain::{IssueFilter, IssueKind, IssueStatus};
     use rstest::rstest;
 
     fn create_test_issue() -> Issue {
@@ -552,7 +555,7 @@ mod tests {
             description: String::new(),
             status: IssueStatus::Open,
             priority: 2,
-            issue_type: IssueType::Task,
+            issue_kind: IssueKind::Task,
             assignee: Some("alice".to_string()),
             labels: vec!["bug".to_string(), "urgent".to_string()],
             design: None,
@@ -598,15 +601,15 @@ mod tests {
     }
 
     #[rstest]
-    #[case::type_matches(Some(IssueType::Task), true)]
-    #[case::type_does_not_match(Some(IssueType::Bug), false)]
-    fn test_matches_filter_issue_type(
-        #[case] issue_type: Option<IssueType>,
+    #[case::kind_matches(Some(IssueKind::Task), true)]
+    #[case::kind_does_not_match(Some(IssueKind::Bug), false)]
+    fn test_matches_filter_issue_kind(
+        #[case] issue_kind: Option<IssueKind>,
         #[case] expected: bool,
     ) {
         let issue = create_test_issue();
         let filter = IssueFilter {
-            issue_type,
+            issue_kind,
             ..Default::default()
         };
         assert_eq!(matches_filter(&issue, &filter), expected);
@@ -644,7 +647,7 @@ mod tests {
         let filter = IssueFilter {
             status: Some(IssueStatus::Open),
             priority: Some(2),
-            issue_type: Some(IssueType::Task),
+            issue_kind: Some(IssueKind::Task),
             assignee: Some("alice".to_string()),
             label: Some("bug".to_string()),
             limit: None,

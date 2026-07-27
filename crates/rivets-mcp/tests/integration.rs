@@ -79,7 +79,7 @@ storage:
     pub struct IssueSetup {
         pub title: &'static str,
         pub priority: Option<u8>,
-        pub issue_type: Option<&'static str>,
+        pub issue_kind: Option<&'static str>,
         pub assignee: Option<&'static str>,
         pub labels: Option<Vec<&'static str>>,
         pub close_after_create: bool,
@@ -90,7 +90,7 @@ storage:
             Self {
                 title,
                 priority: None,
-                issue_type: None,
+                issue_kind: None,
                 assignee: None,
                 labels: None,
                 close_after_create: false,
@@ -102,8 +102,8 @@ storage:
             self
         }
 
-        pub fn with_issue_type(mut self, t: &'static str) -> Self {
-            self.issue_type = Some(t);
+        pub fn with_issue_kind(mut self, t: &'static str) -> Self {
+            self.issue_kind = Some(t);
             self
         }
 
@@ -128,7 +128,7 @@ storage:
     pub struct FilterParams {
         pub status: Option<&'static str>,
         pub priority: Option<u8>,
-        pub issue_type: Option<&'static str>,
+        pub issue_kind: Option<&'static str>,
         pub assignee: Option<&'static str>,
         pub label: Option<&'static str>,
         pub limit: Option<usize>,
@@ -149,8 +149,8 @@ storage:
             self
         }
 
-        pub fn with_issue_type(mut self, t: &'static str) -> Self {
-            self.issue_type = Some(t);
+        pub fn with_issue_kind(mut self, t: &'static str) -> Self {
+            self.issue_kind = Some(t);
             self
         }
 
@@ -200,7 +200,7 @@ storage:
                 setup.title.to_string(),
                 Some(format!("Description for {}", setup.title)),
                 setup.priority,
-                setup.issue_type,
+                setup.issue_kind,
                 setup.assignee.map(str::to_string),
                 labels,
                 None,
@@ -253,6 +253,7 @@ async fn test_issue_lifecycle_create_update_close() {
             None,
             Some("in_progress"),
             Some(1),
+            None, // issue_kind
             Some(Some("alice".to_string())),
             None,
             None,
@@ -313,7 +314,7 @@ async fn test_create_issue_with_all_fields() {
     assert_eq!(issue.title, "Full Issue");
     assert_eq!(issue.description, "Detailed description");
     assert_eq!(issue.priority, 0);
-    assert_eq!(issue.issue_type, "feature");
+    assert_eq!(issue.issue_kind, "feature");
     assert_eq!(issue.assignee, Some("bob".to_string()));
     assert_eq!(issue.design, Some("Technical design notes".to_string()));
     assert_eq!(
@@ -322,22 +323,22 @@ async fn test_create_issue_with_all_fields() {
     );
 }
 
-/// Test creating multiple issue types.
+/// Test creating, returning, filtering, and persisting every Issue Kind.
 #[tokio::test]
-async fn test_create_all_issue_types() {
+async fn test_create_all_issue_kinds() {
     let workspace = create_temp_workspace();
     let tools = create_tools();
     set_context(&tools, workspace.path()).await;
 
-    let types = ["bug", "feature", "task", "epic", "chore"];
+    let kinds = ["bug", "feature", "task", "epic", "chore"];
 
-    for issue_type in types {
+    for issue_kind in kinds {
         let issue = tools
             .create(
-                format!("A {issue_type}"),
+                format!("A {issue_kind}"),
                 None,
                 None,
-                Some(issue_type),
+                Some(issue_kind),
                 None,
                 None,
                 None,
@@ -347,14 +348,103 @@ async fn test_create_all_issue_types() {
             .await
             .expect("create should succeed");
 
-        assert_eq!(issue.issue_type, issue_type);
+        assert_eq!(issue.issue_kind, issue_kind);
+        let response = serde_json::to_value(&issue).expect("MCP Issue should serialize");
+        assert_eq!(response["issue_kind"], issue_kind);
+        assert!(response.get("issue_type").is_none());
+
+        let filtered = tools
+            .list(None, None, Some(issue_kind), None, None, None, None)
+            .await
+            .expect("kind filter should succeed");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].issue_kind, issue_kind);
     }
 
-    let list = tools
+    drop(tools);
+    let restarted = create_tools();
+    set_context(&restarted, workspace.path()).await;
+    let list = restarted
         .list(None, None, None, None, None, None, None)
         .await
-        .expect("list should succeed");
+        .expect("list after restart should succeed");
     assert_eq!(list.len(), 5);
+    for issue_kind in kinds {
+        assert!(list.iter().any(|issue| issue.issue_kind == issue_kind));
+    }
+}
+
+#[tokio::test]
+async fn test_update_reclassifies_only_kind_and_persists_across_context_restart() {
+    let workspace = create_temp_workspace();
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+
+    let created = create_custom_issue(
+        &tools,
+        &IssueSetup::new("Reclassify through MCP")
+            .with_issue_kind("task")
+            .with_priority(1)
+            .with_assignee("agent")
+            .with_labels(vec!["backend", "ready"]),
+    )
+    .await;
+
+    let updated = tools
+        .update(
+            &created.id,
+            None,
+            None,
+            None,
+            None,
+            Some("bug"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("kind update should succeed");
+
+    assert_eq!(updated.issue_kind, "bug");
+    assert_ne!(created.updated_at, updated.updated_at);
+    let mut before = serde_json::to_value(&created)
+        .expect("MCP Issue should serialize")
+        .as_object()
+        .expect("MCP Issue should serialize as an object")
+        .clone();
+    let mut after = serde_json::to_value(&updated)
+        .expect("MCP Issue should serialize")
+        .as_object()
+        .expect("MCP Issue should serialize as an object")
+        .clone();
+    before.remove("issue_kind");
+    before.remove("updated_at");
+    after.remove("issue_kind");
+    after.remove("updated_at");
+    assert_eq!(before, after);
+
+    let persisted = std::fs::read_to_string(workspace.path().join(".rivets/issues.jsonl"))
+        .expect("persisted issues should be readable");
+    let record: serde_json::Value = persisted
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("persisted record should be JSON"))
+        .find(|record: &serde_json::Value| record["id"] == created.id)
+        .expect("updated issue should remain persisted");
+    assert_eq!(record["issue_kind"], "bug");
+    assert!(record.get("issue_type").is_none());
+
+    drop(tools);
+    let restarted = create_tools();
+    set_context(&restarted, workspace.path()).await;
+    let reloaded = restarted
+        .show(&created.id, None)
+        .await
+        .expect("reclassified issue should survive context restart");
+    assert_eq!(reloaded.issue_kind, "bug");
 }
 
 // ============================================================================
@@ -499,9 +589,9 @@ async fn test_error_invalid_status() {
     }
 }
 
-/// Test error response for invalid issue type.
+/// Test error response for an invalid issue kind.
 #[tokio::test]
-async fn test_error_invalid_issue_type() {
+async fn test_error_invalid_issue_kind() {
     let workspace = create_temp_workspace();
     let tools = create_tools();
     set_context(&tools, workspace.path()).await;
@@ -511,7 +601,7 @@ async fn test_error_invalid_issue_type() {
             "Test".to_string(),
             None,
             None,
-            Some("invalid_type"),
+            Some("invalid_kind"),
             None,
             None,
             None,
@@ -523,8 +613,8 @@ async fn test_error_invalid_issue_type() {
     assert!(result.is_err());
     match result.unwrap_err() {
         Error::InvalidArgument { field, value, .. } => {
-            assert_eq!(field, "issue_type");
-            assert_eq!(value, "invalid_type");
+            assert_eq!(field, "issue_kind");
+            assert_eq!(value, "invalid_kind");
         }
         e => panic!("Expected InvalidArgument error, got: {e:?}"),
     }
@@ -758,24 +848,24 @@ async fn test_ready_excludes_blocked() {
         expected_titles: Some(vec!["High Priority"]),
     }
 )]
-#[case::issue_type_bug(
+#[case::issue_kind_bug(
     ListFilterCase {
         setup: vec![
-            IssueSetup::new("A Bug").with_issue_type("bug"),
-            IssueSetup::new("A Feature").with_issue_type("feature"),
+            IssueSetup::new("A Bug").with_issue_kind("bug"),
+            IssueSetup::new("A Feature").with_issue_kind("feature"),
         ],
-        filter: FilterParams::new().with_issue_type("bug"),
+        filter: FilterParams::new().with_issue_kind("bug"),
         expected_count: 1,
         expected_titles: Some(vec!["A Bug"]),
     }
 )]
-#[case::issue_type_feature(
+#[case::issue_kind_feature(
     ListFilterCase {
         setup: vec![
-            IssueSetup::new("A Bug").with_issue_type("bug"),
-            IssueSetup::new("A Feature").with_issue_type("feature"),
+            IssueSetup::new("A Bug").with_issue_kind("bug"),
+            IssueSetup::new("A Feature").with_issue_kind("feature"),
         ],
-        filter: FilterParams::new().with_issue_type("feature"),
+        filter: FilterParams::new().with_issue_kind("feature"),
         expected_count: 1,
         expected_titles: Some(vec!["A Feature"]),
     }
@@ -834,11 +924,11 @@ async fn test_ready_excludes_blocked() {
 #[case::status_and_type(
     ListFilterCase {
         setup: vec![
-            IssueSetup::new("Open Bug").with_issue_type("bug"),
-            IssueSetup::new("Open Feature").with_issue_type("feature"),
-            IssueSetup::new("Closed Bug").with_issue_type("bug").closed(),
+            IssueSetup::new("Open Bug").with_issue_kind("bug"),
+            IssueSetup::new("Open Feature").with_issue_kind("feature"),
+            IssueSetup::new("Closed Bug").with_issue_kind("bug").closed(),
         ],
-        filter: FilterParams::new().with_status("open").with_issue_type("bug"),
+        filter: FilterParams::new().with_status("open").with_issue_kind("bug"),
         expected_count: 1,
         expected_titles: Some(vec!["Open Bug"]),
     }
@@ -870,11 +960,11 @@ async fn test_ready_excludes_blocked() {
 #[case::priority_and_type(
     ListFilterCase {
         setup: vec![
-            IssueSetup::new("P0 Bug").with_priority(0).with_issue_type("bug"),
-            IssueSetup::new("P0 Feature").with_priority(0).with_issue_type("feature"),
-            IssueSetup::new("P2 Bug").with_priority(2).with_issue_type("bug"),
+            IssueSetup::new("P0 Bug").with_priority(0).with_issue_kind("bug"),
+            IssueSetup::new("P0 Feature").with_priority(0).with_issue_kind("feature"),
+            IssueSetup::new("P2 Bug").with_priority(2).with_issue_kind("bug"),
         ],
-        filter: FilterParams::new().with_priority(0).with_issue_type("bug"),
+        filter: FilterParams::new().with_priority(0).with_issue_kind("bug"),
         expected_count: 1,
         expected_titles: Some(vec!["P0 Bug"]),
     }
@@ -906,11 +996,11 @@ async fn test_ready_excludes_blocked() {
 #[case::type_and_assignee(
     ListFilterCase {
         setup: vec![
-            IssueSetup::new("Bug Alice").with_issue_type("bug").with_assignee("alice"),
-            IssueSetup::new("Bug Bob").with_issue_type("bug").with_assignee("bob"),
-            IssueSetup::new("Feature Alice").with_issue_type("feature").with_assignee("alice"),
+            IssueSetup::new("Bug Alice").with_issue_kind("bug").with_assignee("alice"),
+            IssueSetup::new("Bug Bob").with_issue_kind("bug").with_assignee("bob"),
+            IssueSetup::new("Feature Alice").with_issue_kind("feature").with_assignee("alice"),
         ],
-        filter: FilterParams::new().with_issue_type("bug").with_assignee("alice"),
+        filter: FilterParams::new().with_issue_kind("bug").with_assignee("alice"),
         expected_count: 1,
         expected_titles: Some(vec!["Bug Alice"]),
     }
@@ -918,11 +1008,11 @@ async fn test_ready_excludes_blocked() {
 #[case::type_and_label(
     ListFilterCase {
         setup: vec![
-            IssueSetup::new("Bug Urgent").with_issue_type("bug").with_labels(vec!["urgent"]),
-            IssueSetup::new("Bug Normal").with_issue_type("bug").with_labels(vec!["normal"]),
-            IssueSetup::new("Feature Urgent").with_issue_type("feature").with_labels(vec!["urgent"]),
+            IssueSetup::new("Bug Urgent").with_issue_kind("bug").with_labels(vec!["urgent"]),
+            IssueSetup::new("Bug Normal").with_issue_kind("bug").with_labels(vec!["normal"]),
+            IssueSetup::new("Feature Urgent").with_issue_kind("feature").with_labels(vec!["urgent"]),
         ],
-        filter: FilterParams::new().with_issue_type("bug").with_label("urgent"),
+        filter: FilterParams::new().with_issue_kind("bug").with_label("urgent"),
         expected_count: 1,
         expected_titles: Some(vec!["Bug Urgent"]),
     }
@@ -945,12 +1035,12 @@ async fn test_ready_excludes_blocked() {
 #[case::status_priority_type(
     ListFilterCase {
         setup: vec![
-            IssueSetup::new("Open P0 Bug").with_priority(0).with_issue_type("bug"),
-            IssueSetup::new("Open P0 Feature").with_priority(0).with_issue_type("feature"),
-            IssueSetup::new("Open P2 Bug").with_priority(2).with_issue_type("bug"),
-            IssueSetup::new("Closed P0 Bug").with_priority(0).with_issue_type("bug").closed(),
+            IssueSetup::new("Open P0 Bug").with_priority(0).with_issue_kind("bug"),
+            IssueSetup::new("Open P0 Feature").with_priority(0).with_issue_kind("feature"),
+            IssueSetup::new("Open P2 Bug").with_priority(2).with_issue_kind("bug"),
+            IssueSetup::new("Closed P0 Bug").with_priority(0).with_issue_kind("bug").closed(),
         ],
-        filter: FilterParams::new().with_status("open").with_priority(0).with_issue_type("bug"),
+        filter: FilterParams::new().with_status("open").with_priority(0).with_issue_kind("bug"),
         expected_count: 1,
         expected_titles: Some(vec!["Open P0 Bug"]),
     }
@@ -971,12 +1061,12 @@ async fn test_ready_excludes_blocked() {
 #[case::status_type_label(
     ListFilterCase {
         setup: vec![
-            IssueSetup::new("Open Bug Urgent").with_issue_type("bug").with_labels(vec!["urgent"]),
-            IssueSetup::new("Open Bug Normal").with_issue_type("bug").with_labels(vec!["normal"]),
-            IssueSetup::new("Open Feature Urgent").with_issue_type("feature").with_labels(vec!["urgent"]),
-            IssueSetup::new("Closed Bug Urgent").with_issue_type("bug").with_labels(vec!["urgent"]).closed(),
+            IssueSetup::new("Open Bug Urgent").with_issue_kind("bug").with_labels(vec!["urgent"]),
+            IssueSetup::new("Open Bug Normal").with_issue_kind("bug").with_labels(vec!["normal"]),
+            IssueSetup::new("Open Feature Urgent").with_issue_kind("feature").with_labels(vec!["urgent"]),
+            IssueSetup::new("Closed Bug Urgent").with_issue_kind("bug").with_labels(vec!["urgent"]).closed(),
         ],
-        filter: FilterParams::new().with_status("open").with_issue_type("bug").with_label("urgent"),
+        filter: FilterParams::new().with_status("open").with_issue_kind("bug").with_label("urgent"),
         expected_count: 1,
         expected_titles: Some(vec!["Open Bug Urgent"]),
     }
@@ -984,12 +1074,12 @@ async fn test_ready_excludes_blocked() {
 #[case::priority_type_assignee(
     ListFilterCase {
         setup: vec![
-            IssueSetup::new("P0 Bug Alice").with_priority(0).with_issue_type("bug").with_assignee("alice"),
-            IssueSetup::new("P0 Bug Bob").with_priority(0).with_issue_type("bug").with_assignee("bob"),
-            IssueSetup::new("P0 Feature Alice").with_priority(0).with_issue_type("feature").with_assignee("alice"),
-            IssueSetup::new("P2 Bug Alice").with_priority(2).with_issue_type("bug").with_assignee("alice"),
+            IssueSetup::new("P0 Bug Alice").with_priority(0).with_issue_kind("bug").with_assignee("alice"),
+            IssueSetup::new("P0 Bug Bob").with_priority(0).with_issue_kind("bug").with_assignee("bob"),
+            IssueSetup::new("P0 Feature Alice").with_priority(0).with_issue_kind("feature").with_assignee("alice"),
+            IssueSetup::new("P2 Bug Alice").with_priority(2).with_issue_kind("bug").with_assignee("alice"),
         ],
-        filter: FilterParams::new().with_priority(0).with_issue_type("bug").with_assignee("alice"),
+        filter: FilterParams::new().with_priority(0).with_issue_kind("bug").with_assignee("alice"),
         expected_count: 1,
         expected_titles: Some(vec!["P0 Bug Alice"]),
     }
@@ -1010,12 +1100,12 @@ async fn test_ready_excludes_blocked() {
 #[case::type_assignee_label(
     ListFilterCase {
         setup: vec![
-            IssueSetup::new("Bug Alice Urgent").with_issue_type("bug").with_assignee("alice").with_labels(vec!["urgent"]),
-            IssueSetup::new("Bug Alice Normal").with_issue_type("bug").with_assignee("alice").with_labels(vec!["normal"]),
-            IssueSetup::new("Bug Bob Urgent").with_issue_type("bug").with_assignee("bob").with_labels(vec!["urgent"]),
-            IssueSetup::new("Feature Alice Urgent").with_issue_type("feature").with_assignee("alice").with_labels(vec!["urgent"]),
+            IssueSetup::new("Bug Alice Urgent").with_issue_kind("bug").with_assignee("alice").with_labels(vec!["urgent"]),
+            IssueSetup::new("Bug Alice Normal").with_issue_kind("bug").with_assignee("alice").with_labels(vec!["normal"]),
+            IssueSetup::new("Bug Bob Urgent").with_issue_kind("bug").with_assignee("bob").with_labels(vec!["urgent"]),
+            IssueSetup::new("Feature Alice Urgent").with_issue_kind("feature").with_assignee("alice").with_labels(vec!["urgent"]),
         ],
-        filter: FilterParams::new().with_issue_type("bug").with_assignee("alice").with_label("urgent"),
+        filter: FilterParams::new().with_issue_kind("bug").with_assignee("alice").with_label("urgent"),
         expected_count: 1,
         expected_titles: Some(vec!["Bug Alice Urgent"]),
     }
@@ -1026,13 +1116,13 @@ async fn test_ready_excludes_blocked() {
 #[case::four_way_status_priority_type_assignee(
     ListFilterCase {
         setup: vec![
-            IssueSetup::new("Target").with_priority(0).with_issue_type("bug").with_assignee("alice"),
-            IssueSetup::new("Wrong Priority").with_priority(2).with_issue_type("bug").with_assignee("alice"),
-            IssueSetup::new("Wrong Type").with_priority(0).with_issue_type("feature").with_assignee("alice"),
-            IssueSetup::new("Wrong Assignee").with_priority(0).with_issue_type("bug").with_assignee("bob"),
-            IssueSetup::new("Closed Match").with_priority(0).with_issue_type("bug").with_assignee("alice").closed(),
+            IssueSetup::new("Target").with_priority(0).with_issue_kind("bug").with_assignee("alice"),
+            IssueSetup::new("Wrong Priority").with_priority(2).with_issue_kind("bug").with_assignee("alice"),
+            IssueSetup::new("Wrong Type").with_priority(0).with_issue_kind("feature").with_assignee("alice"),
+            IssueSetup::new("Wrong Assignee").with_priority(0).with_issue_kind("bug").with_assignee("bob"),
+            IssueSetup::new("Closed Match").with_priority(0).with_issue_kind("bug").with_assignee("alice").closed(),
         ],
-        filter: FilterParams::new().with_status("open").with_priority(0).with_issue_type("bug").with_assignee("alice"),
+        filter: FilterParams::new().with_status("open").with_priority(0).with_issue_kind("bug").with_assignee("alice"),
         expected_count: 1,
         expected_titles: Some(vec!["Target"]),
     }
@@ -1040,14 +1130,14 @@ async fn test_ready_excludes_blocked() {
 #[case::five_way_all_filters(
     ListFilterCase {
         setup: vec![
-            IssueSetup::new("Perfect Match").with_priority(0).with_issue_type("bug").with_assignee("alice").with_labels(vec!["urgent"]),
-            IssueSetup::new("Wrong Label").with_priority(0).with_issue_type("bug").with_assignee("alice").with_labels(vec!["normal"]),
-            IssueSetup::new("Wrong Assignee").with_priority(0).with_issue_type("bug").with_assignee("bob").with_labels(vec!["urgent"]),
-            IssueSetup::new("Wrong Type").with_priority(0).with_issue_type("feature").with_assignee("alice").with_labels(vec!["urgent"]),
-            IssueSetup::new("Wrong Priority").with_priority(2).with_issue_type("bug").with_assignee("alice").with_labels(vec!["urgent"]),
-            IssueSetup::new("Closed Match").with_priority(0).with_issue_type("bug").with_assignee("alice").with_labels(vec!["urgent"]).closed(),
+            IssueSetup::new("Perfect Match").with_priority(0).with_issue_kind("bug").with_assignee("alice").with_labels(vec!["urgent"]),
+            IssueSetup::new("Wrong Label").with_priority(0).with_issue_kind("bug").with_assignee("alice").with_labels(vec!["normal"]),
+            IssueSetup::new("Wrong Assignee").with_priority(0).with_issue_kind("bug").with_assignee("bob").with_labels(vec!["urgent"]),
+            IssueSetup::new("Wrong Type").with_priority(0).with_issue_kind("feature").with_assignee("alice").with_labels(vec!["urgent"]),
+            IssueSetup::new("Wrong Priority").with_priority(2).with_issue_kind("bug").with_assignee("alice").with_labels(vec!["urgent"]),
+            IssueSetup::new("Closed Match").with_priority(0).with_issue_kind("bug").with_assignee("alice").with_labels(vec!["urgent"]).closed(),
         ],
-        filter: FilterParams::new().with_status("open").with_priority(0).with_issue_type("bug").with_assignee("alice").with_label("urgent"),
+        filter: FilterParams::new().with_status("open").with_priority(0).with_issue_kind("bug").with_assignee("alice").with_label("urgent"),
         expected_count: 1,
         expected_titles: Some(vec!["Perfect Match"]),
     }
@@ -1058,10 +1148,10 @@ async fn test_ready_excludes_blocked() {
 #[case::no_matches(
     ListFilterCase {
         setup: vec![
-            IssueSetup::new("Bug").with_issue_type("bug"),
-            IssueSetup::new("Feature").with_issue_type("feature"),
+            IssueSetup::new("Bug").with_issue_kind("bug"),
+            IssueSetup::new("Feature").with_issue_kind("feature"),
         ],
-        filter: FilterParams::new().with_issue_type("epic"),
+        filter: FilterParams::new().with_issue_kind("epic"),
         expected_count: 0,
         expected_titles: None,
     }
@@ -1069,11 +1159,11 @@ async fn test_ready_excludes_blocked() {
 #[case::all_match(
     ListFilterCase {
         setup: vec![
-            IssueSetup::new("Bug 1").with_issue_type("bug"),
-            IssueSetup::new("Bug 2").with_issue_type("bug"),
-            IssueSetup::new("Bug 3").with_issue_type("bug"),
+            IssueSetup::new("Bug 1").with_issue_kind("bug"),
+            IssueSetup::new("Bug 2").with_issue_kind("bug"),
+            IssueSetup::new("Bug 3").with_issue_kind("bug"),
         ],
-        filter: FilterParams::new().with_issue_type("bug"),
+        filter: FilterParams::new().with_issue_kind("bug"),
         expected_count: 3,
         expected_titles: Some(vec!["Bug 1", "Bug 2", "Bug 3"]),
     }
@@ -1081,12 +1171,12 @@ async fn test_ready_excludes_blocked() {
 #[case::limit_with_filters(
     ListFilterCase {
         setup: vec![
-            IssueSetup::new("Bug 1").with_issue_type("bug"),
-            IssueSetup::new("Bug 2").with_issue_type("bug"),
-            IssueSetup::new("Bug 3").with_issue_type("bug"),
-            IssueSetup::new("Feature 1").with_issue_type("feature"),
+            IssueSetup::new("Bug 1").with_issue_kind("bug"),
+            IssueSetup::new("Bug 2").with_issue_kind("bug"),
+            IssueSetup::new("Bug 3").with_issue_kind("bug"),
+            IssueSetup::new("Feature 1").with_issue_kind("feature"),
         ],
-        filter: FilterParams::new().with_issue_type("bug").with_limit(2),
+        filter: FilterParams::new().with_issue_kind("bug").with_limit(2),
         expected_count: 2,
         expected_titles: None,
     }
@@ -1107,7 +1197,7 @@ async fn test_list_filters(#[case] test_case: ListFilterCase) {
         .list(
             test_case.filter.status,
             test_case.filter.priority,
-            test_case.filter.issue_type,
+            test_case.filter.issue_kind,
             test_case.filter.assignee.map(str::to_string),
             test_case.filter.label.map(str::to_string),
             test_case.filter.limit,
@@ -1184,6 +1274,7 @@ async fn test_assignee_clearing() {
             None,
             None,
             None,
+            None,       // issue_kind
             Some(None), // This clears the assignee
             None,
             None,
@@ -1228,6 +1319,7 @@ async fn test_assignee_update_vs_noop() {
             None,
             None,
             None,
+            None, // issue_kind
             None, // None means don't update
             None,
             None,
@@ -1248,6 +1340,7 @@ async fn test_assignee_update_vs_noop() {
             None,
             None,
             None,
+            None, // issue_kind
             Some(Some("new".to_string())),
             None,
             None,
@@ -1335,6 +1428,7 @@ async fn test_update_persistence() {
                 None,
                 Some("in_progress"),
                 None,
+                None, // issue_kind
                 None,
                 None,
                 None,
@@ -1385,13 +1479,13 @@ async fn test_update_persistence() {
         expected_titles: Some(vec!["Alice's Issue"]),
     }
 )]
-#[case::issue_type_filter(
+#[case::issue_kind_filter(
     ReadyFilterCase {
         setup: vec![
-            IssueSetup::new("Bug Issue").with_issue_type("bug"),
-            IssueSetup::new("Feature Issue").with_issue_type("feature"),
+            IssueSetup::new("Bug Issue").with_issue_kind("bug"),
+            IssueSetup::new("Feature Issue").with_issue_kind("feature"),
         ],
-        filter: FilterParams::new().with_issue_type("bug"),
+        filter: FilterParams::new().with_issue_kind("bug"),
         expected_count: 1,
         expected_titles: Some(vec!["Bug Issue"]),
     }
@@ -1427,11 +1521,11 @@ async fn test_update_persistence() {
 #[case::priority_and_type(
     ReadyFilterCase {
         setup: vec![
-            IssueSetup::new("P0 Bug").with_priority(0).with_issue_type("bug"),
-            IssueSetup::new("P0 Feature").with_priority(0).with_issue_type("feature"),
-            IssueSetup::new("P2 Bug").with_priority(2).with_issue_type("bug"),
+            IssueSetup::new("P0 Bug").with_priority(0).with_issue_kind("bug"),
+            IssueSetup::new("P0 Feature").with_priority(0).with_issue_kind("feature"),
+            IssueSetup::new("P2 Bug").with_priority(2).with_issue_kind("bug"),
         ],
-        filter: FilterParams::new().with_priority(0).with_issue_type("bug"),
+        filter: FilterParams::new().with_priority(0).with_issue_kind("bug"),
         expected_count: 1,
         expected_titles: Some(vec!["P0 Bug"]),
     }
@@ -1463,11 +1557,11 @@ async fn test_update_persistence() {
 #[case::type_and_assignee(
     ReadyFilterCase {
         setup: vec![
-            IssueSetup::new("Bug Alice").with_issue_type("bug").with_assignee("alice"),
-            IssueSetup::new("Bug Bob").with_issue_type("bug").with_assignee("bob"),
-            IssueSetup::new("Feature Alice").with_issue_type("feature").with_assignee("alice"),
+            IssueSetup::new("Bug Alice").with_issue_kind("bug").with_assignee("alice"),
+            IssueSetup::new("Bug Bob").with_issue_kind("bug").with_assignee("bob"),
+            IssueSetup::new("Feature Alice").with_issue_kind("feature").with_assignee("alice"),
         ],
-        filter: FilterParams::new().with_issue_type("bug").with_assignee("alice"),
+        filter: FilterParams::new().with_issue_kind("bug").with_assignee("alice"),
         expected_count: 1,
         expected_titles: Some(vec!["Bug Alice"]),
     }
@@ -1475,11 +1569,11 @@ async fn test_update_persistence() {
 #[case::type_and_label(
     ReadyFilterCase {
         setup: vec![
-            IssueSetup::new("Bug Urgent").with_issue_type("bug").with_labels(vec!["urgent"]),
-            IssueSetup::new("Bug Normal").with_issue_type("bug").with_labels(vec!["normal"]),
-            IssueSetup::new("Feature Urgent").with_issue_type("feature").with_labels(vec!["urgent"]),
+            IssueSetup::new("Bug Urgent").with_issue_kind("bug").with_labels(vec!["urgent"]),
+            IssueSetup::new("Bug Normal").with_issue_kind("bug").with_labels(vec!["normal"]),
+            IssueSetup::new("Feature Urgent").with_issue_kind("feature").with_labels(vec!["urgent"]),
         ],
-        filter: FilterParams::new().with_issue_type("bug").with_label("urgent"),
+        filter: FilterParams::new().with_issue_kind("bug").with_label("urgent"),
         expected_count: 1,
         expected_titles: Some(vec!["Bug Urgent"]),
     }
@@ -1502,12 +1596,12 @@ async fn test_update_persistence() {
 #[case::priority_type_assignee(
     ReadyFilterCase {
         setup: vec![
-            IssueSetup::new("P0 Bug Alice").with_priority(0).with_issue_type("bug").with_assignee("alice"),
-            IssueSetup::new("P0 Bug Bob").with_priority(0).with_issue_type("bug").with_assignee("bob"),
-            IssueSetup::new("P0 Feature Alice").with_priority(0).with_issue_type("feature").with_assignee("alice"),
-            IssueSetup::new("P2 Bug Alice").with_priority(2).with_issue_type("bug").with_assignee("alice"),
+            IssueSetup::new("P0 Bug Alice").with_priority(0).with_issue_kind("bug").with_assignee("alice"),
+            IssueSetup::new("P0 Bug Bob").with_priority(0).with_issue_kind("bug").with_assignee("bob"),
+            IssueSetup::new("P0 Feature Alice").with_priority(0).with_issue_kind("feature").with_assignee("alice"),
+            IssueSetup::new("P2 Bug Alice").with_priority(2).with_issue_kind("bug").with_assignee("alice"),
         ],
-        filter: FilterParams::new().with_priority(0).with_issue_type("bug").with_assignee("alice"),
+        filter: FilterParams::new().with_priority(0).with_issue_kind("bug").with_assignee("alice"),
         expected_count: 1,
         expected_titles: Some(vec!["P0 Bug Alice"]),
     }
@@ -1515,12 +1609,12 @@ async fn test_update_persistence() {
 #[case::priority_type_label(
     ReadyFilterCase {
         setup: vec![
-            IssueSetup::new("P0 Bug Urgent").with_priority(0).with_issue_type("bug").with_labels(vec!["urgent"]),
-            IssueSetup::new("P0 Bug Normal").with_priority(0).with_issue_type("bug").with_labels(vec!["normal"]),
-            IssueSetup::new("P0 Feature Urgent").with_priority(0).with_issue_type("feature").with_labels(vec!["urgent"]),
-            IssueSetup::new("P2 Bug Urgent").with_priority(2).with_issue_type("bug").with_labels(vec!["urgent"]),
+            IssueSetup::new("P0 Bug Urgent").with_priority(0).with_issue_kind("bug").with_labels(vec!["urgent"]),
+            IssueSetup::new("P0 Bug Normal").with_priority(0).with_issue_kind("bug").with_labels(vec!["normal"]),
+            IssueSetup::new("P0 Feature Urgent").with_priority(0).with_issue_kind("feature").with_labels(vec!["urgent"]),
+            IssueSetup::new("P2 Bug Urgent").with_priority(2).with_issue_kind("bug").with_labels(vec!["urgent"]),
         ],
-        filter: FilterParams::new().with_priority(0).with_issue_type("bug").with_label("urgent"),
+        filter: FilterParams::new().with_priority(0).with_issue_kind("bug").with_label("urgent"),
         expected_count: 1,
         expected_titles: Some(vec!["P0 Bug Urgent"]),
     }
@@ -1541,12 +1635,12 @@ async fn test_update_persistence() {
 #[case::type_assignee_label(
     ReadyFilterCase {
         setup: vec![
-            IssueSetup::new("Bug Alice Urgent").with_issue_type("bug").with_assignee("alice").with_labels(vec!["urgent"]),
-            IssueSetup::new("Bug Alice Normal").with_issue_type("bug").with_assignee("alice").with_labels(vec!["normal"]),
-            IssueSetup::new("Bug Bob Urgent").with_issue_type("bug").with_assignee("bob").with_labels(vec!["urgent"]),
-            IssueSetup::new("Feature Alice Urgent").with_issue_type("feature").with_assignee("alice").with_labels(vec!["urgent"]),
+            IssueSetup::new("Bug Alice Urgent").with_issue_kind("bug").with_assignee("alice").with_labels(vec!["urgent"]),
+            IssueSetup::new("Bug Alice Normal").with_issue_kind("bug").with_assignee("alice").with_labels(vec!["normal"]),
+            IssueSetup::new("Bug Bob Urgent").with_issue_kind("bug").with_assignee("bob").with_labels(vec!["urgent"]),
+            IssueSetup::new("Feature Alice Urgent").with_issue_kind("feature").with_assignee("alice").with_labels(vec!["urgent"]),
         ],
-        filter: FilterParams::new().with_issue_type("bug").with_assignee("alice").with_label("urgent"),
+        filter: FilterParams::new().with_issue_kind("bug").with_assignee("alice").with_label("urgent"),
         expected_count: 1,
         expected_titles: Some(vec!["Bug Alice Urgent"]),
     }
@@ -1557,13 +1651,13 @@ async fn test_update_persistence() {
 #[case::four_way_all_filters(
     ReadyFilterCase {
         setup: vec![
-            IssueSetup::new("Perfect Match").with_priority(0).with_issue_type("bug").with_assignee("alice").with_labels(vec!["urgent"]),
-            IssueSetup::new("Wrong Label").with_priority(0).with_issue_type("bug").with_assignee("alice").with_labels(vec!["normal"]),
-            IssueSetup::new("Wrong Assignee").with_priority(0).with_issue_type("bug").with_assignee("bob").with_labels(vec!["urgent"]),
-            IssueSetup::new("Wrong Type").with_priority(0).with_issue_type("feature").with_assignee("alice").with_labels(vec!["urgent"]),
-            IssueSetup::new("Wrong Priority").with_priority(2).with_issue_type("bug").with_assignee("alice").with_labels(vec!["urgent"]),
+            IssueSetup::new("Perfect Match").with_priority(0).with_issue_kind("bug").with_assignee("alice").with_labels(vec!["urgent"]),
+            IssueSetup::new("Wrong Label").with_priority(0).with_issue_kind("bug").with_assignee("alice").with_labels(vec!["normal"]),
+            IssueSetup::new("Wrong Assignee").with_priority(0).with_issue_kind("bug").with_assignee("bob").with_labels(vec!["urgent"]),
+            IssueSetup::new("Wrong Type").with_priority(0).with_issue_kind("feature").with_assignee("alice").with_labels(vec!["urgent"]),
+            IssueSetup::new("Wrong Priority").with_priority(2).with_issue_kind("bug").with_assignee("alice").with_labels(vec!["urgent"]),
         ],
-        filter: FilterParams::new().with_priority(0).with_issue_type("bug").with_assignee("alice").with_label("urgent"),
+        filter: FilterParams::new().with_priority(0).with_issue_kind("bug").with_assignee("alice").with_label("urgent"),
         expected_count: 1,
         expected_titles: Some(vec!["Perfect Match"]),
     }
@@ -1574,10 +1668,10 @@ async fn test_update_persistence() {
 #[case::no_matches(
     ReadyFilterCase {
         setup: vec![
-            IssueSetup::new("Bug").with_issue_type("bug"),
-            IssueSetup::new("Feature").with_issue_type("feature"),
+            IssueSetup::new("Bug").with_issue_kind("bug"),
+            IssueSetup::new("Feature").with_issue_kind("feature"),
         ],
-        filter: FilterParams::new().with_issue_type("epic"),
+        filter: FilterParams::new().with_issue_kind("epic"),
         expected_count: 0,
         expected_titles: None,
     }
@@ -1585,11 +1679,11 @@ async fn test_update_persistence() {
 #[case::all_match(
     ReadyFilterCase {
         setup: vec![
-            IssueSetup::new("Bug 1").with_issue_type("bug"),
-            IssueSetup::new("Bug 2").with_issue_type("bug"),
-            IssueSetup::new("Bug 3").with_issue_type("bug"),
+            IssueSetup::new("Bug 1").with_issue_kind("bug"),
+            IssueSetup::new("Bug 2").with_issue_kind("bug"),
+            IssueSetup::new("Bug 3").with_issue_kind("bug"),
         ],
-        filter: FilterParams::new().with_issue_type("bug"),
+        filter: FilterParams::new().with_issue_kind("bug"),
         expected_count: 3,
         expected_titles: Some(vec!["Bug 1", "Bug 2", "Bug 3"]),
     }
@@ -1597,12 +1691,12 @@ async fn test_update_persistence() {
 #[case::limit_with_filters(
     ReadyFilterCase {
         setup: vec![
-            IssueSetup::new("Bug 1").with_issue_type("bug"),
-            IssueSetup::new("Bug 2").with_issue_type("bug"),
-            IssueSetup::new("Bug 3").with_issue_type("bug"),
-            IssueSetup::new("Feature 1").with_issue_type("feature"),
+            IssueSetup::new("Bug 1").with_issue_kind("bug"),
+            IssueSetup::new("Bug 2").with_issue_kind("bug"),
+            IssueSetup::new("Bug 3").with_issue_kind("bug"),
+            IssueSetup::new("Feature 1").with_issue_kind("feature"),
         ],
-        filter: FilterParams::new().with_issue_type("bug").with_limit(2),
+        filter: FilterParams::new().with_issue_kind("bug").with_limit(2),
         expected_count: 2,
         expected_titles: None,
     }
@@ -1610,10 +1704,10 @@ async fn test_update_persistence() {
 #[case::excludes_closed_issues(
     ReadyFilterCase {
         setup: vec![
-            IssueSetup::new("Open Bug").with_issue_type("bug"),
-            IssueSetup::new("Closed Bug").with_issue_type("bug").closed(),
+            IssueSetup::new("Open Bug").with_issue_kind("bug"),
+            IssueSetup::new("Closed Bug").with_issue_kind("bug").closed(),
         ],
-        filter: FilterParams::new().with_issue_type("bug"),
+        filter: FilterParams::new().with_issue_kind("bug"),
         expected_count: 1,
         expected_titles: Some(vec!["Open Bug"]),
     }
@@ -1634,7 +1728,7 @@ async fn test_ready_filters(#[case] test_case: ReadyFilterCase) {
         .ready(
             test_case.filter.limit,
             test_case.filter.priority,
-            test_case.filter.issue_type,
+            test_case.filter.issue_kind,
             test_case.filter.assignee.map(str::to_string),
             test_case.filter.label.map(str::to_string),
             None,
@@ -1687,10 +1781,10 @@ async fn test_empty_filter_results() {
     // Create some issues that won't match our filter
     let setup_issues = vec![
         IssueSetup::new("Bug Issue")
-            .with_issue_type("bug")
+            .with_issue_kind("bug")
             .with_priority(2),
         IssueSetup::new("Feature Issue")
-            .with_issue_type("feature")
+            .with_issue_kind("feature")
             .with_priority(3),
     ];
 
@@ -2124,15 +2218,15 @@ async fn test_invalid_status_values(#[case] invalid_value: &str, #[case] expecte
     }
 }
 
-/// Test invalid `issue_type` values return appropriate errors.
+/// Test invalid `issue_kind` values return appropriate errors.
 #[rstest]
-#[case::invalid_type("invalid", "issue_type")]
-#[case::story_type("story", "issue_type")]
-#[case::spike_type("spike", "issue_type")]
-#[case::enhancement_type("enhancement", "issue_type")]
-#[case::defect_type("defect", "issue_type")]
+#[case::invalid_kind("invalid", "issue_kind")]
+#[case::story_kind("story", "issue_kind")]
+#[case::spike_kind("spike", "issue_kind")]
+#[case::enhancement_kind("enhancement", "issue_kind")]
+#[case::defect_kind("defect", "issue_kind")]
 #[tokio::test]
-async fn test_invalid_issue_type_values(#[case] invalid_value: &str, #[case] expected_field: &str) {
+async fn test_invalid_issue_kind_values(#[case] invalid_value: &str, #[case] expected_field: &str) {
     let workspace = create_temp_workspace();
     let tools = create_tools();
     set_context(&tools, workspace.path()).await;
@@ -2144,7 +2238,7 @@ async fn test_invalid_issue_type_values(#[case] invalid_value: &str, #[case] exp
 
     assert!(
         list_result.is_err(),
-        "Expected error for invalid issue_type in list: {invalid_value}"
+        "Expected error for invalid issue_kind in list: {invalid_value}"
     );
     match list_result.unwrap_err() {
         Error::InvalidArgument {
@@ -2156,23 +2250,23 @@ async fn test_invalid_issue_type_values(#[case] invalid_value: &str, #[case] exp
             assert_eq!(value, invalid_value);
             assert!(
                 valid_values.contains("bug"),
-                "Error should mention valid type 'bug'"
+                "Error should mention valid kind 'bug'"
             );
             assert!(
                 valid_values.contains("feature"),
-                "Error should mention valid type 'feature'"
+                "Error should mention valid kind 'feature'"
             );
             assert!(
                 valid_values.contains("task"),
-                "Error should mention valid type 'task'"
+                "Error should mention valid kind 'task'"
             );
             assert!(
                 valid_values.contains("epic"),
-                "Error should mention valid type 'epic'"
+                "Error should mention valid kind 'epic'"
             );
             assert!(
                 valid_values.contains("chore"),
-                "Error should mention valid type 'chore'"
+                "Error should mention valid kind 'chore'"
             );
         }
         e => panic!("Expected InvalidArgument error, got: {e:?}"),
@@ -2195,7 +2289,7 @@ async fn test_invalid_issue_type_values(#[case] invalid_value: &str, #[case] exp
 
     assert!(
         create_result.is_err(),
-        "Expected error for invalid issue_type in create: {invalid_value}"
+        "Expected error for invalid issue_kind in create: {invalid_value}"
     );
 
     // Test in ready filter
@@ -2205,7 +2299,7 @@ async fn test_invalid_issue_type_values(#[case] invalid_value: &str, #[case] exp
 
     assert!(
         ready_result.is_err(),
-        "Expected error for invalid issue_type in ready: {invalid_value}"
+        "Expected error for invalid issue_kind in ready: {invalid_value}"
     );
 }
 
@@ -2283,6 +2377,7 @@ async fn test_invalid_status_in_update(#[case] invalid_value: &str) {
             None,
             Some(invalid_value),
             None,
+            None, // issue_kind
             None,
             None,
             None,
@@ -2374,6 +2469,7 @@ async fn test_complete_issue_lifecycle_all_states() {
             None,
             Some("in_progress"),
             None,
+            None, // issue_kind
             None,
             None,
             None,
@@ -2399,6 +2495,7 @@ async fn test_complete_issue_lifecycle_all_states() {
             None,
             Some("blocked"),
             None,
+            None, // issue_kind
             None,
             None,
             None,
@@ -2425,6 +2522,7 @@ async fn test_complete_issue_lifecycle_all_states() {
             None,
             Some("in_progress"),
             None,
+            None, // issue_kind
             None,
             None,
             None,
@@ -2494,6 +2592,7 @@ async fn test_update_preserves_unmodified_fields() {
             None, // Don't update description
             None, // Don't update status
             None, // Don't update priority
+            None, // issue_kind
             None, // Don't update assignee
             None, // Don't update design
             None, // Don't update acceptance
@@ -2658,6 +2757,7 @@ async fn test_all_tools_with_storage_backend() {
             None,
             Some("in_progress"),
             None,
+            None, // issue_kind
             None,
             None,
             None,
@@ -2833,6 +2933,7 @@ async fn test_issue_counts_accurate() {
             None,
             Some("in_progress"),
             None,
+            None, // issue_kind
             None,
             None,
             None,

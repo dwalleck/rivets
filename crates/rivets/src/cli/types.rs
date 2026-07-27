@@ -6,7 +6,7 @@
 use clap::ValueEnum;
 use serde::Serialize;
 
-use crate::domain::{DependencyType, Issue, IssueStatus, IssueType};
+use crate::domain::{DependencyType, Issue, IssueKind, IssueStatus};
 
 // ============================================================================
 // Batch Operation Results
@@ -74,9 +74,9 @@ pub struct BatchError {
 // Value Enums
 // ============================================================================
 
-/// Issue type for CLI arguments
+/// Issue kind for CLI arguments
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IssueTypeArg {
+pub enum IssueKindArg {
     /// Bug fix
     Bug,
     /// New feature
@@ -89,7 +89,7 @@ pub enum IssueTypeArg {
     Chore,
 }
 
-impl std::fmt::Display for IssueTypeArg {
+impl std::fmt::Display for IssueKindArg {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Bug => write!(f, "bug"),
@@ -203,26 +203,26 @@ impl std::fmt::Display for SortPolicyArg {
 // Domain Type Conversions
 // ============================================================================
 
-impl From<IssueTypeArg> for IssueType {
-    fn from(arg: IssueTypeArg) -> Self {
+impl From<IssueKindArg> for IssueKind {
+    fn from(arg: IssueKindArg) -> Self {
         match arg {
-            IssueTypeArg::Bug => IssueType::Bug,
-            IssueTypeArg::Feature => IssueType::Feature,
-            IssueTypeArg::Task => IssueType::Task,
-            IssueTypeArg::Epic => IssueType::Epic,
-            IssueTypeArg::Chore => IssueType::Chore,
+            IssueKindArg::Bug => IssueKind::Bug,
+            IssueKindArg::Feature => IssueKind::Feature,
+            IssueKindArg::Task => IssueKind::Task,
+            IssueKindArg::Epic => IssueKind::Epic,
+            IssueKindArg::Chore => IssueKind::Chore,
         }
     }
 }
 
-impl From<IssueType> for IssueTypeArg {
-    fn from(t: IssueType) -> Self {
+impl From<IssueKind> for IssueKindArg {
+    fn from(t: IssueKind) -> Self {
         match t {
-            IssueType::Bug => IssueTypeArg::Bug,
-            IssueType::Feature => IssueTypeArg::Feature,
-            IssueType::Task => IssueTypeArg::Task,
-            IssueType::Epic => IssueTypeArg::Epic,
-            IssueType::Chore => IssueTypeArg::Chore,
+            IssueKind::Bug => IssueKindArg::Bug,
+            IssueKind::Feature => IssueKindArg::Feature,
+            IssueKind::Task => IssueKindArg::Task,
+            IssueKind::Epic => IssueKindArg::Epic,
+            IssueKind::Chore => IssueKindArg::Chore,
         }
     }
 }
@@ -276,18 +276,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_issue_type_conversion() {
-        assert_eq!(IssueType::from(IssueTypeArg::Bug), IssueType::Bug);
-        assert_eq!(IssueType::from(IssueTypeArg::Feature), IssueType::Feature);
-        assert_eq!(IssueType::from(IssueTypeArg::Task), IssueType::Task);
-        assert_eq!(IssueType::from(IssueTypeArg::Epic), IssueType::Epic);
-        assert_eq!(IssueType::from(IssueTypeArg::Chore), IssueType::Chore);
+    fn test_issue_kind_conversion() {
+        assert_eq!(IssueKind::from(IssueKindArg::Bug), IssueKind::Bug);
+        assert_eq!(IssueKind::from(IssueKindArg::Feature), IssueKind::Feature);
+        assert_eq!(IssueKind::from(IssueKindArg::Task), IssueKind::Task);
+        assert_eq!(IssueKind::from(IssueKindArg::Epic), IssueKind::Epic);
+        assert_eq!(IssueKind::from(IssueKindArg::Chore), IssueKind::Chore);
 
         // Reverse conversion
-        assert_eq!(IssueTypeArg::from(IssueType::Bug), IssueTypeArg::Bug);
+        assert_eq!(IssueKindArg::from(IssueKind::Bug), IssueKindArg::Bug);
         assert_eq!(
-            IssueTypeArg::from(IssueType::Feature),
-            IssueTypeArg::Feature
+            IssueKindArg::from(IssueKind::Feature),
+            IssueKindArg::Feature
         );
     }
 
@@ -336,7 +336,7 @@ mod tests {
 
     #[test]
     fn test_display_implementations() {
-        assert_eq!(format!("{}", IssueTypeArg::Bug), "bug");
+        assert_eq!(format!("{}", IssueKindArg::Bug), "bug");
         assert_eq!(format!("{}", IssueStatusArg::InProgress), "in_progress");
         assert_eq!(
             format!("{}", DependencyTypeArg::ParentChild),

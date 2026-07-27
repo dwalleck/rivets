@@ -23,7 +23,7 @@ pub use color::{error, info, success, warning};
 pub use tree::{DepTreeNode, dep_tree_to_json_public, print_dep_tree, print_dep_tree_dependents};
 
 use color::{
-    bold, colored_status_icon, colored_type_icon, colorize_id, colorize_labels, colorize_priority,
+    bold, colored_kind_icon, colored_status_icon, colorize_id, colorize_labels, colorize_priority,
     colorize_status, cyan, dimmed, yellow,
 };
 use json::{print_blocked_json, print_issue_details_json, print_issue_json, print_issues_json};
@@ -285,7 +285,7 @@ fn print_issue_text<W: Write>(w: &mut W, issue: &Issue, config: &OutputConfig) -
         "{} {} {} {} {}",
         colored_status_icon(issue.status, config),
         colorize_id(issue.id.as_str(), config),
-        colored_type_icon(issue.issue_type, config),
+        colored_kind_icon(issue.issue_kind, config),
         colorize_priority(issue.priority, config),
         issue.title
     )?;
@@ -325,7 +325,7 @@ fn print_issues_text<W: Write>(
             "{} {}  {}  {}  {}",
             colored_status_icon(issue.status, config),
             colorize_id(issue.id.as_str(), config),
-            colored_type_icon(issue.issue_type, config),
+            colored_kind_icon(issue.issue_kind, config),
             colorize_priority(issue.priority, config),
             issue.title
         )?;
@@ -354,16 +354,16 @@ fn print_issue_details_text<W: Write>(
     )?;
 
     // Metadata line
-    let type_display = format!(
+    let kind_display = format!(
         "{} {}",
-        colored_type_icon(issue.issue_type, config),
-        issue.issue_type
+        colored_kind_icon(issue.issue_kind, config),
+        issue.issue_kind
     );
     writeln!(
         w,
         "{}  {}    {}  {}    {}  {}",
-        dimmed("Type:", config),
-        type_display,
+        dimmed("Kind:", config),
+        kind_display,
         dimmed("Status:", config),
         colorize_status(issue.status, config),
         dimmed("Priority:", config),
@@ -488,7 +488,7 @@ fn print_blocked_text<W: Write>(
             "{} {}  {}  {}  {}",
             colored_status_icon(issue.status, config),
             colorize_id(issue.id.as_str(), config),
-            colored_type_icon(issue.issue_type, config),
+            colored_kind_icon(issue.issue_kind, config),
             colorize_priority(issue.priority, config),
             issue.title
         )?;
@@ -517,7 +517,7 @@ fn print_blocked_text<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{Dependency, DependencyType, IssueId, IssueStatus, IssueType};
+    use crate::domain::{Dependency, DependencyType, IssueId, IssueKind, IssueStatus};
     use chrono::Utc;
     fn test_issue() -> Issue {
         Issue {
@@ -526,7 +526,7 @@ mod tests {
             description: "A test description".to_string(),
             status: IssueStatus::Open,
             priority: 1,
-            issue_type: IssueType::Task,
+            issue_kind: IssueKind::Task,
             assignee: Some("alice".to_string()),
             labels: vec!["urgent".to_string()],
             design: None,

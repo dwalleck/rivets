@@ -127,7 +127,11 @@ fn test_cli_create_help() {
         stdout.contains("--priority"),
         "Create help should show --priority"
     );
-    assert!(stdout.contains("--type"), "Create help should show --type");
+    assert!(stdout.contains("--kind"), "Create help should show --kind");
+    assert!(
+        !stdout.contains("--type"),
+        "Create help should not expose removed --type"
+    );
     assert!(
         stdout.contains("--assignee"),
         "Create help should show --assignee"
@@ -218,7 +222,7 @@ fn test_cli_create_with_full_options(initialized_dir: TempDir) {
             "Bug fix",
             "--priority",
             "1",
-            "--type",
+            "--kind",
             "bug",
             "--assignee",
             "alice",
@@ -390,17 +394,28 @@ fn test_cli_list_status_filters_match_issues(initialized_dir: TempDir) {
 #[case::task("task")]
 #[case::epic("epic")]
 #[case::chore("chore")]
-fn test_cli_create_issue_types(initialized_dir: TempDir, #[case] issue_type: &str) {
-    let output = run_rivets_in_dir(
-        initialized_dir.path(),
-        &["create", "--title", "Type test", "--type", issue_type],
-    );
+fn test_cli_create_issue_kinds(initialized_dir: TempDir, #[case] issue_kind: &str) {
+    let issue_id = create_issue(initialized_dir.path(), "Kind test", &["--kind", issue_kind]);
+
+    let show = run_rivets_in_dir(initialized_dir.path(), &["show", &issue_id]);
     assert!(
-        output.status.success(),
-        "Issue type '{}' should be valid. Stderr: {}",
-        issue_type,
-        String::from_utf8_lossy(&output.stderr)
+        show.status.success(),
+        "Issue kind '{issue_kind}' should persist. Stderr: {}",
+        String::from_utf8_lossy(&show.stderr)
     );
+    let show_text = String::from_utf8_lossy(&show.stdout);
+    assert!(show_text.contains("Kind:"));
+    assert!(show_text.contains(issue_kind));
+
+    let list = run_rivets_in_dir(initialized_dir.path(), &["list", "--kind", issue_kind]);
+    assert!(list.status.success());
+    assert!(String::from_utf8_lossy(&list.stdout).contains(&issue_id));
+
+    let json_show = run_rivets_in_dir(initialized_dir.path(), &["--json", "show", &issue_id]);
+    let json: serde_json::Value =
+        serde_json::from_slice(&json_show.stdout).expect("show output should be JSON");
+    assert_eq!(json[0]["issue_kind"], issue_kind);
+    assert!(json[0].get("issue_type").is_none());
 }
 
 #[rstest]
@@ -496,6 +511,71 @@ fn test_cli_update_issue(initialized_dir: TempDir) {
     assert!(show_stdout.contains("in_progress"));
 }
 
+#[rstest]
+fn test_cli_reclassifies_only_kind_and_persists(initialized_dir: TempDir) {
+    let issue_id = create_issue(
+        initialized_dir.path(),
+        "Reclassify me",
+        &[
+            "--description",
+            "Keep this description",
+            "--priority",
+            "1",
+            "--kind",
+            "task",
+            "--assignee",
+            "alice",
+            "--labels",
+            "backend,ready",
+        ],
+    );
+
+    let before = run_rivets_in_dir(initialized_dir.path(), &["--json", "show", &issue_id]);
+    let before: serde_json::Value =
+        serde_json::from_slice(&before.stdout).expect("initial show output should be JSON");
+
+    let update = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["update", &issue_id, "--kind", "bug"],
+    );
+    assert!(
+        update.status.success(),
+        "Kind update failed: {}",
+        String::from_utf8_lossy(&update.stderr)
+    );
+
+    let after = run_rivets_in_dir(initialized_dir.path(), &["--json", "show", &issue_id]);
+    let after: serde_json::Value =
+        serde_json::from_slice(&after.stdout).expect("restarted show output should be JSON");
+    assert_eq!(after[0]["issue_kind"], "bug");
+    assert!(after[0].get("issue_type").is_none());
+    assert_ne!(before[0]["updated_at"], after[0]["updated_at"]);
+
+    let mut before_fields = before[0]
+        .as_object()
+        .expect("issue should be an object")
+        .clone();
+    let mut after_fields = after[0]
+        .as_object()
+        .expect("issue should be an object")
+        .clone();
+    before_fields.remove("issue_kind");
+    before_fields.remove("updated_at");
+    after_fields.remove("issue_kind");
+    after_fields.remove("updated_at");
+    assert_eq!(before_fields, after_fields);
+
+    let persisted = std::fs::read_to_string(initialized_dir.path().join(".rivets/issues.jsonl"))
+        .expect("persisted issues should be readable");
+    let record: serde_json::Value = persisted
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("persisted record should be JSON"))
+        .find(|record: &serde_json::Value| record["id"] == issue_id)
+        .expect("updated issue should remain persisted");
+    assert_eq!(record["issue_kind"], "bug");
+    assert!(record.get("issue_type").is_none());
+}
+
 // ============================================================================
 // Close Command Tests
 // ============================================================================
@@ -579,21 +659,21 @@ fn test_cli_ready_with_issues(initialized_dir: TempDir) {
 }
 
 #[rstest]
-fn test_cli_ready_filters_by_type_and_label(initialized_dir: TempDir) {
+fn test_cli_ready_filters_by_kind_and_label(initialized_dir: TempDir) {
     let expected_id = create_issue(
         initialized_dir.path(),
         "Ready agent task",
-        &["--type", "task", "--labels", "ready-for-agent"],
+        &["--kind", "task", "--labels", "ready-for-agent"],
     );
     create_issue(
         initialized_dir.path(),
         "Ready task with another label",
-        &["--type", "task", "--labels", "needs-triage"],
+        &["--kind", "task", "--labels", "needs-triage"],
     );
     create_issue(
         initialized_dir.path(),
         "Ready agent feature",
-        &["--type", "feature", "--labels", "ready-for-agent"],
+        &["--kind", "feature", "--labels", "ready-for-agent"],
     );
 
     let output = run_rivets_in_dir(
@@ -601,7 +681,7 @@ fn test_cli_ready_filters_by_type_and_label(initialized_dir: TempDir) {
         &[
             "--json",
             "ready",
-            "--type",
+            "--kind",
             "task",
             "--label",
             "ready-for-agent",
@@ -1499,7 +1579,7 @@ fn test_cli_no_color_env_disables_ansi(initialized_dir: TempDir) {
     create_issue(
         initialized_dir.path(),
         "Color test issue",
-        &["--type", "bug", "--priority", "1"],
+        &["--kind", "bug", "--priority", "1"],
     );
 
     // Without NO_COLOR, output may contain ANSI escapes (depends on terminal detection,
@@ -1518,7 +1598,7 @@ fn test_cli_rivets_color_zero_disables_ansi(initialized_dir: TempDir) {
     create_issue(
         initialized_dir.path(),
         "Color test issue",
-        &["--type", "feature"],
+        &["--kind", "feature"],
     );
 
     let output = run_rivets_with_env(initialized_dir.path(), &["list"], "RIVETS_COLOR", "0");

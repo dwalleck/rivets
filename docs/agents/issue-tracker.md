@@ -5,9 +5,9 @@ Issues and planning artifacts for this repo live in Rivets. The checked-in `.riv
 ## Conventions
 
 - **Initialize MCP context**: call `set_context` with the repository root before other Rivets MCP operations.
-- **Create an issue**: use `create`, or `rivets create --title "..." --type <type> --priority <0-4>`.
+- **Create an issue**: use `create`, or `rivets create --title "..." --kind <kind> --priority <0-4>`.
 - **Read an issue**: use `show`, or `rivets show <issue-id>`.
-- **List issues**: use `list`, or `rivets list`, with status, label, type, priority, or assignee filters as needed.
+- **List issues**: use `list`, or `rivets list`, with status, label, kind, priority, or assignee filters as needed.
 - **Find unblocked work**: use `ready`, or `rivets ready`.
 - **Update an issue**: use `update`, or `rivets update <issue-id>`. Prefer atomic label add/remove operations over replacing the full label set.
 - **Record discussion or resolution**: Rivets has no authored comment history. Append dated entries to `notes`, preserving existing notes. Workflows that require reporter-reply detection need human interpretation.

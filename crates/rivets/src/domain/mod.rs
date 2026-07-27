@@ -65,8 +65,8 @@ pub struct Issue {
     /// Priority level (0 = highest, 4 = lowest)
     pub priority: u8,
 
-    /// Issue type
-    pub issue_type: IssueType,
+    /// Issue kind
+    pub issue_kind: IssueKind,
 
     /// Assignee (optional)
     pub assignee: Option<String>,
@@ -159,10 +159,10 @@ impl fmt::Display for IssueStatus {
     }
 }
 
-/// Type of issue
+/// Current classification of an issue
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum IssueType {
+pub enum IssueKind {
     /// Bug fix
     Bug,
 
@@ -179,7 +179,7 @@ pub enum IssueType {
     Chore,
 }
 
-impl fmt::Display for IssueType {
+impl fmt::Display for IssueKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Bug => write!(f, "bug"),
@@ -404,8 +404,8 @@ pub struct NewIssue {
     /// Priority level (0-4)
     pub priority: u8,
 
-    /// Issue type
-    pub issue_type: IssueType,
+    /// Issue kind
+    pub issue_kind: IssueKind,
 
     /// Assignee (optional)
     pub assignee: Option<String>,
@@ -459,14 +459,14 @@ impl Default for NewIssue {
     /// - title: "Untitled Issue"
     /// - description: ""
     /// - priority: 2 (medium)
-    /// - issue_type: Task
+    /// - issue_kind: Task
     /// - All optional fields: None or empty
     fn default() -> Self {
         Self {
             title: "Untitled Issue".to_string(),
             description: String::new(),
             priority: 2,
-            issue_type: IssueType::Task,
+            issue_kind: IssueKind::Task,
             assignee: None,
             labels: vec![],
             design: None,
@@ -492,6 +492,9 @@ pub struct IssueUpdate {
 
     /// New priority (if updating)
     pub priority: Option<u8>,
+
+    /// New issue kind (if reclassifying)
+    pub issue_kind: Option<IssueKind>,
 
     /// New assignee (if updating)
     ///
@@ -526,8 +529,8 @@ pub struct IssueFilter {
     /// Filter by priority
     pub priority: Option<u8>,
 
-    /// Filter by issue type
-    pub issue_type: Option<IssueType>,
+    /// Filter by issue kind
+    pub issue_kind: Option<IssueKind>,
 
     /// Filter by assignee
     pub assignee: Option<String>,
@@ -750,7 +753,7 @@ mod tests {
         assert_eq!(issue.title, "Untitled Issue");
         assert_eq!(issue.description, "");
         assert_eq!(issue.priority, 2);
-        assert_eq!(issue.issue_type, IssueType::Task);
+        assert_eq!(issue.issue_kind, IssueKind::Task);
         assert!(issue.assignee.is_none());
         assert!(issue.labels.is_empty());
         assert!(issue.dependencies.is_empty());
@@ -773,12 +776,12 @@ mod tests {
     }
 
     #[test]
-    fn test_issue_type_display() {
-        assert_eq!(format!("{}", IssueType::Bug), "bug");
-        assert_eq!(format!("{}", IssueType::Feature), "feature");
-        assert_eq!(format!("{}", IssueType::Task), "task");
-        assert_eq!(format!("{}", IssueType::Epic), "epic");
-        assert_eq!(format!("{}", IssueType::Chore), "chore");
+    fn test_issue_kind_display() {
+        assert_eq!(format!("{}", IssueKind::Bug), "bug");
+        assert_eq!(format!("{}", IssueKind::Feature), "feature");
+        assert_eq!(format!("{}", IssueKind::Task), "task");
+        assert_eq!(format!("{}", IssueKind::Epic), "epic");
+        assert_eq!(format!("{}", IssueKind::Chore), "chore");
     }
 
     #[test]

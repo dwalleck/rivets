@@ -1,13 +1,13 @@
 //! Compatibility boundary between persisted JSONL issue records and the domain model.
 
-use crate::domain::{Dependency, Issue, IssueId, IssueStatus, IssueType};
+use crate::domain::{Dependency, Issue, IssueId, IssueKind, IssueStatus};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// A domain field with emitted and migration-only persisted names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MigrationField {
-    /// The issue's kind, emitted today as `issue_type` while also accepting `issue_kind`.
+    /// The issue's kind, emitted as `issue_kind` while accepting legacy `issue_type`.
     IssueKind,
 }
 
@@ -15,14 +15,14 @@ impl MigrationField {
     /// The persisted name written by the save path.
     pub const fn emitted_name(self) -> &'static str {
         match self {
-            Self::IssueKind => "issue_type",
+            Self::IssueKind => "issue_kind",
         }
     }
 
     /// The migration-only persisted name accepted during loading.
     pub const fn accepted_migration_name(self) -> &'static str {
         match self {
-            Self::IssueKind => "issue_kind",
+            Self::IssueKind => "issue_type",
         }
     }
 }
@@ -51,13 +51,13 @@ pub(super) struct IssueRecord {
     description: String,
     status: IssueStatus,
     priority: u8,
-    issue_type: IssueType,
-    /// Read-only migration field: accepted on load so a half-migrated record can be
-    /// detected, never written back. Emitting it would add a migration-only field to every
-    /// record, changing the on-disk shape and breaking byte-stable saves; `into_domain`
-    /// folds it into `issue_type` instead.
+    /// Canonical field. Optional while decoding so legacy-only records reach
+    /// `into_domain`; canonical writes always populate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    issue_kind: Option<IssueKind>,
+    /// Legacy read-only field accepted during migration and never written back.
     #[serde(default, skip_serializing)]
-    issue_kind: Option<IssueType>,
+    issue_type: Option<IssueKind>,
     assignee: Option<String>,
     labels: Vec<String>,
     design: Option<String>,
@@ -78,8 +78,8 @@ impl IssueRecord {
             description,
             status,
             priority,
-            issue_type,
             issue_kind,
+            issue_type,
             assignee,
             labels,
             design,
@@ -91,13 +91,19 @@ impl IssueRecord {
             updated_at,
             closed_at,
         } = self;
-        let issue_type = match issue_kind {
-            None => issue_type,
-            Some(issue_kind) if issue_kind == issue_type => issue_kind,
-            Some(_) => {
+        let issue_kind = match (issue_kind, issue_type) {
+            (Some(issue_kind), None) | (None, Some(issue_kind)) => issue_kind,
+            (Some(issue_kind), Some(issue_type)) if issue_kind == issue_type => issue_kind,
+            (Some(_), Some(_)) => {
                 return Err(IssueRecordError::MigrationConflict {
                     issue_id: id,
                     field: MigrationField::IssueKind,
+                });
+            }
+            (None, None) => {
+                return Err(IssueRecordError::InvalidData {
+                    issue_id: id,
+                    error: "missing issue kind (`issue_kind` or legacy `issue_type`)".to_string(),
                 });
             }
         };
@@ -108,7 +114,7 @@ impl IssueRecord {
             description,
             status,
             priority,
-            issue_type,
+            issue_kind,
             assignee,
             labels,
             design,
@@ -139,7 +145,7 @@ impl From<Issue> for IssueRecord {
             description,
             status,
             priority,
-            issue_type,
+            issue_kind,
             assignee,
             labels,
             design,
@@ -158,9 +164,9 @@ impl From<Issue> for IssueRecord {
             description,
             status,
             priority,
-            issue_type,
-            // Never serialized; the domain carries only `issue_type`.
-            issue_kind: None,
+            issue_kind: Some(issue_kind),
+            // Accepted only during loading; canonical writes never emit `issue_type`.
+            issue_type: None,
             assignee,
             labels,
             design,

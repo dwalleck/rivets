@@ -87,7 +87,7 @@ impl RivetsMcpServer {
             .ready(
                 params.limit,
                 params.priority,
-                params.issue_type.as_deref(),
+                params.issue_kind.as_deref(),
                 params.assignee,
                 params.label,
                 params.workspace_root.as_deref(),
@@ -101,7 +101,7 @@ impl RivetsMcpServer {
 
     /// List issues with optional filters.
     #[tool(
-        description = "List all issues with optional filters (status, priority, type, assignee, label). Returns up to 100 results by default if no limit specified. Uses workspace_root if provided, otherwise uses current context."
+        description = "List all issues with optional filters (status, priority, kind, assignee, label). Returns up to 100 results by default if no limit specified. Uses workspace_root if provided, otherwise uses current context."
     )]
     async fn list(
         &self,
@@ -112,7 +112,7 @@ impl RivetsMcpServer {
             .list(
                 params.status.as_deref(),
                 params.priority,
-                params.issue_type.as_deref(),
+                params.issue_kind.as_deref(),
                 params.assignee,
                 params.label,
                 params.limit,
@@ -171,7 +171,7 @@ impl RivetsMcpServer {
                 params.title,
                 params.description,
                 params.priority,
-                params.issue_type.as_deref(),
+                params.issue_kind.as_deref(),
                 params.assignee,
                 params.labels,
                 params.design,
@@ -187,7 +187,7 @@ impl RivetsMcpServer {
 
     /// Update an existing issue.
     #[tool(
-        description = "Update an existing issue's status, priority, assignee, labels, description, design notes, or acceptance criteria. Use empty string for assignee to clear it. Labels replace existing labels when provided. Uses workspace_root if provided, otherwise uses current context."
+        description = "Update an existing issue's status, priority, kind, assignee, labels, description, design notes, or acceptance criteria. Use empty string for assignee to clear it. Labels replace existing labels when provided. Uses workspace_root if provided, otherwise uses current context."
     )]
     async fn update(
         &self,
@@ -209,6 +209,7 @@ impl RivetsMcpServer {
                 params.description,
                 params.status.as_deref(),
                 params.priority,
+                params.issue_kind.as_deref(),
                 assignee,
                 params.design,
                 params.acceptance_criteria,
@@ -584,10 +585,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_list_with_invalid_issue_type_returns_invalid_params() {
+    async fn test_list_with_invalid_issue_kind_returns_invalid_params() {
         let server = RivetsMcpServer::new();
 
-        let temp = std::env::temp_dir().join("rivets-test-invalid-type");
+        let temp = std::env::temp_dir().join("rivets-test-invalid-kind");
         std::fs::create_dir_all(temp.join(".rivets")).ok();
         std::fs::write(temp.join(".rivets/rivets.jsonl"), "").ok();
 
@@ -599,7 +600,7 @@ mod tests {
 
         let result = server
             .list(Parameters(ListParams {
-                issue_type: Some("invalid_type".to_string()),
+                issue_kind: Some("invalid_kind".to_string()),
                 ..Default::default()
             }))
             .await;
@@ -609,8 +610,8 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
-            err.message.contains("Invalid issue_type"),
-            "Expected InvalidArgument error for issue_type, got: {}",
+            err.message.contains("Invalid issue_kind"),
+            "Expected InvalidArgument error for issue_kind, got: {}",
             err.message
         );
     }

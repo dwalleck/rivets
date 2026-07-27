@@ -108,7 +108,7 @@ RUST_LOG=debug rivets-mcp
 {
   "status": "open",           // optional: open, in_progress, blocked, closed
   "priority": 1,              // optional: 0-4
-  "issue_type": "bug",        // optional: bug, feature, task, epic, chore
+  "issue_kind": "bug",        // optional: bug, feature, task, epic, chore
   "assignee": "alice",        // optional
   "label": "urgent",          // optional
   "limit": 20,                // optional, default 100
@@ -123,7 +123,7 @@ RUST_LOG=debug rivets-mcp
   "title": "Fix login bug",           // required
   "description": "Users can't...",    // optional
   "priority": 1,                      // optional, default 2
-  "issue_type": "bug",                // optional, default "task"
+  "issue_kind": "bug",                // optional, default "task"
   "assignee": "bob",                  // optional
   "labels": ["urgent", "auth"],       // optional
   "design": "## Approach\n...",       // optional
@@ -140,6 +140,7 @@ RUST_LOG=debug rivets-mcp
   "title": "New title",               // optional
   "status": "in_progress",            // optional
   "priority": 0,                      // optional
+  "issue_kind": "bug",                // optional
   "assignee": "",                     // optional, empty string clears
   "workspace_root": "/path"           // optional
 }

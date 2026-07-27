@@ -10,7 +10,7 @@
 //!   - Emphasis:      bold    (section headers, P0)
 //!   - Default:       white   (open status)
 
-use crate::domain::{IssueStatus, IssueType};
+use crate::domain::{IssueKind, IssueStatus};
 use colored::Colorize;
 
 use super::OutputConfig;
@@ -156,46 +156,46 @@ pub(crate) fn yellow(text: &str, config: &OutputConfig) -> String {
     text.yellow().to_string()
 }
 
-/// Get a type icon for issue types, with ASCII fallback support.
-pub(crate) fn type_icon(issue_type: IssueType, config: &OutputConfig) -> &'static str {
+/// Get a kind icon, with ASCII fallback support.
+pub(crate) fn kind_icon(issue_kind: IssueKind, config: &OutputConfig) -> &'static str {
     if config.use_ascii {
-        match issue_type {
-            IssueType::Task => "-",
-            IssueType::Bug => "*",
-            IssueType::Feature => "+",
-            IssueType::Epic => "#",
-            IssueType::Chore => ".",
+        match issue_kind {
+            IssueKind::Task => "-",
+            IssueKind::Bug => "*",
+            IssueKind::Feature => "+",
+            IssueKind::Epic => "#",
+            IssueKind::Chore => ".",
         }
     } else {
-        match issue_type {
-            IssueType::Task => "◇",
-            IssueType::Bug => "●",
-            IssueType::Feature => "★",
-            IssueType::Epic => "◆",
-            IssueType::Chore => "○",
+        match issue_kind {
+            IssueKind::Task => "◇",
+            IssueKind::Bug => "●",
+            IssueKind::Feature => "★",
+            IssueKind::Epic => "◆",
+            IssueKind::Chore => "○",
         }
     }
 }
 
-/// Get a colored type icon for issue types.
-pub(crate) fn colored_type_icon(issue_type: IssueType, config: &OutputConfig) -> String {
-    let icon = type_icon(issue_type, config);
+/// Get a colored kind icon.
+pub(crate) fn colored_kind_icon(issue_kind: IssueKind, config: &OutputConfig) -> String {
+    let icon = kind_icon(issue_kind, config);
     if !config.use_colors {
         return icon.to_string();
     }
-    match issue_type {
-        IssueType::Bug => icon.red().to_string(),
-        IssueType::Feature => icon.green().to_string(),
-        IssueType::Epic => icon.magenta().bold().to_string(),
-        IssueType::Task => icon.blue().to_string(),
-        IssueType::Chore => icon.dimmed().to_string(),
+    match issue_kind {
+        IssueKind::Bug => icon.red().to_string(),
+        IssueKind::Feature => icon.green().to_string(),
+        IssueKind::Epic => icon.magenta().bold().to_string(),
+        IssueKind::Task => icon.blue().to_string(),
+        IssueKind::Chore => icon.dimmed().to_string(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::IssueType;
+    use crate::domain::IssueKind;
     use colored::control::set_override;
     use std::sync::{Mutex, MutexGuard};
 
@@ -324,22 +324,22 @@ mod tests {
     #[test]
     fn test_type_icon() {
         let config = OutputConfig::default();
-        assert_eq!(type_icon(IssueType::Task, &config), "◇");
-        assert_eq!(type_icon(IssueType::Bug, &config), "●");
-        assert_eq!(type_icon(IssueType::Feature, &config), "★");
-        assert_eq!(type_icon(IssueType::Epic, &config), "◆");
-        assert_eq!(type_icon(IssueType::Chore, &config), "○");
+        assert_eq!(kind_icon(IssueKind::Task, &config), "◇");
+        assert_eq!(kind_icon(IssueKind::Bug, &config), "●");
+        assert_eq!(kind_icon(IssueKind::Feature, &config), "★");
+        assert_eq!(kind_icon(IssueKind::Epic, &config), "◆");
+        assert_eq!(kind_icon(IssueKind::Chore, &config), "○");
     }
 
     #[test]
     fn test_ascii_fallback_icons() {
         let config = OutputConfig::new(80, true, true);
 
-        assert_eq!(type_icon(IssueType::Task, &config), "-");
-        assert_eq!(type_icon(IssueType::Bug, &config), "*");
-        assert_eq!(type_icon(IssueType::Feature, &config), "+");
-        assert_eq!(type_icon(IssueType::Epic, &config), "#");
-        assert_eq!(type_icon(IssueType::Chore, &config), ".");
+        assert_eq!(kind_icon(IssueKind::Task, &config), "-");
+        assert_eq!(kind_icon(IssueKind::Bug, &config), "*");
+        assert_eq!(kind_icon(IssueKind::Feature, &config), "+");
+        assert_eq!(kind_icon(IssueKind::Epic, &config), "#");
+        assert_eq!(kind_icon(IssueKind::Chore, &config), ".");
 
         let config_no_color = OutputConfig::new(80, true, false);
         let open = colored_status_icon(IssueStatus::Open, &config_no_color);
@@ -359,14 +359,14 @@ mod tests {
     #[test]
     fn test_colored_type_icon_without_colors() {
         let config = OutputConfig::new(80, false, false);
-        let bug = colored_type_icon(IssueType::Bug, &config);
+        let bug = colored_kind_icon(IssueKind::Bug, &config);
         assert_eq!(bug, "●");
         assert!(
             !bug.contains("\x1b["),
             "Bug icon should NOT have ANSI codes"
         );
 
-        let feature = colored_type_icon(IssueType::Feature, &config);
+        let feature = colored_kind_icon(IssueKind::Feature, &config);
         assert_eq!(feature, "★");
         assert!(
             !feature.contains("\x1b["),
@@ -378,14 +378,14 @@ mod tests {
     fn test_colored_type_icon_with_colors() {
         with_colors_enabled(|| {
             let config = OutputConfig::new(80, false, true);
-            let bug = colored_type_icon(IssueType::Bug, &config);
+            let bug = colored_kind_icon(IssueKind::Bug, &config);
             assert!(bug.contains("●"), "Bug icon should contain the icon");
             assert!(
                 bug.contains("\x1b["),
                 "Bug icon should have ANSI codes when colors enabled"
             );
 
-            let feature = colored_type_icon(IssueType::Feature, &config);
+            let feature = colored_kind_icon(IssueKind::Feature, &config);
             assert!(
                 feature.contains("★"),
                 "Feature icon should contain the icon"
@@ -395,7 +395,7 @@ mod tests {
                 "Feature icon should have ANSI codes when colors enabled"
             );
 
-            let epic = colored_type_icon(IssueType::Epic, &config);
+            let epic = colored_kind_icon(IssueKind::Epic, &config);
             assert!(epic.contains("◆"), "Epic icon should contain the icon");
             assert!(
                 epic.contains("\x1b["),
@@ -407,11 +407,11 @@ mod tests {
     #[test]
     fn test_colored_type_icon_ascii_mode() {
         let config = OutputConfig::new(80, true, false);
-        assert_eq!(colored_type_icon(IssueType::Bug, &config), "*");
-        assert_eq!(colored_type_icon(IssueType::Feature, &config), "+");
-        assert_eq!(colored_type_icon(IssueType::Epic, &config), "#");
-        assert_eq!(colored_type_icon(IssueType::Task, &config), "-");
-        assert_eq!(colored_type_icon(IssueType::Chore, &config), ".");
+        assert_eq!(colored_kind_icon(IssueKind::Bug, &config), "*");
+        assert_eq!(colored_kind_icon(IssueKind::Feature, &config), "+");
+        assert_eq!(colored_kind_icon(IssueKind::Epic, &config), "#");
+        assert_eq!(colored_kind_icon(IssueKind::Task, &config), "-");
+        assert_eq!(colored_kind_icon(IssueKind::Chore, &config), ".");
     }
 
     #[test]
