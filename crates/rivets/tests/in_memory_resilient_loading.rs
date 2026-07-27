@@ -564,7 +564,7 @@ mod load_from_jsonl_tests {
     }
 
     #[tokio::test]
-    async fn conflicting_legacy_and_canonical_fields_report_the_field() {
+    async fn conflicting_emitted_and_migration_fields_report_distinct_names() {
         let content = r#"{"id":"test-conflict","title":"Conflict","description":"Test","status":"open","priority":2,"issue_type":"task","issue_kind":"feature","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":null,"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#;
         let file = create_temp_jsonl_file(content);
 
@@ -589,9 +589,9 @@ mod load_from_jsonl_tests {
                 assert_eq!(issue_id.as_str(), "test-conflict");
                 assert_eq!(*line_number, 1);
                 assert_eq!(*field, MigrationField::IssueKind);
-                assert_eq!(field.name(), "issue_kind");
-                assert_eq!(field.legacy_name(), "issue_type");
-                assert_eq!(field.canonical_name(), "issue_kind");
+                assert_eq!(field.emitted_name(), "issue_type");
+                assert_eq!(field.accepted_migration_name(), "issue_kind");
+                assert_ne!(field.emitted_name(), field.accepted_migration_name());
             }
             warning => panic!("Expected MigrationConflict warning, got {warning:?}"),
         }
