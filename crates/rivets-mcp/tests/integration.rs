@@ -65,6 +65,7 @@ storage:
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .expect("create should succeed")
@@ -206,6 +207,7 @@ storage:
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .expect("create should succeed");
@@ -258,7 +260,6 @@ async fn test_issue_lifecycle_create_update_close() {
             None,
             None,
             None,
-            None,
             None, // labels
             None, // workspace_root
         )
@@ -289,6 +290,69 @@ async fn test_issue_lifecycle_create_update_close() {
     assert_eq!(shown.status, "closed");
 }
 
+#[tokio::test]
+async fn test_notes_create_append_validate_and_survive_context_restart() {
+    let workspace = create_temp_workspace();
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+
+    let created = tools
+        .create(
+            "Note history".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("Initial context".to_string()),
+            None,
+        )
+        .await
+        .expect("create with an initial Note should succeed");
+    assert_eq!(created.notes.len(), 1);
+    assert_eq!(created.notes[0].content, "Initial context");
+    assert_eq!(created.notes[0].created_at, created.updated_at);
+
+    let appended = tools
+        .add_note(&created.id, "Second finding".to_string(), None)
+        .await
+        .expect("add_note should append");
+    assert_eq!(appended.notes.len(), 2);
+    assert_eq!(appended.notes[0], created.notes[0]);
+    assert_eq!(appended.notes[1].content, "Second finding");
+    assert_eq!(appended.notes[1].created_at, appended.updated_at);
+
+    let empty = tools.add_note(&created.id, " \n ".to_string(), None).await;
+    assert!(matches!(empty, Err(Error::InvalidNote(_))));
+
+    let closed = tools
+        .close(&created.id, Some("Completed".to_string()), None)
+        .await
+        .expect("close reason should append a Note");
+    assert_eq!(closed.notes.len(), 3);
+    assert_eq!(closed.notes[2].content, "Completed");
+    assert_eq!(closed.notes[2].created_at, closed.updated_at);
+    assert_eq!(closed.notes[2].created_at, closed.closed_at.unwrap());
+
+    let reopened = tools
+        .reopen(&created.id, Some("Needs more work".to_string()), None)
+        .await
+        .expect("reopen reason should append a Note");
+    assert_eq!(reopened.notes.len(), 4);
+    assert_eq!(reopened.notes[3].content, "Needs more work");
+    assert_eq!(reopened.notes[3].created_at, reopened.updated_at);
+
+    let restarted = create_tools();
+    set_context(&restarted, workspace.path()).await;
+    let shown = restarted
+        .show(&created.id, None)
+        .await
+        .expect("restarted context should load Notes");
+    assert_eq!(shown.notes, reopened.notes);
+}
+
 /// Test issue creation with all optional fields.
 #[tokio::test]
 async fn test_create_issue_with_all_fields() {
@@ -306,6 +370,7 @@ async fn test_create_issue_with_all_fields() {
             Some(vec!["urgent".to_string(), "frontend".to_string()]),
             Some("Technical design notes".to_string()),
             Some("- [ ] Criteria 1\n- [ ] Criteria 2".to_string()),
+            None,
             None,
         )
         .await
@@ -339,6 +404,7 @@ async fn test_create_all_issue_kinds() {
                 None,
                 None,
                 Some(issue_kind),
+                None,
                 None,
                 None,
                 None,
@@ -398,7 +464,6 @@ async fn test_update_reclassifies_only_kind_and_persists_across_context_restart(
             None,
             None,
             Some("bug"),
-            None,
             None,
             None,
             None,
@@ -602,6 +667,7 @@ async fn test_error_invalid_issue_kind() {
             None,
             None,
             Some("invalid_kind"),
+            None,
             None,
             None,
             None,
@@ -1260,6 +1326,7 @@ async fn test_assignee_clearing() {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1276,7 +1343,6 @@ async fn test_assignee_clearing() {
             None,
             None,       // issue_kind
             Some(None), // This clears the assignee
-            None,
             None,
             None,
             None,
@@ -1307,6 +1373,7 @@ async fn test_assignee_update_vs_noop() {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1321,7 +1388,6 @@ async fn test_assignee_update_vs_noop() {
             None,
             None, // issue_kind
             None, // None means don't update
-            None,
             None,
             None,
             None,
@@ -1342,7 +1408,6 @@ async fn test_assignee_update_vs_noop() {
             None,
             None, // issue_kind
             Some(Some("new".to_string())),
-            None,
             None,
             None,
             None,
@@ -1429,7 +1494,6 @@ async fn test_update_persistence() {
                 Some("in_progress"),
                 None,
                 None, // issue_kind
-                None,
                 None,
                 None,
                 None,
@@ -1930,6 +1994,7 @@ async fn test_assignee_case_sensitivity() {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("create should succeed");
@@ -2018,6 +2083,7 @@ async fn test_unicode_support() {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("create with Japanese title should succeed");
@@ -2041,6 +2107,7 @@ async fn test_unicode_support() {
             Some("bug"),
             None,
             Some(vec!["🔥hotfix".to_string(), "critical".to_string()]),
+            None,
             None,
             None,
             None,
@@ -2075,6 +2142,7 @@ async fn test_unicode_support() {
             None,
             None,
             Some("José García".to_string()),
+            None,
             None,
             None,
             None,
@@ -2131,6 +2199,7 @@ async fn test_unicode_titles_in_list() {
         tools
             .create(
                 (*title).to_string(),
+                None,
                 None,
                 None,
                 None,
@@ -2284,6 +2353,7 @@ async fn test_invalid_issue_kind_values(#[case] invalid_value: &str, #[case] exp
             None,
             None,
             None,
+            None,
         )
         .await;
 
@@ -2382,7 +2452,6 @@ async fn test_invalid_status_in_update(#[case] invalid_value: &str) {
             None,
             None,
             None,
-            None,
             None, // labels
             None, // workspace_root
         )
@@ -2454,6 +2523,7 @@ async fn test_complete_issue_lifecycle_all_states() {
             Some("Design notes here".to_string()),
             Some("- [ ] Criteria 1".to_string()),
             None,
+            None,
         )
         .await
         .expect("create should succeed");
@@ -2473,7 +2543,6 @@ async fn test_complete_issue_lifecycle_all_states() {
             None,
             None,
             None,
-            Some("Started working on this".to_string()),
             None,
             None, // labels
             None, // workspace_root
@@ -2482,10 +2551,6 @@ async fn test_complete_issue_lifecycle_all_states() {
         .expect("update to in_progress should succeed");
 
     assert_eq!(in_progress.status, "in_progress");
-    assert_eq!(
-        in_progress.notes,
-        Some("Started working on this".to_string())
-    );
 
     // Transition to blocked
     let blocked = tools
@@ -2499,7 +2564,6 @@ async fn test_complete_issue_lifecycle_all_states() {
             None,
             None,
             None,
-            Some("Waiting for dependency".to_string()),
             None,
             None, // labels
             None, // workspace_root
@@ -2526,7 +2590,6 @@ async fn test_complete_issue_lifecycle_all_states() {
             None,
             None,
             None,
-            Some("Resumed work".to_string()),
             None,
             None, // labels
             None, // workspace_root
@@ -2580,6 +2643,7 @@ async fn test_update_preserves_unmodified_fields() {
             Some("Original Design".to_string()),
             Some("Original Criteria".to_string()),
             None,
+            None,
         )
         .await
         .expect("create should succeed");
@@ -2596,7 +2660,6 @@ async fn test_update_preserves_unmodified_fields() {
             None, // Don't update assignee
             None, // Don't update design
             None, // Don't update acceptance
-            None, // Don't update notes
             None, // Don't update external_ref
             None, // labels
             None, // workspace_root
@@ -2722,6 +2785,7 @@ async fn test_all_tools_with_storage_backend() {
             Some("Design".to_string()),
             Some("Criteria".to_string()),
             None,
+            None,
         )
         .await
         .expect("create should succeed");
@@ -2762,7 +2826,6 @@ async fn test_all_tools_with_storage_backend() {
             None,
             None,
             None,
-            None,
             None, // labels
             None, // workspace_root
         )
@@ -2775,6 +2838,7 @@ async fn test_all_tools_with_storage_backend() {
     let blocker = tools
         .create(
             "Blocker Issue".to_string(),
+            None,
             None,
             None,
             None,
@@ -2934,7 +2998,6 @@ async fn test_issue_counts_accurate() {
             Some("in_progress"),
             None,
             None, // issue_kind
-            None,
             None,
             None,
             None,

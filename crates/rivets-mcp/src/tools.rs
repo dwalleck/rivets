@@ -23,6 +23,7 @@ use crate::models::{
 };
 use rivets::domain::{
     DependencyType, IssueFilter, IssueId, IssueKind, IssueStatus, IssueUpdate, NewIssue,
+    NoteContent,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -274,7 +275,7 @@ impl Tools {
     ///
     /// Returns an error if no context is set, invalid `issue_kind`, or storage operations fail.
     #[allow(clippy::too_many_arguments)]
-    #[instrument(skip(self, description, labels, design, acceptance_criteria), fields(%title))]
+    #[instrument(skip(self, description, labels, design, acceptance_criteria, notes), fields(%title))]
     pub async fn create(
         &self,
         title: String,
@@ -285,6 +286,7 @@ impl Tools {
         labels: Option<Vec<String>>,
         design: Option<String>,
         acceptance_criteria: Option<String>,
+        notes: Option<String>,
         workspace_root: Option<&str>,
     ) -> Result<McpIssue> {
         debug!("Creating issue");
@@ -293,6 +295,7 @@ impl Tools {
             .map(validate_issue_kind)
             .transpose()?
             .unwrap_or(IssueKind::Task);
+        let initial_note = notes.map(NoteContent::new).transpose()?;
 
         let storage = {
             let context = self.context.read().await;
@@ -309,7 +312,7 @@ impl Tools {
             labels: labels.unwrap_or_default(),
             design,
             acceptance_criteria,
-            notes: None,
+            initial_note,
             external_ref: None,
             dependencies: vec![],
         };
@@ -332,7 +335,7 @@ impl Tools {
     ///
     /// Returns an error if no context is set, invalid status, issue not found, or storage fails.
     #[allow(clippy::too_many_arguments)]
-    #[instrument(skip(self, title, description, design, acceptance_criteria, notes, external_ref, labels), fields(%issue_id))]
+    #[instrument(skip(self, title, description, design, acceptance_criteria, external_ref, labels), fields(%issue_id))]
     pub async fn update(
         &self,
         issue_id: &str,
@@ -344,7 +347,6 @@ impl Tools {
         assignee: Option<Option<String>>,
         design: Option<String>,
         acceptance_criteria: Option<String>,
-        notes: Option<String>,
         external_ref: Option<String>,
         labels: Option<Vec<String>>,
         workspace_root: Option<&str>,
@@ -370,7 +372,7 @@ impl Tools {
             assignee,
             design,
             acceptance_criteria,
-            notes,
+            note: None,
             external_ref,
             labels,
         };
@@ -387,6 +389,44 @@ impl Tools {
         Ok(issue.into())
     }
 
+    /// Append an immutable Note to an Issue.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the Note is empty, no context is set, the Issue is
+    /// not found, or persistence fails.
+    #[instrument(skip(self, content), fields(%issue_id))]
+    pub async fn add_note(
+        &self,
+        issue_id: &str,
+        content: String,
+        workspace_root: Option<&str>,
+    ) -> Result<McpIssue> {
+        let note = NoteContent::new(content)?;
+        let storage = {
+            let workspace_context = self.context.read().await;
+            workspace_context.storage_for(workspace_root.map(Path::new))?
+        };
+        let mut storage = storage.write().await;
+
+        let issue = storage
+            .update(
+                &IssueId::new(issue_id),
+                IssueUpdate {
+                    note: Some(note),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        if let Err(error) = storage.save().await {
+            if let Err(reload_error) = storage.reload().await {
+                tracing::error!(error = %reload_error, "Failed to reload after save error");
+            }
+            return Err(error.into());
+        }
+        Ok(issue.into())
+    }
+
     /// Close an issue.
     ///
     /// # Errors
@@ -400,6 +440,7 @@ impl Tools {
         workspace_root: Option<&str>,
     ) -> Result<McpIssue> {
         debug!("Closing issue");
+        let note = reason.map(NoteContent::new).transpose()?;
         let storage = {
             let context = self.context.read().await;
             context.storage_for(workspace_root.map(Path::new))?
@@ -409,7 +450,7 @@ impl Tools {
         let id = IssueId::new(issue_id);
         let updates = IssueUpdate {
             status: Some(rivets::domain::IssueStatus::Closed),
-            notes: reason,
+            note,
             ..Default::default()
         };
 
@@ -484,6 +525,7 @@ impl Tools {
         workspace_root: Option<&str>,
     ) -> Result<McpIssue> {
         debug!("Reopening issue");
+        let note = reason.map(NoteContent::new).transpose()?;
         let storage = {
             let context = self.context.read().await;
             context.storage_for(workspace_root.map(Path::new))?
@@ -493,7 +535,7 @@ impl Tools {
         let id = IssueId::new(issue_id);
         let updates = IssueUpdate {
             status: Some(IssueStatus::Open),
-            notes: reason,
+            note,
             ..Default::default()
         };
 
@@ -710,6 +752,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap()
@@ -728,6 +771,7 @@ mod tests {
                 Some("task"),
                 Some("alice".to_string()),
                 Some(vec!["label1".to_string()]),
+                None,
                 None,
                 None,
                 None,
@@ -776,7 +820,6 @@ mod tests {
                 Some("in_progress"),
                 Some(0),
                 None, // issue_kind
-                None,
                 None,
                 None,
                 None,
@@ -964,6 +1007,7 @@ mod tests {
                             None,
                             None,
                             None,
+                            None,
                         )
                         .await;
                 }
@@ -1038,6 +1082,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -1065,6 +1110,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -1077,6 +1123,7 @@ mod tests {
                 None,
                 None,
                 Some(vec!["feature".to_string(), "frontend".to_string()]),
+                None,
                 None,
                 None,
                 None,

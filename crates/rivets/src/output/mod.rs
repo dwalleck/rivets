@@ -12,7 +12,7 @@ pub mod color;
 mod json;
 pub mod tree;
 
-use crate::domain::{Dependency, Issue};
+use crate::domain::{Dependency, Issue, Note};
 use colored::Colorize;
 use serde::Serialize;
 use std::env;
@@ -189,6 +189,28 @@ fn print_optional_section<W: Write>(
 ) -> io::Result<()> {
     if let Some(text) = content {
         print_text_section(w, title, text, width, config)?;
+    }
+    Ok(())
+}
+
+/// Print immutable Notes in chronological insertion order.
+fn print_notes_section<W: Write>(
+    w: &mut W,
+    notes: &[Note],
+    width: usize,
+    config: &OutputConfig,
+) -> io::Result<()> {
+    if notes.is_empty() {
+        return Ok(());
+    }
+
+    writeln!(w)?;
+    writeln!(w, "{} ({}):", bold("Notes", config), notes.len())?;
+    for note in notes {
+        writeln!(w, "  {}", dimmed(&note.created_at().to_rfc3339(), config))?;
+        for line in wrap_text(note.content(), width.saturating_sub(4)) {
+            writeln!(w, "    {line}")?;
+        }
     }
     Ok(())
 }
@@ -417,7 +439,7 @@ fn print_issue_details_text<W: Write>(
         content_width,
         config,
     )?;
-    print_optional_section(w, "Notes", &issue.notes, content_width, config)?;
+    print_notes_section(w, issue.notes(), content_width, config)?;
 
     // Dependencies section
     if !deps.is_empty() {
@@ -531,7 +553,7 @@ mod tests {
             labels: vec!["urgent".to_string()],
             design: None,
             acceptance_criteria: None,
-            notes: None,
+            notes: vec![],
             external_ref: None,
             dependencies: vec![],
             created_at: Utc::now(),

@@ -512,6 +512,116 @@ fn test_cli_update_issue(initialized_dir: TempDir) {
 }
 
 #[rstest]
+fn test_cli_notes_append_and_survive_restart(initialized_dir: TempDir) {
+    let issue_id = create_issue(
+        initialized_dir.path(),
+        "Note history",
+        &["--notes", "Initial context"],
+    );
+
+    let initial = run_rivets_in_dir(initialized_dir.path(), &["--json", "show", &issue_id]);
+    assert!(
+        initial.status.success(),
+        "Initial show failed: {}",
+        String::from_utf8_lossy(&initial.stderr)
+    );
+    let initial: serde_json::Value =
+        serde_json::from_slice(&initial.stdout).expect("initial show output should be JSON");
+    let initial_issue = &initial[0];
+    assert_eq!(initial_issue["notes"][0]["content"], "Initial context");
+    assert_eq!(
+        initial_issue["notes"][0]["created_at"],
+        initial_issue["updated_at"]
+    );
+
+    let update = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["update", &issue_id, "--notes", "Second finding"],
+    );
+    assert!(
+        update.status.success(),
+        "Note append failed: {}",
+        String::from_utf8_lossy(&update.stderr)
+    );
+
+    let restarted = run_rivets_in_dir(initialized_dir.path(), &["--json", "show", &issue_id]);
+    let restarted: serde_json::Value =
+        serde_json::from_slice(&restarted.stdout).expect("restarted show output should be JSON");
+    let restarted_issue = &restarted[0];
+    assert_eq!(restarted_issue["notes"][0]["content"], "Initial context");
+    assert_eq!(
+        restarted_issue["notes"][0]["created_at"],
+        initial_issue["notes"][0]["created_at"]
+    );
+    assert_eq!(restarted_issue["notes"][1]["content"], "Second finding");
+    assert_eq!(
+        restarted_issue["notes"][1]["created_at"],
+        restarted_issue["updated_at"]
+    );
+
+    let human = run_rivets_in_dir(initialized_dir.path(), &["show", &issue_id]);
+    let human = String::from_utf8_lossy(&human.stdout);
+    for note in restarted_issue["notes"]
+        .as_array()
+        .expect("Notes should be an array")
+    {
+        let timestamp = note["created_at"]
+            .as_str()
+            .expect("Note timestamp should be a string");
+        let human_timestamp = chrono::DateTime::parse_from_rfc3339(timestamp)
+            .expect("JSON Note timestamp should be RFC 3339")
+            .to_rfc3339();
+        assert!(
+            human.contains(&human_timestamp),
+            "human output should include Note timestamp {human_timestamp}"
+        );
+    }
+    let first = human
+        .find("Initial context")
+        .expect("human output should include initial Note");
+    let second = human
+        .find("Second finding")
+        .expect("human output should include appended Note");
+    assert!(first < second, "human output should preserve Note order");
+
+    let persisted = std::fs::read_to_string(initialized_dir.path().join(".rivets/issues.jsonl"))
+        .expect("persisted issues should be readable");
+    let persisted: serde_json::Value =
+        serde_json::from_str(persisted.lines().next().expect("one persisted issue"))
+            .expect("persisted issue should be JSON");
+    assert!(persisted["notes"].is_array());
+    assert_eq!(persisted["notes"][0]["content"], "Initial context");
+    assert_eq!(persisted["notes"][1]["content"], "Second finding");
+}
+
+#[rstest]
+fn test_cli_rejects_empty_notes_on_create_and_update(initialized_dir: TempDir) {
+    let create = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["create", "--title", "Invalid Note", "--notes", " \n "],
+    );
+    assert!(!create.status.success());
+    assert!(String::from_utf8_lossy(&create.stderr).contains("Note content cannot be empty"));
+    let after_failed_create = run_rivets_in_dir(initialized_dir.path(), &["--json", "list"]);
+    let after_failed_create: serde_json::Value =
+        serde_json::from_slice(&after_failed_create.stdout).expect("list output should be JSON");
+    assert_eq!(after_failed_create, serde_json::json!([]));
+
+    let issue_id = create_issue(initialized_dir.path(), "Valid Issue", &[]);
+    let update = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["update", &issue_id, "--notes", ""],
+    );
+    assert!(!update.status.success());
+    assert!(String::from_utf8_lossy(&update.stderr).contains("Note content cannot be empty"));
+
+    let shown = run_rivets_in_dir(initialized_dir.path(), &["--json", "show", &issue_id]);
+    let shown: serde_json::Value =
+        serde_json::from_slice(&shown.stdout).expect("show output should be JSON");
+    assert_eq!(shown[0]["notes"], serde_json::json!([]));
+}
+
+#[rstest]
 fn test_cli_reclassifies_only_kind_and_persists(initialized_dir: TempDir) {
     let issue_id = create_issue(
         initialized_dir.path(),
@@ -596,6 +706,42 @@ fn test_cli_close_issue(initialized_dir: TempDir) {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Closed 1 issue(s):"));
+}
+
+#[rstest]
+fn test_cli_close_and_reopen_reasons_append_notes(initialized_dir: TempDir) {
+    let issue_id = create_issue(initialized_dir.path(), "Lifecycle history", &[]);
+
+    let close = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["close", &issue_id, "--reason", "Fixed once"],
+    );
+    assert!(
+        close.status.success(),
+        "Close failed: {}",
+        String::from_utf8_lossy(&close.stderr)
+    );
+
+    let reopen = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["reopen", &issue_id, "--reason", "Regression found"],
+    );
+    assert!(
+        reopen.status.success(),
+        "Reopen failed: {}",
+        String::from_utf8_lossy(&reopen.stderr)
+    );
+
+    let restarted = run_rivets_in_dir(initialized_dir.path(), &["--json", "show", &issue_id]);
+    let restarted: serde_json::Value =
+        serde_json::from_slice(&restarted.stdout).expect("show output should be JSON");
+    let issue = &restarted[0];
+    assert_eq!(issue["notes"].as_array().map(Vec::len), Some(2));
+    assert_eq!(issue["notes"][0]["content"], "Closed: Fixed once");
+    assert_eq!(issue["notes"][0]["created_at"], issue["closed_at"]);
+    assert_eq!(issue["notes"][1]["content"], "Reopened: Regression found");
+    assert_eq!(issue["notes"][1]["created_at"], issue["updated_at"]);
+    assert_eq!(issue["status"], "open");
 }
 
 // ============================================================================

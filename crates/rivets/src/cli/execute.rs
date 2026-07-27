@@ -125,7 +125,7 @@ pub async fn execute_create(
     args: &CreateArgs,
     output_mode: OutputMode,
 ) -> Result<()> {
-    use crate::domain::{DependencyType as DomainDepType, IssueId, NewIssue};
+    use crate::domain::{DependencyType as DomainDepType, IssueId, NewIssue, NoteContent};
     use crate::output;
 
     // Get title (interactive prompt if not provided)
@@ -184,7 +184,7 @@ pub async fn execute_create(
         labels: args.labels.clone(),
         design: args.design.clone(),
         acceptance_criteria: args.acceptance.clone(),
-        notes: None,
+        initial_note: args.notes.clone().map(NoteContent::new).transpose()?,
         external_ref: args.external_ref.clone(),
         dependencies,
     };
@@ -297,7 +297,7 @@ pub async fn execute_show(
                         "labels": issue.labels,
                         "design": issue.design,
                         "acceptance_criteria": issue.acceptance_criteria,
-                        "notes": issue.notes,
+                        "notes": issue.notes(),
                         "external_ref": issue.external_ref,
                         "created_at": issue.created_at,
                         "updated_at": issue.updated_at,
@@ -341,7 +341,7 @@ pub async fn execute_update(
     output_mode: OutputMode,
 ) -> Result<()> {
     use super::types::BatchResult;
-    use crate::domain::{IssueId, IssueUpdate};
+    use crate::domain::{IssueId, IssueUpdate, NoteContent};
 
     if !args.has_updates() {
         anyhow::bail!(
@@ -352,6 +352,7 @@ pub async fn execute_update(
     }
 
     let mut result = BatchResult::new();
+    let note = args.notes.clone().map(NoteContent::new).transpose()?;
 
     for id_str in &args.issue_ids {
         let issue_id = IssueId::new(id_str);
@@ -370,7 +371,7 @@ pub async fn execute_update(
             },
             design: args.design.clone(),
             acceptance_criteria: args.acceptance.clone(),
-            notes: args.notes.clone(),
+            note: note.clone(),
             external_ref: args.external_ref.clone(),
             ..Default::default()
         };
@@ -477,27 +478,14 @@ fn output_batch_result(
     Ok(())
 }
 
-/// Append a new note to existing notes, separated by blank line.
-///
-/// Used by close/reopen commands to append reason notes to existing issue notes.
-/// Treats empty existing notes the same as None (returns just the new note).
-fn append_note(existing: Option<&str>, new_note: &str) -> String {
-    match existing {
-        Some(notes) if !notes.is_empty() => format!("{}\n\n{}", notes, new_note),
-        _ => new_note.to_string(),
-    }
-}
-
-/// Build a reason note for close/reopen operations.
-///
-/// If a reason is provided, formats it with the given prefix (e.g., "Closed" or "Reopened")
-/// and appends it to existing notes. Returns None if no reason provided.
+/// Build a lifecycle reason Note.
 fn build_reason_note(
-    existing_notes: Option<&str>,
     reason: Option<&str>,
     prefix: &str,
-) -> Option<String> {
-    reason.map(|r| append_note(existing_notes, &format!("{}: {}", prefix, r)))
+) -> std::result::Result<Option<crate::domain::NoteContent>, crate::domain::NoteError> {
+    reason
+        .map(|reason| crate::domain::NoteContent::new(format!("{prefix}: {reason}")))
+        .transpose()
 }
 
 /// Return an error if a batch operation had any failures.
@@ -684,7 +672,7 @@ pub async fn execute_close(
         let issue_id = IssueId::new(id_str);
         let update = IssueUpdate {
             status: Some(IssueStatus::Closed),
-            notes: build_reason_note(existing.notes.as_deref(), args.reason.as_deref(), "Closed"),
+            note: build_reason_note(args.reason.as_deref(), "Closed")?,
             ..Default::default()
         };
 
@@ -737,11 +725,7 @@ pub async fn execute_reopen(
         let issue_id = IssueId::new(id_str);
         let update = IssueUpdate {
             status: Some(IssueStatus::Open),
-            notes: build_reason_note(
-                existing.notes.as_deref(),
-                args.reason.as_deref(),
-                "Reopened",
-            ),
+            note: build_reason_note(args.reason.as_deref(), "Reopened")?,
             ..Default::default()
         };
 
@@ -1533,7 +1517,7 @@ mod tests {
             labels: vec![],
             design: None,
             acceptance_criteria: None,
-            notes: None,
+            notes: vec![],
             external_ref: None,
             dependencies: vec![],
             created_at: Utc::now(),
@@ -1711,50 +1695,6 @@ mod tests {
         }
     }
 
-    mod append_note_tests {
-        use super::super::append_note;
-        use rstest::rstest;
-
-        #[rstest]
-        #[case::no_existing_notes(None, "New note", "New note")]
-        #[case::with_existing_notes(
-            Some("Existing notes"),
-            "New note",
-            "Existing notes\n\nNew note"
-        )]
-        #[case::empty_existing_notes(Some(""), "New note", "New note")]
-        #[case::multiline_existing(
-            Some("Line 1\nLine 2"),
-            "New note",
-            "Line 1\nLine 2\n\nNew note"
-        )]
-        fn test_append_note(
-            #[case] existing: Option<&str>,
-            #[case] new_note: &str,
-            #[case] expected: &str,
-        ) {
-            let result = append_note(existing, new_note);
-            assert_eq!(result, expected);
-        }
-
-        #[test]
-        fn test_append_note_close_reason() {
-            let close_note = format!("Closed: {}", "Fixed the bug");
-            let result = append_note(Some("Initial description"), &close_note);
-            assert_eq!(result, "Initial description\n\nClosed: Fixed the bug");
-        }
-
-        #[test]
-        fn test_append_note_reopen_reason() {
-            let reopen_note = format!("Reopened: {}", "Bug still present");
-            let result = append_note(Some("Closed: Fixed the bug"), &reopen_note);
-            assert_eq!(
-                result,
-                "Closed: Fixed the bug\n\nReopened: Bug still present"
-            );
-        }
-    }
-
     mod validate_status_transition_tests {
         use super::super::validate_status_transition;
         use crate::domain::IssueStatus;
@@ -1830,47 +1770,6 @@ mod tests {
                 should_succeed,
                 result
             );
-        }
-    }
-
-    mod build_reason_note_tests {
-        use super::super::build_reason_note;
-        use rstest::rstest;
-
-        #[rstest]
-        #[case::no_reason(None, None, "Closed", None)]
-        #[case::with_reason_no_existing(
-            None,
-            Some("Fixed the bug"),
-            "Closed",
-            Some("Closed: Fixed the bug")
-        )]
-        #[case::with_reason_and_existing(
-            Some("Initial notes"),
-            Some("Fixed"),
-            "Closed",
-            Some("Initial notes\n\nClosed: Fixed")
-        )]
-        #[case::empty_existing_treated_as_none(
-            Some(""),
-            Some("Needs work"),
-            "Reopened",
-            Some("Reopened: Needs work")
-        )]
-        #[case::reopen_prefix(
-            None,
-            Some("Not actually fixed"),
-            "Reopened",
-            Some("Reopened: Not actually fixed")
-        )]
-        fn test_build_reason_note(
-            #[case] existing: Option<&str>,
-            #[case] reason: Option<&str>,
-            #[case] prefix: &str,
-            #[case] expected: Option<&str>,
-        ) {
-            let result = build_reason_note(existing, reason, prefix);
-            assert_eq!(result.as_deref(), expected);
         }
     }
 

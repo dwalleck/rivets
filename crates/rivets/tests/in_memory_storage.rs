@@ -6,7 +6,7 @@
 
 use rivets::domain::{
     DependencyType, IssueFilter, IssueId, IssueKind, IssueStatus, IssueUpdate, MAX_PRIORITY,
-    NewIssue, SortPolicy,
+    NewIssue, NoteContent, SortPolicy,
 };
 use rivets::error::Error;
 use rivets::storage::IssueStorage;
@@ -24,7 +24,7 @@ fn create_test_issue(title: &str) -> NewIssue {
         labels: vec![],
         design: None,
         acceptance_criteria: None,
-        notes: None,
+        initial_note: None,
         external_ref: None,
         dependencies: vec![],
     }
@@ -40,7 +40,7 @@ fn create_test_issue_with_priority(title: &str, priority: u8) -> NewIssue {
         labels: vec![],
         design: None,
         acceptance_criteria: None,
-        notes: None,
+        initial_note: None,
         external_ref: None,
         dependencies: vec![],
     }
@@ -119,6 +119,32 @@ async fn test_update_rejects_invalid_priority() {
         .await;
 
     assert!(matches!(result, Err(Error::InvalidPriority(_))));
+}
+
+#[tokio::test]
+async fn rejected_update_does_not_append_note_or_mutate_issue() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let created = storage
+        .create(create_test_issue("Original Title"))
+        .await
+        .unwrap();
+
+    let result = storage
+        .update(
+            &created.id,
+            IssueUpdate {
+                title: Some(" ".to_string()),
+                note: Some(NoteContent::new("Must not persist").unwrap()),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(result.is_err());
+
+    let unchanged = storage.get(&created.id).await.unwrap().unwrap();
+    assert_eq!(unchanged.title, "Original Title");
+    assert!(unchanged.notes().is_empty());
+    assert_eq!(unchanged.updated_at, created.updated_at);
 }
 
 #[tokio::test]

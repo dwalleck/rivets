@@ -20,6 +20,10 @@ pub enum Error {
         valid_values: &'static str,
     },
 
+    /// Note content failed domain validation.
+    #[error("Invalid note: {0}")]
+    InvalidNote(#[from] rivets::domain::NoteError),
+
     /// The requested issue was not found.
     #[error("Issue not found: {0}")]
     IssueNotFound(String),

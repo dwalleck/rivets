@@ -12,7 +12,7 @@
 //! - Round-trip persistence through save and load
 
 use chrono::Utc;
-use rivets::domain::{DependencyType, Issue, IssueId, IssueKind, IssueStatus, NewIssue};
+use rivets::domain::{DependencyType, IssueId, IssueKind, IssueStatus, NewIssue};
 use rivets::storage::in_memory::{
     LoadWarning, MigrationField, load_from_jsonl, new_in_memory_storage, save_to_jsonl,
 };
@@ -41,7 +41,7 @@ fn create_test_issue(title: &str) -> NewIssue {
         labels: vec![],
         design: None,
         acceptance_criteria: None,
-        notes: None,
+        initial_note: None,
         external_ref: None,
         dependencies: vec![],
     }
@@ -494,27 +494,10 @@ mod load_from_jsonl_tests {
 
     #[tokio::test]
     async fn load_preserves_all_issue_fields() {
-        let now = Utc::now();
-        let issue = Issue {
-            id: IssueId::new("test-full"),
-            title: "Full Issue".to_string(),
-            description: "Complete description".to_string(),
-            status: IssueStatus::InProgress,
-            priority: 1,
-            issue_kind: IssueKind::Feature,
-            assignee: Some("alice".to_string()),
-            labels: vec!["backend".to_string(), "urgent".to_string()],
-            design: Some("Design notes here".to_string()),
-            acceptance_criteria: Some("- Criterion 1\n- Criterion 2".to_string()),
-            notes: Some("Implementation notes".to_string()),
-            external_ref: Some("GH-123".to_string()),
-            dependencies: vec![],
-            created_at: now,
-            updated_at: now,
-            closed_at: None,
-        };
-
-        let json = serde_json::to_string(&issue).unwrap();
+        let now = Utc::now().to_rfc3339();
+        let json = format!(
+            r#"{{"id":"test-full","title":"Full Issue","description":"Complete description","status":"in_progress","priority":1,"issue_kind":"feature","assignee":"alice","labels":["backend","urgent"],"design":"Design notes here","acceptance_criteria":"- Criterion 1\n- Criterion 2","notes":[{{"content":"Implementation notes","created_at":"{now}"}}],"external_ref":"GH-123","dependencies":[],"created_at":"{now}","updated_at":"{now}","closed_at":null}}"#
+        );
         let file = create_temp_jsonl_file(&json);
 
         let (storage, warnings) = load_from_jsonl(file.path(), "test".to_string())
@@ -537,6 +520,9 @@ mod load_from_jsonl_tests {
         assert_eq!(loaded.labels, vec!["backend", "urgent"]);
         assert_eq!(loaded.design, Some("Design notes here".to_string()));
         assert_eq!(loaded.external_ref, Some("GH-123".to_string()));
+        assert_eq!(loaded.notes().len(), 1);
+        assert_eq!(loaded.notes()[0].content(), "Implementation notes");
+        assert_eq!(loaded.notes()[0].created_at().to_rfc3339(), now);
     }
 
     #[tokio::test]
@@ -595,6 +581,82 @@ mod load_from_jsonl_tests {
             }
             warning => panic!("Expected MigrationConflict warning, got {warning:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn legacy_note_preserves_exact_content_and_update_timestamp() {
+        let content = r#"{"id":"test-note","title":"Legacy Note","description":"Test","status":"open","priority":2,"issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":"Line 1\n\nLine 2  ","external_ref":null,"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T03:04:05Z","closed_at":null}"#;
+        let file = create_temp_jsonl_file(content);
+
+        let (storage, warnings) = load_from_jsonl(file.path(), "test".to_string())
+            .await
+            .expect("legacy Note should load");
+        assert!(warnings.is_empty());
+
+        let issue = storage
+            .get(&IssueId::new("test-note"))
+            .await
+            .expect("lookup should succeed")
+            .expect("legacy Issue should load");
+        assert_eq!(issue.notes().len(), 1);
+        assert_eq!(issue.notes()[0].content(), "Line 1\n\nLine 2  ");
+        assert_eq!(
+            issue.notes()[0].created_at().to_rfc3339(),
+            "2026-01-02T03:04:05+00:00"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_and_null_legacy_notes_load_as_empty_histories() {
+        let content = concat!(
+            r#"{"id":"test-missing","title":"Missing","description":"Test","status":"open","priority":2,"issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"external_ref":null,"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#,
+            "\n",
+            r#"{"id":"test-null","title":"Null","description":"Test","status":"open","priority":2,"issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":null,"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#,
+            "\n",
+            r#"{"id":"test-whitespace","title":"Whitespace","description":"Test","status":"open","priority":2,"issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":" \t ","external_ref":null,"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#
+        );
+        let file = create_temp_jsonl_file(content);
+
+        let (storage, warnings) = load_from_jsonl(file.path(), "test".to_string())
+            .await
+            .expect("legacy empty histories should load");
+        assert!(warnings.is_empty());
+        for id in ["test-missing", "test-null", "test-whitespace"] {
+            let issue = storage
+                .get(&IssueId::new(id))
+                .await
+                .expect("lookup should succeed")
+                .expect("Issue should load");
+            assert!(issue.notes().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_note_shape_is_rejected_with_a_warning() {
+        let content = r#"{"id":"test-malformed","title":"Malformed","description":"Test","status":"open","priority":2,"issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":{},"external_ref":null,"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#;
+        let file = create_temp_jsonl_file(content);
+
+        let (storage, warnings) = load_from_jsonl(file.path(), "test".to_string())
+            .await
+            .expect("resilient load should report malformed Note data");
+        assert_eq!(warnings.len(), 1);
+        match &warnings[0] {
+            LoadWarning::MalformedJson { line_number, error } => {
+                assert_eq!(*line_number, 1);
+                assert!(
+                    error.contains("PersistedNotes"),
+                    "warning should identify malformed Note data: {error}"
+                );
+            }
+            warning => panic!("expected malformed Note warning, got {warning:?}"),
+        }
+        assert!(
+            storage
+                .export_all()
+                .await
+                .expect("export should succeed")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -877,6 +939,13 @@ mod round_trip_tests {
         assert!(!canonical_text.contains("\"issue_type\""));
         assert!(canonical_text.contains("\"issue_kind\":\"bug\""));
         assert!(canonical_text.contains("\"issue_kind\":\"task\""));
+        let records: Vec<serde_json::Value> = canonical_text
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("canonical record should be JSON"))
+            .collect();
+        assert_eq!(records[0]["notes"][0]["content"], "History");
+        assert_eq!(records[0]["notes"][0]["created_at"], "2026-01-02T00:00:00Z");
+        assert_eq!(records[1]["notes"], serde_json::json!([]));
 
         let (reloaded, warnings) = load_from_jsonl(file.path(), "test".to_string())
             .await

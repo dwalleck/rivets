@@ -356,6 +356,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use super::{IssueId, Status, Priority, IssueType, Dependency};
 
+pub struct Note {
+    content: String,
+    created_at: DateTime<Utc>,
+}
+
+pub struct NoteContent(String);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Issue {
     pub id: IssueId,
@@ -363,7 +370,7 @@ pub struct Issue {
     pub description: String,
     pub design: Option<String>,
     pub acceptance_criteria: Option<String>,
-    pub notes: Option<String>,
+    notes: Vec<Note>,
     pub status: Status,
     pub priority: Priority,
     pub issue_type: IssueType,
@@ -381,7 +388,7 @@ pub struct NewIssue {
     pub description: String,
     pub design: Option<String>,
     pub acceptance_criteria: Option<String>,
-    pub notes: Option<String>,
+    pub initial_note: Option<NoteContent>,
     pub priority: Priority,
     pub issue_type: IssueType,
     pub assignee: Option<String>,
@@ -395,7 +402,7 @@ pub struct IssueUpdate {
     pub description: Option<String>,
     pub design: Option<String>,
     pub acceptance_criteria: Option<String>,
-    pub notes: Option<String>,
+    pub note: Option<NoteContent>,
     pub status: Option<Status>,
     pub priority: Option<Priority>,
     pub assignee: Option<String>,

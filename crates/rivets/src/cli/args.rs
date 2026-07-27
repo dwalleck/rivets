@@ -74,6 +74,10 @@ pub struct CreateArgs {
     #[arg(long, allow_hyphen_values = true)]
     pub acceptance: Option<String>,
 
+    /// Initial Note
+    #[arg(long, allow_hyphen_values = true)]
+    pub notes: Option<String>,
+
     /// External reference (e.g., GitHub issue URL)
     #[arg(long)]
     pub external_ref: Option<String>,
@@ -173,7 +177,7 @@ pub struct UpdateArgs {
     #[arg(long, allow_hyphen_values = true)]
     pub acceptance: Option<String>,
 
-    /// New notes
+    /// Note to append
     #[arg(long, allow_hyphen_values = true)]
     pub notes: Option<String>,
 
