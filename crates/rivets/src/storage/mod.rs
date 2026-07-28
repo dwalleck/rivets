@@ -73,7 +73,7 @@
 use crate::domain::{
     Dependency, DependencyType, Issue, IssueFilter, IssueId, IssueUpdate, NewIssue, SortPolicy,
 };
-use crate::error::Result;
+use crate::error::{PartialLoadError, Result, SkippedIssueRecordCause, StorageError};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 
@@ -307,6 +307,11 @@ pub trait IssueStorage: Send + Sync {
     ///
     /// For in-memory storage with JSONL backing, this writes to disk.
     /// For database backends, this is typically a no-op (auto-committed).
+    ///
+    /// # Errors
+    ///
+    /// JSONL-backed storage returns [`StorageError::UnsafePartialLoad`] when
+    /// resilient loading omitted any Issue record. No file write is attempted.
     async fn save(&self) -> Result<()>;
 
     /// Reload state from persistent storage, discarding in-memory changes.
@@ -365,14 +370,16 @@ impl StorageBackend {
     }
 }
 
-/// Wrapper that adds JSONL file persistence to any storage backend.
+/// Wrapper that adds guarded JSONL file persistence to an in-memory backend.
 ///
-/// This wrapper holds a reference to the file path and implements `save()`
-/// by writing all issues to the JSONL file atomically.
+/// Reads remain available after a resilient partial load. Mutations and saves
+/// are rejected before state changes when any Issue record was omitted, so an
+/// incomplete in-memory representation can never replace the source file.
 struct JsonlBackedStorage {
     inner: Box<dyn IssueStorage>,
     path: PathBuf,
     prefix: String,
+    load_warnings: Vec<in_memory::LoadWarning>,
 }
 
 impl JsonlBackedStorage {
@@ -384,11 +391,57 @@ impl JsonlBackedStorage {
     pub(crate) fn inner(&self) -> &dyn IssueStorage {
         self.inner.as_ref()
     }
+
+    fn unsafe_partial_load(&self) -> Option<StorageError> {
+        let causes = self
+            .load_warnings
+            .iter()
+            .filter_map(|warning| match warning {
+                in_memory::LoadWarning::MalformedJson { line_number, error } => {
+                    Some(SkippedIssueRecordCause::MalformedJson {
+                        line_number: *line_number,
+                        error: error.clone(),
+                    })
+                }
+                in_memory::LoadWarning::MigrationConflict {
+                    issue_id,
+                    line_number,
+                    field,
+                } => Some(SkippedIssueRecordCause::MigrationConflict {
+                    line_number: *line_number,
+                    issue_id: issue_id.clone(),
+                    emitted_field: field.emitted_name(),
+                    accepted_migration_field: field.accepted_migration_name(),
+                }),
+                in_memory::LoadWarning::InvalidIssueData {
+                    issue_id,
+                    line_number,
+                    error,
+                } => Some(SkippedIssueRecordCause::InvalidIssueData {
+                    line_number: *line_number,
+                    issue_id: issue_id.clone(),
+                    error: error.clone(),
+                }),
+                in_memory::LoadWarning::OrphanedDependency { .. }
+                | in_memory::LoadWarning::CircularDependency { .. } => None,
+            })
+            .collect();
+
+        PartialLoadError::new(causes).map(StorageError::from)
+    }
+
+    fn ensure_writable(&self) -> Result<()> {
+        match self.unsafe_partial_load() {
+            Some(error) => Err(error.into()),
+            None => Ok(()),
+        }
+    }
 }
 
 #[async_trait]
 impl IssueStorage for JsonlBackedStorage {
     async fn create(&mut self, issue: NewIssue) -> Result<Issue> {
+        self.ensure_writable()?;
         self.inner.create(issue).await
     }
 
@@ -397,10 +450,12 @@ impl IssueStorage for JsonlBackedStorage {
     }
 
     async fn update(&mut self, id: &IssueId, updates: IssueUpdate) -> Result<Issue> {
+        self.ensure_writable()?;
         self.inner.update(id, updates).await
     }
 
     async fn delete(&mut self, id: &IssueId) -> Result<()> {
+        self.ensure_writable()?;
         self.inner.delete(id).await
     }
 
@@ -410,10 +465,12 @@ impl IssueStorage for JsonlBackedStorage {
         to: &IssueId,
         dep_type: DependencyType,
     ) -> Result<()> {
+        self.ensure_writable()?;
         self.inner.add_dependency(from, to, dep_type).await
     }
 
     async fn remove_dependency(&mut self, from: &IssueId, to: &IssueId) -> Result<()> {
+        self.ensure_writable()?;
         self.inner.remove_dependency(from, to).await
     }
 
@@ -454,14 +511,17 @@ impl IssueStorage for JsonlBackedStorage {
     }
 
     async fn add_label(&mut self, id: &IssueId, label: &str) -> Result<Issue> {
+        self.ensure_writable()?;
         self.inner.add_label(id, label).await
     }
 
     async fn remove_label(&mut self, id: &IssueId, label: &str) -> Result<Issue> {
+        self.ensure_writable()?;
         self.inner.remove_label(id, label).await
     }
 
     async fn import_issues(&mut self, issues: Vec<Issue>) -> Result<()> {
+        self.ensure_writable()?;
         self.inner.import_issues(issues).await
     }
 
@@ -470,6 +530,7 @@ impl IssueStorage for JsonlBackedStorage {
     }
 
     async fn save(&self) -> Result<()> {
+        self.ensure_writable()?;
         in_memory::save_to_jsonl(self.inner.as_ref(), &self.path).await
     }
 
@@ -484,9 +545,11 @@ impl IssueStorage for JsonlBackedStorage {
                 }
             }
             self.inner = new_storage;
+            self.load_warnings = warnings;
         } else {
             // File doesn't exist - reset to empty storage
             self.inner = in_memory::new_in_memory_storage(self.prefix.clone());
+            self.load_warnings.clear();
         }
         Ok(())
     }
@@ -527,24 +590,25 @@ pub async fn create_storage(
         StorageBackend::InMemory => Ok(in_memory::new_in_memory_storage(prefix)),
         StorageBackend::Jsonl(path) => {
             // JSONL backend uses InMemoryStorage with file persistence
-            let inner = if path.exists() {
+            let (inner, load_warnings) = if path.exists() {
                 let (storage, warnings) = in_memory::load_from_jsonl(&path, prefix.clone()).await?;
                 if !warnings.is_empty() {
-                    // Log warnings but continue - storage is still usable
+                    // Log warnings but continue - read operations remain usable.
                     for warning in &warnings {
                         tracing::warn!(warning = ?warning, "JSONL load warning");
                     }
                 }
-                storage
+                (storage, warnings)
             } else {
                 // File doesn't exist yet (first run) - create empty storage
-                in_memory::new_in_memory_storage(prefix.clone())
+                (in_memory::new_in_memory_storage(prefix.clone()), Vec::new())
             };
             // Wrap in JsonlBackedStorage so save() writes to file
             Ok(Box::new(JsonlBackedStorage {
                 inner,
                 path,
                 prefix,
+                load_warnings,
             }))
         }
         StorageBackend::PostgreSQL(_conn_str) => {
@@ -916,6 +980,46 @@ mod tests {
         // Verify in-memory state matches disk (original title)
         let after_reload = storage.get(&issue_id).await.unwrap().unwrap();
         assert_eq!(after_reload.title, "Original Title");
+    }
+
+    #[tokio::test]
+    async fn partial_jsonl_load_rejects_mutation_before_changing_memory() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let jsonl_path = temp_dir.path().join("issues.jsonl");
+        let original = b"{\"id\":\"broken\",\"notes\":[}\n";
+        std::fs::write(&jsonl_path, original).unwrap();
+
+        let mut storage = create_storage(StorageBackend::Jsonl(jsonl_path.clone()), "test".into())
+            .await
+            .unwrap();
+        let result = storage
+            .create(NewIssue {
+                title: "Phantom issue".to_string(),
+                ..Default::default()
+            })
+            .await;
+
+        match result {
+            Err(crate::error::Error::Storage(StorageError::UnsafePartialLoad(error))) => {
+                assert_eq!(error.skipped_records(), 1);
+                assert!(matches!(
+                    error.causes(),
+                    [crate::error::SkippedIssueRecordCause::MalformedJson { line_number: 1, .. }]
+                ));
+            }
+            other => panic!("expected a typed partial-load error, got {other:?}"),
+        }
+        assert!(
+            storage
+                .list(&IssueFilter::default())
+                .await
+                .unwrap()
+                .is_empty(),
+            "rejected mutation must not change in-memory state"
+        );
+        assert_eq!(std::fs::read(&jsonl_path).unwrap(), original);
     }
 
     #[tokio::test]

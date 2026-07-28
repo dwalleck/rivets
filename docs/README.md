@@ -38,7 +38,7 @@ Detailed storage design including:
 **Key Highlights**:
 - Arc<Mutex<InMemoryStorageInner>> for thread safety
 - Two-pass JSONL loading (issues → dependencies)
-- Graceful error recovery (skip orphans, cycles, malformed JSON)
+- Graceful read recovery; writes stop when Issue records were skipped, while invalid dependency edges remain warnings
 - O(V+E) cycle detection via petgraph
 
 ### 📦 [Module Structure](./module-structure.md)
@@ -131,14 +131,15 @@ Standard terminology for:
 - **Tasks**: rivets-cgl, rivets-l66
 
 #### ✅ Error Recovery
-- **Decision**: Graceful degradation for JSONL corruption
-- **Rationale**: Partial recovery better than total failure
-- **Tasks**: rivets-l66, rivets-0gc
+- **Decision**: Recover readable JSONL data without allowing partial state to overwrite its source
+- **Rationale**: Partial read access is better than total failure; write refusal prevents recovered subsets from becoming destructive rewrites
+- **Tasks**: rivets-l66, rivets-0gc, rivets-u7ba
 - **Behavior**:
-  - Skip malformed JSON lines (log warning)
-  - Skip orphaned dependencies (log warning)
-  - Detect and skip circular dependencies (log warning)
-  - Return (Storage, Vec<Warning>) for user awareness
+  - Load unaffected Issues and report malformed or schema-incompatible records
+  - Reject mutations and saves when any Issue record was omitted
+  - Leave the JSONL file byte-for-byte unchanged on refusal
+  - Skip orphaned or circular dependency edges with warnings
+  - Return `(Storage, Vec<Warning>)` for user awareness
 
 #### ✅ Referential Integrity
 - **Decision**: Safe deletion with dependent check
@@ -292,7 +293,7 @@ tokio::fs::rename(&temp, path).await?;  // Atomic on POSIX
 **A**: Simpler mental model for CLI use case, easier to debug, sufficient performance (no contention in single-threaded runtime), and standard Rust pattern for shared mutable state.
 
 ### Q: Why auto-save after every command?
-**A**: Maximizes durability (resilient to crashes), simple to reason about (no complex flush logic), acceptable I/O overhead for CLI, and clear user expectations (command completes = persisted).
+**A**: On a complete load, auto-save maximizes durability, keeps the model simple, and makes successful command completion mean persisted state. If resilient loading omitted an Issue record, mutations and auto-save are rejected until the JSONL source is repaired and reloaded.
 
 ### Q: Why petgraph instead of custom graph?
 **A**: Battle-tested algorithms (cycle detection, traversal), well-documented API, good performance characteristics, and maintained by community. Trade-off: extra dependency vs. correctness guarantee.

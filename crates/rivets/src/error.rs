@@ -1,7 +1,7 @@
 //! Error types for rivets CLI operations.
 
 use crate::domain::IssueId;
-use std::io;
+use std::{fmt, io};
 use thiserror::Error;
 
 /// Configuration-related errors.
@@ -65,6 +65,129 @@ pub enum ConfigError {
     UnsupportedBackend(String),
 }
 
+/// The reason one persisted Issue record was omitted during resilient loading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SkippedIssueRecordCause {
+    /// The record could not be decoded from its JSONL representation.
+    MalformedJson {
+        /// Physical 1-based line number in the JSONL file.
+        line_number: usize,
+        /// Decoder error returned by the JSONL adapter.
+        error: String,
+    },
+    /// Canonical and migration-only representations of one field disagreed.
+    MigrationConflict {
+        /// Physical 1-based line number in the JSONL file.
+        line_number: usize,
+        /// Issue identifier decoded before the conflict was found.
+        issue_id: IssueId,
+        /// Canonical persisted field name.
+        emitted_field: &'static str,
+        /// Accepted migration-only field name.
+        accepted_migration_field: &'static str,
+    },
+    /// The decoded record violated an Issue invariant.
+    InvalidIssueData {
+        /// Physical 1-based line number in the JSONL file.
+        line_number: usize,
+        /// Issue identifier decoded before validation failed.
+        issue_id: IssueId,
+        /// Domain validation error.
+        error: String,
+    },
+}
+
+impl SkippedIssueRecordCause {
+    /// Returns the record's physical 1-based JSONL line number.
+    #[must_use]
+    pub const fn line_number(&self) -> usize {
+        match self {
+            Self::MalformedJson { line_number, .. }
+            | Self::MigrationConflict { line_number, .. }
+            | Self::InvalidIssueData { line_number, .. } => *line_number,
+        }
+    }
+}
+
+impl fmt::Display for SkippedIssueRecordCause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MalformedJson { line_number, error } => {
+                write!(f, "line {line_number}: malformed JSON ({error})")
+            }
+            Self::MigrationConflict {
+                line_number,
+                issue_id,
+                emitted_field,
+                accepted_migration_field,
+            } => write!(
+                f,
+                "line {line_number}: issue {issue_id} has conflicting '{emitted_field}' and '{accepted_migration_field}' fields"
+            ),
+            Self::InvalidIssueData {
+                line_number,
+                issue_id,
+                error,
+            } => write!(
+                f,
+                "line {line_number}: issue {issue_id} is invalid ({error})"
+            ),
+        }
+    }
+}
+
+/// A non-empty, typed account of Issue records omitted from a JSONL load.
+#[derive(Debug)]
+pub struct PartialLoadError {
+    causes: Box<[SkippedIssueRecordCause]>,
+}
+
+impl PartialLoadError {
+    pub(crate) fn new(mut causes: Vec<SkippedIssueRecordCause>) -> Option<Self> {
+        if causes.is_empty() {
+            None
+        } else {
+            causes.sort_by_key(SkippedIssueRecordCause::line_number);
+            Some(Self {
+                causes: causes.into_boxed_slice(),
+            })
+        }
+    }
+
+    /// Returns the number of Issue records omitted from the in-memory view.
+    #[must_use]
+    pub fn skipped_records(&self) -> usize {
+        self.causes.len()
+    }
+
+    /// Returns the typed, source-ordered causes for every omitted Issue.
+    #[must_use]
+    pub fn causes(&self) -> &[SkippedIssueRecordCause] {
+        &self.causes
+    }
+}
+
+impl fmt::Display for PartialLoadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Refusing to modify storage after an incomplete JSONL load: {} issue record(s) were skipped: ",
+            self.skipped_records()
+        )?;
+        let mut causes = self.causes.iter();
+        if let Some(first) = causes.next() {
+            write!(f, "{first}")?;
+        }
+        for cause in causes {
+            write!(f, "; {cause}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for PartialLoadError {}
+
 /// Storage-layer errors.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -93,6 +216,11 @@ pub enum StorageError {
     /// Invalid format encountered during parsing.
     #[error("Invalid format: {0}")]
     InvalidFormat(String),
+
+    /// A write was attempted after one or more Issue records were omitted
+    /// during resilient JSONL loading.
+    #[error(transparent)]
+    UnsafePartialLoad(#[from] PartialLoadError),
 
     /// JSON serialization failed during storage operations.
     #[error("JSON serialization failed")]

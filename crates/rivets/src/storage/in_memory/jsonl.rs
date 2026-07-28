@@ -9,7 +9,7 @@ use super::issue_record::{IssueRecord, IssueRecordError, MigrationField};
 use crate::domain::IssueId;
 use crate::error::{Error, Result, StorageError};
 use crate::storage::IssueStorage;
-use rivets_jsonl::{Warning as JsonlWarning, read_jsonl_resilient};
+use rivets_jsonl::{Warning as JsonlWarning, read_jsonl_resilient_with_line_numbers};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::fs::File;
@@ -26,6 +26,10 @@ use tokio::sync::Mutex;
 ///
 /// Applications should log or report these warnings to users, as they indicate
 /// data corruption or integrity issues that may need manual resolution.
+///
+/// When this loader is used by the JSONL-backed workspace adapter, warnings
+/// that represent omitted Issue records leave reads available but block every
+/// mutation and save until the file is repaired and reloaded.
 ///
 /// **Example:**
 /// ```no_run
@@ -121,6 +125,11 @@ pub enum LoadWarning {
 /// - **Orphaned dependencies**: Skips the dependency edge and adds a warning
 /// - **Circular dependencies**: Skips the dependency edge and adds a warning
 ///
+/// The JSONL-backed workspace adapter treats warnings that omit an entire
+/// Issue as unsafe for writes. It continues to serve the successfully loaded
+/// Issues for reads, but rejects mutations and saves to preserve the source
+/// file byte-for-byte.
+///
 /// # Memory Considerations
 ///
 /// This function loads the entire JSONL file into memory during parsing. The three-pass
@@ -155,13 +164,14 @@ pub async fn load_from_jsonl(
     prefix: String,
 ) -> Result<(Box<dyn IssueStorage>, Vec<LoadWarning>)> {
     // First pass: resiliently parse persistence DTOs, never domain Issues.
-    let (parsed_records, jsonl_warnings) = read_jsonl_resilient::<IssueRecord, _>(path)
-        .await
-        .map_err(|e| match e {
-            rivets_jsonl::Error::Io(io_err) => Error::Io(io_err),
-            rivets_jsonl::Error::Json(json_err) => Error::Json(json_err),
-            rivets_jsonl::Error::InvalidFormat(msg) => StorageError::InvalidFormat(msg).into(),
-        })?;
+    let (parsed_records, jsonl_warnings) =
+        read_jsonl_resilient_with_line_numbers::<IssueRecord, _>(path)
+            .await
+            .map_err(|e| match e {
+                rivets_jsonl::Error::Io(io_err) => Error::Io(io_err),
+                rivets_jsonl::Error::Json(json_err) => Error::Json(json_err),
+                rivets_jsonl::Error::InvalidFormat(msg) => StorageError::InvalidFormat(msg).into(),
+            })?;
 
     let mut warnings = Vec::new();
 
@@ -185,24 +195,21 @@ pub async fn load_from_jsonl(
     }
 
     // Convert and validate persisted records at the compatibility boundary.
-    // Note: line_number here is the record index (1-based) within successfully
-    // parsed records, not the actual file line number after malformed lines.
     let mut issues = Vec::new();
-    for (index, record) in parsed_records.into_iter().enumerate() {
-        let record_number = index + 1;
+    for (line_number, record) in parsed_records {
         match record.into_domain() {
             Ok(issue) => issues.push(issue),
             Err(IssueRecordError::MigrationConflict { issue_id, field }) => {
                 warnings.push(LoadWarning::MigrationConflict {
                     issue_id,
-                    line_number: record_number,
+                    line_number,
                     field,
                 });
             }
             Err(IssueRecordError::InvalidData { issue_id, error }) => {
                 warnings.push(LoadWarning::InvalidIssueData {
                     issue_id,
-                    line_number: record_number,
+                    line_number,
                     error,
                 });
             }

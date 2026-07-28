@@ -316,6 +316,30 @@ where
     Ok((values, warnings))
 }
 
+/// Reads a JSONL file resiliently while retaining each decoded record's
+/// physical 1-based source line number.
+///
+/// The returned record tuples are `(line_number, value)`. Empty lines are
+/// counted but not returned, and malformed lines are represented only by
+/// [`Warning`] values. This lets callers perform a second validation phase
+/// without losing the source location of records that decoded successfully.
+pub async fn read_jsonl_resilient_with_line_numbers<T, P>(
+    path: P,
+) -> Result<(Vec<(usize, T)>, Vec<Warning>)>
+where
+    T: DeserializeOwned + 'static,
+    P: AsRef<Path>,
+{
+    let file = File::open(path).await?;
+    let reader = JsonlReader::new(file);
+    let (stream, collector) = reader.stream_resilient_with_line_numbers();
+
+    let values: Vec<(usize, T)> = std::pin::pin!(stream).collect().await;
+    let warnings = collector.into_warnings();
+
+    Ok((values, warnings))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

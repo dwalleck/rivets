@@ -257,7 +257,7 @@ sequenceDiagram
 ## Error Handling Strategy
 
 ### Graceful Degradation
-- **JSONL corruption**: Skip invalid lines, log warnings, continue loading
+- **JSONL corruption**: Load unaffected Issues for reads, report skipped records, and block mutations and saves until repair
 - **Orphaned dependencies**: Skip edges to non-existent issues during import
 - **Circular dependencies**: Detect and skip cycles during JSONL load
 
@@ -265,6 +265,7 @@ sequenceDiagram
 - **Delete with dependents**: Fail with clear error listing dependent issues
 - **Cycle creation**: Pre-check before adding dependency
 - **Concurrent access**: Arc<Mutex<>> prevents data races
+- **Partial-load writes**: Reject before in-memory mutation and preserve the JSONL source byte-for-byte
 
 ## Thread Safety
 
@@ -323,7 +324,7 @@ graph TD
 - **Simplicity**: No database setup required
 - **Performance**: All operations are in-memory fast
 - **Portability**: JSONL files work everywhere, no DB dependencies
-- **Resilience**: Graceful error recovery (skip malformed lines)
+- **Resilience**: Load unaffected Issues for reads; block writes after skipped records
 - **Git-friendly**: JSONL can be diffed and merged
 - **Low overhead**: <3MB memory for 1000 issues
 
@@ -395,13 +396,13 @@ graph TD
 
 ### 8. Resilient JSONL Loading
 
-**Decision**: Continue loading despite malformed JSON, collect warnings
+**Decision**: Continue loading unaffected Issues for reads, collect warnings, and reject writes when any Issue record was omitted
 
 **Rationale**:
-- **Graceful degradation**: Don't fail entire load for one bad line
-- **User experience**: Better to load 999/1000 issues than fail completely
-- **Recovery path**: Warnings guide user to fix corrupted data
-- **Git merge friendly**: Partial corruption after merge doesn't brick system
+- **Graceful degradation**: One bad line does not prevent inspection of unaffected Issues
+- **Data preservation**: An incomplete in-memory view can never overwrite the complete source file
+- **Recovery path**: Typed errors report skipped-record counts and line-specific causes
+- **Git merge friendly**: Partial corruption after merge remains inspectable without becoming a destructive rewrite
 
 **Alternative considered**: Fail-fast on any error
 **Why rejected**: Poor UX, fragile to manual edits or git conflicts
@@ -415,6 +416,7 @@ graph TD
 - **Simplicity**: User can't forget to save
 - **Crash resistance**: Latest state always on disk
 - **Atomic writes**: Temp file + rename prevents corruption
+- **Partial-load guard**: Auto-save is disabled when resilient loading omitted an Issue record
 
 **Alternative considered**: Manual save command
 **Why rejected**: Easy to forget, data loss risk

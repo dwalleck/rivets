@@ -5,7 +5,7 @@
 
 use crate::warning::{Warning, WarningCollector};
 use crate::{Error, Result};
-use futures::stream::Stream;
+use futures::stream::{Stream, StreamExt};
 use serde::de::DeserializeOwned;
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 
@@ -383,6 +383,18 @@ impl<R: AsyncRead + Unpin> JsonlReader<R> {
     where
         T: DeserializeOwned + 'static,
     {
+        let (stream, collector) = self.stream_resilient_with_line_numbers();
+        (stream.map(|(_, value)| value), collector)
+    }
+
+    /// Creates a resilient stream that retains each decoded record's physical
+    /// 1-based source line number.
+    pub(crate) fn stream_resilient_with_line_numbers<T>(
+        self,
+    ) -> (impl Stream<Item = (usize, T)>, WarningCollector)
+    where
+        T: DeserializeOwned + 'static,
+    {
         let collector = WarningCollector::new();
         let collector_clone = collector.clone();
 
@@ -420,7 +432,7 @@ impl<R: AsyncRead + Unpin> JsonlReader<R> {
                     // Attempt to parse the line using trimmed value
                     match serde_json::from_str::<T>(trimmed) {
                         Ok(value) => {
-                            return Some((value, (reader, warnings)));
+                            return Some(((reader.line_number, value), (reader, warnings)));
                         }
                         Err(e) => {
                             // Collect warning and continue to next line

@@ -660,6 +660,29 @@ mod load_from_jsonl_tests {
     }
 
     #[tokio::test]
+    async fn domain_conversion_warning_preserves_physical_line_number() {
+        let content = concat!(
+            "not valid JSON\n",
+            "\n",
+            r#"{"id":"test-invalid","title":"Invalid","description":"Test","status":"open","priority":2,"assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":null,"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#
+        );
+        let file = create_temp_jsonl_file(content);
+
+        let (_, warnings) = load_from_jsonl(file.path(), "test".to_string())
+            .await
+            .expect("resilient load should report both skipped records");
+        assert_eq!(warnings.len(), 2);
+        assert!(matches!(
+            &warnings[1],
+            LoadWarning::InvalidIssueData {
+                issue_id,
+                line_number: 3,
+                ..
+            } if issue_id == &IssueId::new("test-invalid")
+        ));
+    }
+
+    #[tokio::test]
     async fn load_nonexistent_file_returns_error() {
         let result = load_from_jsonl(
             std::path::Path::new("/nonexistent/file.jsonl"),

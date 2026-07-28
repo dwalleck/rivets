@@ -213,6 +213,60 @@ fn test_cli_create_with_title(initialized_dir: TempDir) {
 }
 
 #[rstest]
+#[case::partial_load(true, 2, 2)]
+#[case::schema_incompatible_zero_load(false, 1, 1)]
+fn test_cli_refuses_to_save_after_skipped_issue_records(
+    initialized_dir: TempDir,
+    #[case] include_valid_issue: bool,
+    #[case] skipped_line_number: usize,
+    #[case] skipped_record_count: usize,
+) {
+    use std::io::Write as _;
+
+    let data_path = initialized_dir.path().join(".rivets/issues.jsonl");
+    if include_valid_issue {
+        create_issue(initialized_dir.path(), "Preserved issue", &[]);
+    }
+    let skipped_record = if include_valid_issue {
+        r#"{"id":"broken","notes":[}"#
+    } else {
+        r#"{"id":"broken","title":"Broken","description":"Schema mismatch","status":"open","priority":2,"issue_kind":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":42,"external_ref":null,"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#
+    };
+    let mut data_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&data_path)
+        .expect("test should open the JSONL data file");
+    writeln!(data_file, "{skipped_record}").expect("test should append a skipped record");
+    if include_valid_issue {
+        writeln!(data_file, "not valid JSON").expect("test should append another skipped record");
+    }
+    drop(data_file);
+    let before = std::fs::read(&data_path).expect("test should read the original JSONL bytes");
+
+    let create = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["create", "--title", "Must not be persisted"],
+    );
+
+    assert!(
+        !create.status.success(),
+        "mutation after a partial load must be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&create.stderr);
+    assert!(
+        stderr.contains(&format!("{skipped_record_count} issue record"))
+            && stderr.contains(&format!("line {skipped_line_number}")),
+        "error should report the skipped-record count and cause: {stderr}"
+    );
+    let after = std::fs::read(&data_path).expect("test should reread the JSONL bytes");
+    assert_eq!(
+        after, before,
+        "a refused save must not rewrite the JSONL file"
+    );
+}
+
+#[rstest]
 fn test_cli_create_with_full_options(initialized_dir: TempDir) {
     let output = run_rivets_in_dir(
         initialized_dir.path(),

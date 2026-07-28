@@ -111,25 +111,31 @@ graph TB
 ```mermaid
 sequenceDiagram
     participant App
-    participant Storage as InMemoryStorage
-    participant Inner as InMemoryStorageInner
+    participant Storage as JsonlBackedStorage
+    participant Inner as InMemoryStorage
     participant FS as tokio::fs
 
     Note over App,FS: SAVE Operation
 
     App->>Storage: save()
-    Storage->>Inner: lock().await
-    Storage->>FS: create(temp.jsonl)
-    loop For each issue
-        Inner->>FS: write_all(json + \n)
+    Storage->>Storage: ensure_writable()
+    alt Issue records were skipped during load
+        Storage-->>App: Err(UnsafePartialLoad)
+    else Complete load
+        Storage->>Inner: export_all()
+        Inner-->>Storage: issues
+        Storage->>FS: create(temp.jsonl)
+        loop For each issue
+            Storage->>FS: write_all(json + \n)
+        end
+        Storage->>FS: flush()
+        Storage->>FS: rename(temp → issues.jsonl)
+        Storage-->>App: Ok(())
     end
-    Storage->>FS: flush()
-    Storage->>FS: rename(temp → issues.jsonl)
-    Storage-->>App: Ok(())
 
     Note over App,FS: LOAD Operation
 
-    App->>Storage: load_from_jsonl(path)
+    App->>Storage: create_storage(Jsonl(path))
     Storage->>FS: open(issues.jsonl)
     loop Pass 1: Import issues
         FS->>Storage: read_line()
@@ -154,7 +160,7 @@ sequenceDiagram
             Storage->>Storage: warnings.push(OrphanedDep)
         end
     end
-    Storage-->>App: Ok((storage, warnings))
+    Storage-->>App: Ok(JsonlBackedStorage with cached warnings)
 ```
 
 ### JSONL Format Example
@@ -166,14 +172,15 @@ sequenceDiagram
 
 ### Error Recovery Strategies
 
-#### Malformed JSON Line
+#### Skipped Issue Record
 ```
 Line 42: Invalid JSON, skipping: expected ',' at line 1 column 234
-Warning: Loaded with 1 errors. 99 issues imported.
+Warning: Loaded with 1 errors. 99 issues available for read-only access.
 ```
-- **Action**: Skip line, log warning, continue
-- **Result**: Partial data loss (that one issue)
-- **Recovery**: User can manually fix JSONL file
+- **Trigger**: Malformed JSON, a schema-incompatible record, invalid Issue data, or conflicting migration fields
+- **Action**: Load unaffected Issues for reads; reject every mutation and save with `UnsafePartialLoad`
+- **Result**: The original JSONL bytes remain unchanged rather than replacing the skipped record
+- **Recovery**: Manually repair the JSONL file, then restart or reload; there is no implicit force-repair path
 
 #### Orphaned Dependency
 ```
