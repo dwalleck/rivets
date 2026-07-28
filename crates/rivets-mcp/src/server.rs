@@ -166,22 +166,7 @@ impl RivetsMcpServer {
         &self,
         Parameters(params): Parameters<CreateParams>,
     ) -> Result<CallToolResult, McpError> {
-        match self
-            .tools
-            .create(
-                params.title,
-                params.description,
-                params.priority,
-                params.issue_kind.as_deref(),
-                params.assignee,
-                params.labels,
-                params.design,
-                params.acceptance,
-                params.notes,
-                params.workspace_root.as_deref(),
-            )
-            .await
-        {
+        match self.tools.create(params).await {
             Ok(issue) => Ok(CallToolResult::success(vec![Content::json(issue)?])),
             Err(e) => Err(to_mcp_error(&e)),
         }
@@ -522,7 +507,7 @@ mod tests {
                 .and_then(serde_json::Value::as_object)
                 .expect("tool input schema should expose properties")
         };
-        assert!(input_properties("create").contains_key("notes"));
+        assert!(input_properties("create").contains_key("initial_note"));
         assert!(!input_properties("update").contains_key("notes"));
         assert!(input_properties("add_note").contains_key("content"));
         assert_eq!(tools.len(), 17);

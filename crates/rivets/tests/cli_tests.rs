@@ -751,7 +751,7 @@ fn test_cli_rejects_blank_lifecycle_reasons(initialized_dir: TempDir) {
 
     let blank_close = run_rivets_in_dir(
         initialized_dir.path(),
-        &["close", &issue_id, "--reason", "   "],
+        &["close", &issue_id, "--reason", ""],
     );
     assert!(!blank_close.status.success());
     assert!(

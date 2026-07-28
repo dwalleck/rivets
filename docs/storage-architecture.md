@@ -393,10 +393,10 @@ Total: ~2-3 MB
      ├─ Strings: title (50), description (200), Note content (100 each)
      ├─ Enums: 1 byte each
      ├─ Timestamps: Issue timestamps plus one per Note
-     ├─ Collections: Vec<Note> and Vec<Dependency>
+     └─ Collections: Vec<Note> and Vec<Dependency>
 
 - DiGraph: ~200 KB
-  └─ Nodes: 1000 × 8 bytes (NodeIndex)
+  ├─ Nodes: 1000 × 8 bytes (NodeIndex)
   └─ Edges: ~500 × 24 bytes (from, to, weight)
 
 - HashMap<IssueId, NodeIndex>: ~64 KB

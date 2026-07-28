@@ -110,7 +110,7 @@ pub struct CreateParams {
     pub acceptance: Option<String>,
 
     /// Initial Note.
-    pub notes: Option<String>,
+    pub initial_note: Option<String>,
 
     /// Optional workspace root (uses current context if not specified).
     pub workspace_root: Option<String>,

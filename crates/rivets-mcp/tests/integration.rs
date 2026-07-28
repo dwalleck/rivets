@@ -9,7 +9,7 @@
 
 use rivets_mcp::context::Context;
 use rivets_mcp::error::Error;
-use rivets_mcp::models::McpIssue;
+use rivets_mcp::models::{CreateParams, McpIssue};
 use rivets_mcp::tools::Tools;
 use rstest::rstest;
 use std::sync::Arc;
@@ -55,18 +55,18 @@ storage:
     /// Create an issue and return it.
     pub async fn create_issue(tools: &Tools, title: &str) -> McpIssue {
         tools
-            .create(
-                title.to_string(),
-                Some(format!("Description for {title}")),
-                Some(2),
-                Some("task"),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
+            .create(CreateParams {
+                title: title.to_string(),
+                description: Some(format!("Description for {title}")),
+                priority: Some(2),
+                issue_kind: Some(str::to_owned("task")),
+                assignee: None,
+                labels: None,
+                design: None,
+                acceptance: None,
+                initial_note: None,
+                workspace_root: None,
+            })
             .await
             .expect("create should succeed")
     }
@@ -197,18 +197,18 @@ storage:
             .map(|l| l.iter().copied().map(str::to_string).collect());
 
         let issue = tools
-            .create(
-                setup.title.to_string(),
-                Some(format!("Description for {}", setup.title)),
-                setup.priority,
-                setup.issue_kind,
-                setup.assignee.map(str::to_string),
+            .create(CreateParams {
+                title: setup.title.to_string(),
+                description: Some(format!("Description for {}", setup.title)),
+                priority: setup.priority,
+                issue_kind: setup.issue_kind.map(str::to_owned),
+                assignee: setup.assignee.map(str::to_string),
                 labels,
-                None,
-                None,
-                None,
-                None,
-            )
+                design: None,
+                acceptance: None,
+                initial_note: None,
+                workspace_root: None,
+            })
             .await
             .expect("create should succeed");
 
@@ -297,18 +297,18 @@ async fn test_notes_create_append_validate_and_survive_context_restart() {
     set_context(&tools, workspace.path()).await;
 
     let created = tools
-        .create(
-            "Note history".to_string(),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("Initial context".to_string()),
-            None,
-        )
+        .create(CreateParams {
+            title: "Note history".to_string(),
+            description: None,
+            priority: None,
+            issue_kind: None,
+            assignee: None,
+            labels: None,
+            design: None,
+            acceptance: None,
+            initial_note: Some("Initial context".to_string()),
+            workspace_root: None,
+        })
         .await
         .expect("create with an initial Note should succeed");
     assert_eq!(created.notes.len(), 1);
@@ -327,12 +327,23 @@ async fn test_notes_create_append_validate_and_survive_context_restart() {
     let empty = tools.add_note(&created.id, " \n ".to_string(), None).await;
     assert!(matches!(empty, Err(Error::InvalidNote(_))));
 
+    let empty_close = tools
+        .close(&created.id, Some(" \n ".to_string()), None)
+        .await;
+    assert!(matches!(empty_close, Err(Error::InvalidNote(_))));
+    let unchanged = tools
+        .show(&created.id, None)
+        .await
+        .expect("rejected close reason must leave the Issue unchanged");
+    assert_eq!(unchanged.status, "open");
+    assert_eq!(unchanged.notes, appended.notes);
+
     let closed = tools
         .close(&created.id, Some("Completed".to_string()), None)
         .await
         .expect("close reason should append a Note");
     assert_eq!(closed.notes.len(), 3);
-    assert_eq!(closed.notes[2].content, "Completed");
+    assert_eq!(closed.notes[2].content, "Closed: Completed");
     assert_eq!(closed.notes[2].created_at, closed.updated_at);
     assert_eq!(closed.notes[2].created_at, closed.closed_at.unwrap());
 
@@ -341,7 +352,7 @@ async fn test_notes_create_append_validate_and_survive_context_restart() {
         .await
         .expect("reopen reason should append a Note");
     assert_eq!(reopened.notes.len(), 4);
-    assert_eq!(reopened.notes[3].content, "Needs more work");
+    assert_eq!(reopened.notes[3].content, "Reopened: Needs more work");
     assert_eq!(reopened.notes[3].created_at, reopened.updated_at);
 
     let restarted = create_tools();
@@ -361,18 +372,18 @@ async fn test_create_issue_with_all_fields() {
     set_context(&tools, workspace.path()).await;
 
     let issue = tools
-        .create(
-            "Full Issue".to_string(),
-            Some("Detailed description".to_string()),
-            Some(0),
-            Some("feature"),
-            Some("bob".to_string()),
-            Some(vec!["urgent".to_string(), "frontend".to_string()]),
-            Some("Technical design notes".to_string()),
-            Some("- [ ] Criteria 1\n- [ ] Criteria 2".to_string()),
-            None,
-            None,
-        )
+        .create(CreateParams {
+            title: "Full Issue".to_string(),
+            description: Some("Detailed description".to_string()),
+            priority: Some(0),
+            issue_kind: Some(str::to_owned("feature")),
+            assignee: Some("bob".to_string()),
+            labels: Some(vec!["urgent".to_string(), "frontend".to_string()]),
+            design: Some("Technical design notes".to_string()),
+            acceptance: Some("- [ ] Criteria 1\n- [ ] Criteria 2".to_string()),
+            initial_note: None,
+            workspace_root: None,
+        })
         .await
         .expect("create should succeed");
 
@@ -399,18 +410,18 @@ async fn test_create_all_issue_kinds() {
 
     for issue_kind in kinds {
         let issue = tools
-            .create(
-                format!("A {issue_kind}"),
-                None,
-                None,
-                Some(issue_kind),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
+            .create(CreateParams {
+                title: format!("A {issue_kind}"),
+                description: None,
+                priority: None,
+                issue_kind: Some(str::to_owned(issue_kind)),
+                assignee: None,
+                labels: None,
+                design: None,
+                acceptance: None,
+                initial_note: None,
+                workspace_root: None,
+            })
             .await
             .expect("create should succeed");
 
@@ -662,18 +673,18 @@ async fn test_error_invalid_issue_kind() {
     set_context(&tools, workspace.path()).await;
 
     let result = tools
-        .create(
-            "Test".to_string(),
-            None,
-            None,
-            Some("invalid_kind"),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        .create(CreateParams {
+            title: "Test".to_string(),
+            description: None,
+            priority: None,
+            issue_kind: Some(str::to_owned("invalid_kind")),
+            assignee: None,
+            labels: None,
+            design: None,
+            acceptance: None,
+            initial_note: None,
+            workspace_root: None,
+        })
         .await;
 
     assert!(result.is_err());
@@ -1316,18 +1327,18 @@ async fn test_assignee_clearing() {
 
     // Create issue with assignee
     let created = tools
-        .create(
-            "Assigned Issue".to_string(),
-            None,
-            None,
-            None,
-            Some("alice".to_string()),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        .create(CreateParams {
+            title: "Assigned Issue".to_string(),
+            description: None,
+            priority: None,
+            issue_kind: None,
+            assignee: Some("alice".to_string()),
+            labels: None,
+            design: None,
+            acceptance: None,
+            initial_note: None,
+            workspace_root: None,
+        })
         .await
         .unwrap();
 
@@ -1363,18 +1374,18 @@ async fn test_assignee_update_vs_noop() {
     set_context(&tools, workspace.path()).await;
 
     let created = tools
-        .create(
-            "Test".to_string(),
-            None,
-            None,
-            None,
-            Some("original".to_string()),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        .create(CreateParams {
+            title: "Test".to_string(),
+            description: None,
+            priority: None,
+            issue_kind: None,
+            assignee: Some("original".to_string()),
+            labels: None,
+            design: None,
+            acceptance: None,
+            initial_note: None,
+            workspace_root: None,
+        })
         .await
         .unwrap();
 
@@ -1984,18 +1995,18 @@ async fn test_assignee_case_sensitivity() {
 
     // Create issue with mixed-case assignee
     let issue = tools
-        .create(
-            "Alice's Task".to_string(),
-            None,
-            None,
-            None,
-            Some("Alice".to_string()), // Mixed case
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        .create(CreateParams {
+            title: "Alice's Task".to_string(),
+            description: None,
+            priority: None,
+            issue_kind: None,
+            assignee: Some("Alice".to_string()), // Mixed case
+            labels: None,
+            design: None,
+            acceptance: None,
+            initial_note: None,
+            workspace_root: None,
+        })
         .await
         .expect("create should succeed");
 
@@ -2073,18 +2084,18 @@ async fn test_unicode_support() {
 
     // Create issue with Japanese title
     let japanese_issue = tools
-        .create(
-            "バグ修正".to_string(),               // "Bug fix" in Japanese
-            Some("これはテストです".to_string()), // "This is a test"
-            Some(1),
-            Some("bug"),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        .create(CreateParams {
+            title: "バグ修正".to_string(), // "Bug fix" in Japanese
+            description: Some("これはテストです".to_string()), // "This is a test"
+            priority: Some(1),
+            issue_kind: Some("bug".to_string()),
+            assignee: None,
+            labels: None,
+            design: None,
+            acceptance: None,
+            initial_note: None,
+            workspace_root: None,
+        })
         .await
         .expect("create with Japanese title should succeed");
 
@@ -2100,18 +2111,18 @@ async fn test_unicode_support() {
 
     // Create issue with emoji label
     let emoji_issue = tools
-        .create(
-            "Hot Fix".to_string(),
-            None,
-            Some(0),
-            Some("bug"),
-            None,
-            Some(vec!["🔥hotfix".to_string(), "critical".to_string()]),
-            None,
-            None,
-            None,
-            None,
-        )
+        .create(CreateParams {
+            title: "Hot Fix".to_string(),
+            description: None,
+            priority: Some(0),
+            issue_kind: Some(str::to_owned("bug")),
+            assignee: None,
+            labels: Some(vec!["🔥hotfix".to_string(), "critical".to_string()]),
+            design: None,
+            acceptance: None,
+            initial_note: None,
+            workspace_root: None,
+        })
         .await
         .expect("create with emoji label should succeed");
 
@@ -2136,18 +2147,18 @@ async fn test_unicode_support() {
 
     // Create issue with accented assignee name
     let accented_issue = tools
-        .create(
-            "Accented Assignee Task".to_string(),
-            None,
-            None,
-            None,
-            Some("José García".to_string()),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        .create(CreateParams {
+            title: "Accented Assignee Task".to_string(),
+            description: None,
+            priority: None,
+            issue_kind: None,
+            assignee: Some("José García".to_string()),
+            labels: None,
+            design: None,
+            acceptance: None,
+            initial_note: None,
+            workspace_root: None,
+        })
         .await
         .expect("create with accented assignee should succeed");
 
@@ -2197,18 +2208,18 @@ async fn test_unicode_titles_in_list() {
 
     for title in &titles {
         tools
-            .create(
-                (*title).to_string(),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
+            .create(CreateParams {
+                title: (*title).to_string(),
+                description: None,
+                priority: None,
+                issue_kind: None,
+                assignee: None,
+                labels: None,
+                design: None,
+                acceptance: None,
+                initial_note: None,
+                workspace_root: None,
+            })
             .await
             .expect("create with unicode title should succeed");
     }
@@ -2343,18 +2354,18 @@ async fn test_invalid_issue_kind_values(#[case] invalid_value: &str, #[case] exp
 
     // Test in create
     let create_result = tools
-        .create(
-            "Test".to_string(),
-            None,
-            None,
-            Some(invalid_value),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        .create(CreateParams {
+            title: "Test".to_string(),
+            description: None,
+            priority: None,
+            issue_kind: Some(str::to_owned(invalid_value)),
+            assignee: None,
+            labels: None,
+            design: None,
+            acceptance: None,
+            initial_note: None,
+            workspace_root: None,
+        })
         .await;
 
     assert!(
@@ -2513,18 +2524,18 @@ async fn test_complete_issue_lifecycle_all_states() {
 
     // Create issue (starts as open)
     let created = tools
-        .create(
-            "Lifecycle Issue".to_string(),
-            Some("Testing full lifecycle".to_string()),
-            Some(2),
-            Some("feature"),
-            Some("developer".to_string()),
-            Some(vec!["lifecycle-test".to_string()]),
-            Some("Design notes here".to_string()),
-            Some("- [ ] Criteria 1".to_string()),
-            None,
-            None,
-        )
+        .create(CreateParams {
+            title: "Lifecycle Issue".to_string(),
+            description: Some("Testing full lifecycle".to_string()),
+            priority: Some(2),
+            issue_kind: Some(str::to_owned("feature")),
+            assignee: Some("developer".to_string()),
+            labels: Some(vec!["lifecycle-test".to_string()]),
+            design: Some("Design notes here".to_string()),
+            acceptance: Some("- [ ] Criteria 1".to_string()),
+            initial_note: None,
+            workspace_root: None,
+        })
         .await
         .expect("create should succeed");
 
@@ -2633,18 +2644,18 @@ async fn test_update_preserves_unmodified_fields() {
 
     // Create issue with all fields
     let created = tools
-        .create(
-            "Original Title".to_string(),
-            Some("Original Description".to_string()),
-            Some(1),
-            Some("bug"),
-            Some("alice".to_string()),
-            Some(vec!["label1".to_string(), "label2".to_string()]),
-            Some("Original Design".to_string()),
-            Some("Original Criteria".to_string()),
-            None,
-            None,
-        )
+        .create(CreateParams {
+            title: "Original Title".to_string(),
+            description: Some("Original Description".to_string()),
+            priority: Some(1),
+            issue_kind: Some(str::to_owned("bug")),
+            assignee: Some("alice".to_string()),
+            labels: Some(vec!["label1".to_string(), "label2".to_string()]),
+            design: Some("Original Design".to_string()),
+            acceptance: Some("Original Criteria".to_string()),
+            initial_note: None,
+            workspace_root: None,
+        })
         .await
         .expect("create should succeed");
 
@@ -2775,18 +2786,18 @@ async fn test_all_tools_with_storage_backend() {
 
     // 3. create
     let created = tools
-        .create(
-            "Integration Test Issue".to_string(),
-            Some("Full integration test".to_string()),
-            Some(1),
-            Some("task"),
-            Some("tester".to_string()),
-            Some(vec!["integration".to_string()]),
-            Some("Design".to_string()),
-            Some("Criteria".to_string()),
-            None,
-            None,
-        )
+        .create(CreateParams {
+            title: "Integration Test Issue".to_string(),
+            description: Some("Full integration test".to_string()),
+            priority: Some(1),
+            issue_kind: Some(str::to_owned("task")),
+            assignee: Some("tester".to_string()),
+            labels: Some(vec!["integration".to_string()]),
+            design: Some("Design".to_string()),
+            acceptance: Some("Criteria".to_string()),
+            initial_note: None,
+            workspace_root: None,
+        })
         .await
         .expect("create should succeed");
     assert!(!created.id.is_empty());
@@ -2836,18 +2847,18 @@ async fn test_all_tools_with_storage_backend() {
 
     // 8. Create another issue for dependency testing
     let blocker = tools
-        .create(
-            "Blocker Issue".to_string(),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        .create(CreateParams {
+            title: "Blocker Issue".to_string(),
+            description: None,
+            priority: None,
+            issue_kind: None,
+            assignee: None,
+            labels: None,
+            design: None,
+            acceptance: None,
+            initial_note: None,
+            workspace_root: None,
+        })
         .await
         .expect("create blocker should succeed");
 

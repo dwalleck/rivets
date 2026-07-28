@@ -65,6 +65,27 @@ impl NoteContent {
         Ok(Self(content))
     }
 
+    /// Construct canonical Note content for a close reason.
+    ///
+    /// The reason is validated before the lifecycle prefix is added so empty
+    /// input is rejected and control-character positions refer to user input.
+    pub fn closing_reason(reason: impl Into<String>) -> Result<Self, NoteError> {
+        Self::lifecycle_reason("Closed", reason)
+    }
+
+    /// Construct canonical Note content for a reopen reason.
+    ///
+    /// The reason is validated before the lifecycle prefix is added so empty
+    /// input is rejected and control-character positions refer to user input.
+    pub fn reopening_reason(reason: impl Into<String>) -> Result<Self, NoteError> {
+        Self::lifecycle_reason("Reopened", reason)
+    }
+
+    fn lifecycle_reason(prefix: &str, reason: impl Into<String>) -> Result<Self, NoteError> {
+        let reason = Self::new(reason)?;
+        Ok(Self(format!("{prefix}: {}", reason.0)))
+    }
+
     pub(crate) fn into_string(self) -> String {
         self.0
     }
@@ -967,6 +988,18 @@ mod tests {
                 result,
                 Err(NoteError::InvalidControlCharacter { .. })
             ));
+        }
+
+        #[test]
+        fn lifecycle_reason_is_validated_before_prefixing() {
+            assert_eq!(
+                NoteContent::closing_reason("   "),
+                Err(NoteError::EmptyContent)
+            );
+            assert_eq!(
+                NoteContent::reopening_reason("bad\x1breason"),
+                Err(NoteError::InvalidControlCharacter { position: 3 })
+            );
         }
 
         #[test]

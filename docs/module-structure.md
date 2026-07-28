@@ -353,61 +353,72 @@ pub enum DependencyType {
 
 ```rust
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use super::{IssueId, Status, Priority, IssueType, Dependency};
+use serde::Serialize;
+use super::{Dependency, DependencyType, IssueId, IssueKind, IssueStatus};
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Note {
     content: String,
     created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoteContent(String);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Issue {
     pub id: IssueId,
     pub title: String,
     pub description: String,
+    pub status: IssueStatus,
+    pub priority: u8,
+    pub issue_kind: IssueKind,
+    pub assignee: Option<String>,
+    pub labels: Vec<String>,
     pub design: Option<String>,
     pub acceptance_criteria: Option<String>,
-    notes: Vec<Note>,
-    pub status: Status,
-    pub priority: Priority,
-    pub issue_type: IssueType,
-    pub assignee: Option<String>,
+    pub(crate) notes: Vec<Note>,
+    pub external_ref: Option<String>,
+    pub dependencies: Vec<Dependency>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub closed_at: Option<DateTime<Utc>>,
-    pub labels: Vec<String>,
-    pub dependencies: Vec<Dependency>,
 }
 
 #[derive(Debug, Clone)]
 pub struct NewIssue {
     pub title: String,
     pub description: String,
+    pub priority: u8,
+    pub issue_kind: IssueKind,
+    pub assignee: Option<String>,
+    pub labels: Vec<String>,
     pub design: Option<String>,
     pub acceptance_criteria: Option<String>,
     pub initial_note: Option<NoteContent>,
-    pub priority: Priority,
-    pub issue_type: IssueType,
-    pub assignee: Option<String>,
-    pub labels: Vec<String>,
-    pub dependencies: Vec<Dependency>,
+    pub external_ref: Option<String>,
+    pub dependencies: Vec<(IssueId, DependencyType)>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct IssueUpdate {
     pub title: Option<String>,
     pub description: Option<String>,
+    pub status: Option<IssueStatus>,
+    pub priority: Option<u8>,
+    pub issue_kind: Option<IssueKind>,
+    pub assignee: Option<Option<String>>,
     pub design: Option<String>,
     pub acceptance_criteria: Option<String>,
     pub note: Option<NoteContent>,
-    pub status: Option<Status>,
-    pub priority: Option<Priority>,
-    pub assignee: Option<String>,
+    pub external_ref: Option<String>,
+    pub labels: Option<Vec<String>>,
 }
 ```
+
+`Issue` and `Note` intentionally do not implement `Deserialize`. JSONL loading
+uses the compatibility `IssueRecord` DTO in `storage/in_memory/issue_record.rs`,
+then converts validated records into the domain model.
 
 ### domain/filter.rs
 

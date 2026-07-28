@@ -254,7 +254,7 @@ Parentage never propagates blockedness. Related is one symmetric association, no
 ### Issue Record
 
 - **Issue Kind** is the mutable classification Bug, Feature, Task, Epic, or Chore. “Issue Type” is legacy vocabulary.
-- **Notes** are immutable timestamped entries in an append-only history; the current replaceable note string is legacy.
+- **Notes** are immutable timestamped entries in an append-only history. Legacy singular Note strings are accepted only by the JSONL compatibility loader and migrate to canonical Note arrays.
 - **Associated Resources** are typed, mutable references to Web URLs or Workspace Paths; the current singular External Reference is legacy.
 
 ### Storage Adapters

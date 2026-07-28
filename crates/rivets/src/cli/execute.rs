@@ -478,27 +478,6 @@ fn output_batch_result(
     Ok(())
 }
 
-/// Build a lifecycle reason Note.
-///
-/// A provided but whitespace-only reason is rejected rather than prefixed,
-/// which would otherwise append an immutable content-free Note.
-fn build_reason_note(
-    reason: Option<&str>,
-    prefix: &str,
-) -> std::result::Result<Option<crate::domain::NoteContent>, crate::domain::NoteError> {
-    match reason {
-        Some(reason) => {
-            let reason = reason.trim();
-            if reason.is_empty() {
-                Err(crate::domain::NoteError::EmptyContent)
-            } else {
-                crate::domain::NoteContent::new(format!("{prefix}: {reason}")).map(Some)
-            }
-        }
-        None => Ok(None),
-    }
-}
-
 /// Return an error if a batch operation had any failures.
 fn bail_on_batch_failures(result: &super::types::BatchResult, action: &str) -> Result<()> {
     if result.has_failures() {
@@ -658,11 +637,17 @@ pub async fn execute_close(
     skip_confirm: bool,
 ) -> Result<()> {
     use super::types::{BatchError, BatchResult};
-    use crate::domain::{IssueId, IssueStatus, IssueUpdate};
+    use crate::domain::{IssueId, IssueStatus, IssueUpdate, NoteContent};
 
     if !confirm_batch("Close", args.issue_ids.len(), skip_confirm)? {
         return Ok(());
     }
+
+    let note = args
+        .reason
+        .as_deref()
+        .map(NoteContent::closing_reason)
+        .transpose()?;
 
     let mut result = BatchResult::new();
 
@@ -683,7 +668,7 @@ pub async fn execute_close(
         let issue_id = IssueId::new(id_str);
         let update = IssueUpdate {
             status: Some(IssueStatus::Closed),
-            note: build_reason_note(args.reason.as_deref(), "Closed")?,
+            note: note.clone(),
             ..Default::default()
         };
 
@@ -711,11 +696,17 @@ pub async fn execute_reopen(
     skip_confirm: bool,
 ) -> Result<()> {
     use super::types::{BatchError, BatchResult};
-    use crate::domain::{IssueId, IssueStatus, IssueUpdate};
+    use crate::domain::{IssueId, IssueStatus, IssueUpdate, NoteContent};
 
     if !confirm_batch("Reopen", args.issue_ids.len(), skip_confirm)? {
         return Ok(());
     }
+
+    let note = args
+        .reason
+        .as_deref()
+        .map(NoteContent::reopening_reason)
+        .transpose()?;
 
     let mut result = BatchResult::new();
 
@@ -736,7 +727,7 @@ pub async fn execute_reopen(
         let issue_id = IssueId::new(id_str);
         let update = IssueUpdate {
             status: Some(IssueStatus::Open),
-            note: build_reason_note(args.reason.as_deref(), "Reopened")?,
+            note: note.clone(),
             ..Default::default()
         };
 
