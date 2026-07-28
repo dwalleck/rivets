@@ -18,12 +18,14 @@
 use crate::context::Context;
 use crate::error::{Error, Result};
 use crate::models::{
-    BlockedIssueResponse, McpIssue, SetContextResponse, WhereAmIResponse, dep_type_to_str,
-    parse_dep_type, parse_issue_kind, parse_status,
+    BlockedIssueResponse, CreateParams, McpIssue, SetContextResponse, WhereAmIResponse,
+    dep_type_to_str, parse_dep_type, parse_issue_kind, parse_status,
 };
 use rivets::domain::{
     DependencyType, IssueFilter, IssueId, IssueKind, IssueStatus, IssueUpdate, NewIssue,
+    NoteContent,
 };
+use rivets::storage::IssueStorage;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -60,6 +62,16 @@ fn validate_dep_type(dep_type: &str) -> Result<DependencyType> {
         value: dep_type.to_string(),
         valid_values: "blocks, related, parent-child, discovered-from",
     })
+}
+
+async fn save_or_reload(storage: &mut dyn IssueStorage) -> Result<()> {
+    if let Err(error) = storage.save().await {
+        if let Err(reload_error) = storage.reload().await {
+            tracing::error!(error = %reload_error, "Failed to reload after save error");
+        }
+        return Err(error.into());
+    }
+    Ok(())
 }
 
 /// Tool implementations for the rivets MCP server.
@@ -272,31 +284,34 @@ impl Tools {
     ///
     /// # Errors
     ///
-    /// Returns an error if no context is set, invalid `issue_kind`, or storage operations fail.
-    #[allow(clippy::too_many_arguments)]
-    #[instrument(skip(self, description, labels, design, acceptance_criteria), fields(%title))]
-    pub async fn create(
-        &self,
-        title: String,
-        description: Option<String>,
-        priority: Option<u8>,
-        issue_kind: Option<&str>,
-        assignee: Option<String>,
-        labels: Option<Vec<String>>,
-        design: Option<String>,
-        acceptance_criteria: Option<String>,
-        workspace_root: Option<&str>,
-    ) -> Result<McpIssue> {
+    /// Returns an error if no context is set, `issue_kind` is invalid, the
+    /// initial Note is invalid, or storage operations fail.
+    #[instrument(skip(self, params), fields(title = %params.title))]
+    pub async fn create(&self, params: CreateParams) -> Result<McpIssue> {
         debug!("Creating issue");
-        // Validate issue_kind before acquiring locks
+        let CreateParams {
+            title,
+            description,
+            priority,
+            issue_kind,
+            assignee,
+            labels,
+            design,
+            acceptance: acceptance_criteria,
+            initial_note,
+            workspace_root,
+        } = params;
+        // Validate adapter inputs before acquiring locks.
         let issue_kind = issue_kind
+            .as_deref()
             .map(validate_issue_kind)
             .transpose()?
             .unwrap_or(IssueKind::Task);
+        let initial_note = initial_note.map(NoteContent::new).transpose()?;
 
         let storage = {
             let context = self.context.read().await;
-            context.storage_for(workspace_root.map(Path::new))?
+            context.storage_for(workspace_root.as_deref().map(Path::new))?
         };
         let mut storage = storage.write().await;
 
@@ -309,19 +324,13 @@ impl Tools {
             labels: labels.unwrap_or_default(),
             design,
             acceptance_criteria,
-            notes: None,
+            initial_note,
             external_ref: None,
             dependencies: vec![],
         };
 
         let issue = storage.create(new_issue).await?;
-        if let Err(e) = storage.save().await {
-            // Reload from disk to restore consistent state
-            if let Err(reload_err) = storage.reload().await {
-                tracing::error!(error = %reload_err, "Failed to reload after save error");
-            }
-            return Err(e.into());
-        }
+        save_or_reload(storage.as_mut()).await?;
         debug!(issue_id = %issue.id, "Created issue");
         Ok(issue.into())
     }
@@ -332,7 +341,7 @@ impl Tools {
     ///
     /// Returns an error if no context is set, invalid status, issue not found, or storage fails.
     #[allow(clippy::too_many_arguments)]
-    #[instrument(skip(self, title, description, design, acceptance_criteria, notes, external_ref, labels), fields(%issue_id))]
+    #[instrument(skip(self, title, description, design, acceptance_criteria, external_ref, labels), fields(%issue_id))]
     pub async fn update(
         &self,
         issue_id: &str,
@@ -344,7 +353,6 @@ impl Tools {
         assignee: Option<Option<String>>,
         design: Option<String>,
         acceptance_criteria: Option<String>,
-        notes: Option<String>,
         external_ref: Option<String>,
         labels: Option<Vec<String>>,
         workspace_root: Option<&str>,
@@ -370,20 +378,47 @@ impl Tools {
             assignee,
             design,
             acceptance_criteria,
-            notes,
+            note: None,
             external_ref,
             labels,
         };
 
         let issue = storage.update(&id, updates).await?;
-        if let Err(e) = storage.save().await {
-            // Reload from disk to restore consistent state
-            if let Err(reload_err) = storage.reload().await {
-                tracing::error!(error = %reload_err, "Failed to reload after save error");
-            }
-            return Err(e.into());
-        }
+        save_or_reload(storage.as_mut()).await?;
         debug!("Updated issue");
+        Ok(issue.into())
+    }
+
+    /// Append an immutable Note to an Issue.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the Note is empty, no context is set, the Issue is
+    /// not found, or persistence fails.
+    #[instrument(skip(self, content), fields(%issue_id))]
+    pub async fn add_note(
+        &self,
+        issue_id: &str,
+        content: String,
+        workspace_root: Option<&str>,
+    ) -> Result<McpIssue> {
+        let note = NoteContent::new(content)?;
+        let storage = {
+            let workspace_context = self.context.read().await;
+            workspace_context.storage_for(workspace_root.map(Path::new))?
+        };
+        let mut storage = storage.write().await;
+
+        let issue = storage
+            .update(
+                &IssueId::new(issue_id),
+                IssueUpdate {
+                    note: Some(note),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        save_or_reload(storage.as_mut()).await?;
         Ok(issue.into())
     }
 
@@ -391,7 +426,8 @@ impl Tools {
     ///
     /// # Errors
     ///
-    /// Returns an error if no context is set, issue not found, or storage operations fail.
+    /// Returns an error if the reason is invalid, no context is set, the Issue
+    /// is not found, or storage operations fail.
     #[instrument(skip(self, reason), fields(%issue_id))]
     pub async fn close(
         &self,
@@ -400,6 +436,7 @@ impl Tools {
         workspace_root: Option<&str>,
     ) -> Result<McpIssue> {
         debug!("Closing issue");
+        let note = reason.map(NoteContent::closing_reason).transpose()?;
         let storage = {
             let context = self.context.read().await;
             context.storage_for(workspace_root.map(Path::new))?
@@ -409,18 +446,12 @@ impl Tools {
         let id = IssueId::new(issue_id);
         let updates = IssueUpdate {
             status: Some(rivets::domain::IssueStatus::Closed),
-            notes: reason,
+            note,
             ..Default::default()
         };
 
         let issue = storage.update(&id, updates).await?;
-        if let Err(e) = storage.save().await {
-            // Reload from disk to restore consistent state
-            if let Err(reload_err) = storage.reload().await {
-                tracing::error!(error = %reload_err, "Failed to reload after save error");
-            }
-            return Err(e.into());
-        }
+        save_or_reload(storage.as_mut()).await?;
         debug!("Closed issue");
         Ok(issue.into())
     }
@@ -456,13 +487,7 @@ impl Tools {
         let to = IssueId::new(depends_on_id);
 
         storage.add_dependency(&from, &to, dep_type).await?;
-        if let Err(e) = storage.save().await {
-            // Reload from disk to restore consistent state
-            if let Err(reload_err) = storage.reload().await {
-                tracing::error!(error = %reload_err, "Failed to reload after save error");
-            }
-            return Err(e.into());
-        }
+        save_or_reload(storage.as_mut()).await?;
 
         let dep_type_str = dep_type_to_str(dep_type);
         debug!(dep_type = %dep_type_str, "Added dependency");
@@ -475,7 +500,8 @@ impl Tools {
     ///
     /// # Errors
     ///
-    /// Returns an error if no context is set, issue not found, or storage operations fail.
+    /// Returns an error if the reason is invalid, no context is set, the Issue
+    /// is not found, or storage operations fail.
     #[instrument(skip(self, reason), fields(%issue_id))]
     pub async fn reopen(
         &self,
@@ -484,6 +510,7 @@ impl Tools {
         workspace_root: Option<&str>,
     ) -> Result<McpIssue> {
         debug!("Reopening issue");
+        let note = reason.map(NoteContent::reopening_reason).transpose()?;
         let storage = {
             let context = self.context.read().await;
             context.storage_for(workspace_root.map(Path::new))?
@@ -493,17 +520,12 @@ impl Tools {
         let id = IssueId::new(issue_id);
         let updates = IssueUpdate {
             status: Some(IssueStatus::Open),
-            notes: reason,
+            note,
             ..Default::default()
         };
 
         let issue = storage.update(&id, updates).await?;
-        if let Err(e) = storage.save().await {
-            if let Err(reload_err) = storage.reload().await {
-                tracing::error!(error = %reload_err, "Failed to reload after save error");
-            }
-            return Err(e.into());
-        }
+        save_or_reload(storage.as_mut()).await?;
         debug!("Reopened issue");
         Ok(issue.into())
     }
@@ -580,12 +602,7 @@ impl Tools {
 
         let id = IssueId::new(issue_id);
         let issue = storage.add_label(&id, label).await?;
-        if let Err(e) = storage.save().await {
-            if let Err(reload_err) = storage.reload().await {
-                tracing::error!(error = %reload_err, "Failed to reload after save error");
-            }
-            return Err(e.into());
-        }
+        save_or_reload(storage.as_mut()).await?;
         debug!("Added label");
         Ok(issue.into())
     }
@@ -611,12 +628,7 @@ impl Tools {
 
         let id = IssueId::new(issue_id);
         let issue = storage.remove_label(&id, label).await?;
-        if let Err(e) = storage.save().await {
-            if let Err(reload_err) = storage.reload().await {
-                tracing::error!(error = %reload_err, "Failed to reload after save error");
-            }
-            return Err(e.into());
-        }
+        save_or_reload(storage.as_mut()).await?;
         debug!("Removed label");
         Ok(issue.into())
     }
@@ -700,17 +712,18 @@ mod tests {
     /// Helper to create a simple issue with just a title.
     async fn create_issue(tools: &Tools, title: &str) -> McpIssue {
         tools
-            .create(
-                title.to_string(),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
+            .create(CreateParams {
+                title: title.to_string(),
+                description: None,
+                priority: None,
+                issue_kind: None,
+                assignee: None,
+                labels: None,
+                design: None,
+                acceptance: None,
+                initial_note: None,
+                workspace_root: None,
+            })
             .await
             .unwrap()
     }
@@ -721,17 +734,18 @@ mod tests {
         let tools = tools.await;
 
         let issue = tools
-            .create(
-                "Test Issue".to_string(),
-                Some("Test description".to_string()),
-                Some(1),
-                Some("task"),
-                Some("alice".to_string()),
-                Some(vec!["label1".to_string()]),
-                None,
-                None,
-                None,
-            )
+            .create(CreateParams {
+                title: "Test Issue".to_string(),
+                description: Some("Test description".to_string()),
+                priority: Some(1),
+                issue_kind: Some(str::to_owned("task")),
+                assignee: Some("alice".to_string()),
+                labels: Some(vec!["label1".to_string()]),
+                design: None,
+                acceptance: None,
+                initial_note: None,
+                workspace_root: None,
+            })
             .await
             .unwrap();
 
@@ -776,7 +790,6 @@ mod tests {
                 Some("in_progress"),
                 Some(0),
                 None, // issue_kind
-                None,
                 None,
                 None,
                 None,
@@ -954,17 +967,18 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 for j in 0..5 {
                     let _ = tools
-                        .create(
-                            format!("Concurrent Issue {i}-{j}"),
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                        )
+                        .create(CreateParams {
+                            title: format!("Concurrent Issue {i}-{j}"),
+                            description: None,
+                            priority: None,
+                            issue_kind: None,
+                            assignee: None,
+                            labels: None,
+                            design: None,
+                            acceptance: None,
+                            initial_note: None,
+                            workspace_root: None,
+                        })
                         .await;
                 }
             }));
@@ -1028,17 +1042,18 @@ mod tests {
 
         // Create issue with label
         let issue = tools
-            .create(
-                "Issue with Label".to_string(),
-                None,
-                None,
-                None,
-                None,
-                Some(vec!["bug".to_string()]),
-                None,
-                None,
-                None,
-            )
+            .create(CreateParams {
+                title: "Issue with Label".to_string(),
+                description: None,
+                priority: None,
+                issue_kind: None,
+                assignee: None,
+                labels: Some(vec!["bug".to_string()]),
+                design: None,
+                acceptance: None,
+                initial_note: None,
+                workspace_root: None,
+            })
             .await
             .unwrap();
         assert!(issue.labels.contains(&"bug".to_string()));
@@ -1055,32 +1070,34 @@ mod tests {
 
         // Create issues with different labels
         tools
-            .create(
-                "Issue 1".to_string(),
-                None,
-                None,
-                None,
-                None,
-                Some(vec!["feature".to_string(), "backend".to_string()]),
-                None,
-                None,
-                None,
-            )
+            .create(CreateParams {
+                title: "Issue 1".to_string(),
+                description: None,
+                priority: None,
+                issue_kind: None,
+                assignee: None,
+                labels: Some(vec!["feature".to_string(), "backend".to_string()]),
+                design: None,
+                acceptance: None,
+                initial_note: None,
+                workspace_root: None,
+            })
             .await
             .unwrap();
 
         tools
-            .create(
-                "Issue 2".to_string(),
-                None,
-                None,
-                None,
-                None,
-                Some(vec!["feature".to_string(), "frontend".to_string()]),
-                None,
-                None,
-                None,
-            )
+            .create(CreateParams {
+                title: "Issue 2".to_string(),
+                description: None,
+                priority: None,
+                issue_kind: None,
+                assignee: None,
+                labels: Some(vec!["feature".to_string(), "frontend".to_string()]),
+                design: None,
+                acceptance: None,
+                initial_note: None,
+                workspace_root: None,
+            })
             .await
             .unwrap();
 

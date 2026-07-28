@@ -5,9 +5,9 @@
 use crate::context::Context;
 use crate::error::Error;
 use crate::models::{
-    BlockedParams, CloseParams, CreateParams, DepParams, LabelAddParams, LabelListAllParams,
-    LabelListParams, LabelRemoveParams, ListParams, ReadyParams, ReopenParams, SetContextParams,
-    ShowParams, StaleParams, UpdateParams,
+    AddNoteParams, BlockedParams, CloseParams, CreateParams, DepParams, LabelAddParams,
+    LabelListAllParams, LabelListParams, LabelRemoveParams, ListParams, ReadyParams, ReopenParams,
+    SetContextParams, ShowParams, StaleParams, UpdateParams,
 };
 use crate::tools::Tools;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -24,14 +24,15 @@ use tokio::sync::RwLock;
 /// Convert a rivets error to an appropriate MCP error.
 ///
 /// Maps error types to appropriate MCP error codes:
-/// - `NoContext`, `InvalidArgument` -> `invalid_params` (user needs to fix their request)
+/// - `NoContext`, `InvalidArgument`, `InvalidNote` -> `invalid_params` (user needs to fix their request)
 /// - `IssueNotFound` -> `invalid_params` (requested resource doesn't exist)
 /// - Other errors -> `internal_error`
 fn to_mcp_error(e: &Error) -> McpError {
     match e {
-        Error::NoContext | Error::InvalidArgument { .. } | Error::IssueNotFound(_) => {
-            McpError::invalid_params(e.to_string(), None)
-        }
+        Error::NoContext
+        | Error::InvalidArgument { .. }
+        | Error::InvalidNote(_)
+        | Error::IssueNotFound(_) => McpError::invalid_params(e.to_string(), None),
         _ => McpError::internal_error(e.to_string(), None),
     }
 }
@@ -159,27 +160,13 @@ impl RivetsMcpServer {
 
     /// Create a new issue.
     #[tool(
-        description = "Create a new issue (bug, feature, task, epic, or chore) with optional design, acceptance criteria, and dependencies. Uses workspace_root if provided, otherwise uses current context."
+        description = "Create a new issue (bug, feature, task, epic, or chore) with an optional initial Note, design, acceptance criteria, and dependencies. Uses workspace_root if provided, otherwise uses current context."
     )]
     async fn create(
         &self,
         Parameters(params): Parameters<CreateParams>,
     ) -> Result<CallToolResult, McpError> {
-        match self
-            .tools
-            .create(
-                params.title,
-                params.description,
-                params.priority,
-                params.issue_kind.as_deref(),
-                params.assignee,
-                params.labels,
-                params.design,
-                params.acceptance,
-                params.workspace_root.as_deref(),
-            )
-            .await
-        {
+        match self.tools.create(params).await {
             Ok(issue) => Ok(CallToolResult::success(vec![Content::json(issue)?])),
             Err(e) => Err(to_mcp_error(&e)),
         }
@@ -213,7 +200,6 @@ impl RivetsMcpServer {
                 assignee,
                 params.design,
                 params.acceptance_criteria,
-                params.notes,
                 params.external_ref,
                 params.labels,
                 params.workspace_root.as_deref(),
@@ -222,6 +208,28 @@ impl RivetsMcpServer {
         {
             Ok(issue) => Ok(CallToolResult::success(vec![Content::json(issue)?])),
             Err(e) => Err(to_mcp_error(&e)),
+        }
+    }
+
+    /// Append an immutable Note to an Issue.
+    #[tool(
+        description = "Append one immutable, timestamped Note to an issue. Existing Note history is preserved. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn add_note(
+        &self,
+        Parameters(params): Parameters<AddNoteParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .tools
+            .add_note(
+                &params.issue_id,
+                params.content,
+                params.workspace_root.as_deref(),
+            )
+            .await
+        {
+            Ok(issue) => Ok(CallToolResult::success(vec![Content::json(issue)?])),
+            Err(error) => Err(to_mcp_error(&error)),
         }
     }
 
@@ -482,6 +490,7 @@ mod tests {
         assert!(tool_names.contains(&"blocked"));
         assert!(tool_names.contains(&"create"));
         assert!(tool_names.contains(&"update"));
+        assert!(tool_names.contains(&"add_note"));
         assert!(tool_names.contains(&"close"));
         assert!(tool_names.contains(&"dep"));
         assert!(tool_names.contains(&"reopen"));
@@ -490,7 +499,18 @@ mod tests {
         assert!(tool_names.contains(&"label_remove"));
         assert!(tool_names.contains(&"label_list"));
         assert!(tool_names.contains(&"label_list_all"));
-        assert_eq!(tools.len(), 16);
+        let input_properties = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .and_then(|tool| tool.input_schema.get("properties"))
+                .and_then(serde_json::Value::as_object)
+                .expect("tool input schema should expose properties")
+        };
+        assert!(input_properties("create").contains_key("initial_note"));
+        assert!(!input_properties("update").contains_key("notes"));
+        assert!(input_properties("add_note").contains_key("content"));
+        assert_eq!(tools.len(), 17);
     }
 
     // =========================================================================

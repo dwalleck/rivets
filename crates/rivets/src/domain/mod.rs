@@ -43,6 +43,99 @@ impl From<&str> for IssueId {
     }
 }
 
+/// Validated content for a Note that has not yet been timestamped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteContent(String);
+
+impl NoteContent {
+    /// Parse Note content without changing its bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the content is empty after trimming or contains
+    /// a control character that is unsafe for multiline terminal output.
+    pub fn new(content: impl Into<String>) -> Result<Self, NoteError> {
+        let content = content.into();
+        if content.trim().is_empty() {
+            return Err(NoteError::EmptyContent);
+        }
+        if let Some(position) = find_control_char_multiline(&content) {
+            return Err(NoteError::InvalidControlCharacter { position });
+        }
+        Ok(Self(content))
+    }
+
+    /// Construct canonical Note content for a close reason.
+    ///
+    /// The reason is validated before the lifecycle prefix is added so empty
+    /// input is rejected and control-character positions refer to user input.
+    pub fn closing_reason(reason: impl Into<String>) -> Result<Self, NoteError> {
+        Self::lifecycle_reason("Closed", reason)
+    }
+
+    /// Construct canonical Note content for a reopen reason.
+    ///
+    /// The reason is validated before the lifecycle prefix is added so empty
+    /// input is rejected and control-character positions refer to user input.
+    pub fn reopening_reason(reason: impl Into<String>) -> Result<Self, NoteError> {
+        Self::lifecycle_reason("Reopened", reason)
+    }
+
+    fn lifecycle_reason(prefix: &str, reason: impl Into<String>) -> Result<Self, NoteError> {
+        let reason = Self::new(reason)?;
+        Ok(Self(format!("{prefix}: {}", reason.0)))
+    }
+
+    pub(crate) fn into_string(self) -> String {
+        self.0
+    }
+}
+
+/// A failure to construct valid Note content.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum NoteError {
+    /// Note content was empty or whitespace-only.
+    #[error("Note content cannot be empty")]
+    EmptyContent,
+    /// Note content included an unsafe control character.
+    #[error("Note content contains invalid control character at position {position}")]
+    InvalidControlCharacter {
+        /// Character offset of the invalid value.
+        position: usize,
+    },
+}
+
+/// An immutable, timestamped entry in an Issue's chronological history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Note {
+    content: String,
+    created_at: DateTime<Utc>,
+}
+
+impl Note {
+    pub(crate) fn from_parts(content: NoteContent, created_at: DateTime<Utc>) -> Self {
+        Self {
+            content: content.into_string(),
+            created_at,
+        }
+    }
+
+    /// Return the Note content exactly as recorded.
+    pub fn content(&self) -> &str {
+        &self.content
+    }
+
+    /// Return the creation timestamp assigned when this Note was constructed
+    /// (system time for appends, the legacy `updated_at` for migrated records).
+    pub fn created_at(&self) -> &DateTime<Utc> {
+        &self.created_at
+    }
+
+    pub(crate) fn into_parts(self) -> (String, DateTime<Utc>) {
+        (self.content, self.created_at)
+    }
+}
+
 /// Represents an issue in the tracking system
 ///
 /// Note: Dependencies are managed by the storage backend and accessed via
@@ -80,8 +173,8 @@ pub struct Issue {
     /// Acceptance criteria (optional)
     pub acceptance_criteria: Option<String>,
 
-    /// Additional notes
-    pub notes: Option<String>,
+    /// Ordered, append-only Note history
+    pub(crate) notes: Vec<Note>,
 
     /// External reference (e.g., GitHub issue number)
     pub external_ref: Option<String>,
@@ -108,6 +201,15 @@ pub struct Issue {
 }
 
 impl Issue {
+    /// Return Notes in chronological insertion order.
+    pub fn notes(&self) -> &[Note] {
+        &self.notes
+    }
+
+    pub(crate) fn append_note(&mut self, content: NoteContent, created_at: DateTime<Utc>) {
+        self.notes.push(Note::from_parts(content, created_at));
+    }
+
     /// Validate issue data integrity
     ///
     /// Checks:
@@ -124,7 +226,6 @@ impl Issue {
             &self.labels,
             self.design.as_deref(),
             self.acceptance_criteria.as_deref(),
-            self.notes.as_deref(),
             self.external_ref.as_deref(),
         )
     }
@@ -339,7 +440,6 @@ fn validate_text_fields(
     labels: &[String],
     design: Option<&str>,
     acceptance_criteria: Option<&str>,
-    notes: Option<&str>,
     external_ref: Option<&str>,
 ) -> Result<(), String> {
     if let Some(pos) = find_control_char_multiline(description) {
@@ -373,13 +473,6 @@ fn validate_text_fields(
     {
         return Err(format!(
             "Acceptance criteria contains invalid control character at position {pos}"
-        ));
-    }
-    if let Some(val) = notes
-        && let Some(pos) = find_control_char_multiline(val)
-    {
-        return Err(format!(
-            "Notes contains invalid control character at position {pos}"
         ));
     }
     if let Some(val) = external_ref
@@ -419,8 +512,8 @@ pub struct NewIssue {
     /// Acceptance criteria (optional)
     pub acceptance_criteria: Option<String>,
 
-    /// Additional notes
-    pub notes: Option<String>,
+    /// Initial Note recorded with the Issue creation timestamp
+    pub initial_note: Option<NoteContent>,
 
     /// External reference
     pub external_ref: Option<String>,
@@ -446,7 +539,6 @@ impl NewIssue {
             &self.labels,
             self.design.as_deref(),
             self.acceptance_criteria.as_deref(),
-            self.notes.as_deref(),
             self.external_ref.as_deref(),
         )
     }
@@ -471,7 +563,7 @@ impl Default for NewIssue {
             labels: vec![],
             design: None,
             acceptance_criteria: None,
-            notes: None,
+            initial_note: None,
             external_ref: None,
             dependencies: vec![],
         }
@@ -510,8 +602,8 @@ pub struct IssueUpdate {
     /// New acceptance criteria (if updating)
     pub acceptance_criteria: Option<String>,
 
-    /// New notes (if updating)
-    pub notes: Option<String>,
+    /// Note to append with this mutation's timestamp
+    pub note: Option<NoteContent>,
 
     /// New external reference (if updating)
     pub external_ref: Option<String>,
@@ -891,14 +983,23 @@ mod tests {
 
         #[test]
         fn notes_with_escape_rejected() {
-            let issue = NewIssue {
-                title: "Clean title".to_string(),
-                notes: Some("See \x1b[4munderlined\x1b[0m note".to_string()),
-                ..Default::default()
-            };
-            let result = issue.validate();
-            assert!(result.is_err());
-            assert!(result.unwrap_err().contains("Notes"));
+            let result = NoteContent::new("See \x1b[4munderlined\x1b[0m note");
+            assert!(matches!(
+                result,
+                Err(NoteError::InvalidControlCharacter { .. })
+            ));
+        }
+
+        #[test]
+        fn lifecycle_reason_is_validated_before_prefixing() {
+            assert_eq!(
+                NoteContent::closing_reason("   "),
+                Err(NoteError::EmptyContent)
+            );
+            assert_eq!(
+                NoteContent::reopening_reason("bad\x1breason"),
+                Err(NoteError::InvalidControlCharacter { position: 3 })
+            );
         }
 
         #[test]
@@ -910,7 +1011,6 @@ mod tests {
                     &["bug".to_string(), "urgent".to_string()],
                     Some("Use approach A"),
                     Some("- [ ] Done"),
-                    Some("Extra context"),
                     Some("GH-123"),
                 )
                 .is_ok()

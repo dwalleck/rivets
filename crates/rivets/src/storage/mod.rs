@@ -58,7 +58,7 @@
 //!         labels: vec![],
 //!         design: None,
 //!         acceptance_criteria: None,
-//!         notes: None,
+//!         initial_note: None,
 //!         external_ref: None,
 //!         dependencies: vec![],
 //!     };
@@ -664,7 +664,7 @@ impl MockStorage {
             labels: vec![],
             design: None,
             acceptance_criteria: None,
-            notes: None,
+            notes: vec![],
             external_ref: None,
             dependencies: vec![],
             created_at: Utc::now(),
@@ -810,7 +810,7 @@ mod tests {
             labels: vec![],
             design: None,
             acceptance_criteria: None,
-            notes: None,
+            initial_note: None,
             external_ref: None,
             dependencies: vec![],
         };
@@ -889,7 +889,7 @@ mod tests {
             labels: vec![],
             design: None,
             acceptance_criteria: None,
-            notes: None,
+            initial_note: None,
             external_ref: None,
             dependencies: vec![],
         };
@@ -939,7 +939,7 @@ mod tests {
             labels: vec![],
             design: None,
             acceptance_criteria: None,
-            notes: None,
+            initial_note: None,
             external_ref: None,
             dependencies: vec![],
         };
@@ -974,7 +974,7 @@ mod tests {
             labels: vec![],
             design: None,
             acceptance_criteria: None,
-            notes: None,
+            initial_note: None,
             external_ref: None,
             dependencies: vec![],
         };

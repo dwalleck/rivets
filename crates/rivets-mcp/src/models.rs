@@ -3,7 +3,7 @@
 //! This module contains types for MCP tool inputs and outputs.
 //! They wrap or transform rivets domain types for MCP compatibility.
 
-use rivets::domain::{Dependency, DependencyType, Issue, IssueKind, IssueStatus};
+use rivets::domain::{Dependency, DependencyType, Issue, IssueKind, IssueStatus, Note};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -109,6 +109,9 @@ pub struct CreateParams {
     /// Acceptance criteria.
     pub acceptance: Option<String>,
 
+    /// Initial Note.
+    pub initial_note: Option<String>,
+
     /// Optional workspace root (uses current context if not specified).
     pub workspace_root: Option<String>,
 }
@@ -143,14 +146,24 @@ pub struct UpdateParams {
     /// New acceptance criteria.
     pub acceptance_criteria: Option<String>,
 
-    /// New notes.
-    pub notes: Option<String>,
-
     /// New external reference.
     pub external_ref: Option<String>,
 
     /// New labels (replaces existing labels).
     pub labels: Option<Vec<String>>,
+
+    /// Optional workspace root (uses current context if not specified).
+    pub workspace_root: Option<String>,
+}
+
+/// Parameters for the `add_note` tool.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AddNoteParams {
+    /// The Issue receiving the Note.
+    pub issue_id: String,
+
+    /// Immutable Note content.
+    pub content: String,
 
     /// Optional workspace root (uses current context if not specified).
     pub workspace_root: Option<String>,
@@ -290,6 +303,25 @@ pub struct WhereAmIResponse {
     pub issue_prefix: Option<String>,
 }
 
+/// Immutable Note representation for MCP responses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct McpNote {
+    /// Note content preserved exactly as recorded.
+    pub content: String,
+
+    /// System-assigned creation timestamp (ISO 8601).
+    pub created_at: String,
+}
+
+impl From<&Note> for McpNote {
+    fn from(note: &Note) -> Self {
+        Self {
+            content: note.content().to_string(),
+            created_at: note.created_at().to_rfc3339(),
+        }
+    }
+}
+
 /// Issue representation for MCP responses.
 ///
 /// This is a simplified view of an issue optimized for MCP transport.
@@ -325,8 +357,8 @@ pub struct McpIssue {
     /// Acceptance criteria.
     pub acceptance_criteria: Option<String>,
 
-    /// Additional notes.
-    pub notes: Option<String>,
+    /// Immutable Notes in chronological order.
+    pub notes: Vec<McpNote>,
 
     /// External reference.
     pub external_ref: Option<String>,
@@ -346,6 +378,7 @@ pub struct McpIssue {
 
 impl From<Issue> for McpIssue {
     fn from(issue: Issue) -> Self {
+        let notes = issue.notes().iter().map(Into::into).collect();
         Self {
             id: issue.id.to_string(),
             title: issue.title,
@@ -357,7 +390,7 @@ impl From<Issue> for McpIssue {
             labels: issue.labels,
             design: issue.design,
             acceptance_criteria: issue.acceptance_criteria,
-            notes: issue.notes,
+            notes,
             external_ref: issue.external_ref,
             dependencies: issue.dependencies.into_iter().map(Into::into).collect(),
             created_at: issue.created_at.to_rfc3339(),

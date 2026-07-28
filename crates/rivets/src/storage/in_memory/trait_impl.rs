@@ -5,7 +5,7 @@ use super::graph::{find_blocked_issues, get_dependency_tree_impl, has_cycle_impl
 use super::sorting::sort_by_policy;
 use crate::domain::{
     Dependency, DependencyType, Issue, IssueFilter, IssueId, IssueStatus, IssueUpdate,
-    MAX_PRIORITY, NewIssue, SortPolicy,
+    MAX_PRIORITY, NewIssue, Note, SortPolicy,
 };
 use crate::error::{Error, Result, StorageError};
 use crate::storage::IssueStorage;
@@ -78,6 +78,10 @@ impl IssueStorage for InMemoryStorage {
 
         // === Phase 4: Create issue (all validations passed) ===
         let now = Utc::now();
+        let notes = new_issue
+            .initial_note
+            .map(|content| vec![Note::from_parts(content, now)])
+            .unwrap_or_default();
 
         // Convert dependencies from tuples to Dependency structs
         let dependencies: Vec<Dependency> = new_issue
@@ -100,7 +104,7 @@ impl IssueStorage for InMemoryStorage {
             labels: new_issue.labels,
             design: new_issue.design,
             acceptance_criteria: new_issue.acceptance_criteria,
-            notes: new_issue.notes,
+            notes,
             external_ref: new_issue.external_ref,
             dependencies: dependencies.clone(),
             created_at: now,
@@ -128,61 +132,58 @@ impl IssueStorage for InMemoryStorage {
 
     async fn update(&mut self, id: &IssueId, updates: IssueUpdate) -> Result<Issue> {
         let mut inner = self.lock().await;
-
-        let issue = inner
+        let stored = inner
             .issues
             .get_mut(id)
             .ok_or_else(|| Error::IssueNotFound(id.clone()))?;
+        let mut candidate = stored.clone();
+        let now = Utc::now();
 
-        // Apply updates
         if let Some(title) = updates.title {
-            issue.title = title;
+            candidate.title = title;
         }
         if let Some(description) = updates.description {
-            issue.description = description;
+            candidate.description = description;
         }
         if let Some(status) = updates.status {
-            issue.status = status;
-            // Set closed_at if status is closed
-            if status == IssueStatus::Closed && issue.closed_at.is_none() {
-                issue.closed_at = Some(Utc::now());
+            candidate.status = status;
+            if status == IssueStatus::Closed && candidate.closed_at.is_none() {
+                candidate.closed_at = Some(now);
             }
         }
         if let Some(priority) = updates.priority {
             if priority > MAX_PRIORITY {
                 return Err(Error::InvalidPriority(priority));
             }
-            issue.priority = priority;
+            candidate.priority = priority;
         }
         if let Some(issue_kind) = updates.issue_kind {
-            issue.issue_kind = issue_kind;
+            candidate.issue_kind = issue_kind;
         }
-        if let Some(assignee_opt) = updates.assignee {
-            issue.assignee = assignee_opt;
+        if let Some(assignee) = updates.assignee {
+            candidate.assignee = assignee;
         }
         if let Some(design) = updates.design {
-            issue.design = Some(design);
+            candidate.design = Some(design);
         }
         if let Some(acceptance_criteria) = updates.acceptance_criteria {
-            issue.acceptance_criteria = Some(acceptance_criteria);
+            candidate.acceptance_criteria = Some(acceptance_criteria);
         }
-        if let Some(notes) = updates.notes {
-            issue.notes = Some(notes);
+        if let Some(note) = updates.note {
+            candidate.append_note(note, now);
         }
         if let Some(external_ref) = updates.external_ref {
-            issue.external_ref = Some(external_ref);
+            candidate.external_ref = Some(external_ref);
         }
         if let Some(labels) = updates.labels {
-            issue.labels = labels;
+            candidate.labels = labels;
         }
 
-        // Validate the updated issue to ensure data integrity
-        // This catches invalid titles, descriptions, or priorities that may have been set
-        issue.validate().map_err(StorageError::Validation)?;
+        candidate.validate().map_err(StorageError::Validation)?;
+        candidate.updated_at = now;
 
-        issue.updated_at = Utc::now();
-
-        Ok(issue.clone())
+        *stored = candidate.clone();
+        Ok(candidate)
     }
 
     async fn delete(&mut self, id: &IssueId) -> Result<()> {
@@ -560,7 +561,7 @@ mod tests {
             labels: vec!["bug".to_string(), "urgent".to_string()],
             design: None,
             acceptance_criteria: None,
-            notes: None,
+            notes: vec![],
             external_ref: None,
             dependencies: Vec::new(),
             created_at: chrono::Utc::now(),
