@@ -416,16 +416,9 @@ impl JsonlBackedStorage {
                         error: error.clone(),
                     })
                 }
-                in_memory::LoadWarning::MigrationConflict {
-                    issue_id,
-                    line_number,
-                    field,
-                } => Some(SkippedIssueRecordCause::MigrationConflict {
-                    line_number: *line_number,
-                    issue_id: issue_id.clone(),
-                    emitted_field: field.emitted_name(),
-                    accepted_migration_field: field.accepted_migration_name(),
-                }),
+                in_memory::LoadWarning::MigrationConflict { .. }
+                | in_memory::LoadWarning::OrphanedDependency { .. }
+                | in_memory::LoadWarning::CircularDependency { .. } => None,
                 in_memory::LoadWarning::InvalidIssueData {
                     issue_id,
                     line_number,
@@ -435,8 +428,6 @@ impl JsonlBackedStorage {
                     issue_id: issue_id.clone(),
                     error: error.clone(),
                 }),
-                in_memory::LoadWarning::OrphanedDependency { .. }
-                | in_memory::LoadWarning::CircularDependency { .. } => None,
             })
             .collect();
 

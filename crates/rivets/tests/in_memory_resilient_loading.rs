@@ -16,6 +16,7 @@ use rivets::domain::{DependencyType, IssueId, IssueKind, IssueStatus, NewIssue, 
 use rivets::storage::in_memory::{
     LoadWarning, MigrationField, load_from_jsonl, new_in_memory_storage, save_to_jsonl,
 };
+use rivets::storage::{StorageBackend, create_storage};
 use std::io::Write;
 use tempfile::NamedTempFile;
 
@@ -921,6 +922,90 @@ mod load_from_jsonl_tests {
                 ..
             } if issue_id == &IssueId::new("test-invalid")
         ));
+    }
+
+    #[tokio::test]
+    async fn invalid_record_with_conflicting_kind_fields_reports_both_warnings() {
+        let content = r#"{"id":"test-conflict","title":"Conflict","description":"Test","status":"open","priority":10,"issue_kind":"feature","issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":null,"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#;
+        let file = create_temp_jsonl_file(content);
+
+        let (storage, warnings) = load_from_jsonl(file.path(), "test".to_string())
+            .await
+            .expect("load should succeed and report both data problems");
+
+        assert!(
+            storage
+                .export_all()
+                .await
+                .expect("export_all should succeed")
+                .is_empty()
+        );
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings.iter().any(|warning| matches!(
+            warning,
+            LoadWarning::MigrationConflict {
+                issue_id,
+                field: MigrationField::IssueKind,
+                ..
+            } if issue_id.as_str() == "test-conflict"
+        )));
+        assert!(warnings.iter().any(|warning| matches!(
+            warning,
+            LoadWarning::InvalidIssueData { issue_id, .. }
+                if issue_id.as_str() == "test-conflict"
+        )));
+    }
+
+    #[tokio::test]
+    async fn resolvable_kind_conflict_does_not_block_subsequent_writes() {
+        let content = r#"{"id":"test-conflict","title":"Conflict","description":"Test","status":"open","priority":2,"issue_kind":"feature","issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":null,"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#;
+        let file = create_temp_jsonl_file(content);
+
+        let mut storage = create_storage(
+            StorageBackend::Jsonl(file.path().to_path_buf()),
+            "test".to_string(),
+        )
+        .await
+        .expect("storage should open with a MigrationConflict warning");
+
+        // The conflicting record is loaded with the canonical field winning.
+        let issue = storage
+            .get(&IssueId::new("test-conflict"))
+            .await
+            .expect("lookup should succeed")
+            .expect("conflicting record should still load");
+        assert_eq!(issue.issue_kind, IssueKind::Feature);
+
+        // Writes must not be blocked: the warning is informational, not a skip.
+        storage
+            .create(NewIssue {
+                title: "Post-load write".to_string(),
+                description: String::new(),
+                priority: 2,
+                issue_kind: IssueKind::Task,
+                assignee: None,
+                labels: Vec::new(),
+                design: None,
+                acceptance_criteria: None,
+                initial_note: None,
+                dependencies: Vec::new(),
+            })
+            .await
+            .expect("create should succeed after a MigrationConflict warning");
+        storage
+            .save()
+            .await
+            .expect("save should succeed after a MigrationConflict warning");
+
+        // The saved file still contains the migrated record.
+        let (reloaded, _) = load_from_jsonl(file.path(), "test".to_string())
+            .await
+            .expect("reload should succeed");
+        let issues = reloaded
+            .export_all()
+            .await
+            .expect("export_all should succeed");
+        assert_eq!(issues.len(), 2);
     }
 
     #[tokio::test]

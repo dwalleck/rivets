@@ -76,17 +76,6 @@ pub enum SkippedIssueRecordCause {
         /// Decoder error returned by the JSONL adapter.
         error: String,
     },
-    /// Canonical and migration-only representations of one field disagreed.
-    MigrationConflict {
-        /// Physical 1-based line number in the JSONL file.
-        line_number: usize,
-        /// Issue identifier decoded before the conflict was found.
-        issue_id: IssueId,
-        /// Canonical persisted field name.
-        emitted_field: &'static str,
-        /// Accepted migration-only field name.
-        accepted_migration_field: &'static str,
-    },
     /// The decoded record violated an Issue invariant.
     InvalidIssueData {
         /// Physical 1-based line number in the JSONL file.
@@ -104,7 +93,6 @@ impl SkippedIssueRecordCause {
     pub const fn line_number(&self) -> usize {
         match self {
             Self::MalformedJson { line_number, .. }
-            | Self::MigrationConflict { line_number, .. }
             | Self::InvalidIssueData { line_number, .. } => *line_number,
         }
     }
@@ -116,15 +104,6 @@ impl fmt::Display for SkippedIssueRecordCause {
             Self::MalformedJson { line_number, error } => {
                 write!(f, "line {line_number}: malformed JSON ({error})")
             }
-            Self::MigrationConflict {
-                line_number,
-                issue_id,
-                emitted_field,
-                accepted_migration_field,
-            } => write!(
-                f,
-                "line {line_number}: issue {issue_id} has conflicting '{emitted_field}' and '{accepted_migration_field}' fields"
-            ),
             Self::InvalidIssueData {
                 line_number,
                 issue_id,

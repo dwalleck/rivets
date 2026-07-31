@@ -213,7 +213,18 @@ pub async fn load_from_jsonl(
                 }
                 issues.push(issue);
             }
-            Err(IssueRecordError::InvalidData { issue_id, error }) => {
+            Err(IssueRecordError::InvalidData {
+                issue_id,
+                error,
+                migration_conflict,
+            }) => {
+                if let Some(field) = migration_conflict {
+                    warnings.push(LoadWarning::MigrationConflict {
+                        issue_id: issue_id.clone(),
+                        line_number,
+                        field,
+                    });
+                }
                 warnings.push(LoadWarning::InvalidIssueData {
                     issue_id,
                     line_number,

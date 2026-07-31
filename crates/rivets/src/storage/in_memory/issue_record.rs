@@ -33,10 +33,13 @@ impl MigrationField {
 
 #[derive(Debug)]
 pub(super) enum IssueRecordError {
-    InvalidData { issue_id: IssueId, error: String },
+    InvalidData {
+        issue_id: IssueId,
+        error: String,
+        migration_conflict: Option<MigrationField>,
+    },
 }
 
-<<<<<<< HEAD
 #[derive(Debug, Serialize, Deserialize)]
 struct NoteRecord {
     content: String,
@@ -237,6 +240,7 @@ impl IssueRecord {
                 return Err(IssueRecordError::InvalidData {
                     issue_id: id,
                     error: "missing issue kind (`issue_kind` or legacy `issue_type`)".to_string(),
+                    migration_conflict: None,
                 });
             }
         };
@@ -244,10 +248,12 @@ impl IssueRecord {
         let note_error = |error: NoteError| IssueRecordError::InvalidData {
             issue_id: id.clone(),
             error: error.to_string(),
+            migration_conflict,
         };
         let resource_error = |error: crate::domain::ResourceError| IssueRecordError::InvalidData {
             issue_id: id.clone(),
             error: error.to_string(),
+            migration_conflict,
         };
         let notes = match notes {
             PersistedNotes::Empty(()) => Vec::new(),
@@ -293,6 +299,7 @@ impl IssueRecord {
             .map_err(|error| IssueRecordError::InvalidData {
                 issue_id: issue.id.clone(),
                 error: error.to_string(),
+                migration_conflict,
             })?;
 
         // Legacy `external_ref` migration (ADR-0003). Only a truly empty value
@@ -316,6 +323,7 @@ impl IssueRecord {
                             return Err(IssueRecordError::InvalidData {
                                 issue_id: issue.id.clone(),
                                 error: error.to_string(),
+                                migration_conflict,
                             });
                         }
                     }
@@ -325,6 +333,7 @@ impl IssueRecord {
                         .map_err(|error| IssueRecordError::InvalidData {
                             issue_id: issue.id.clone(),
                             error: error.to_string(),
+                            migration_conflict,
                         })?;
                     issue.append_note(content, updated_at);
                 }
@@ -335,6 +344,7 @@ impl IssueRecord {
             .map_err(|error| IssueRecordError::InvalidData {
                 issue_id: issue.id.clone(),
                 error,
+                migration_conflict,
             })?;
 
         Ok(IssueRecordConversion {
