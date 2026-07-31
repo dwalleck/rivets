@@ -7,7 +7,7 @@ use crate::error::Error;
 use crate::models::{
     AddNoteParams, BlockedParams, CloseParams, CreateParams, DepParams, LabelAddParams,
     LabelListAllParams, LabelListParams, LabelRemoveParams, ListParams, ReadyParams, ReopenParams,
-    SetContextParams, ShowParams, StaleParams, UpdateParams,
+    ResourceAddParams, ResourceListParams, SetContextParams, ShowParams, StaleParams, UpdateParams,
 };
 use crate::tools::Tools;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -21,10 +21,9 @@ use rmcp::{
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Convert a rivets error to an appropriate MCP error.
-///
 /// Maps error types to appropriate MCP error codes:
-/// - `NoContext`, `InvalidArgument`, `InvalidNote` -> `invalid_params` (user needs to fix their request)
+/// - `NoContext`, `InvalidArgument`, `InvalidNote`, `InvalidResource` ->
+///   `invalid_params` (user needs to fix their request)
 /// - `IssueNotFound` -> `invalid_params` (requested resource doesn't exist)
 /// - Other errors -> `internal_error`
 fn to_mcp_error(e: &Error) -> McpError {
@@ -32,6 +31,7 @@ fn to_mcp_error(e: &Error) -> McpError {
         Error::NoContext
         | Error::InvalidArgument { .. }
         | Error::InvalidNote(_)
+        | Error::InvalidResource(_)
         | Error::IssueNotFound(_) => McpError::invalid_params(e.to_string(), None),
         _ => McpError::internal_error(e.to_string(), None),
     }
@@ -200,7 +200,6 @@ impl RivetsMcpServer {
                 assignee,
                 params.design,
                 params.acceptance_criteria,
-                params.external_ref,
                 params.labels,
                 params.workspace_root.as_deref(),
             )
@@ -229,6 +228,48 @@ impl RivetsMcpServer {
             .await
         {
             Ok(issue) => Ok(CallToolResult::success(vec![Content::json(issue)?])),
+            Err(error) => Err(to_mcp_error(&error)),
+        }
+    }
+
+    /// Associate an absolute Web URL with an Issue.
+    #[tool(
+        description = "Associate an absolute HTTP or HTTPS Web URL with an issue using a canonical role and optional label. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn resource_add(
+        &self,
+        Parameters(params): Parameters<ResourceAddParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .tools
+            .resource_add(
+                &params.issue_id,
+                params.url,
+                &params.role,
+                params.label,
+                params.workspace_root.as_deref(),
+            )
+            .await
+        {
+            Ok(issue) => Ok(CallToolResult::success(vec![Content::json(issue)?])),
+            Err(error) => Err(to_mcp_error(&error)),
+        }
+    }
+
+    /// List an Issue's Associated Resources.
+    #[tool(
+        description = "List an issue's Associated Resources in insertion order. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn resource_list(
+        &self,
+        Parameters(params): Parameters<ResourceListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .tools
+            .resource_list(&params.issue_id, params.workspace_root.as_deref())
+            .await
+        {
+            Ok(resources) => Ok(CallToolResult::success(vec![Content::json(resources)?])),
             Err(error) => Err(to_mcp_error(&error)),
         }
     }
@@ -499,6 +540,8 @@ mod tests {
         assert!(tool_names.contains(&"label_remove"));
         assert!(tool_names.contains(&"label_list"));
         assert!(tool_names.contains(&"label_list_all"));
+        assert!(tool_names.contains(&"resource_add"));
+        assert!(tool_names.contains(&"resource_list"));
         let input_properties = |name: &str| {
             tools
                 .iter()
@@ -510,7 +553,9 @@ mod tests {
         assert!(input_properties("create").contains_key("initial_note"));
         assert!(!input_properties("update").contains_key("notes"));
         assert!(input_properties("add_note").contains_key("content"));
-        assert_eq!(tools.len(), 17);
+        assert!(input_properties("resource_add").contains_key("url"));
+        assert!(input_properties("resource_add").contains_key("role"));
+        assert_eq!(tools.len(), 19);
     }
 
     // =========================================================================

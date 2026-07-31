@@ -3,7 +3,10 @@
 //! This module contains types for MCP tool inputs and outputs.
 //! They wrap or transform rivets domain types for MCP compatibility.
 
-use rivets::domain::{Dependency, DependencyType, Issue, IssueKind, IssueStatus, Note};
+use rivets::domain::{
+    AssociatedResource, Dependency, DependencyType, Issue, IssueKind, IssueStatus, Note,
+    ResourceRole, ResourceTarget,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -146,9 +149,6 @@ pub struct UpdateParams {
     /// New acceptance criteria.
     pub acceptance_criteria: Option<String>,
 
-    /// New external reference.
-    pub external_ref: Option<String>,
-
     /// New labels (replaces existing labels).
     pub labels: Option<Vec<String>>,
 
@@ -164,6 +164,35 @@ pub struct AddNoteParams {
 
     /// Immutable Note content.
     pub content: String,
+
+    /// Optional workspace root (uses current context if not specified).
+    pub workspace_root: Option<String>,
+}
+
+/// Parameters for the `resource_add` tool.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ResourceAddParams {
+    /// The Issue receiving the Associated Resource.
+    pub issue_id: String,
+
+    /// Absolute HTTP or HTTPS URL.
+    pub url: String,
+
+    /// Resource Role (implementation, documentation, evidence, successor, reference).
+    pub role: String,
+
+    /// Optional human-readable label.
+    pub label: Option<String>,
+
+    /// Optional workspace root (uses current context if not specified).
+    pub workspace_root: Option<String>,
+}
+
+/// Parameters for the `resource_list` tool.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ResourceListParams {
+    /// The Issue whose Associated Resources should be listed.
+    pub issue_id: String,
 
     /// Optional workspace root (uses current context if not specified).
     pub workspace_root: Option<String>,
@@ -322,6 +351,46 @@ impl From<&Note> for McpNote {
     }
 }
 
+/// Discriminated Resource Target representation for MCP responses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum McpResourceTarget {
+    /// Absolute HTTP or HTTPS URL.
+    Web {
+        /// Normalized URL.
+        url: String,
+    },
+}
+
+/// Associated Resource representation for MCP responses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct McpResource {
+    /// Stable, opaque identifier within the Issue.
+    pub id: String,
+    /// Typed resource target.
+    pub target: McpResourceTarget,
+    /// Why the resource matters.
+    pub role: String,
+    /// Optional human-readable label.
+    pub label: Option<String>,
+}
+
+impl From<&AssociatedResource> for McpResource {
+    fn from(resource: &AssociatedResource) -> Self {
+        let target = match resource.target() {
+            ResourceTarget::Web { url } => McpResourceTarget::Web {
+                url: url.as_str().to_string(),
+            },
+        };
+        Self {
+            id: resource.id().to_string(),
+            target,
+            role: resource.role().to_string(),
+            label: resource.label().map(|label| label.as_str().to_string()),
+        }
+    }
+}
+
 /// Issue representation for MCP responses.
 ///
 /// This is a simplified view of an issue optimized for MCP transport.
@@ -360,8 +429,8 @@ pub struct McpIssue {
     /// Immutable Notes in chronological order.
     pub notes: Vec<McpNote>,
 
-    /// External reference.
-    pub external_ref: Option<String>,
+    /// Associated Resources in insertion order.
+    pub resources: Vec<McpResource>,
 
     /// Dependencies.
     pub dependencies: Vec<McpDependency>,
@@ -379,6 +448,7 @@ pub struct McpIssue {
 impl From<Issue> for McpIssue {
     fn from(issue: Issue) -> Self {
         let notes = issue.notes().iter().map(Into::into).collect();
+        let resources = issue.resources().iter().map(Into::into).collect();
         Self {
             id: issue.id.to_string(),
             title: issue.title,
@@ -391,7 +461,7 @@ impl From<Issue> for McpIssue {
             design: issue.design,
             acceptance_criteria: issue.acceptance_criteria,
             notes,
-            external_ref: issue.external_ref,
+            resources,
             dependencies: issue.dependencies.into_iter().map(Into::into).collect(),
             created_at: issue.created_at.to_rfc3339(),
             updated_at: issue.updated_at.to_rfc3339(),
@@ -507,6 +577,12 @@ pub fn parse_issue_kind(s: &str) -> Option<IssueKind> {
         "chore" => Some(IssueKind::Chore),
         _ => None,
     }
+}
+
+/// Parse a Resource Role string.
+#[must_use]
+pub fn parse_resource_role(s: &str) -> Option<ResourceRole> {
+    s.parse().ok()
 }
 
 /// Parse a dependency type string into a `DependencyType`.

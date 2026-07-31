@@ -9,7 +9,7 @@
 
 use rivets_mcp::context::Context;
 use rivets_mcp::error::Error;
-use rivets_mcp::models::{CreateParams, McpIssue};
+use rivets_mcp::models::{CreateParams, McpIssue, McpResourceTarget};
 use rivets_mcp::tools::Tools;
 use rstest::rstest;
 use std::sync::Arc;
@@ -259,7 +259,6 @@ async fn test_issue_lifecycle_create_update_close() {
             Some(Some("alice".to_string())),
             None,
             None,
-            None,
             None, // labels
             None, // workspace_root
         )
@@ -475,7 +474,6 @@ async fn test_update_reclassifies_only_kind_and_persists_across_context_restart(
             None,
             None,
             Some("bug"),
-            None,
             None,
             None,
             None,
@@ -1356,7 +1354,6 @@ async fn test_assignee_clearing() {
             Some(None), // This clears the assignee
             None,
             None,
-            None,
             None, // labels
             None, // workspace_root
         )
@@ -1401,7 +1398,6 @@ async fn test_assignee_update_vs_noop() {
             None, // None means don't update
             None,
             None,
-            None,
             None, // labels
             None, // workspace_root
         )
@@ -1419,7 +1415,6 @@ async fn test_assignee_update_vs_noop() {
             None,
             None, // issue_kind
             Some(Some("new".to_string())),
-            None,
             None,
             None,
             None, // labels
@@ -1505,7 +1500,6 @@ async fn test_update_persistence() {
                 Some("in_progress"),
                 None,
                 None, // issue_kind
-                None,
                 None,
                 None,
                 None,
@@ -2462,7 +2456,6 @@ async fn test_invalid_status_in_update(#[case] invalid_value: &str) {
             None,
             None,
             None,
-            None,
             None, // labels
             None, // workspace_root
         )
@@ -2554,7 +2547,6 @@ async fn test_complete_issue_lifecycle_all_states() {
             None,
             None,
             None,
-            None,
             None, // labels
             None, // workspace_root
         )
@@ -2572,7 +2564,6 @@ async fn test_complete_issue_lifecycle_all_states() {
             Some("blocked"),
             None,
             None, // issue_kind
-            None,
             None,
             None,
             None,
@@ -2598,7 +2589,6 @@ async fn test_complete_issue_lifecycle_all_states() {
             Some("in_progress"),
             None,
             None, // issue_kind
-            None,
             None,
             None,
             None,
@@ -2671,7 +2661,6 @@ async fn test_update_preserves_unmodified_fields() {
             None, // Don't update assignee
             None, // Don't update design
             None, // Don't update acceptance
-            None, // Don't update external_ref
             None, // labels
             None, // workspace_root
         )
@@ -2833,7 +2822,6 @@ async fn test_all_tools_with_storage_backend() {
             Some("in_progress"),
             None,
             None, // issue_kind
-            None,
             None,
             None,
             None,
@@ -3012,7 +3000,6 @@ async fn test_issue_counts_accurate() {
             None,
             None,
             None,
-            None,
             None, // labels
             None, // workspace_root
         )
@@ -3051,4 +3038,209 @@ async fn test_issue_counts_accurate() {
         .unwrap();
     assert_eq!(closed.len(), 1, "Should have 1 closed issue");
     assert_eq!(closed[0].id, issue3.id);
+}
+
+// =============================================================================
+// Associated Resource Tests
+// =============================================================================
+
+#[tokio::test]
+async fn resource_add_list_and_context_recreation_use_real_storage() {
+    let workspace = create_temp_workspace();
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+    let issue = create_issue(&tools, "Resource owner").await;
+
+    let first = tools
+        .resource_add(
+            &issue.id,
+            "https://example.com/pr/123".to_string(),
+            "implementation",
+            Some("Implementation PR".to_string()),
+            None,
+        )
+        .await
+        .expect("first resource should be added");
+    assert_eq!(first.resources.len(), 1);
+    assert_eq!(first.resources[0].id, "r1");
+
+    let second = tools
+        .resource_add(
+            &issue.id,
+            "https://example.com/pr/123".to_string(),
+            "documentation",
+            None,
+            None,
+        )
+        .await
+        .expect("same target with distinct role should be added");
+    assert_eq!(second.resources.len(), 2);
+    assert_eq!(second.resources[0].role, "implementation");
+    assert_eq!(second.resources[1].role, "documentation");
+
+    let resources = tools
+        .resource_list(&issue.id, None)
+        .await
+        .expect("resource list should succeed");
+    assert_eq!(resources.len(), 2);
+    assert_eq!(resources[0].id, "r1");
+    assert_eq!(resources[0].label.as_deref(), Some("Implementation PR"));
+    assert_eq!(resources[1].id, "r2");
+    assert!(resources[1].label.is_none());
+    match &resources[0].target {
+        McpResourceTarget::Web { url } => {
+            assert_eq!(url, "https://example.com/pr/123");
+        }
+    }
+
+    let restarted = create_tools();
+    set_context(&restarted, workspace.path()).await;
+    let persisted = restarted
+        .resource_list(&issue.id, None)
+        .await
+        .expect("resources should survive context recreation");
+    assert_eq!(persisted, resources);
+
+    let shown = restarted
+        .show(&issue.id, None)
+        .await
+        .expect("full Issue response should include resources");
+    assert_eq!(shown.resources, persisted);
+
+    let data = std::fs::read_to_string(workspace.path().join(".rivets/issues.jsonl"))
+        .expect("issues file should be readable");
+    let record: serde_json::Value = data
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("record should be JSON"))
+        .find(|record: &serde_json::Value| record["id"] == issue.id)
+        .expect("Issue should be persisted");
+    assert!(record.get("external_ref").is_none());
+    assert_eq!(record["resources"].as_array().unwrap().len(), 2);
+    assert_eq!(record["next_resource_id"], 3);
+}
+
+#[tokio::test]
+async fn resource_add_rejects_invalid_inputs_without_mutation() {
+    let workspace = create_temp_workspace();
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+    let issue = create_issue(&tools, "Resource validation").await;
+
+    tools
+        .resource_add(
+            &issue.id,
+            "https://example.com/pr/123".to_string(),
+            "implementation",
+            None,
+            None,
+        )
+        .await
+        .expect("initial resource should be added");
+
+    let duplicate = tools
+        .resource_add(
+            &issue.id,
+            "https://example.com/pr/123".to_string(),
+            "implementation",
+            None,
+            None,
+        )
+        .await
+        .expect_err("exact target-and-role duplicate should fail");
+    assert!(duplicate.to_string().contains("already exists"));
+
+    assert!(matches!(
+        tools
+            .resource_add(
+                &issue.id,
+                "docs/adr/0003-associated-resources.md".to_string(),
+                "reference",
+                None,
+                None,
+            )
+            .await,
+        Err(Error::InvalidResource(_))
+    ));
+    assert!(matches!(
+        tools
+            .resource_add(
+                &issue.id,
+                "https://example.com/evidence".to_string(),
+                "evidence",
+                Some("   ".to_string()),
+                None,
+            )
+            .await,
+        Err(Error::InvalidResource(_))
+    ));
+    assert!(matches!(
+        tools
+            .resource_add(
+                &issue.id,
+                "https://example.com/evidence".to_string(),
+                "Evidence",
+                None,
+                None,
+            )
+            .await,
+        Err(Error::InvalidArgument { field: "role", .. })
+    ));
+    assert_eq!(
+        tools
+            .resource_list(&issue.id, None)
+            .await
+            .expect("failures must not mutate storage")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn legacy_web_external_ref_migrates_through_mcp_and_persists() {
+    let workspace = create_temp_workspace();
+    let issues_path = workspace.path().join(".rivets/issues.jsonl");
+    let legacy = r#"{"id":"test-legacy","title":"Legacy URL","description":"Test","status":"open","priority":2,"issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":"https://example.com/legacy","dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null}"#;
+    std::fs::write(&issues_path, format!("{legacy}\n")).expect("legacy record should be seeded");
+
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+    let migrated = tools
+        .resource_list("test-legacy", None)
+        .await
+        .expect("legacy resource should be visible");
+    assert_eq!(migrated.len(), 1);
+    assert_eq!(migrated[0].id, "r1");
+    assert_eq!(migrated[0].role, "reference");
+
+    let updated = tools
+        .resource_add(
+            "test-legacy",
+            "https://example.com/new".to_string(),
+            "evidence",
+            None,
+            None,
+        )
+        .await
+        .expect("mutation should canonicalize and persist");
+    assert_eq!(updated.resources.len(), 2);
+
+    let restarted = create_tools();
+    set_context(&restarted, workspace.path()).await;
+    let persisted = restarted
+        .resource_list("test-legacy", None)
+        .await
+        .expect("migrated resources should survive context recreation");
+    assert_eq!(persisted.len(), 2);
+    assert_eq!(persisted[0].id, "r1");
+    assert_eq!(persisted[1].id, "r2");
+
+    let canonical =
+        std::fs::read_to_string(issues_path).expect("canonical record should be readable");
+    let record: serde_json::Value =
+        serde_json::from_str(canonical.trim()).expect("record should be JSON");
+    assert!(record.get("external_ref").is_none());
+    assert!(record.get("issue_type").is_none());
+    assert_eq!(record["issue_kind"], "task");
+    assert_eq!(record["resources"].as_array().unwrap().len(), 2);
+    assert_eq!(record["next_resource_id"], 3);
 }

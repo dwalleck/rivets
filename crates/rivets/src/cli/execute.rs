@@ -8,8 +8,8 @@ use anyhow::{Context, Result};
 
 use super::args::{
     BlockedArgs, CloseArgs, CreateArgs, DeleteArgs, DepAction, DepArgs, InfoArgs, InitArgs,
-    LabelAction, LabelArgs, ListArgs, ReadyArgs, ReopenArgs, ShowArgs, StaleArgs, StatsArgs,
-    UpdateArgs,
+    LabelAction, LabelArgs, ListArgs, ReadyArgs, ReopenArgs, ResourceAction, ResourceArgs,
+    ShowArgs, StaleArgs, StatsArgs, UpdateArgs,
 };
 use super::types::{DependencyTypeArg, SortOrderArg, SortPolicyArg};
 use crate::output::OutputMode;
@@ -185,7 +185,6 @@ pub async fn execute_create(
         design: args.design.clone(),
         acceptance_criteria: args.acceptance.clone(),
         initial_note: args.notes.clone().map(NoteContent::new).transpose()?,
-        external_ref: args.external_ref.clone(),
         dependencies,
     };
 
@@ -298,7 +297,7 @@ pub async fn execute_show(
                         "design": issue.design,
                         "acceptance_criteria": issue.acceptance_criteria,
                         "notes": issue.notes(),
-                        "external_ref": issue.external_ref,
+                        "resources": issue.resources(),
                         "created_at": issue.created_at,
                         "updated_at": issue.updated_at,
                         "closed_at": issue.closed_at,
@@ -372,7 +371,6 @@ pub async fn execute_update(
             design: args.design.clone(),
             acceptance_criteria: args.acceptance.clone(),
             note: note.clone(),
-            external_ref: args.external_ref.clone(),
             ..Default::default()
         };
 
@@ -1322,6 +1320,80 @@ pub async fn execute_label(
     }
 }
 
+/// Execute an Associated Resource command.
+pub async fn execute_resource(
+    app: &mut crate::app::App,
+    args: &ResourceArgs,
+    output_mode: OutputMode,
+) -> Result<()> {
+    use crate::domain::{IssueId, NewResource, ResourceLabel, ResourceTarget, WebUrl};
+    use crate::output;
+
+    match &args.action {
+        ResourceAction::Add {
+            issue_id,
+            url,
+            role,
+            label,
+        } => {
+            let resource = NewResource {
+                target: ResourceTarget::web(WebUrl::new(url)?),
+                role: (*role).into(),
+                label: label.clone().map(ResourceLabel::new).transpose()?,
+            };
+            let issue = app
+                .storage_mut()
+                .add_resource(&IssueId::new(issue_id), resource)
+                .await?;
+            app.save().await?;
+
+            match output_mode {
+                output::OutputMode::Json => output::print_json(&issue)?,
+                output::OutputMode::Text => {
+                    println!("Added resource to {}", issue.id);
+                }
+            }
+        }
+        ResourceAction::List { issue_id } => {
+            let id = IssueId::new(issue_id);
+            let issue = app
+                .storage()
+                .get(&id)
+                .await?
+                .ok_or_else(|| crate::error::Error::IssueNotFound(id.clone()))?;
+
+            match output_mode {
+                output::OutputMode::Json => output::print_json(&issue.resources())?,
+                output::OutputMode::Text => {
+                    if issue.resources().is_empty() {
+                        println!("{issue_id} has no associated resources");
+                    } else {
+                        println!("Resources for {} ({}):", issue_id, issue.resources().len());
+                        for resource in issue.resources() {
+                            match resource.label() {
+                                Some(label) => println!(
+                                    "  [{}] {} ({}) — {}",
+                                    resource.id(),
+                                    resource.target(),
+                                    resource.role(),
+                                    label
+                                ),
+                                None => println!(
+                                    "  [{}] {} ({})",
+                                    resource.id(),
+                                    resource.target(),
+                                    resource.role()
+                                ),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Execute the stale command
 ///
 /// By default, closed issues are excluded from staleness checks (since they're done).
@@ -1520,7 +1592,8 @@ mod tests {
             design: None,
             acceptance_criteria: None,
             notes: vec![],
-            external_ref: None,
+            resources: vec![],
+            next_resource_id: 1,
             dependencies: vec![],
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -1952,7 +2025,6 @@ mod tests {
                 design: None,
                 acceptance: None,
                 notes: None,
-                external_ref: None,
             };
 
             let result = execute_update(&mut app, &args, OutputMode::Text).await;

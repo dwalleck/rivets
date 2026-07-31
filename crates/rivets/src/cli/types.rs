@@ -6,7 +6,7 @@
 use clap::ValueEnum;
 use serde::Serialize;
 
-use crate::domain::{DependencyType, Issue, IssueKind, IssueStatus};
+use crate::domain::{DependencyType, Issue, IssueKind, IssueStatus, ResourceRole};
 
 // ============================================================================
 // Batch Operation Results
@@ -122,6 +122,33 @@ impl std::fmt::Display for IssueStatusArg {
             Self::InProgress => write!(f, "in_progress"),
             Self::Blocked => write!(f, "blocked"),
             Self::Closed => write!(f, "closed"),
+        }
+    }
+}
+
+/// Associated Resource role for CLI arguments.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceRoleArg {
+    /// Delivers work for the Issue.
+    Implementation,
+    /// Explains the Issue or its context.
+    Documentation,
+    /// Supports a finding or decision.
+    Evidence,
+    /// Identifies where the Issue continues.
+    Successor,
+    /// Generic external context.
+    Reference,
+}
+
+impl std::fmt::Display for ResourceRoleArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Implementation => write!(f, "implementation"),
+            Self::Documentation => write!(f, "documentation"),
+            Self::Evidence => write!(f, "evidence"),
+            Self::Successor => write!(f, "successor"),
+            Self::Reference => write!(f, "reference"),
         }
     }
 }
@@ -245,6 +272,18 @@ impl From<IssueStatus> for IssueStatusArg {
             IssueStatus::InProgress => IssueStatusArg::InProgress,
             IssueStatus::Blocked => IssueStatusArg::Blocked,
             IssueStatus::Closed => IssueStatusArg::Closed,
+        }
+    }
+}
+
+impl From<ResourceRoleArg> for ResourceRole {
+    fn from(arg: ResourceRoleArg) -> Self {
+        match arg {
+            ResourceRoleArg::Implementation => ResourceRole::Implementation,
+            ResourceRoleArg::Documentation => ResourceRole::Documentation,
+            ResourceRoleArg::Evidence => ResourceRole::Evidence,
+            ResourceRoleArg::Successor => ResourceRole::Successor,
+            ResourceRoleArg::Reference => ResourceRole::Reference,
         }
     }
 }

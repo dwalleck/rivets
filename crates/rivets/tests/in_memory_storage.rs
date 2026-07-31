@@ -25,7 +25,6 @@ fn create_test_issue(title: &str) -> NewIssue {
         design: None,
         acceptance_criteria: None,
         initial_note: None,
-        external_ref: None,
         dependencies: vec![],
     }
 }
@@ -41,7 +40,6 @@ fn create_test_issue_with_priority(title: &str, priority: u8) -> NewIssue {
         design: None,
         acceptance_criteria: None,
         initial_note: None,
-        external_ref: None,
         dependencies: vec![],
     }
 }

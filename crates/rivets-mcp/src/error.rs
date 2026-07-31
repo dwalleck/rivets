@@ -24,6 +24,10 @@ pub enum Error {
     #[error("Invalid note: {0}")]
     InvalidNote(#[from] rivets::domain::NoteError),
 
+    /// Associated Resource input failed domain validation.
+    #[error("Invalid resource: {0}")]
+    InvalidResource(#[from] rivets::domain::ResourceError),
+
     /// The requested issue was not found.
     #[error("Issue not found: {0}")]
     IssueNotFound(String),

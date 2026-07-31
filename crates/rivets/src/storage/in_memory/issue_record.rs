@@ -1,7 +1,8 @@
 //! Compatibility boundary between persisted JSONL issue records and the domain model.
 
 use crate::domain::{
-    Dependency, Issue, IssueId, IssueKind, IssueStatus, Note, NoteContent, NoteError,
+    AssociatedResource, Dependency, Issue, IssueId, IssueKind, IssueStatus, Note, NoteContent,
+    NoteError, ResourceId, ResourceLabel, ResourceRole, ResourceTarget, WebUrl,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -80,6 +81,67 @@ impl Default for PersistedNotes {
     }
 }
 
+/// Persisted form of a Resource Target.
+///
+/// Stringly typed on purpose: the record is an adapter DTO, and conversion
+/// into the domain revalidates through the [`WebUrl`] constructor.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ResourceTargetRecord {
+    Web { url: String },
+}
+
+/// Persisted form of an Associated Resource.
+#[derive(Debug, Serialize, Deserialize)]
+struct ResourceRecord {
+    id: String,
+    target: ResourceTargetRecord,
+    role: ResourceRole,
+    label: Option<String>,
+}
+
+impl ResourceRecord {
+    fn into_domain(self) -> Result<AssociatedResource, crate::domain::ResourceError> {
+        let target = match self.target {
+            ResourceTargetRecord::Web { url } => ResourceTarget::web(WebUrl::new(url)?),
+        };
+        let label = self.label.map(ResourceLabel::new).transpose()?;
+        Ok(AssociatedResource::from_parts(
+            ResourceId::new(self.id)?,
+            target,
+            self.role,
+            label,
+        ))
+    }
+}
+
+impl From<AssociatedResource> for ResourceRecord {
+    fn from(resource: AssociatedResource) -> Self {
+        let target = match resource.target() {
+            ResourceTarget::Web { url } => ResourceTargetRecord::Web {
+                url: url.as_str().to_string(),
+            },
+        };
+        Self {
+            id: resource.id().as_str().to_string(),
+            target,
+            role: resource.role(),
+            label: resource.label().map(|l| l.as_str().to_string()),
+        }
+    }
+}
+
+/// Default next resource identifier for records that never held resources.
+const DEFAULT_NEXT_RESOURCE_ID: u64 = 1;
+
+fn default_next_resource_id() -> u64 {
+    DEFAULT_NEXT_RESOURCE_ID
+}
+
+fn is_default_next_resource_id(value: &u64) -> bool {
+    *value == DEFAULT_NEXT_RESOURCE_ID
+}
+
 /// The current on-disk Issue shape.
 ///
 /// This DTO owns all serde behavior for JSONL persistence. The domain [`Issue`]
@@ -105,6 +167,18 @@ pub(super) struct IssueRecord {
     acceptance_criteria: Option<String>,
     #[serde(default)]
     notes: PersistedNotes,
+    /// Canonical Associated Resource collection.
+    #[serde(default)]
+    resources: Vec<ResourceRecord>,
+    /// Monotonic resource identifier sequence. Emitted only once resources
+    /// exist so resource-free records do not grow a sequence field.
+    #[serde(
+        default = "default_next_resource_id",
+        skip_serializing_if = "is_default_next_resource_id"
+    )]
+    next_resource_id: u64,
+    /// Legacy read-only field accepted during migration and never written back.
+    #[serde(default, skip_serializing)]
     external_ref: Option<String>,
     dependencies: Vec<Dependency>,
     created_at: DateTime<Utc>,
@@ -127,6 +201,8 @@ impl IssueRecord {
             design,
             acceptance_criteria,
             notes,
+            resources,
+            next_resource_id,
             external_ref,
             dependencies,
             created_at,
@@ -154,7 +230,11 @@ impl IssueRecord {
             issue_id: id.clone(),
             error: error.to_string(),
         };
-        let notes = match notes {
+        let resource_error = |error: crate::domain::ResourceError| IssueRecordError::InvalidData {
+            issue_id: id.clone(),
+            error: error.to_string(),
+        };
+        let mut notes = match notes {
             PersistedNotes::Empty(()) => Vec::new(),
             PersistedNotes::Legacy(content) if content.trim().is_empty() => Vec::new(),
             PersistedNotes::Legacy(content) => {
@@ -168,6 +248,103 @@ impl IssueRecord {
                 .map_err(note_error)?,
         };
 
+        let mut resources = resources
+            .into_iter()
+            .map(ResourceRecord::into_domain)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(resource_error)?;
+        for (index, resource) in resources.iter().enumerate() {
+            if resources[..index]
+                .iter()
+                .any(|prior| prior.id() == resource.id())
+            {
+                return Err(IssueRecordError::InvalidData {
+                    issue_id: id.clone(),
+                    error: format!("duplicate resource id '{}'", resource.id()),
+                });
+            }
+            if resources[..index]
+                .iter()
+                .any(|prior| prior.target() == resource.target() && prior.role() == resource.role())
+            {
+                return Err(IssueRecordError::InvalidData {
+                    issue_id: id.clone(),
+                    error: format!(
+                        "duplicate resource with target '{}' and role '{}'",
+                        resource.target(),
+                        resource.role()
+                    ),
+                });
+            }
+        }
+
+        // Legacy `external_ref` migration (ADR-0003). Empty values carry no
+        // context; absolute web URLs become Reference resources; opaque values
+        // are preserved byte-for-byte in a migration Note rather than guessed.
+        //
+        // The identifier sequence is normalized against the canonical
+        // resources BEFORE migration mints an identifier: a record with a
+        // defaulted or hand-edited counter must never reuse a live id.
+        let min_unused = match resources
+            .iter()
+            .filter_map(|r| r.id().as_str().strip_prefix('r'))
+            .filter_map(|suffix| suffix.parse::<u64>().ok())
+            .max()
+        {
+            Some(max) => max
+                .checked_add(1)
+                .ok_or_else(|| IssueRecordError::InvalidData {
+                    issue_id: id.clone(),
+                    error: "resource identifier sequence exhausted".to_string(),
+                })?,
+            None => DEFAULT_NEXT_RESOURCE_ID,
+        };
+        let mut next_resource_id = next_resource_id.max(min_unused);
+        if let Some(external_ref) = external_ref
+            && !external_ref.trim().is_empty()
+        {
+            match WebUrl::new(&external_ref) {
+                Ok(url) => {
+                    // A hand-maintained record may already associate the same
+                    // URL as a Reference; the content is preserved either way,
+                    // so migration is a no-op instead of minting a duplicate.
+                    let already_associated = resources.iter().any(|r| {
+                        r.target() == &ResourceTarget::web(url.clone())
+                            && r.role() == ResourceRole::Reference
+                    });
+                    if !already_associated {
+                        let resource_id =
+                            ResourceId::new(format!("r{next_resource_id}")).map_err(|error| {
+                                IssueRecordError::InvalidData {
+                                    issue_id: id.clone(),
+                                    error: error.to_string(),
+                                }
+                            })?;
+                        next_resource_id = next_resource_id.checked_add(1).ok_or_else(|| {
+                            IssueRecordError::InvalidData {
+                                issue_id: id.clone(),
+                                error: "resource identifier sequence exhausted during migration"
+                                    .to_string(),
+                            }
+                        })?;
+                        resources.push(AssociatedResource::from_parts(
+                            resource_id,
+                            ResourceTarget::web(url),
+                            ResourceRole::Reference,
+                            None,
+                        ));
+                    }
+                }
+                Err(_) => {
+                    let content = NoteContent::new(format!(
+                        "Migrated legacy external reference: {external_ref}"
+                    ))
+                    .map_err(note_error)?;
+                    notes.push(Note::from_parts(content, updated_at));
+                }
+            }
+        }
+
         let issue = Issue {
             id,
             title,
@@ -180,7 +357,8 @@ impl IssueRecord {
             design,
             acceptance_criteria,
             notes,
-            external_ref,
+            resources,
+            next_resource_id,
             dependencies,
             created_at,
             updated_at,
@@ -211,7 +389,8 @@ impl From<Issue> for IssueRecord {
             design,
             acceptance_criteria,
             notes,
-            external_ref,
+            resources,
+            next_resource_id,
             dependencies,
             created_at,
             updated_at,
@@ -232,7 +411,10 @@ impl From<Issue> for IssueRecord {
             design,
             acceptance_criteria,
             notes: PersistedNotes::Canonical(notes.into_iter().map(Into::into).collect()),
-            external_ref,
+            resources: resources.into_iter().map(Into::into).collect(),
+            next_resource_id,
+            // Accepted only during loading; canonical writes never emit `external_ref`.
+            external_ref: None,
             dependencies,
             created_at,
             updated_at,

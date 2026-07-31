@@ -12,7 +12,7 @@
 //! - Round-trip persistence through save and load
 
 use chrono::Utc;
-use rivets::domain::{DependencyType, IssueId, IssueKind, IssueStatus, NewIssue};
+use rivets::domain::{DependencyType, IssueId, IssueKind, IssueStatus, NewIssue, ResourceRole};
 use rivets::storage::in_memory::{
     LoadWarning, MigrationField, load_from_jsonl, new_in_memory_storage, save_to_jsonl,
 };
@@ -42,7 +42,6 @@ fn create_test_issue(title: &str) -> NewIssue {
         design: None,
         acceptance_criteria: None,
         initial_note: None,
-        external_ref: None,
         dependencies: vec![],
     }
 }
@@ -519,10 +518,160 @@ mod load_from_jsonl_tests {
         assert_eq!(loaded.assignee, Some("alice".to_string()));
         assert_eq!(loaded.labels, vec!["backend", "urgent"]);
         assert_eq!(loaded.design, Some("Design notes here".to_string()));
-        assert_eq!(loaded.external_ref, Some("GH-123".to_string()));
-        assert_eq!(loaded.notes().len(), 1);
+        assert!(loaded.resources().is_empty());
+        assert_eq!(loaded.notes().len(), 2);
         assert_eq!(loaded.notes()[0].content(), "Implementation notes");
         assert_eq!(loaded.notes()[0].created_at().to_rfc3339(), now);
+        assert_eq!(
+            loaded.notes()[1].content(),
+            "Migrated legacy external reference: GH-123"
+        );
+        assert_eq!(loaded.notes()[1].created_at().to_rfc3339(), now);
+    }
+
+    #[tokio::test]
+    async fn legacy_web_external_ref_migrates_to_reference_resource_idempotently() {
+        let json = r#"{"id":"test-web-ref","title":"Legacy Web Ref","description":"Test","status":"open","priority":2,"issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":"HTTPS://EXAMPLE.com/pr/1","dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T03:04:05Z","closed_at":null}"#;
+        let file = create_temp_jsonl_file(json);
+
+        let (storage, warnings) = load_from_jsonl(file.path(), "test".to_string())
+            .await
+            .expect("legacy Web URL should load");
+        assert!(warnings.is_empty());
+        let issue = storage
+            .get(&IssueId::new("test-web-ref"))
+            .await
+            .expect("lookup should succeed")
+            .expect("Issue should load");
+        assert!(issue.notes().is_empty());
+        assert_eq!(issue.resources().len(), 1);
+        let resource = &issue.resources()[0];
+        assert_eq!(resource.id().as_str(), "r1");
+        assert_eq!(resource.target().to_string(), "https://example.com/pr/1");
+        assert_eq!(resource.role(), ResourceRole::Reference);
+        assert!(resource.label().is_none());
+
+        save_to_jsonl(storage.as_ref(), file.path())
+            .await
+            .expect("canonical save should succeed");
+        let canonical = std::fs::read(file.path()).expect("canonical file should be readable");
+        let record: serde_json::Value =
+            serde_json::from_slice(&canonical).expect("canonical record should be JSON");
+        assert!(record.get("external_ref").is_none());
+        assert_eq!(record["resources"][0]["id"], "r1");
+        assert_eq!(record["resources"][0]["target"]["type"], "web");
+        assert_eq!(
+            record["resources"][0]["target"]["url"],
+            "https://example.com/pr/1"
+        );
+        assert_eq!(record["resources"][0]["role"], "reference");
+        assert_eq!(record["next_resource_id"], 2);
+
+        let (reloaded, warnings) = load_from_jsonl(file.path(), "test".to_string())
+            .await
+            .expect("canonical record should reload");
+        assert!(warnings.is_empty());
+        save_to_jsonl(reloaded.as_ref(), file.path())
+            .await
+            .expect("repeat canonical save should succeed");
+        assert_eq!(
+            std::fs::read(file.path()).expect("repeat saved file should be readable"),
+            canonical
+        );
+    }
+
+    #[tokio::test]
+    async fn opaque_legacy_external_ref_becomes_migration_note_idempotently() {
+        let json = r#"{"id":"test-opaque-ref","title":"Opaque Ref","description":"Test","status":"open","priority":2,"issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":"  GH-123  ","dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T03:04:05Z","closed_at":null}"#;
+        let file = create_temp_jsonl_file(json);
+
+        let (storage, warnings) = load_from_jsonl(file.path(), "test".to_string())
+            .await
+            .expect("opaque legacy reference should load");
+        assert!(warnings.is_empty());
+        let issue = storage
+            .get(&IssueId::new("test-opaque-ref"))
+            .await
+            .expect("lookup should succeed")
+            .expect("Issue should load");
+        assert!(issue.resources().is_empty());
+        assert_eq!(issue.notes().len(), 1);
+        assert_eq!(
+            issue.notes()[0].content(),
+            "Migrated legacy external reference:   GH-123  "
+        );
+        assert_eq!(
+            issue.notes()[0].created_at().to_rfc3339(),
+            "2026-01-02T03:04:05+00:00"
+        );
+
+        save_to_jsonl(storage.as_ref(), file.path())
+            .await
+            .expect("canonical save should succeed");
+        let canonical = std::fs::read(file.path()).expect("canonical file should be readable");
+        let record: serde_json::Value =
+            serde_json::from_slice(&canonical).expect("canonical record should be JSON");
+        assert!(record.get("external_ref").is_none());
+        assert_eq!(record["resources"], serde_json::json!([]));
+        assert_eq!(
+            record["notes"][0]["content"],
+            "Migrated legacy external reference:   GH-123  "
+        );
+        assert_eq!(record["notes"][0]["created_at"], "2026-01-02T03:04:05Z");
+
+        let (reloaded, warnings) = load_from_jsonl(file.path(), "test".to_string())
+            .await
+            .expect("canonical record should reload");
+        assert!(warnings.is_empty());
+        save_to_jsonl(reloaded.as_ref(), file.path())
+            .await
+            .expect("repeat canonical save should succeed");
+        assert_eq!(
+            std::fs::read(file.path()).expect("repeat saved file should be readable"),
+            canonical
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_legacy_external_ref_loads_without_resources_or_notes() {
+        let json = r#"{"id":"test-empty-ref","title":"Empty Ref","description":"Test","status":"open","priority":2,"issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":"","dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#;
+        let file = create_temp_jsonl_file(json);
+
+        let (storage, warnings) = load_from_jsonl(file.path(), "test".to_string())
+            .await
+            .expect("empty legacy reference should load");
+        assert!(warnings.is_empty());
+        let issue = storage
+            .get(&IssueId::new("test-empty-ref"))
+            .await
+            .expect("lookup should succeed")
+            .expect("Issue should load");
+        assert!(issue.resources().is_empty());
+        assert!(issue.notes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn empty_canonical_resource_id_is_rejected_with_visible_warning() {
+        let json = r#"{"id":"test-empty-resource-id","title":"Bad Resource","description":"Test","status":"open","priority":2,"issue_kind":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":[],"resources":[{"id":"","target":{"type":"web","url":"https://example.com"},"role":"reference","label":null}],"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#;
+        let file = create_temp_jsonl_file(json);
+
+        let (storage, warnings) = load_from_jsonl(file.path(), "test".to_string())
+            .await
+            .expect("resilient load should report invalid resource ID");
+        assert_eq!(warnings.len(), 1);
+        match &warnings[0] {
+            LoadWarning::InvalidIssueData { error, .. } => {
+                assert!(error.contains("Resource identifier cannot be empty"));
+            }
+            warning => panic!("expected InvalidIssueData warning, got {warning:?}"),
+        }
+        assert!(
+            storage
+                .export_all()
+                .await
+                .expect("export should succeed")
+                .is_empty()
+        );
     }
 
     #[tokio::test]

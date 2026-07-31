@@ -6,6 +6,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+mod resource;
+
+pub use resource::{
+    AssociatedResource, NewResource, ResourceError, ResourceId, ResourceLabel, ResourceRole,
+    ResourceTarget, WebUrl,
+};
+
 /// Unique identifier for an issue
 ///
 /// Wraps a string ID in a newtype for type safety. The inner field is private
@@ -176,8 +183,16 @@ pub struct Issue {
     /// Ordered, append-only Note history
     pub(crate) notes: Vec<Note>,
 
-    /// External reference (e.g., GitHub issue number)
-    pub external_ref: Option<String>,
+    /// Ordered, curated Associated Resource index
+    pub(crate) resources: Vec<AssociatedResource>,
+
+    /// Next Associated Resource identifier number to assign.
+    ///
+    /// Monotonic per Issue so identifiers are never reused, even after a
+    /// resource is removed. Skipped in domain JSON output; the persistence
+    /// boundary owns its serialized form.
+    #[serde(skip)]
+    pub(crate) next_resource_id: u64,
 
     /// Dependencies (issues this issue depends on)
     ///
@@ -210,6 +225,45 @@ impl Issue {
         self.notes.push(Note::from_parts(content, created_at));
     }
 
+    /// Return Associated Resources in insertion order.
+    pub fn resources(&self) -> &[AssociatedResource] {
+        &self.resources
+    }
+
+    /// Associate a new resource, assigning its stable identifier.
+    ///
+    /// Identifiers come from a monotonic per-Issue sequence, so they are
+    /// never reused even after a resource is removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResourceError::DuplicateTargetRole`] when an association with
+    /// the same target and role already exists.
+    pub fn add_resource(&mut self, new: NewResource) -> Result<ResourceId, ResourceError> {
+        if self
+            .resources
+            .iter()
+            .any(|r| *r.target() == new.target && r.role() == new.role)
+        {
+            return Err(ResourceError::DuplicateTargetRole {
+                target: new.target.to_string(),
+                role: new.role,
+            });
+        }
+        let id = ResourceId::new(format!("r{}", self.next_resource_id))?;
+        self.next_resource_id = self
+            .next_resource_id
+            .checked_add(1)
+            .ok_or(ResourceError::IdSequenceExhausted)?;
+        self.resources.push(AssociatedResource::from_parts(
+            id.clone(),
+            new.target,
+            new.role,
+            new.label,
+        ));
+        Ok(id)
+    }
+
     /// Validate issue data integrity
     ///
     /// Checks:
@@ -226,7 +280,6 @@ impl Issue {
             &self.labels,
             self.design.as_deref(),
             self.acceptance_criteria.as_deref(),
-            self.external_ref.as_deref(),
         )
     }
 }
@@ -369,7 +422,7 @@ pub const MAX_PRIORITY: u8 = 4;
 /// Check a single-line field for control characters (0x00-0x1F except tab, and 0x7F-0x9F).
 ///
 /// Returns the position of the first offending character, if any.
-fn find_control_char(s: &str) -> Option<usize> {
+pub(crate) fn find_control_char(s: &str) -> Option<usize> {
     s.chars().position(|c| {
         let code = c as u32;
         (code < 0x20 && code != 0x09) || (0x7F..=0x9F).contains(&code)
@@ -440,7 +493,6 @@ fn validate_text_fields(
     labels: &[String],
     design: Option<&str>,
     acceptance_criteria: Option<&str>,
-    external_ref: Option<&str>,
 ) -> Result<(), String> {
     if let Some(pos) = find_control_char_multiline(description) {
         return Err(format!(
@@ -473,13 +525,6 @@ fn validate_text_fields(
     {
         return Err(format!(
             "Acceptance criteria contains invalid control character at position {pos}"
-        ));
-    }
-    if let Some(val) = external_ref
-        && let Some(pos) = find_control_char(val)
-    {
-        return Err(format!(
-            "External ref contains invalid control character at position {pos}"
         ));
     }
     Ok(())
@@ -515,9 +560,6 @@ pub struct NewIssue {
     /// Initial Note recorded with the Issue creation timestamp
     pub initial_note: Option<NoteContent>,
 
-    /// External reference
-    pub external_ref: Option<String>,
-
     /// Dependencies
     pub dependencies: Vec<(IssueId, DependencyType)>,
 }
@@ -539,7 +581,6 @@ impl NewIssue {
             &self.labels,
             self.design.as_deref(),
             self.acceptance_criteria.as_deref(),
-            self.external_ref.as_deref(),
         )
     }
 }
@@ -564,7 +605,6 @@ impl Default for NewIssue {
             design: None,
             acceptance_criteria: None,
             initial_note: None,
-            external_ref: None,
             dependencies: vec![],
         }
     }
@@ -604,9 +644,6 @@ pub struct IssueUpdate {
 
     /// Note to append with this mutation's timestamp
     pub note: Option<NoteContent>,
-
-    /// New external reference (if updating)
-    pub external_ref: Option<String>,
 
     /// New labels (if updating) - replaces existing labels
     pub labels: Option<Vec<String>>,
@@ -1011,10 +1048,129 @@ mod tests {
                     &["bug".to_string(), "urgent".to_string()],
                     Some("Use approach A"),
                     Some("- [ ] Done"),
-                    Some("GH-123"),
                 )
                 .is_ok()
             );
+        }
+    }
+
+    // ===== Associated Resources =====
+
+    mod resource_tests {
+        use super::*;
+
+        fn issue_with_next_id(next_resource_id: u64) -> Issue {
+            Issue {
+                id: IssueId::new("test-1"),
+                title: "Test".to_string(),
+                description: String::new(),
+                status: IssueStatus::Open,
+                priority: 2,
+                issue_kind: IssueKind::Task,
+                assignee: None,
+                labels: vec![],
+                design: None,
+                acceptance_criteria: None,
+                notes: vec![],
+                resources: vec![],
+                next_resource_id,
+                dependencies: vec![],
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                closed_at: None,
+            }
+        }
+
+        fn web_resource(url: &str, role: ResourceRole) -> NewResource {
+            NewResource {
+                target: ResourceTarget::web(WebUrl::new(url).expect("valid URL")),
+                role,
+                label: None,
+            }
+        }
+
+        #[test]
+        fn add_resource_assigns_sequential_ids_in_insertion_order() {
+            let mut issue = issue_with_next_id(1);
+            let first = issue
+                .add_resource(web_resource(
+                    "https://a.example.com",
+                    ResourceRole::Reference,
+                ))
+                .expect("add succeeds");
+            let second = issue
+                .add_resource(web_resource(
+                    "https://b.example.com",
+                    ResourceRole::Evidence,
+                ))
+                .expect("add succeeds");
+
+            assert_eq!(first.as_str(), "r1");
+            assert_eq!(second.as_str(), "r2");
+            let ids: Vec<_> = issue.resources().iter().map(|r| r.id().as_str()).collect();
+            assert_eq!(ids, ["r1", "r2"]);
+        }
+
+        #[test]
+        fn add_resource_rejects_exact_target_role_duplicate() {
+            let mut issue = issue_with_next_id(1);
+            issue
+                .add_resource(web_resource(
+                    "https://a.example.com",
+                    ResourceRole::Reference,
+                ))
+                .expect("add succeeds");
+
+            let duplicate = issue.add_resource(web_resource(
+                "https://a.example.com/",
+                ResourceRole::Reference,
+            ));
+            assert!(matches!(
+                duplicate,
+                Err(ResourceError::DuplicateTargetRole { .. })
+            ));
+            assert_eq!(issue.resources().len(), 1);
+        }
+
+        #[test]
+        fn add_resource_allows_same_target_with_distinct_roles() {
+            let mut issue = issue_with_next_id(1);
+            issue
+                .add_resource(web_resource(
+                    "https://a.example.com",
+                    ResourceRole::Reference,
+                ))
+                .expect("add succeeds");
+            issue
+                .add_resource(web_resource(
+                    "https://a.example.com",
+                    ResourceRole::Documentation,
+                ))
+                .expect("distinct role is allowed");
+            assert_eq!(issue.resources().len(), 2);
+        }
+
+        #[test]
+        fn add_resource_never_reuses_ids_from_loaded_sequence() {
+            let mut issue = issue_with_next_id(5);
+            let id = issue
+                .add_resource(web_resource(
+                    "https://a.example.com",
+                    ResourceRole::Reference,
+                ))
+                .expect("add succeeds");
+            assert_eq!(id.as_str(), "r5");
+        }
+
+        #[test]
+        fn add_resource_rejects_exhausted_id_sequence() {
+            let mut issue = issue_with_next_id(u64::MAX);
+            let result = issue.add_resource(web_resource(
+                "https://a.example.com",
+                ResourceRole::Reference,
+            ));
+            assert_eq!(result, Err(ResourceError::IdSequenceExhausted));
+            assert!(issue.resources().is_empty());
         }
     }
 }
