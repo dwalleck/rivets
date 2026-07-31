@@ -230,6 +230,48 @@ impl Issue {
         &self.resources
     }
 
+    /// Rehydrate the persisted resource index while restoring its invariants.
+    pub(crate) fn rehydrate_resources(
+        &mut self,
+        resources: Vec<AssociatedResource>,
+        next_resource_id: u64,
+    ) -> Result<(), ResourceError> {
+        for (index, resource) in resources.iter().enumerate() {
+            let prior = &resources[..index];
+            if prior
+                .iter()
+                .any(|candidate| candidate.id() == resource.id())
+            {
+                return Err(ResourceError::DuplicateResourceId {
+                    id: resource.id().clone(),
+                });
+            }
+            if prior.iter().any(|candidate| {
+                candidate.target() == resource.target() && candidate.role() == resource.role()
+            }) {
+                return Err(ResourceError::DuplicateTargetRole {
+                    target: resource.target().clone(),
+                    role: resource.role(),
+                });
+            }
+        }
+
+        let min_unused = match resources
+            .iter()
+            .filter_map(|resource| resource.id().as_str().strip_prefix('r'))
+            .filter_map(|suffix| suffix.parse::<u64>().ok())
+            .max()
+        {
+            Some(maximum) => maximum
+                .checked_add(1)
+                .ok_or(ResourceError::IdSequenceExhausted)?,
+            None => 1,
+        };
+        self.resources = resources;
+        self.next_resource_id = next_resource_id.max(min_unused).max(1);
+        Ok(())
+    }
+
     /// Associate a new resource, assigning its stable identifier.
     ///
     /// Identifiers come from a monotonic per-Issue sequence, so they are
@@ -246,7 +288,7 @@ impl Issue {
             .any(|r| *r.target() == new.target && r.role() == new.role)
         {
             return Err(ResourceError::DuplicateTargetRole {
-                target: new.target.to_string(),
+                target: new.target.clone(),
                 role: new.role,
             });
         }
@@ -1089,6 +1131,15 @@ mod tests {
             }
         }
 
+        fn persisted_resource(id: &str, url: &str, role: ResourceRole) -> AssociatedResource {
+            AssociatedResource::from_parts(
+                ResourceId::new(id).expect("valid resource ID"),
+                ResourceTarget::web(WebUrl::new(url).expect("valid URL")),
+                role,
+                None,
+            )
+        }
+
         #[test]
         fn add_resource_assigns_sequential_ids_in_insertion_order() {
             let mut issue = issue_with_next_id(1);
@@ -1162,6 +1213,61 @@ mod tests {
             assert_eq!(id.as_str(), "r5");
         }
 
+        #[test]
+        fn rehydrate_resources_rejects_duplicate_ids() {
+            let mut issue = issue_with_next_id(1);
+            let result = issue.rehydrate_resources(
+                vec![
+                    persisted_resource("r1", "https://a.example.com", ResourceRole::Reference),
+                    persisted_resource("r1", "https://b.example.com", ResourceRole::Evidence),
+                ],
+                2,
+            );
+            assert!(matches!(
+                result,
+                Err(ResourceError::DuplicateResourceId { .. })
+            ));
+            assert!(issue.resources().is_empty());
+        }
+
+        #[test]
+        fn rehydrate_resources_rejects_duplicate_target_and_role() {
+            let mut issue = issue_with_next_id(1);
+            let result = issue.rehydrate_resources(
+                vec![
+                    persisted_resource("r1", "https://a.example.com", ResourceRole::Reference),
+                    persisted_resource("r2", "https://a.example.com/", ResourceRole::Reference),
+                ],
+                3,
+            );
+            assert!(matches!(
+                result,
+                Err(ResourceError::DuplicateTargetRole { .. })
+            ));
+            assert!(issue.resources().is_empty());
+        }
+
+        #[test]
+        fn rehydrate_resources_normalizes_stale_identifier_sequence() {
+            let mut issue = issue_with_next_id(1);
+            issue
+                .rehydrate_resources(
+                    vec![persisted_resource(
+                        "r5",
+                        "https://a.example.com",
+                        ResourceRole::Reference,
+                    )],
+                    2,
+                )
+                .expect("rehydration should succeed");
+            let id = issue
+                .add_resource(web_resource(
+                    "https://b.example.com",
+                    ResourceRole::Evidence,
+                ))
+                .expect("add should use normalized sequence");
+            assert_eq!(id.as_str(), "r6");
+        }
         #[test]
         fn add_resource_rejects_exhausted_id_sequence() {
             let mut issue = issue_with_next_id(u64::MAX);

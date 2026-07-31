@@ -3147,7 +3147,7 @@ async fn resource_add_rejects_invalid_inputs_without_mutation() {
         )
         .await
         .expect_err("exact target-and-role duplicate should fail");
-    assert!(duplicate.to_string().contains("already exists"));
+    assert!(matches!(duplicate, Error::InvalidResource(_)));
 
     assert!(matches!(
         tools
@@ -3184,6 +3184,18 @@ async fn resource_add_rejects_invalid_inputs_without_mutation() {
             )
             .await,
         Err(Error::InvalidArgument { field: "role", .. })
+    ));
+    assert!(matches!(
+        tools
+            .resource_add(
+                "test-missing",
+                "https://example.com/reference".to_string(),
+                "reference",
+                None,
+                None,
+            )
+            .await,
+        Err(Error::IssueNotFound(issue_id)) if issue_id == "test-missing"
     ));
     assert_eq!(
         tools

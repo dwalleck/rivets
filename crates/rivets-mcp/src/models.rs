@@ -5,7 +5,7 @@
 
 use rivets::domain::{
     AssociatedResource, Dependency, DependencyType, Issue, IssueKind, IssueStatus, Note,
-    ResourceRole, ResourceTarget,
+    ResourceTarget,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -577,12 +577,6 @@ pub fn parse_issue_kind(s: &str) -> Option<IssueKind> {
         "chore" => Some(IssueKind::Chore),
         _ => None,
     }
-}
-
-/// Parse a Resource Role string.
-#[must_use]
-pub fn parse_resource_role(s: &str) -> Option<ResourceRole> {
-    s.parse().ok()
 }
 
 /// Parse a dependency type string into a `DependencyType`.

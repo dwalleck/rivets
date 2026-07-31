@@ -19,8 +19,7 @@ use crate::context::Context;
 use crate::error::{Error, Result};
 use crate::models::{
     BlockedIssueResponse, CreateParams, McpIssue, McpResource, SetContextResponse,
-    WhereAmIResponse, dep_type_to_str, parse_dep_type, parse_issue_kind, parse_resource_role,
-    parse_status,
+    WhereAmIResponse, dep_type_to_str, parse_dep_type, parse_issue_kind, parse_status,
 };
 use rivets::domain::{
     DependencyType, IssueFilter, IssueId, IssueKind, IssueStatus, IssueUpdate, NewIssue,
@@ -58,7 +57,7 @@ fn validate_issue_kind(issue_kind: &str) -> Result<IssueKind> {
 
 /// Parse and validate a Resource Role string.
 fn validate_resource_role(role: &str) -> Result<ResourceRole> {
-    parse_resource_role(role).ok_or_else(|| Error::InvalidArgument {
+    role.parse().map_err(|_| Error::InvalidArgument {
         field: "role",
         value: role.to_string(),
         valid_values: "implementation, documentation, evidence, successor, reference",

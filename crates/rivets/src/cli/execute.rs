@@ -1370,21 +1370,7 @@ pub async fn execute_resource(
                     } else {
                         println!("Resources for {} ({}):", issue_id, issue.resources().len());
                         for resource in issue.resources() {
-                            match resource.label() {
-                                Some(label) => println!(
-                                    "  [{}] {} ({}) — {}",
-                                    resource.id(),
-                                    resource.target(),
-                                    resource.role(),
-                                    label
-                                ),
-                                None => println!(
-                                    "  [{}] {} ({})",
-                                    resource.id(),
-                                    resource.target(),
-                                    resource.role()
-                                ),
-                            }
+                            println!("  {resource}");
                         }
                     }
                 }

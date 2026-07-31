@@ -418,15 +418,7 @@ fn print_issue_details_text<W: Write>(
         writeln!(w)?;
         writeln!(w, "{} ({}):", bold("Resources", config), resources.len())?;
         for resource in resources {
-            let id = resource.id().as_str();
-            let target = resource.target().to_string();
-            let role = resource.role().to_string();
-            match resource.label() {
-                Some(label) => {
-                    writeln!(w, "  [{}] {} ({}) — {}", id, target, role, label.as_str())?
-                }
-                None => writeln!(w, "  [{}] {} ({})", id, target, role)?,
-            }
+            writeln!(w, "  {resource}")?;
         }
     }
 

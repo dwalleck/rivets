@@ -633,6 +633,40 @@ mod load_from_jsonl_tests {
     }
 
     #[tokio::test]
+    async fn whitespace_only_legacy_external_ref_is_preserved_as_a_note() {
+        let json = r#"{"id":"test-whitespace-ref","title":"Whitespace Ref","description":"Test","status":"open","priority":2,"issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":" \t ","dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T03:04:05Z","closed_at":null}"#;
+        let file = create_temp_jsonl_file(json);
+
+        let (storage, warnings) = load_from_jsonl(file.path(), "test".to_string())
+            .await
+            .expect("whitespace-only legacy reference should load");
+        assert!(warnings.is_empty());
+        let issue = storage
+            .get(&IssueId::new("test-whitespace-ref"))
+            .await
+            .expect("lookup should succeed")
+            .expect("Issue should load");
+        assert!(issue.resources().is_empty());
+        assert_eq!(issue.notes().len(), 1);
+        assert_eq!(
+            issue.notes()[0].content(),
+            "Migrated legacy external reference:  \t "
+        );
+
+        save_to_jsonl(storage.as_ref(), file.path())
+            .await
+            .expect("canonical save should succeed");
+        let record: serde_json::Value =
+            serde_json::from_reader(std::fs::File::open(file.path()).unwrap())
+                .expect("canonical record should be JSON");
+        assert!(record.get("external_ref").is_none());
+        assert_eq!(
+            record["notes"][0]["content"],
+            "Migrated legacy external reference:  \t "
+        );
+    }
+
+    #[tokio::test]
     async fn empty_legacy_external_ref_loads_without_resources_or_notes() {
         let json = r#"{"id":"test-empty-ref","title":"Empty Ref","description":"Test","status":"open","priority":2,"issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":"","dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#;
         let file = create_temp_jsonl_file(json);
@@ -662,6 +696,30 @@ mod load_from_jsonl_tests {
         match &warnings[0] {
             LoadWarning::InvalidIssueData { error, .. } => {
                 assert!(error.contains("Resource identifier cannot be empty"));
+            }
+            warning => panic!("expected InvalidIssueData warning, got {warning:?}"),
+        }
+        assert!(
+            storage
+                .export_all()
+                .await
+                .expect("export should succeed")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn control_character_resource_id_is_rejected_with_visible_warning() {
+        let json = r#"{"id":"test-control-resource-id","title":"Bad Resource","description":"Test","status":"open","priority":2,"issue_kind":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":[],"resources":[{"id":"r1\u001b","target":{"type":"web","url":"https://example.com"},"role":"reference","label":null}],"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#;
+        let file = create_temp_jsonl_file(json);
+
+        let (storage, warnings) = load_from_jsonl(file.path(), "test".to_string())
+            .await
+            .expect("resilient load should report unsafe resource ID");
+        assert_eq!(warnings.len(), 1);
+        match &warnings[0] {
+            LoadWarning::InvalidIssueData { error, .. } => {
+                assert!(error.contains("Resource identifier contains invalid control character"));
             }
             warning => panic!("expected InvalidIssueData warning, got {warning:?}"),
         }

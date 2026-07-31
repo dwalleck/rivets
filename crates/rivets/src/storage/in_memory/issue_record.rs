@@ -1,8 +1,8 @@
 //! Compatibility boundary between persisted JSONL issue records and the domain model.
 
 use crate::domain::{
-    AssociatedResource, Dependency, Issue, IssueId, IssueKind, IssueStatus, Note, NoteContent,
-    NoteError, ResourceId, ResourceLabel, ResourceRole, ResourceTarget, WebUrl,
+    AssociatedResource, Dependency, Issue, IssueId, IssueKind, IssueStatus, NewResource, Note,
+    NoteContent, NoteError, ResourceId, ResourceLabel, ResourceRole, ResourceTarget, WebUrl,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -234,7 +234,7 @@ impl IssueRecord {
             issue_id: id.clone(),
             error: error.to_string(),
         };
-        let mut notes = match notes {
+        let notes = match notes {
             PersistedNotes::Empty(()) => Vec::new(),
             PersistedNotes::Legacy(content) if content.trim().is_empty() => Vec::new(),
             PersistedNotes::Legacy(content) => {
@@ -248,104 +248,13 @@ impl IssueRecord {
                 .map_err(note_error)?,
         };
 
-        let mut resources = resources
+        let resources = resources
             .into_iter()
             .map(ResourceRecord::into_domain)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(resource_error)?;
-        for (index, resource) in resources.iter().enumerate() {
-            if resources[..index]
-                .iter()
-                .any(|prior| prior.id() == resource.id())
-            {
-                return Err(IssueRecordError::InvalidData {
-                    issue_id: id.clone(),
-                    error: format!("duplicate resource id '{}'", resource.id()),
-                });
-            }
-            if resources[..index]
-                .iter()
-                .any(|prior| prior.target() == resource.target() && prior.role() == resource.role())
-            {
-                return Err(IssueRecordError::InvalidData {
-                    issue_id: id.clone(),
-                    error: format!(
-                        "duplicate resource with target '{}' and role '{}'",
-                        resource.target(),
-                        resource.role()
-                    ),
-                });
-            }
-        }
+            .map_err(&resource_error)?;
 
-        // Legacy `external_ref` migration (ADR-0003). Empty values carry no
-        // context; absolute web URLs become Reference resources; opaque values
-        // are preserved byte-for-byte in a migration Note rather than guessed.
-        //
-        // The identifier sequence is normalized against the canonical
-        // resources BEFORE migration mints an identifier: a record with a
-        // defaulted or hand-edited counter must never reuse a live id.
-        let min_unused = match resources
-            .iter()
-            .filter_map(|r| r.id().as_str().strip_prefix('r'))
-            .filter_map(|suffix| suffix.parse::<u64>().ok())
-            .max()
-        {
-            Some(max) => max
-                .checked_add(1)
-                .ok_or_else(|| IssueRecordError::InvalidData {
-                    issue_id: id.clone(),
-                    error: "resource identifier sequence exhausted".to_string(),
-                })?,
-            None => DEFAULT_NEXT_RESOURCE_ID,
-        };
-        let mut next_resource_id = next_resource_id.max(min_unused);
-        if let Some(external_ref) = external_ref
-            && !external_ref.trim().is_empty()
-        {
-            match WebUrl::new(&external_ref) {
-                Ok(url) => {
-                    // A hand-maintained record may already associate the same
-                    // URL as a Reference; the content is preserved either way,
-                    // so migration is a no-op instead of minting a duplicate.
-                    let already_associated = resources.iter().any(|r| {
-                        r.target() == &ResourceTarget::web(url.clone())
-                            && r.role() == ResourceRole::Reference
-                    });
-                    if !already_associated {
-                        let resource_id =
-                            ResourceId::new(format!("r{next_resource_id}")).map_err(|error| {
-                                IssueRecordError::InvalidData {
-                                    issue_id: id.clone(),
-                                    error: error.to_string(),
-                                }
-                            })?;
-                        next_resource_id = next_resource_id.checked_add(1).ok_or_else(|| {
-                            IssueRecordError::InvalidData {
-                                issue_id: id.clone(),
-                                error: "resource identifier sequence exhausted during migration"
-                                    .to_string(),
-                            }
-                        })?;
-                        resources.push(AssociatedResource::from_parts(
-                            resource_id,
-                            ResourceTarget::web(url),
-                            ResourceRole::Reference,
-                            None,
-                        ));
-                    }
-                }
-                Err(_) => {
-                    let content = NoteContent::new(format!(
-                        "Migrated legacy external reference: {external_ref}"
-                    ))
-                    .map_err(note_error)?;
-                    notes.push(Note::from_parts(content, updated_at));
-                }
-            }
-        }
-
-        let issue = Issue {
+        let mut issue = Issue {
             id,
             title,
             description,
@@ -357,13 +266,56 @@ impl IssueRecord {
             design,
             acceptance_criteria,
             notes,
-            resources,
-            next_resource_id,
+            resources: Vec::new(),
+            next_resource_id: DEFAULT_NEXT_RESOURCE_ID,
             dependencies,
             created_at,
             updated_at,
             closed_at,
         };
+        issue
+            .rehydrate_resources(resources, next_resource_id)
+            .map_err(|error| IssueRecordError::InvalidData {
+                issue_id: issue.id.clone(),
+                error: error.to_string(),
+            })?;
+
+        // Legacy `external_ref` migration (ADR-0003). Only a truly empty value
+        // carries no context. Absolute Web URLs become Reference resources;
+        // every other non-empty value is preserved byte-for-byte in a migration
+        // Note rather than guessed or discarded.
+        if let Some(external_ref) = external_ref
+            && !external_ref.is_empty()
+        {
+            match WebUrl::new(&external_ref) {
+                Ok(url) => {
+                    let resource = NewResource {
+                        target: ResourceTarget::web(url),
+                        role: ResourceRole::Reference,
+                        label: None,
+                    };
+                    match issue.add_resource(resource) {
+                        Ok(_) | Err(crate::domain::ResourceError::DuplicateTargetRole { .. }) => {}
+                        Err(error) => {
+                            return Err(IssueRecordError::InvalidData {
+                                issue_id: issue.id.clone(),
+                                error: error.to_string(),
+                            });
+                        }
+                    }
+                }
+                Err(_) => {
+                    let content = NoteContent::new(format!(
+                        "Migrated legacy external reference: {external_ref}"
+                    ))
+                    .map_err(|error| IssueRecordError::InvalidData {
+                        issue_id: issue.id.clone(),
+                        error: error.to_string(),
+                    })?;
+                    issue.append_note(content, updated_at);
+                }
+            }
+        }
         issue
             .validate()
             .map_err(|error| IssueRecordError::InvalidData {

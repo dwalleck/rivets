@@ -25,6 +25,9 @@ impl ResourceId {
         if id.trim().is_empty() {
             return Err(ResourceError::EmptyResourceId);
         }
+        if let Some(position) = find_control_char(&id) {
+            return Err(ResourceError::ResourceIdControlCharacter { position });
+        }
         Ok(Self(id))
     }
 
@@ -53,13 +56,14 @@ impl WebUrl {
     ///
     /// # Errors
     ///
-    /// Returns [`ResourceError::InvalidWebUrl`] when the value is not a
-    /// well-formed absolute URL with an `http` or `https` scheme.
+    /// Returns [`ResourceError::MalformedWebUrl`] when syntax is malformed,
+    /// [`ResourceError::MissingWebUrlAuthority`] when no host is present, or
+    /// [`ResourceError::UnsupportedWebUrlScheme`] for non-HTTP(S) schemes.
     pub fn new(raw: impl Into<String>) -> Result<Self, ResourceError> {
         let raw = raw.into();
-        let parsed = url::Url::parse(&raw).map_err(|error| ResourceError::InvalidWebUrl {
+        let parsed = url::Url::parse(&raw).map_err(|source| ResourceError::MalformedWebUrl {
             url: raw.clone(),
-            reason: error.to_string(),
+            source: WebUrlSyntaxError { source },
         })?;
         let has_explicit_authority = raw
             .get(parsed.scheme().len()..)
@@ -68,13 +72,10 @@ impl WebUrl {
             "http" | "https" if has_explicit_authority && parsed.has_host() => {
                 Ok(Self(parsed.into()))
             }
-            "http" | "https" => Err(ResourceError::InvalidWebUrl {
+            "http" | "https" => Err(ResourceError::MissingWebUrlAuthority { url: raw }),
+            scheme => Err(ResourceError::UnsupportedWebUrlScheme {
                 url: raw,
-                reason: "URL must include an explicit host after '//'".to_string(),
-            }),
-            _ => Err(ResourceError::InvalidWebUrl {
-                url: raw,
-                reason: "scheme must be http or https".to_string(),
+                scheme: scheme.to_string(),
             }),
         }
     }
@@ -91,10 +92,21 @@ impl fmt::Display for WebUrl {
     }
 }
 
+/// Opaque causal detail for malformed Web URL syntax.
+///
+/// The URL parser's concrete error remains private so third-party parser types
+/// do not leak through the domain interface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("malformed URL syntax")]
+pub struct WebUrlSyntaxError {
+    #[source]
+    source: url::ParseError,
+}
+
 /// The location of an Associated Resource.
 ///
-/// Discriminated so that Web URLs and Workspace Paths travel through the core
-/// as distinct, validated concepts rather than untyped strings.
+/// This slice supports Web URLs. Workspace Paths remain an accepted domain
+/// decision but are implemented by follow-up task `rivets-p1g4`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResourceTarget {
@@ -250,6 +262,16 @@ impl AssociatedResource {
     }
 }
 
+impl fmt::Display for AssociatedResource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{}] {} ({})", self.id, self.target, self.role)?;
+        if let Some(label) = &self.label {
+            write!(f, " — {label}")?;
+        }
+        Ok(())
+    }
+}
+
 /// Data for associating a new resource with an Issue.
 ///
 /// The resource identifier is assigned by the domain when the resource is
@@ -267,13 +289,28 @@ pub struct NewResource {
 /// A failure to construct or add an Associated Resource.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ResourceError {
-    /// The target was not an absolute HTTP or HTTPS URL.
-    #[error("Invalid web URL '{url}': {reason}")]
-    InvalidWebUrl {
+    /// The target's URL syntax was malformed.
+    #[error("Invalid web URL '{url}': {source}")]
+    MalformedWebUrl {
         /// The rejected value.
         url: String,
-        /// Why parsing failed.
-        reason: String,
+        /// Opaque parser failure.
+        #[source]
+        source: WebUrlSyntaxError,
+    },
+    /// An HTTP(S) target omitted its explicit authority or host.
+    #[error("Invalid web URL '{url}': URL must include an explicit host after '//'")]
+    MissingWebUrlAuthority {
+        /// The rejected value.
+        url: String,
+    },
+    /// The parsed URL used a non-HTTP(S) scheme.
+    #[error("Invalid web URL '{url}': unsupported scheme '{scheme}'")]
+    UnsupportedWebUrlScheme {
+        /// The rejected value.
+        url: String,
+        /// The rejected scheme.
+        scheme: String,
     },
     /// The role was not one of the canonical Resource Roles.
     #[error(
@@ -296,9 +333,21 @@ pub enum ResourceError {
     #[error("Resource with target '{target}' and role '{role}' already exists on this issue")]
     DuplicateTargetRole {
         /// The duplicated target.
-        target: String,
+        target: ResourceTarget,
         /// The duplicated role.
         role: ResourceRole,
+    },
+    /// A persisted resource identifier contained a terminal-unsafe character.
+    #[error("Resource identifier contains invalid control character at position {position}")]
+    ResourceIdControlCharacter {
+        /// Character offset of the invalid value.
+        position: usize,
+    },
+    /// Two persisted resources had the same stable identifier.
+    #[error("Resource identifier '{id}' appears more than once on this issue")]
+    DuplicateResourceId {
+        /// The duplicated identifier.
+        id: ResourceId,
     },
     /// The per-Issue resource identifier sequence reached its maximum.
     #[error("Resource identifier sequence exhausted for this issue")]
@@ -336,9 +385,25 @@ mod tests {
     #[case::whitespace("https://exa mple.com")]
     #[case::empty("")]
     fn web_url_rejects_non_absolute_or_non_http_values(#[case] input: &str) {
+        assert!(WebUrl::new(input).is_err());
+    }
+
+    #[test]
+    fn malformed_web_url_preserves_opaque_causal_error() {
+        let error = WebUrl::new("example.com/docs").expect_err("relative URL should fail");
+        match error {
+            ResourceError::MalformedWebUrl { source, .. } => {
+                assert!(std::error::Error::source(&source).is_some());
+            }
+            error => panic!("expected malformed URL error, got {error:?}"),
+        }
+    }
+
+    #[test]
+    fn unsupported_web_url_scheme_is_a_domain_error() {
         assert!(matches!(
-            WebUrl::new(input),
-            Err(ResourceError::InvalidWebUrl { .. })
+            WebUrl::new("ftp://example.com/file"),
+            Err(ResourceError::UnsupportedWebUrlScheme { .. })
         ));
     }
 
@@ -398,5 +463,29 @@ mod tests {
     fn label_accepts_non_empty_text() {
         let label = ResourceLabel::new("Implementation PR").expect("valid label");
         assert_eq!(label.as_str(), "Implementation PR");
+    }
+
+    // ===== ResourceId / AssociatedResource =====
+
+    #[test]
+    fn resource_id_rejects_terminal_unsafe_control_characters() {
+        assert!(matches!(
+            ResourceId::new("r1\u{1b}"),
+            Err(ResourceError::ResourceIdControlCharacter { position: 2 })
+        ));
+    }
+
+    #[test]
+    fn associated_resource_display_includes_optional_label() {
+        let resource = AssociatedResource::from_parts(
+            ResourceId::new("r1").expect("valid resource ID"),
+            ResourceTarget::web(WebUrl::new("https://example.com/pr/1").expect("valid URL")),
+            ResourceRole::Implementation,
+            Some(ResourceLabel::new("Implementation PR").expect("valid label")),
+        );
+        assert_eq!(
+            resource.to_string(),
+            "[r1] https://example.com/pr/1 (implementation) — Implementation PR"
+        );
     }
 }
