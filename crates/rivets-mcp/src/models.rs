@@ -14,6 +14,111 @@ use serde::{Deserialize, Serialize};
 // Tool Input Parameters
 // ============================================================================
 
+/// Issue Kind values accepted by MCP tool inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum McpIssueKind {
+    /// Bug fix.
+    Bug,
+    /// New feature.
+    Feature,
+    /// General task.
+    Task,
+    /// Epic grouping.
+    Epic,
+    /// Maintenance chore.
+    Chore,
+}
+
+/// Declares the MCP Issue Kind table and its expected-names slice from a single
+/// list, so adding a Kind never requires updating match arms and names in lockstep.
+macro_rules! mcp_issue_kinds {
+    ($(($name:literal, $variant:ident)),+ $(,)?) => {
+        const VALID_KINDS: &[(&str, McpIssueKind)] = &[$(($name, McpIssueKind::$variant)),+];
+        const VALID_KIND_NAMES: &[&str] = &[$($name),+];
+    };
+}
+
+impl<'de> Deserialize<'de> for McpIssueKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        mcp_issue_kinds![
+            ("bug", Bug),
+            ("feature", Feature),
+            ("task", Task),
+            ("epic", Epic),
+            ("chore", Chore),
+        ];
+
+        let value = String::deserialize(deserializer)?;
+        VALID_KINDS
+            .iter()
+            .find(|(name, _)| value.eq_ignore_ascii_case(name))
+            .map(|(_, kind)| *kind)
+            .ok_or_else(|| {
+                <D::Error as serde::de::Error>::unknown_variant(&value, VALID_KIND_NAMES)
+            })
+    }
+}
+
+impl From<McpIssueKind> for IssueKind {
+    fn from(value: McpIssueKind) -> Self {
+        match value {
+            McpIssueKind::Bug => Self::Bug,
+            McpIssueKind::Feature => Self::Feature,
+            McpIssueKind::Task => Self::Task,
+            McpIssueKind::Epic => Self::Epic,
+            McpIssueKind::Chore => Self::Chore,
+        }
+    }
+}
+
+/// Canonical and migration-only names for an MCP Issue Kind input.
+///
+/// `issue_type` remains accepted for compatibility but is omitted from the
+/// generated schema and from serialized canonical requests.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct IssueKindInput {
+    /// Canonical Issue Kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_kind: Option<McpIssueKind>,
+
+    #[serde(default, rename = "issue_type", skip_serializing)]
+    #[schemars(skip)]
+    legacy_issue_type: Option<McpIssueKind>,
+}
+
+impl IssueKindInput {
+    /// Construct a canonical MCP Issue Kind input.
+    #[must_use]
+    pub const fn canonical(issue_kind: Option<McpIssueKind>) -> Self {
+        Self {
+            issue_kind,
+            legacy_issue_type: None,
+        }
+    }
+
+    /// Resolve compatibility fields, preferring `issue_kind` on conflict.
+    #[must_use]
+    pub fn resolve(self, operation: &'static str) -> Option<IssueKind> {
+        match (self.issue_kind, self.legacy_issue_type) {
+            (Some(issue_kind), Some(issue_type)) if issue_kind != issue_type => {
+                tracing::warn!(
+                    operation,
+                    issue_kind = ?issue_kind,
+                    issue_type = ?issue_type,
+                    "Conflicting MCP Issue Kind fields; using issue_kind"
+                );
+                Some(issue_kind.into())
+            }
+            (Some(issue_kind), _) | (None, Some(issue_kind)) => Some(issue_kind.into()),
+            (None, None) => None,
+        }
+    }
+}
+
 /// Parameters for the `set_context` tool.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SetContextParams {
@@ -30,8 +135,9 @@ pub struct ReadyParams {
     /// Filter by priority level.
     pub priority: Option<u8>,
 
-    /// Filter by issue kind.
-    pub issue_kind: Option<String>,
+    /// Filter by Issue Kind.
+    #[serde(flatten)]
+    pub kind: IssueKindInput,
 
     /// Filter by assignee.
     pub assignee: Option<String>,
@@ -52,8 +158,9 @@ pub struct ListParams {
     /// Filter by priority level.
     pub priority: Option<u8>,
 
-    /// Filter by issue kind.
-    pub issue_kind: Option<String>,
+    /// Filter by Issue Kind.
+    #[serde(flatten)]
+    pub kind: IssueKindInput,
 
     /// Filter by assignee.
     pub assignee: Option<String>,
@@ -97,8 +204,9 @@ pub struct CreateParams {
     /// Priority level (0-4, default 2).
     pub priority: Option<u8>,
 
-    /// Issue kind (bug, feature, task, epic, chore).
-    pub issue_kind: Option<String>,
+    /// Issue Kind (bug, feature, task, epic, chore).
+    #[serde(flatten)]
+    pub kind: IssueKindInput,
 
     /// Assignee.
     pub assignee: Option<String>,
@@ -131,8 +239,9 @@ pub struct UpdateParams {
     /// New priority.
     pub priority: Option<u8>,
 
-    /// New issue kind.
-    pub issue_kind: Option<String>,
+    /// New Issue Kind.
+    #[serde(flatten)]
+    pub kind: IssueKindInput,
 
     /// New assignee.
     pub assignee: Option<String>,
@@ -566,19 +675,6 @@ pub fn parse_status(s: &str) -> Option<IssueStatus> {
     }
 }
 
-/// Parse an issue kind string into an `IssueKind`.
-#[must_use]
-pub fn parse_issue_kind(s: &str) -> Option<IssueKind> {
-    match s.to_lowercase().as_str() {
-        "bug" => Some(IssueKind::Bug),
-        "feature" => Some(IssueKind::Feature),
-        "task" => Some(IssueKind::Task),
-        "epic" => Some(IssueKind::Epic),
-        "chore" => Some(IssueKind::Chore),
-        _ => None,
-    }
-}
-
 /// Parse a dependency type string into a `DependencyType`.
 #[must_use]
 pub fn parse_dep_type(s: &str) -> Option<DependencyType> {
@@ -596,6 +692,70 @@ mod tests {
     use super::*;
     use rstest::rstest;
 
+    #[test]
+    fn ready_params_read_legacy_issue_type() {
+        let params: ReadyParams = serde_json::from_value(serde_json::json!({
+            "issue_type": "bug"
+        }))
+        .expect("legacy issue_type should deserialize");
+
+        assert_eq!(params.kind.resolve("ready"), Some(IssueKind::Bug));
+    }
+
+    #[test]
+    fn list_params_read_legacy_issue_type() {
+        let params: ListParams = serde_json::from_value(serde_json::json!({
+            "issue_type": "feature"
+        }))
+        .expect("legacy issue_type should deserialize");
+
+        assert_eq!(params.kind.resolve("list"), Some(IssueKind::Feature));
+    }
+
+    #[test]
+    fn create_params_read_legacy_issue_type() {
+        let params: CreateParams = serde_json::from_value(serde_json::json!({
+            "title": "Legacy input",
+            "issue_type": "epic"
+        }))
+        .expect("legacy issue_type should deserialize");
+
+        assert_eq!(params.kind.resolve("create"), Some(IssueKind::Epic));
+    }
+
+    #[test]
+    fn update_params_read_legacy_issue_type() {
+        let params: UpdateParams = serde_json::from_value(serde_json::json!({
+            "issue_id": "rivets-test",
+            "issue_type": "chore"
+        }))
+        .expect("legacy issue_type should deserialize");
+
+        assert_eq!(params.kind.resolve("update"), Some(IssueKind::Chore));
+    }
+
+    #[test]
+    fn conflicting_mcp_kind_fields_use_canonical_kind() {
+        let params: CreateParams = serde_json::from_value(serde_json::json!({
+            "title": "Conflicting input",
+            "issue_kind": "feature",
+            "issue_type": "task"
+        }))
+        .expect("conflicting compatibility fields should deserialize");
+
+        assert_eq!(params.kind.resolve("create"), Some(IssueKind::Feature));
+    }
+
+    #[test]
+    fn mcp_kind_input_remains_case_insensitive() {
+        let params: ReadyParams = serde_json::from_value(serde_json::json!({
+            "issue_kind": "BUG"
+        }))
+        .expect("Issue Kind parsing should remain case-insensitive");
+
+        assert_eq!(params.kind.resolve("ready"), Some(IssueKind::Bug));
+    }
+
     #[rstest]
     #[case::open("open", Some(IssueStatus::Open))]
     #[case::open_uppercase("OPEN", Some(IssueStatus::Open))]
@@ -607,18 +767,6 @@ mod tests {
     #[case::empty("", None)]
     fn test_parse_status(#[case] input: &str, #[case] expected: Option<IssueStatus>) {
         assert_eq!(parse_status(input), expected);
-    }
-
-    #[rstest]
-    #[case::bug("bug", Some(IssueKind::Bug))]
-    #[case::feature("feature", Some(IssueKind::Feature))]
-    #[case::task("task", Some(IssueKind::Task))]
-    #[case::epic("epic", Some(IssueKind::Epic))]
-    #[case::chore("chore", Some(IssueKind::Chore))]
-    #[case::uppercase("BUG", Some(IssueKind::Bug))]
-    #[case::invalid("invalid", None)]
-    fn test_parse_issue_kind(#[case] input: &str, #[case] expected: Option<IssueKind>) {
-        assert_eq!(parse_issue_kind(input), expected);
     }
 
     #[rstest]

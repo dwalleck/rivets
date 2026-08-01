@@ -18,8 +18,9 @@
 use crate::context::Context;
 use crate::error::{Error, Result};
 use crate::models::{
-    BlockedIssueResponse, CreateParams, McpIssue, McpResource, SetContextResponse,
-    WhereAmIResponse, dep_type_to_str, parse_dep_type, parse_issue_kind, parse_status,
+    BlockedIssueResponse, CreateParams, ListParams, McpIssue, McpResource, ReadyParams,
+    SetContextResponse, UpdateParams, WhereAmIResponse, dep_type_to_str, parse_dep_type,
+    parse_status,
 };
 use rivets::domain::{
     DependencyType, IssueFilter, IssueId, IssueKind, IssueStatus, IssueUpdate, NewIssue,
@@ -43,15 +44,6 @@ fn validate_status(status: &str) -> Result<IssueStatus> {
         field: "status",
         value: status.to_string(),
         valid_values: "open, in_progress, blocked, closed",
-    })
-}
-
-/// Parse and validate an issue kind string.
-fn validate_issue_kind(issue_kind: &str) -> Result<IssueKind> {
-    parse_issue_kind(issue_kind).ok_or_else(|| Error::InvalidArgument {
-        field: "issue_kind",
-        value: issue_kind.to_string(),
-        valid_values: "bug, feature, task, epic, chore",
     })
 }
 
@@ -165,33 +157,24 @@ impl Tools {
     /// # Errors
     ///
     /// Returns an error if no context is set or storage operations fail.
-    #[instrument(skip(self, assignee, label), fields(limit, priority))]
-    pub async fn ready(
-        &self,
-        limit: Option<usize>,
-        priority: Option<u8>,
-        issue_kind: Option<&str>,
-        assignee: Option<String>,
-        label: Option<String>,
-        workspace_root: Option<&str>,
-    ) -> Result<Vec<McpIssue>> {
+    #[instrument(skip(self, params), fields(limit = params.limit, priority = params.priority))]
+    pub async fn ready(&self, params: ReadyParams) -> Result<Vec<McpIssue>> {
         debug!("Finding ready issues");
-        // Validate enum values before acquiring locks
-        let issue_kind = issue_kind.map(validate_issue_kind).transpose()?;
+        let issue_kind = params.kind.resolve("ready");
 
         // Release context lock before acquiring storage lock to prevent deadlocks
         let storage = {
             let context = self.context.read().await;
-            context.storage_for(workspace_root.map(Path::new))?
+            context.storage_for(params.workspace_root.as_deref().map(Path::new))?
         };
         let storage = storage.read().await;
 
         let filter = IssueFilter {
-            priority,
+            priority: params.priority,
             issue_kind,
-            assignee,
-            label,
-            limit: Some(limit.unwrap_or(DEFAULT_QUERY_LIMIT)),
+            assignee: params.assignee,
+            label: params.label,
+            limit: Some(params.limit.unwrap_or(DEFAULT_QUERY_LIMIT)),
             ..Default::default()
         };
 
@@ -207,37 +190,26 @@ impl Tools {
     ///
     /// # Errors
     ///
-    /// Returns an error if no context is set, invalid filter values, or storage operations fail.
-    #[allow(clippy::too_many_arguments)]
-    #[instrument(skip(self, assignee, label), fields(limit, priority))]
-    pub async fn list(
-        &self,
-        status: Option<&str>,
-        priority: Option<u8>,
-        issue_kind: Option<&str>,
-        assignee: Option<String>,
-        label: Option<String>,
-        limit: Option<usize>,
-        workspace_root: Option<&str>,
-    ) -> Result<Vec<McpIssue>> {
+    /// Returns an error if no context is set, status is invalid, or storage operations fail.
+    #[instrument(skip(self, params), fields(limit = params.limit, priority = params.priority))]
+    pub async fn list(&self, params: ListParams) -> Result<Vec<McpIssue>> {
         debug!("Listing issues");
-        // Validate enum values before acquiring locks
-        let status = status.map(validate_status).transpose()?;
-        let issue_kind = issue_kind.map(validate_issue_kind).transpose()?;
+        let status = params.status.as_deref().map(validate_status).transpose()?;
+        let issue_kind = params.kind.resolve("list");
 
         let storage = {
             let context = self.context.read().await;
-            context.storage_for(workspace_root.map(Path::new))?
+            context.storage_for(params.workspace_root.as_deref().map(Path::new))?
         };
         let storage = storage.read().await;
 
         let filter = IssueFilter {
             status,
-            priority,
+            priority: params.priority,
             issue_kind,
-            assignee,
-            label,
-            limit: Some(limit.unwrap_or(DEFAULT_QUERY_LIMIT)),
+            assignee: params.assignee,
+            label: params.label,
+            limit: Some(params.limit.unwrap_or(DEFAULT_QUERY_LIMIT)),
         };
 
         let issues = storage.list(&filter).await?;
@@ -293,46 +265,28 @@ impl Tools {
     ///
     /// # Errors
     ///
-    /// Returns an error if no context is set, `issue_kind` is invalid, the
-    /// initial Note is invalid, or storage operations fail.
+    /// Returns an error if no context is set or storage operations fail.
     #[instrument(skip(self, params), fields(title = %params.title))]
     pub async fn create(&self, params: CreateParams) -> Result<McpIssue> {
         debug!("Creating issue");
-        let CreateParams {
-            title,
-            description,
-            priority,
-            issue_kind,
-            assignee,
-            labels,
-            design,
-            acceptance: acceptance_criteria,
-            initial_note,
-            workspace_root,
-        } = params;
-        // Validate adapter inputs before acquiring locks.
-        let issue_kind = issue_kind
-            .as_deref()
-            .map(validate_issue_kind)
-            .transpose()?
-            .unwrap_or(IssueKind::Task);
-        let initial_note = initial_note.map(NoteContent::new).transpose()?;
+        let issue_kind = params.kind.resolve("create").unwrap_or(IssueKind::Task);
+        let initial_note = params.initial_note.map(NoteContent::new).transpose()?;
 
         let storage = {
             let context = self.context.read().await;
-            context.storage_for(workspace_root.as_deref().map(Path::new))?
+            context.storage_for(params.workspace_root.as_deref().map(Path::new))?
         };
         let mut storage = storage.write().await;
 
         let new_issue = NewIssue {
-            title,
-            description: description.unwrap_or_default(),
-            priority: priority.unwrap_or(2),
+            title: params.title,
+            description: params.description.unwrap_or_default(),
+            priority: params.priority.unwrap_or(2),
             issue_kind,
-            assignee,
-            labels: labels.unwrap_or_default(),
-            design,
-            acceptance_criteria,
+            assignee: params.assignee,
+            labels: params.labels.unwrap_or_default(),
+            design: params.design,
+            acceptance_criteria: params.acceptance,
             initial_note,
             dependencies: vec![],
         };
@@ -344,49 +298,36 @@ impl Tools {
     }
 
     /// Update an existing issue.
-    ///
     /// # Errors
     ///
-    /// Returns an error if no context is set, invalid status, issue not found, or storage fails.
-    #[allow(clippy::too_many_arguments)]
-    #[instrument(skip(self, title, description, design, acceptance_criteria, labels), fields(%issue_id))]
-    pub async fn update(
-        &self,
-        issue_id: &str,
-        title: Option<String>,
-        description: Option<String>,
-        status: Option<&str>,
-        priority: Option<u8>,
-        issue_kind: Option<&str>,
-        assignee: Option<Option<String>>,
-        design: Option<String>,
-        acceptance_criteria: Option<String>,
-        labels: Option<Vec<String>>,
-        workspace_root: Option<&str>,
-    ) -> Result<McpIssue> {
+    /// Returns an error if no context is set, status is invalid, the issue is missing, or storage fails.
+    #[instrument(skip(self, params), fields(issue_id = %params.issue_id))]
+    pub async fn update(&self, params: UpdateParams) -> Result<McpIssue> {
         debug!("Updating issue");
-        // Validate enum values before acquiring locks
-        let status = status.map(validate_status).transpose()?;
-        let issue_kind = issue_kind.map(validate_issue_kind).transpose()?;
+        let status = params.status.as_deref().map(validate_status).transpose()?;
+        let issue_kind = params.kind.resolve("update");
+        let assignee = params
+            .assignee
+            .map(|value| if value.is_empty() { None } else { Some(value) });
 
         let storage = {
             let context = self.context.read().await;
-            context.storage_for(workspace_root.map(Path::new))?
+            context.storage_for(params.workspace_root.as_deref().map(Path::new))?
         };
         let mut storage = storage.write().await;
 
-        let id = IssueId::new(issue_id);
+        let id = IssueId::new(&params.issue_id);
         let updates = IssueUpdate {
-            title,
-            description,
+            title: params.title,
+            description: params.description,
             status,
-            priority,
+            priority: params.priority,
             issue_kind,
             assignee,
-            design,
-            acceptance_criteria,
+            design: params.design,
+            acceptance_criteria: params.acceptance_criteria,
             note: None,
-            labels,
+            labels: params.labels,
         };
 
         let issue = storage.update(&id, updates).await?;
@@ -756,6 +697,113 @@ mod tests {
     use rstest::{fixture, rstest};
     use std::path::PathBuf;
 
+    fn kind_input(value: Option<&str>) -> crate::models::IssueKindInput {
+        use crate::models::McpIssueKind;
+
+        let issue_kind = value.map(|value| match value {
+            "bug" => McpIssueKind::Bug,
+            "feature" => McpIssueKind::Feature,
+            "task" => McpIssueKind::Task,
+            "epic" => McpIssueKind::Epic,
+            "chore" => McpIssueKind::Chore,
+            invalid => panic!("invalid test Issue Kind: {invalid}"),
+        });
+        crate::models::IssueKindInput::canonical(issue_kind)
+    }
+
+    fn ready_params(
+        limit: Option<usize>,
+        priority: Option<u8>,
+        issue_kind: Option<&str>,
+        assignee: Option<String>,
+        label: Option<String>,
+        workspace_root: Option<&str>,
+    ) -> ReadyParams {
+        ReadyParams {
+            limit,
+            priority,
+            kind: kind_input(issue_kind),
+            assignee,
+            label,
+            workspace_root: workspace_root.map(str::to_string),
+        }
+    }
+
+    fn list_params(
+        status: Option<&str>,
+        priority: Option<u8>,
+        issue_kind: Option<&str>,
+        assignee: Option<String>,
+        label: Option<String>,
+        limit: Option<usize>,
+        workspace_root: Option<&str>,
+    ) -> ListParams {
+        ListParams {
+            status: status.map(str::to_string),
+            priority,
+            kind: kind_input(issue_kind),
+            assignee,
+            label,
+            limit,
+            workspace_root: workspace_root.map(str::to_string),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_params(
+        title: String,
+        description: Option<String>,
+        priority: Option<u8>,
+        issue_kind: Option<&str>,
+        assignee: Option<String>,
+        labels: Option<Vec<String>>,
+        design: Option<String>,
+        acceptance: Option<String>,
+        workspace_root: Option<&str>,
+    ) -> CreateParams {
+        CreateParams {
+            title,
+            description,
+            priority,
+            kind: kind_input(issue_kind),
+            assignee,
+            labels,
+            design,
+            acceptance,
+            initial_note: None,
+            workspace_root: workspace_root.map(str::to_string),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn update_params(
+        issue_id: &str,
+        title: Option<String>,
+        description: Option<String>,
+        status: Option<&str>,
+        priority: Option<u8>,
+        issue_kind: Option<&str>,
+        assignee: Option<String>,
+        design: Option<String>,
+        acceptance_criteria: Option<String>,
+        labels: Option<Vec<String>>,
+        workspace_root: Option<&str>,
+    ) -> UpdateParams {
+        UpdateParams {
+            issue_id: issue_id.to_string(),
+            status: status.map(str::to_string),
+            priority,
+            kind: kind_input(issue_kind),
+            assignee,
+            title,
+            description,
+            design,
+            acceptance_criteria,
+            labels,
+            workspace_root: workspace_root.map(str::to_string),
+        }
+    }
+
     /// Async fixture that creates Tools with in-memory storage.
     #[fixture]
     async fn tools() -> Tools {
@@ -774,18 +822,17 @@ mod tests {
     /// Helper to create a simple issue with just a title.
     async fn create_issue(tools: &Tools, title: &str) -> McpIssue {
         tools
-            .create(CreateParams {
-                title: title.to_string(),
-                description: None,
-                priority: None,
-                issue_kind: None,
-                assignee: None,
-                labels: None,
-                design: None,
-                acceptance: None,
-                initial_note: None,
-                workspace_root: None,
-            })
+            .create(create_params(
+                title.to_string(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ))
             .await
             .unwrap()
     }
@@ -796,18 +843,17 @@ mod tests {
         let tools = tools.await;
 
         let issue = tools
-            .create(CreateParams {
-                title: "Test Issue".to_string(),
-                description: Some("Test description".to_string()),
-                priority: Some(1),
-                issue_kind: Some(str::to_owned("task")),
-                assignee: Some("alice".to_string()),
-                labels: Some(vec!["label1".to_string()]),
-                design: None,
-                acceptance: None,
-                initial_note: None,
-                workspace_root: None,
-            })
+            .create(create_params(
+                "Test Issue".to_string(),
+                Some("Test description".to_string()),
+                Some(1),
+                Some("task"),
+                Some("alice".to_string()),
+                Some(vec!["label1".to_string()]),
+                None,
+                None,
+                None,
+            ))
             .await
             .unwrap();
 
@@ -831,7 +877,7 @@ mod tests {
         create_issue(&tools, "Issue 2").await;
 
         let issues = tools
-            .list(None, None, None, None, None, None, None)
+            .list(list_params(None, None, None, None, None, None, None))
             .await
             .unwrap();
         assert_eq!(issues.len(), 2);
@@ -845,19 +891,19 @@ mod tests {
         let issue = create_issue(&tools, "Original Title").await;
 
         let updated = tools
-            .update(
+            .update(update_params(
                 &issue.id,
                 Some("Updated Title".to_string()),
                 None,
                 Some("in_progress"),
                 Some(0),
-                None, // issue_kind
                 None,
                 None,
                 None,
-                None, // labels
-                None, // workspace_root
-            )
+                None,
+                None,
+                None,
+            ))
             .await
             .unwrap();
 
@@ -889,7 +935,7 @@ mod tests {
         create_issue(&tools, "Ready Issue").await;
 
         let ready = tools
-            .ready(None, None, None, None, None, None)
+            .ready(ready_params(None, None, None, None, None, None))
             .await
             .unwrap();
         assert!(!ready.is_empty());
@@ -966,7 +1012,9 @@ mod tests {
         let context = Arc::new(RwLock::new(Context::new()));
         let tools = Tools::new(context);
 
-        let result = tools.list(None, None, None, None, None, None, None).await;
+        let result = tools
+            .list(list_params(None, None, None, None, None, None, None))
+            .await;
         assert!(result.is_err());
     }
 
@@ -983,14 +1031,14 @@ mod tests {
 
         // List with limit of 2
         let issues = tools
-            .list(None, None, None, None, None, Some(2), None)
+            .list(list_params(None, None, None, None, None, Some(2), None))
             .await
             .unwrap();
         assert_eq!(issues.len(), 2, "list should respect explicit limit");
 
         // Ready with limit of 3
         let ready = tools
-            .ready(Some(3), None, None, None, None, None)
+            .ready(ready_params(Some(3), None, None, None, None, None))
             .await
             .unwrap();
         assert_eq!(ready.len(), 3, "ready should respect explicit limit");
@@ -1016,8 +1064,12 @@ mod tests {
             let tools = Arc::clone(&tools);
             handles.push(tokio::spawn(async move {
                 for _ in 0..10 {
-                    let _ = tools.list(None, None, None, None, None, None, None).await;
-                    let _ = tools.ready(None, None, None, None, None, None).await;
+                    let _ = tools
+                        .list(list_params(None, None, None, None, None, None, None))
+                        .await;
+                    let _ = tools
+                        .ready(ready_params(None, None, None, None, None, None))
+                        .await;
                 }
             }));
         }
@@ -1028,18 +1080,17 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 for j in 0..5 {
                     let _ = tools
-                        .create(CreateParams {
-                            title: format!("Concurrent Issue {i}-{j}"),
-                            description: None,
-                            priority: None,
-                            issue_kind: None,
-                            assignee: None,
-                            labels: None,
-                            design: None,
-                            acceptance: None,
-                            initial_note: None,
-                            workspace_root: None,
-                        })
+                        .create(create_params(
+                            format!("Concurrent Issue {i}-{j}"),
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        ))
                         .await;
                 }
             }));
@@ -1103,18 +1154,17 @@ mod tests {
 
         // Create issue with label
         let issue = tools
-            .create(CreateParams {
-                title: "Issue with Label".to_string(),
-                description: None,
-                priority: None,
-                issue_kind: None,
-                assignee: None,
-                labels: Some(vec!["bug".to_string()]),
-                design: None,
-                acceptance: None,
-                initial_note: None,
-                workspace_root: None,
-            })
+            .create(create_params(
+                "Issue with Label".to_string(),
+                None,
+                None,
+                None,
+                None,
+                Some(vec!["bug".to_string()]),
+                None,
+                None,
+                None,
+            ))
             .await
             .unwrap();
         assert!(issue.labels.contains(&"bug".to_string()));
@@ -1131,34 +1181,32 @@ mod tests {
 
         // Create issues with different labels
         tools
-            .create(CreateParams {
-                title: "Issue 1".to_string(),
-                description: None,
-                priority: None,
-                issue_kind: None,
-                assignee: None,
-                labels: Some(vec!["feature".to_string(), "backend".to_string()]),
-                design: None,
-                acceptance: None,
-                initial_note: None,
-                workspace_root: None,
-            })
+            .create(create_params(
+                "Issue 1".to_string(),
+                None,
+                None,
+                None,
+                None,
+                Some(vec!["feature".to_string(), "backend".to_string()]),
+                None,
+                None,
+                None,
+            ))
             .await
             .unwrap();
 
         tools
-            .create(CreateParams {
-                title: "Issue 2".to_string(),
-                description: None,
-                priority: None,
-                issue_kind: None,
-                assignee: None,
-                labels: Some(vec!["feature".to_string(), "frontend".to_string()]),
-                design: None,
-                acceptance: None,
-                initial_note: None,
-                workspace_root: None,
-            })
+            .create(create_params(
+                "Issue 2".to_string(),
+                None,
+                None,
+                None,
+                None,
+                Some(vec!["feature".to_string(), "frontend".to_string()]),
+                None,
+                None,
+                None,
+            ))
             .await
             .unwrap();
 
