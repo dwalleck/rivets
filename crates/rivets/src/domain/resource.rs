@@ -61,11 +61,15 @@ impl WebUrl {
     /// [`ResourceError::UnsupportedWebUrlScheme`] for non-HTTP(S) schemes.
     pub fn new(raw: impl Into<String>) -> Result<Self, ResourceError> {
         let raw = raw.into();
-        let parsed = url::Url::parse(&raw).map_err(|source| ResourceError::MalformedWebUrl {
+        // Match url::Url's preprocessing before checking the caller-supplied
+        // authority marker, so leading C0 controls or spaces do not shift the
+        // scheme offset relative to the parsed URL.
+        let trimmed = raw.trim_matches(|character: char| character == ' ' || character <= '\u{1f}');
+        let parsed = url::Url::parse(trimmed).map_err(|source| ResourceError::MalformedWebUrl {
             url: raw.clone(),
             source: WebUrlSyntaxError { source },
         })?;
-        let has_explicit_authority = raw
+        let has_explicit_authority = trimmed
             .get(parsed.scheme().len()..)
             .is_some_and(|rest| rest.starts_with("://"));
         match parsed.scheme() {
@@ -365,6 +369,8 @@ mod tests {
     // ===== WebUrl =====
 
     #[rstest]
+    #[case::leading_space(" https://example.com/docs")]
+    #[case::leading_control("\u{1f}https://example.com/docs")]
     #[case::http("http://example.com/docs")]
     #[case::https("https://example.com/docs")]
     #[case::https_with_port_and_query("https://example.com:8443/a?b=c#frag")]
