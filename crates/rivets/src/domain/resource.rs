@@ -25,7 +25,7 @@ impl ResourceId {
         if id.trim().is_empty() {
             return Err(ResourceError::EmptyResourceId);
         }
-        if let Some(position) = find_control_char(&id) {
+        if let Some(position) = id.chars().position(char::is_control) {
             return Err(ResourceError::ResourceIdControlCharacter { position });
         }
         Ok(Self(id))
@@ -467,11 +467,18 @@ mod tests {
 
     // ===== ResourceId / AssociatedResource =====
 
-    #[test]
-    fn resource_id_rejects_terminal_unsafe_control_characters() {
+    #[rstest]
+    #[case::escape("r1\u{1b}", 2)]
+    #[case::tab("r1\tspoof", 2)]
+    fn resource_id_rejects_terminal_unsafe_control_characters(
+        #[case] id: &str,
+        #[case] position: usize,
+    ) {
         assert!(matches!(
-            ResourceId::new("r1\u{1b}"),
-            Err(ResourceError::ResourceIdControlCharacter { position: 2 })
+            ResourceId::new(id),
+            Err(ResourceError::ResourceIdControlCharacter {
+                position: actual
+            }) if actual == position
         ));
     }
 
