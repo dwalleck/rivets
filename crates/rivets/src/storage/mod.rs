@@ -59,7 +59,6 @@
 //!         design: None,
 //!         acceptance_criteria: None,
 //!         initial_note: None,
-//!         external_ref: None,
 //!         dependencies: vec![],
 //!     };
 //!
@@ -71,7 +70,8 @@
 //! ```
 
 use crate::domain::{
-    Dependency, DependencyType, Issue, IssueFilter, IssueId, IssueUpdate, NewIssue, SortPolicy,
+    Dependency, DependencyType, Issue, IssueFilter, IssueId, IssueUpdate, NewIssue, NewResource,
+    SortPolicy,
 };
 use crate::error::{PartialLoadError, Result, SkippedIssueRecordCause, StorageError};
 use async_trait::async_trait;
@@ -280,6 +280,19 @@ pub trait IssueStorage: Send + Sync {
     ///
     /// - `Error::IssueNotFound` if the issue doesn't exist
     async fn remove_label(&mut self, id: &IssueId, label: &str) -> Result<Issue>;
+
+    // ========== Associated Resource Operations ==========
+
+    /// Atomically associate a resource with an issue.
+    ///
+    /// The domain assigns a stable, opaque identifier and rejects an exact
+    /// target-and-role duplicate.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::IssueNotFound` if the issue doesn't exist
+    /// - `Error::Storage(StorageError::Resource(ResourceError::DuplicateTargetRole))` on duplicate
+    async fn add_resource(&mut self, id: &IssueId, resource: NewResource) -> Result<Issue>;
 
     // ========== Batch Operations ==========
 
@@ -520,6 +533,11 @@ impl IssueStorage for JsonlBackedStorage {
         self.inner.remove_label(id, label).await
     }
 
+    async fn add_resource(&mut self, id: &IssueId, resource: NewResource) -> Result<Issue> {
+        self.ensure_writable()?;
+        self.inner.add_resource(id, resource).await
+    }
+
     async fn import_issues(&mut self, issues: Vec<Issue>) -> Result<()> {
         self.ensure_writable()?;
         self.inner.import_issues(issues).await
@@ -727,9 +745,10 @@ impl MockStorage {
             assignee: None,
             labels: vec![],
             design: None,
-            acceptance_criteria: None,
+            resources: vec![],
+            next_resource_id: 1,
             notes: vec![],
-            external_ref: None,
+            acceptance_criteria: None,
             dependencies: vec![],
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -837,6 +856,12 @@ impl IssueStorage for MockStorage {
         )
     }
 
+    async fn add_resource(&mut self, _id: &IssueId, _resource: NewResource) -> Result<Issue> {
+        unimplemented!(
+            "MockStorage::add_resource() is not implemented. Use in_memory::new_in_memory_storage() for full CRUD."
+        )
+    }
+
     async fn import_issues(&mut self, _issues: Vec<Issue>) -> Result<()> {
         Ok(())
     }
@@ -875,7 +900,6 @@ mod tests {
             design: None,
             acceptance_criteria: None,
             initial_note: None,
-            external_ref: None,
             dependencies: vec![],
         };
 
@@ -954,7 +978,6 @@ mod tests {
             design: None,
             acceptance_criteria: None,
             initial_note: None,
-            external_ref: None,
             dependencies: vec![],
         };
 
@@ -1044,7 +1067,6 @@ mod tests {
             design: None,
             acceptance_criteria: None,
             initial_note: None,
-            external_ref: None,
             dependencies: vec![],
         };
 
@@ -1079,7 +1101,6 @@ mod tests {
             design: None,
             acceptance_criteria: None,
             initial_note: None,
-            external_ref: None,
             dependencies: vec![],
         };
 

@@ -413,8 +413,13 @@ fn print_issue_details_text<W: Write>(
         )?;
     }
 
-    if let Some(ref ext_ref) = issue.external_ref {
-        writeln!(w, "{} {}", dimmed("Ref:", config), ext_ref)?;
+    let resources = issue.resources();
+    if !resources.is_empty() {
+        writeln!(w)?;
+        writeln!(w, "{} ({}):", bold("Resources", config), resources.len())?;
+        for resource in resources {
+            writeln!(w, "  {resource}")?;
+        }
     }
 
     // Timestamps
@@ -561,7 +566,8 @@ mod tests {
             design: None,
             acceptance_criteria: None,
             notes: vec![],
-            external_ref: None,
+            resources: vec![],
+            next_resource_id: 1,
             dependencies: vec![],
             created_at: Utc::now(),
             updated_at: Utc::now(),

@@ -1,5 +1,6 @@
 //! Error types for the rivets MCP server.
 
+use rivets::error::{Error as RivetsError, StorageError};
 use thiserror::Error;
 
 /// Errors that can occur in the rivets MCP server.
@@ -23,6 +24,10 @@ pub enum Error {
     /// Note content failed domain validation.
     #[error("Invalid note: {0}")]
     InvalidNote(#[from] rivets::domain::NoteError),
+
+    /// Associated Resource input failed domain validation.
+    #[error("Invalid resource: {0}")]
+    InvalidResource(#[from] rivets::domain::ResourceError),
 
     /// The requested issue was not found.
     #[error("Issue not found: {0}")]
@@ -59,7 +64,7 @@ pub enum Error {
 
     /// An error from the rivets storage layer.
     #[error("Storage error: {0}")]
-    Storage(#[from] rivets::error::Error),
+    Storage(#[source] RivetsError),
 
     /// An I/O error occurred.
     #[error("I/O error: {0}")]
@@ -72,3 +77,49 @@ pub enum Error {
 
 /// Result type for rivets MCP operations.
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl From<RivetsError> for Error {
+    fn from(error: RivetsError) -> Self {
+        match error {
+            RivetsError::IssueNotFound(issue_id) => Self::IssueNotFound(issue_id.to_string()),
+            RivetsError::Storage(StorageError::Resource(source)) => Self::InvalidResource(source),
+            error @ (RivetsError::Io(_)
+            | RivetsError::Config(_)
+            | RivetsError::Storage(_)
+            | RivetsError::Validation { .. }
+            | RivetsError::HasDependents { .. }
+            | RivetsError::CircularDependency { .. }
+            | RivetsError::InvalidIssueId(_)
+            | RivetsError::InvalidPriority(_)
+            | RivetsError::DependencyNotFound { .. }
+            | RivetsError::IssueAlreadyExists(_)
+            | RivetsError::Json(_)) => Self::Storage(error),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rivets::domain::{IssueId, ResourceError};
+
+    #[test]
+    fn core_issue_not_found_maps_to_mcp_issue_not_found() {
+        let error = Error::from(RivetsError::IssueNotFound(IssueId::new("test-missing")));
+        assert!(matches!(
+            error,
+            Error::IssueNotFound(issue_id) if issue_id == "test-missing"
+        ));
+    }
+
+    #[test]
+    fn storage_resource_error_maps_to_invalid_resource() {
+        let error = Error::from(RivetsError::Storage(StorageError::Resource(
+            ResourceError::EmptyLabel,
+        )));
+        assert!(matches!(
+            error,
+            Error::InvalidResource(ResourceError::EmptyLabel)
+        ));
+    }
+}

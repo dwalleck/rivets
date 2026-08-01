@@ -225,6 +225,10 @@ pub enum StorageError {
     /// JSON serialization failed during storage operations.
     #[error("JSON serialization failed")]
     Serialization(#[source] serde_json::Error),
+
+    /// An Associated Resource invariant was violated.
+    #[error(transparent)]
+    Resource(#[from] crate::domain::ResourceError),
 }
 
 /// The error type for rivets operations.

@@ -5,7 +5,9 @@
 
 use clap::{Parser, Subcommand};
 
-use super::types::{DependencyTypeArg, IssueKindArg, IssueStatusArg, SortOrderArg, SortPolicyArg};
+use super::types::{
+    DependencyTypeArg, IssueKindArg, IssueStatusArg, ResourceRoleArg, SortOrderArg, SortPolicyArg,
+};
 use super::validators::{
     validate_description, validate_issue_id, validate_label, validate_prefix, validate_title,
 };
@@ -77,10 +79,6 @@ pub struct CreateArgs {
     /// Initial Note
     #[arg(long, allow_hyphen_values = true)]
     pub notes: Option<String>,
-
-    /// External reference (e.g., GitHub issue URL)
-    #[arg(long)]
-    pub external_ref: Option<String>,
 }
 
 /// Arguments for the `list` command
@@ -180,10 +178,6 @@ pub struct UpdateArgs {
     /// Note to append
     #[arg(long, allow_hyphen_values = true)]
     pub notes: Option<String>,
-
-    /// New external reference
-    #[arg(long)]
-    pub external_ref: Option<String>,
 }
 
 impl UpdateArgs {
@@ -226,7 +220,6 @@ impl UpdateArgs {
             || self.design.is_some()
             || self.acceptance.is_some()
             || self.notes.is_some()
-            || self.external_ref.is_some()
     }
 }
 
@@ -444,6 +437,44 @@ pub enum LabelAction {
     ListAll,
 }
 
+/// Arguments for the `resource` command.
+#[derive(Parser, Debug, Clone)]
+pub struct ResourceArgs {
+    /// Associated Resource subcommand.
+    #[command(subcommand)]
+    pub action: ResourceAction,
+}
+
+/// Associated Resource management actions.
+#[derive(Subcommand, Debug, Clone)]
+pub enum ResourceAction {
+    /// Associate an absolute HTTP or HTTPS URL with an Issue.
+    Add {
+        /// Issue ID.
+        #[arg(value_parser = validate_issue_id)]
+        issue_id: String,
+
+        /// Absolute HTTP or HTTPS URL.
+        #[arg(long)]
+        url: String,
+
+        /// Why this resource matters to the Issue.
+        #[arg(long, value_enum)]
+        role: ResourceRoleArg,
+
+        /// Optional human-readable label.
+        #[arg(long)]
+        label: Option<String>,
+    },
+
+    /// List an Issue's Associated Resources in insertion order.
+    List {
+        /// Issue ID.
+        #[arg(value_parser = validate_issue_id)]
+        issue_id: String,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,7 +495,6 @@ mod tests {
                 design: None,
                 acceptance: None,
                 notes: None,
-                external_ref: None,
             }
         }
 
@@ -545,13 +575,6 @@ mod tests {
         }
 
         #[test]
-        fn test_has_updates_external_ref() {
-            let mut args = create_empty_update_args();
-            args.external_ref = Some("https://example.com/issue".to_string());
-            assert!(args.has_updates());
-        }
-
-        #[test]
         fn test_has_updates_multiple_fields() {
             let mut args = create_empty_update_args();
             args.title = Some("New title".to_string());
@@ -579,7 +602,6 @@ mod tests {
                 "--design",
                 "--acceptance",
                 "--notes",
-                "--external-ref",
             ];
 
             for flag in expected_flags {

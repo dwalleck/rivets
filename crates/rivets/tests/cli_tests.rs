@@ -102,6 +102,10 @@ fn test_cli_help_shows_all_commands() {
     assert!(stdout.contains("ready"), "Help should show 'ready' command");
     assert!(stdout.contains("dep"), "Help should show 'dep' command");
     assert!(
+        stdout.contains("resource"),
+        "Help should show 'resource' command"
+    );
+    assert!(
         stdout.contains("blocked"),
         "Help should show 'blocked' command"
     );
@@ -1847,4 +1851,221 @@ fn test_cli_rivets_color_zero_disables_ansi(initialized_dir: TempDir) {
         !contains_ansi_escapes(&stdout),
         "RIVETS_COLOR=0 should suppress ANSI escape sequences in output, got: {stdout}"
     );
+}
+
+// ============================================================================
+// Associated Resource Commands
+// ============================================================================
+
+#[rstest]
+fn resource_add_list_show_and_validation_survive_process_restart(initialized_dir: TempDir) {
+    let issue_id = create_issue(initialized_dir.path(), "Resource owner", &[]);
+
+    let first = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "resource",
+            "add",
+            &issue_id,
+            "--url",
+            "https://example.com/pr/123",
+            "--role",
+            "implementation",
+            "--label",
+            "Implementation PR",
+        ],
+    );
+    assert!(
+        first.status.success(),
+        "first resource add failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let second = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "resource",
+            "add",
+            &issue_id,
+            "--url",
+            "https://example.com/pr/123",
+            "--role",
+            "documentation",
+        ],
+    );
+    assert!(
+        second.status.success(),
+        "same target with distinct role should succeed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+
+    let list = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["--json", "resource", "list", &issue_id],
+    );
+    assert!(list.status.success());
+    let resources: serde_json::Value =
+        serde_json::from_slice(&list.stdout).expect("resource list should be JSON");
+    let resources = resources
+        .as_array()
+        .expect("resource list should be an array");
+    assert_eq!(resources.len(), 2);
+    assert_eq!(resources[0]["id"], "r1");
+    assert_eq!(resources[0]["target"]["type"], "web");
+    assert_eq!(resources[0]["target"]["url"], "https://example.com/pr/123");
+    assert_eq!(resources[0]["role"], "implementation");
+    assert_eq!(resources[0]["label"], "Implementation PR");
+    assert_eq!(resources[1]["id"], "r2");
+    assert_eq!(resources[1]["role"], "documentation");
+    assert!(resources[1]["label"].is_null());
+
+    let show = run_rivets_in_dir(initialized_dir.path(), &["show", &issue_id]);
+    assert!(show.status.success());
+    let show_text = String::from_utf8_lossy(&show.stdout);
+    let first_pos = show_text
+        .find("[r1] https://example.com/pr/123 (implementation) — Implementation PR")
+        .expect("show should render first resource");
+    let second_pos = show_text
+        .find("[r2] https://example.com/pr/123 (documentation)")
+        .expect("show should render second resource");
+    assert!(first_pos < second_pos, "show must preserve insertion order");
+
+    let duplicate = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "resource",
+            "add",
+            &issue_id,
+            "--url",
+            "https://example.com/pr/123",
+            "--role",
+            "implementation",
+        ],
+    );
+    assert!(!duplicate.status.success());
+    assert!(
+        String::from_utf8_lossy(&duplicate.stderr).contains("already exists"),
+        "duplicate error should be explicit: {}",
+        String::from_utf8_lossy(&duplicate.stderr)
+    );
+
+    let invalid_url = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "resource",
+            "add",
+            &issue_id,
+            "--url",
+            "docs/adr/0003-associated-resources.md",
+            "--role",
+            "reference",
+        ],
+    );
+    assert!(!invalid_url.status.success());
+    assert!(String::from_utf8_lossy(&invalid_url.stderr).contains("Invalid web URL"));
+
+    let empty_label = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "resource",
+            "add",
+            &issue_id,
+            "--url",
+            "https://example.com/evidence",
+            "--role",
+            "evidence",
+            "--label",
+            "",
+        ],
+    );
+    assert!(!empty_label.status.success());
+    assert!(
+        String::from_utf8_lossy(&empty_label.stderr).contains("Resource label cannot be empty")
+    );
+
+    let after_failures = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["--json", "resource", "list", &issue_id],
+    );
+    let resources: serde_json::Value =
+        serde_json::from_slice(&after_failures.stdout).expect("resource list should be JSON");
+    assert_eq!(
+        resources
+            .as_array()
+            .expect("resource list should be an array")
+            .len(),
+        2,
+        "validation and duplicate failures must not persist"
+    );
+
+    let data = std::fs::read_to_string(initialized_dir.path().join(".rivets/issues.jsonl"))
+        .expect("issues file should be readable");
+    let record: serde_json::Value = data
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("record should be JSON"))
+        .find(|record: &serde_json::Value| record["id"] == issue_id)
+        .expect("created Issue should be persisted");
+    assert!(record.get("external_ref").is_none());
+    assert_eq!(record["resources"].as_array().unwrap().len(), 2);
+    assert_eq!(record["next_resource_id"], 3);
+}
+
+#[rstest]
+fn legacy_web_external_ref_migrates_then_rewrites_canonically(initialized_dir: TempDir) {
+    let issues_path = initialized_dir.path().join(".rivets/issues.jsonl");
+    let legacy = r#"{"id":"test-legacy","title":"Legacy URL","description":"Test","status":"open","priority":2,"issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":"https://example.com/legacy","dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null}"#;
+    std::fs::write(&issues_path, format!("{legacy}\n")).expect("legacy record should be seeded");
+
+    let migrated = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["--json", "resource", "list", "test-legacy"],
+    );
+    assert!(
+        migrated.status.success(),
+        "legacy list failed: {}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    let resources: serde_json::Value =
+        serde_json::from_slice(&migrated.stdout).expect("migrated resources should be JSON");
+    assert_eq!(resources[0]["id"], "r1");
+    assert_eq!(resources[0]["role"], "reference");
+    assert_eq!(resources[0]["target"]["url"], "https://example.com/legacy");
+
+    let add = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "resource",
+            "add",
+            "test-legacy",
+            "--url",
+            "https://example.com/new",
+            "--role",
+            "evidence",
+        ],
+    );
+    assert!(
+        add.status.success(),
+        "canonicalizing mutation failed: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+
+    let restarted = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["--json", "resource", "list", "test-legacy"],
+    );
+    let resources: serde_json::Value =
+        serde_json::from_slice(&restarted.stdout).expect("restarted list should be JSON");
+    assert_eq!(resources.as_array().unwrap().len(), 2);
+    assert_eq!(resources[0]["id"], "r1");
+    assert_eq!(resources[1]["id"], "r2");
+
+    let canonical =
+        std::fs::read_to_string(issues_path).expect("canonical file should be readable");
+    let record: serde_json::Value =
+        serde_json::from_str(canonical.trim()).expect("canonical record should be JSON");
+    assert!(record.get("external_ref").is_none());
+    assert!(record.get("issue_type").is_none());
+    assert_eq!(record["issue_kind"], "task");
+    assert_eq!(record["resources"].as_array().unwrap().len(), 2);
+    assert_eq!(record["next_resource_id"], 3);
 }

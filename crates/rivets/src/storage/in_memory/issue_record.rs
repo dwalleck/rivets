@@ -1,7 +1,9 @@
 //! Compatibility boundary between persisted JSONL issue records and the domain model.
 
 use crate::domain::{
-    Dependency, Issue, IssueId, IssueKind, IssueStatus, Note, NoteContent, NoteError,
+    AssociatedResource, Dependency, Issue, IssueId, IssueKind, IssueStatus, NewResource, Note,
+    NoteContent, NoteError, ResourceId, ResourceLabel, ResourceRole, ResourceTarget, WebUrl,
+    is_unsafe_multiline_control,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -80,6 +82,88 @@ impl Default for PersistedNotes {
     }
 }
 
+/// Persisted form of a Resource Target.
+///
+/// Stringly typed on purpose: the record is an adapter DTO, and conversion
+/// into the domain revalidates through the [`WebUrl`] constructor.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ResourceTargetRecord {
+    Web { url: String },
+}
+
+/// Persisted form of an Associated Resource.
+#[derive(Debug, Serialize, Deserialize)]
+struct ResourceRecord {
+    id: String,
+    target: ResourceTargetRecord,
+    role: ResourceRole,
+    label: Option<String>,
+}
+
+impl ResourceRecord {
+    fn into_domain(self) -> Result<AssociatedResource, crate::domain::ResourceError> {
+        let target = match self.target {
+            ResourceTargetRecord::Web { url } => ResourceTarget::web(WebUrl::new(url)?),
+        };
+        let label = self.label.map(ResourceLabel::new).transpose()?;
+        Ok(AssociatedResource::from_parts(
+            ResourceId::new(self.id)?,
+            target,
+            self.role,
+            label,
+        ))
+    }
+}
+
+impl From<AssociatedResource> for ResourceRecord {
+    fn from(resource: AssociatedResource) -> Self {
+        let target = match resource.target() {
+            ResourceTarget::Web { url } => ResourceTargetRecord::Web {
+                url: url.as_str().to_string(),
+            },
+        };
+        Self {
+            id: resource.id().as_str().to_string(),
+            target,
+            role: resource.role(),
+            label: resource.label().map(|l| l.as_str().to_string()),
+        }
+    }
+}
+
+/// Default next resource identifier for records that never held resources.
+const DEFAULT_NEXT_RESOURCE_ID: u64 = 1;
+
+const MIGRATED_EXTERNAL_REF_NOTE_PREFIX: &str = "Migrated legacy external reference: ";
+
+fn migrated_external_ref_note_text(external_ref: &str) -> String {
+    let escape_controls = external_ref.chars().any(is_unsafe_multiline_control);
+    let mut content =
+        String::with_capacity(MIGRATED_EXTERNAL_REF_NOTE_PREFIX.len() + external_ref.len());
+    content.push_str(MIGRATED_EXTERNAL_REF_NOTE_PREFIX);
+    if escape_controls {
+        for character in external_ref.chars() {
+            if is_unsafe_multiline_control(character) || character == '\\' {
+                content.extend(character.escape_default());
+            } else {
+                content.push(character);
+            }
+        }
+    } else {
+        content.push_str(external_ref);
+    }
+    content
+}
+
+fn default_next_resource_id() -> u64 {
+    DEFAULT_NEXT_RESOURCE_ID
+}
+
+fn is_default_next_resource_id(value: &u64) -> bool {
+    *value == DEFAULT_NEXT_RESOURCE_ID
+}
+
 /// The current on-disk Issue shape.
 ///
 /// This DTO owns all serde behavior for JSONL persistence. The domain [`Issue`]
@@ -105,6 +189,18 @@ pub(super) struct IssueRecord {
     acceptance_criteria: Option<String>,
     #[serde(default)]
     notes: PersistedNotes,
+    /// Canonical Associated Resource collection.
+    #[serde(default)]
+    resources: Vec<ResourceRecord>,
+    /// Monotonic resource identifier sequence. Emitted only once resources
+    /// exist so resource-free records do not grow a sequence field.
+    #[serde(
+        default = "default_next_resource_id",
+        skip_serializing_if = "is_default_next_resource_id"
+    )]
+    next_resource_id: u64,
+    /// Legacy read-only field accepted during migration and never written back.
+    #[serde(default, skip_serializing)]
     external_ref: Option<String>,
     dependencies: Vec<Dependency>,
     created_at: DateTime<Utc>,
@@ -127,6 +223,8 @@ impl IssueRecord {
             design,
             acceptance_criteria,
             notes,
+            resources,
+            next_resource_id,
             external_ref,
             dependencies,
             created_at,
@@ -154,6 +252,10 @@ impl IssueRecord {
             issue_id: id.clone(),
             error: error.to_string(),
         };
+        let resource_error = |error: crate::domain::ResourceError| IssueRecordError::InvalidData {
+            issue_id: id.clone(),
+            error: error.to_string(),
+        };
         let notes = match notes {
             PersistedNotes::Empty(()) => Vec::new(),
             PersistedNotes::Legacy(content) if content.trim().is_empty() => Vec::new(),
@@ -168,7 +270,13 @@ impl IssueRecord {
                 .map_err(note_error)?,
         };
 
-        let issue = Issue {
+        let resources = resources
+            .into_iter()
+            .map(ResourceRecord::into_domain)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(&resource_error)?;
+
+        let mut issue = Issue {
             id,
             title,
             description,
@@ -180,12 +288,55 @@ impl IssueRecord {
             design,
             acceptance_criteria,
             notes,
-            external_ref,
+            resources: Vec::new(),
+            next_resource_id: DEFAULT_NEXT_RESOURCE_ID,
             dependencies,
             created_at,
             updated_at,
             closed_at,
         };
+        issue
+            .rehydrate_resources(resources, next_resource_id)
+            .map_err(|error| IssueRecordError::InvalidData {
+                issue_id: issue.id.clone(),
+                error: error.to_string(),
+            })?;
+
+        // Legacy `external_ref` migration (ADR-0003). Only a truly empty value
+        // carries no context. Absolute Web URLs become Reference resources;
+        // every other non-empty value is preserved visibly in a migration Note
+        // (with terminal-unsafe control characters and backslashes escaped)
+        // rather than guessed or discarded.
+        if let Some(external_ref) = external_ref
+            && !external_ref.is_empty()
+        {
+            match WebUrl::new(&external_ref) {
+                Ok(url) => {
+                    let resource = NewResource {
+                        target: ResourceTarget::web(url),
+                        role: ResourceRole::Reference,
+                        label: None,
+                    };
+                    match issue.add_resource(resource) {
+                        Ok(_) | Err(crate::domain::ResourceError::DuplicateTargetRole { .. }) => {}
+                        Err(error) => {
+                            return Err(IssueRecordError::InvalidData {
+                                issue_id: issue.id.clone(),
+                                error: error.to_string(),
+                            });
+                        }
+                    }
+                }
+                Err(_) => {
+                    let content = NoteContent::new(migrated_external_ref_note_text(&external_ref))
+                        .map_err(|error| IssueRecordError::InvalidData {
+                            issue_id: issue.id.clone(),
+                            error: error.to_string(),
+                        })?;
+                    issue.append_note(content, updated_at);
+                }
+            }
+        }
         issue
             .validate()
             .map_err(|error| IssueRecordError::InvalidData {
@@ -211,7 +362,8 @@ impl From<Issue> for IssueRecord {
             design,
             acceptance_criteria,
             notes,
-            external_ref,
+            resources,
+            next_resource_id,
             dependencies,
             created_at,
             updated_at,
@@ -232,7 +384,10 @@ impl From<Issue> for IssueRecord {
             design,
             acceptance_criteria,
             notes: PersistedNotes::Canonical(notes.into_iter().map(Into::into).collect()),
-            external_ref,
+            resources: resources.into_iter().map(Into::into).collect(),
+            next_resource_id,
+            // Accepted only during loading; canonical writes never emit `external_ref`.
+            external_ref: None,
             dependencies,
             created_at,
             updated_at,

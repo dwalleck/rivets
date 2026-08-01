@@ -5,7 +5,7 @@ use super::graph::{find_blocked_issues, get_dependency_tree_impl, has_cycle_impl
 use super::sorting::sort_by_policy;
 use crate::domain::{
     Dependency, DependencyType, Issue, IssueFilter, IssueId, IssueStatus, IssueUpdate,
-    MAX_PRIORITY, NewIssue, Note, SortPolicy,
+    MAX_PRIORITY, NewIssue, NewResource, Note, SortPolicy,
 };
 use crate::error::{Error, Result, StorageError};
 use crate::storage::IssueStorage;
@@ -105,7 +105,8 @@ impl IssueStorage for InMemoryStorage {
             design: new_issue.design,
             acceptance_criteria: new_issue.acceptance_criteria,
             notes,
-            external_ref: new_issue.external_ref,
+            resources: vec![],
+            next_resource_id: 1,
             dependencies: dependencies.clone(),
             created_at: now,
             updated_at: now,
@@ -172,15 +173,28 @@ impl IssueStorage for InMemoryStorage {
         if let Some(note) = updates.note {
             candidate.append_note(note, now);
         }
-        if let Some(external_ref) = updates.external_ref {
-            candidate.external_ref = Some(external_ref);
-        }
         if let Some(labels) = updates.labels {
             candidate.labels = labels;
         }
 
         candidate.validate().map_err(StorageError::Validation)?;
         candidate.updated_at = now;
+
+        *stored = candidate.clone();
+        Ok(candidate)
+    }
+
+    async fn add_resource(&mut self, id: &IssueId, resource: NewResource) -> Result<Issue> {
+        let mut inner = self.lock().await;
+        let stored = inner
+            .issues
+            .get_mut(id)
+            .ok_or_else(|| Error::IssueNotFound(id.clone()))?;
+        let mut candidate = stored.clone();
+        candidate
+            .add_resource(resource)
+            .map_err(StorageError::from)?;
+        candidate.updated_at = Utc::now();
 
         *stored = candidate.clone();
         Ok(candidate)
@@ -562,7 +576,8 @@ mod tests {
             design: None,
             acceptance_criteria: None,
             notes: vec![],
-            external_ref: None,
+            resources: vec![],
+            next_resource_id: 1,
             dependencies: Vec::new(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),

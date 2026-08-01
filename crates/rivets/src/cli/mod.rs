@@ -41,14 +41,14 @@ use crate::app::App;
 // Re-export argument structs
 pub use args::{
     BlockedArgs, CloseArgs, CreateArgs, DeleteArgs, DepAction, DepArgs, InfoArgs, InitArgs,
-    LabelAction, LabelArgs, ListArgs, ReadyArgs, ReopenArgs, ShowArgs, StaleArgs, StatsArgs,
-    UpdateArgs,
+    LabelAction, LabelArgs, ListArgs, ReadyArgs, ReopenArgs, ResourceAction, ResourceArgs,
+    ShowArgs, StaleArgs, StatsArgs, UpdateArgs,
 };
 
 // Re-export types
 pub use types::{
-    BatchError, BatchResult, DependencyTypeArg, IssueKindArg, IssueStatusArg, SortOrderArg,
-    SortPolicyArg,
+    BatchError, BatchResult, DependencyTypeArg, IssueKindArg, IssueStatusArg, ResourceRoleArg,
+    SortOrderArg, SortPolicyArg,
 };
 
 // Re-export validators for external use
@@ -146,6 +146,11 @@ pub enum Commands {
     /// Add, remove, or list labels on issues.
     Label(LabelArgs),
 
+    /// Manage Associated Resources.
+    ///
+    /// Add and list typed references to relevant information and artifacts.
+    Resource(ResourceArgs),
+
     /// Find stale issues
     ///
     /// Lists issues that haven't been updated in a specified number of days.
@@ -241,6 +246,10 @@ impl Cli {
             Some(Commands::Label(args)) => {
                 let mut app = load_app_from_cwd().await?;
                 execute::execute_label(&mut app, args, output_mode).await
+            }
+            Some(Commands::Resource(args)) => {
+                let mut app = load_app_from_cwd().await?;
+                execute::execute_resource(&mut app, args, output_mode).await
             }
             Some(Commands::Stale(args)) => {
                 let app = load_app_from_cwd().await?;

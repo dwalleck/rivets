@@ -14,6 +14,7 @@ Rivets stores issues as JSONL files alongside your code—no external services, 
 - **Git-native** — Issues live in your repo, branch with your code, merge with your PRs
 - **Fast** — Built in Rust for instant responses, even with thousands of issues
 - **Dependency tracking** — Model blockers and relationships between issues
+- **Associated Resources** — Attach typed Web links with stable IDs and semantic roles
 - **AI-ready** — MCP server for seamless integration with AI coding assistants
 - **Scriptable** — JSON output mode for automation and custom tooling
 - **Human-readable** — JSONL storage you can grep, diff, and edit directly
@@ -71,6 +72,22 @@ rivets label add RIVETS-1 urgent backend
 rivets label remove RIVETS-1 urgent
 rivets list --label backend
 ```
+
+### Associated Resources
+
+Attach absolute HTTP/HTTPS URLs to an Issue. The same `resource_add` and
+`resource_list` operations are available through the MCP server.
+
+```bash
+rivets resource add RIVETS-1 \
+  --url https://example.com/pull/123 \
+  --role implementation \
+  --label "Implementation PR"
+rivets resource list RIVETS-1
+```
+
+Roles are `implementation`, `documentation`, `evidence`, `successor`, and
+`reference`. Resources retain insertion order and a stable per-Issue ID.
 
 ### JSON Output
 

@@ -18,12 +18,12 @@
 use crate::context::Context;
 use crate::error::{Error, Result};
 use crate::models::{
-    BlockedIssueResponse, CreateParams, McpIssue, SetContextResponse, WhereAmIResponse,
-    dep_type_to_str, parse_dep_type, parse_issue_kind, parse_status,
+    BlockedIssueResponse, CreateParams, McpIssue, McpResource, SetContextResponse,
+    WhereAmIResponse, dep_type_to_str, parse_dep_type, parse_issue_kind, parse_status,
 };
 use rivets::domain::{
     DependencyType, IssueFilter, IssueId, IssueKind, IssueStatus, IssueUpdate, NewIssue,
-    NoteContent,
+    NewResource, NoteContent, ResourceLabel, ResourceRole, ResourceTarget, WebUrl,
 };
 use rivets::storage::IssueStorage;
 use std::path::Path;
@@ -52,6 +52,15 @@ fn validate_issue_kind(issue_kind: &str) -> Result<IssueKind> {
         field: "issue_kind",
         value: issue_kind.to_string(),
         valid_values: "bug, feature, task, epic, chore",
+    })
+}
+
+/// Parse and validate a Resource Role string.
+fn validate_resource_role(role: &str) -> Result<ResourceRole> {
+    role.parse().map_err(|_| Error::InvalidArgument {
+        field: "role",
+        value: role.to_string(),
+        valid_values: "implementation, documentation, evidence, successor, reference",
     })
 }
 
@@ -325,7 +334,6 @@ impl Tools {
             design,
             acceptance_criteria,
             initial_note,
-            external_ref: None,
             dependencies: vec![],
         };
 
@@ -341,7 +349,7 @@ impl Tools {
     ///
     /// Returns an error if no context is set, invalid status, issue not found, or storage fails.
     #[allow(clippy::too_many_arguments)]
-    #[instrument(skip(self, title, description, design, acceptance_criteria, external_ref, labels), fields(%issue_id))]
+    #[instrument(skip(self, title, description, design, acceptance_criteria, labels), fields(%issue_id))]
     pub async fn update(
         &self,
         issue_id: &str,
@@ -353,7 +361,6 @@ impl Tools {
         assignee: Option<Option<String>>,
         design: Option<String>,
         acceptance_criteria: Option<String>,
-        external_ref: Option<String>,
         labels: Option<Vec<String>>,
         workspace_root: Option<&str>,
     ) -> Result<McpIssue> {
@@ -379,7 +386,6 @@ impl Tools {
             design,
             acceptance_criteria,
             note: None,
-            external_ref,
             labels,
         };
 
@@ -420,6 +426,62 @@ impl Tools {
             .await?;
         save_or_reload(storage.as_mut()).await?;
         Ok(issue.into())
+    }
+
+    /// Associate an absolute Web URL with an Issue.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid URL, role, label, missing Issue, context
+    /// failure, duplicate target-and-role association, or persistence failure.
+    #[instrument(skip(self, url, label), fields(%issue_id, %role))]
+    pub async fn resource_add(
+        &self,
+        issue_id: &str,
+        url: String,
+        role: &str,
+        label: Option<String>,
+        workspace_root: Option<&str>,
+    ) -> Result<McpIssue> {
+        let resource = NewResource {
+            target: ResourceTarget::web(WebUrl::new(url)?),
+            role: validate_resource_role(role)?,
+            label: label.map(ResourceLabel::new).transpose()?,
+        };
+        let storage = {
+            let context = self.context.read().await;
+            context.storage_for(workspace_root.map(Path::new))?
+        };
+        let mut storage = storage.write().await;
+
+        let issue = storage
+            .add_resource(&IssueId::new(issue_id), resource)
+            .await?;
+        save_or_reload(storage.as_mut()).await?;
+        Ok(issue.into())
+    }
+
+    /// List an Issue's Associated Resources in insertion order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the context or Issue is missing, or storage fails.
+    #[instrument(skip(self), fields(%issue_id))]
+    pub async fn resource_list(
+        &self,
+        issue_id: &str,
+        workspace_root: Option<&str>,
+    ) -> Result<Vec<McpResource>> {
+        let storage = {
+            let context = self.context.read().await;
+            context.storage_for(workspace_root.map(Path::new))?
+        };
+        let storage = storage.read().await;
+        let issue = storage
+            .get(&IssueId::new(issue_id))
+            .await?
+            .ok_or_else(|| Error::IssueNotFound(issue_id.to_string()))?;
+        Ok(issue.resources().iter().map(Into::into).collect())
     }
 
     /// Close an issue.
@@ -790,7 +852,6 @@ mod tests {
                 Some("in_progress"),
                 Some(0),
                 None, // issue_kind
-                None,
                 None,
                 None,
                 None,
