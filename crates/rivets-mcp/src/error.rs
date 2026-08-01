@@ -7,7 +7,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum Error {
     /// No workspace context has been set.
-    #[error("No workspace context set. Call set_context first.")]
+    #[error("No workspace context set. Provide workspace_root or call set_context.")]
     NoContext,
 
     /// Invalid argument value provided.
@@ -43,8 +43,8 @@ pub enum Error {
         source: Option<std::io::Error>,
     },
 
-    /// Workspace exists but was not initialized via `set_context`.
-    #[error("Workspace not initialized: {0}. Call set_context first.")]
+    /// Workspace exists but is not present in the context cache.
+    #[error("Workspace not initialized: {0}")]
     WorkspaceNotInitialized(String),
 
     /// Failed to discover a rivets workspace.

@@ -54,7 +54,7 @@ pub struct RivetsMcpServer {
 impl RivetsMcpServer {
     /// Set the workspace context for subsequent operations.
     #[tool(
-        description = "Set the workspace root directory for all subsequent operations. Call this first before using other tools."
+        description = "Set the default workspace root for calls that omit workspace_root. Calls with workspace_root initialize that workspace directly."
     )]
     async fn set_context(
         &self,
@@ -435,7 +435,7 @@ impl ServerHandler for RivetsMcpServer {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(
-                "Rivets MCP server for issue tracking. Call set_context first to set the workspace.",
+                "Rivets MCP server for issue tracking. Pass workspace_root to a tool call, or use set_context to set the default workspace.",
             )
     }
 }

@@ -76,7 +76,17 @@ impl Context {
     /// or if storage creation fails.
     pub async fn set_workspace(&mut self, workspace_root: &Path) -> Result<WorkspaceInfo> {
         debug!(path = %workspace_root.display(), "Setting workspace");
+        let info = self.initialize_workspace(workspace_root, None).await?;
+        self.current_workspace = Some(info.workspace_root.clone());
+        Ok(info)
+    }
 
+    /// Load and cache a workspace without changing the current workspace.
+    async fn initialize_workspace(
+        &mut self,
+        workspace_root: &Path,
+        protected_workspace: Option<&Path>,
+    ) -> Result<WorkspaceInfo> {
         // Canonicalize to resolve symlinks and `..` (prevents path traversal)
         let canonical = workspace_root
             .canonicalize()
@@ -113,8 +123,6 @@ impl Context {
         );
         debug!(db_path = %db_path.display(), "Database path from backend");
 
-        self.current_workspace = Some(canonical.clone());
-
         // Store database path
         self.database_paths
             .insert(canonical.clone(), db_path.clone());
@@ -126,7 +134,14 @@ impl Context {
             debug!("Creating new storage instance");
             // Evict oldest workspace if cache is full
             while self.storage_cache.len() >= MAX_CACHED_WORKSPACES {
-                self.evict_oldest();
+                let evicted = self.evict_oldest_except(protected_workspace);
+                debug_assert!(
+                    evicted,
+                    "a full workspace cache must contain an evictable entry"
+                );
+                if !evicted {
+                    break;
+                }
             }
 
             let storage = create_storage(backend.clone(), config.issue_prefix).await?;
@@ -141,13 +156,26 @@ impl Context {
         })
     }
 
-    /// Evict the oldest cached workspace to make room for new entries.
-    fn evict_oldest(&mut self) {
-        if let Some(oldest) = self.cache_order.pop_front() {
-            self.storage_cache.remove(&oldest);
-            self.database_paths.remove(&oldest);
-            tracing::debug!(workspace = %oldest.display(), "Evicted workspace from cache");
-        }
+    /// Evict the oldest cached workspace other than the protected workspace.
+    fn evict_oldest_except(&mut self, protected_workspace: Option<&Path>) -> bool {
+        let Some(eviction_index) =
+            self.cache_order
+                .iter()
+                .position(|workspace| match protected_workspace {
+                    Some(protected) => workspace != protected,
+                    None => true,
+                })
+        else {
+            return false;
+        };
+        let Some(oldest) = self.cache_order.remove(eviction_index) else {
+            return false;
+        };
+
+        self.storage_cache.remove(&oldest);
+        self.database_paths.remove(&oldest);
+        tracing::debug!(workspace = %oldest.display(), "Evicted workspace from cache");
+        true
     }
 
     /// Get the current workspace root.
@@ -203,6 +231,41 @@ impl Context {
             .get(&workspace)
             .cloned()
             .ok_or_else(|| Error::WorkspaceNotInitialized(workspace.display().to_string()))
+    }
+
+    /// Get storage for a workspace, initializing an uncached workspace on first use.
+    ///
+    /// An explicit workspace is cached without changing the current workspace. Calls
+    /// without an explicit workspace still require a current context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no workspace can be resolved, the workspace is invalid,
+    /// or storage creation fails.
+    pub async fn storage_for_or_init(
+        &mut self,
+        workspace_root: Option<&Path>,
+    ) -> Result<Arc<RwLock<Box<dyn IssueStorage>>>> {
+        match self.storage_for(workspace_root) {
+            Ok(storage) => return Ok(storage),
+            Err(Error::WorkspaceNotInitialized(_)) => {}
+            Err(error) => return Err(error),
+        }
+
+        let workspace = match workspace_root {
+            Some(path) => path.to_path_buf(),
+            None => self.current_workspace.clone().ok_or(Error::NoContext)?,
+        };
+        let protected_workspace = self.current_workspace.clone();
+        let info = self
+            .initialize_workspace(&workspace, protected_workspace.as_deref())
+            .await?;
+        self.storage_cache
+            .get(&info.workspace_root)
+            .cloned()
+            .ok_or_else(|| {
+                Error::WorkspaceNotInitialized(info.workspace_root.display().to_string())
+            })
     }
 
     /// Discover and set the workspace by walking up from the given directory.
@@ -441,12 +504,11 @@ mod tests {
     }
 
     #[test]
-    fn test_evict_oldest() {
+    fn test_evict_oldest_except() {
         use rivets::storage::in_memory::new_in_memory_storage;
 
         let mut context = Context::new();
 
-        // Add a few workspaces
         for i in 0..3 {
             let path = PathBuf::from(format!("/test/workspace{i}"));
             let storage = new_in_memory_storage("test".to_string());
@@ -456,21 +518,21 @@ mod tests {
         assert_eq!(context.cache_size(), 3);
         assert_eq!(context.cache_order.len(), 3);
 
-        // Evict oldest
-        context.evict_oldest();
-        assert_eq!(context.cache_size(), 2);
-        assert_eq!(context.cache_order.len(), 2);
+        let protected = Path::new("/test/workspace0");
+        assert!(context.evict_oldest_except(Some(protected)));
+        assert!(context.storage_cache.contains_key(protected));
+        assert!(
+            !context
+                .storage_cache
+                .contains_key(Path::new("/test/workspace1"))
+        );
 
-        // Evict again
-        context.evict_oldest();
+        assert!(context.evict_oldest_except(None));
+        assert!(!context.storage_cache.contains_key(protected));
         assert_eq!(context.cache_size(), 1);
 
-        // Evict last
-        context.evict_oldest();
-        assert_eq!(context.cache_size(), 0);
-
-        // Evicting from empty cache is a no-op
-        context.evict_oldest();
+        assert!(context.evict_oldest_except(None));
+        assert!(!context.evict_oldest_except(None));
         assert_eq!(context.cache_size(), 0);
     }
 }
