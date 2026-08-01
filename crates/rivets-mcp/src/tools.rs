@@ -87,15 +87,23 @@ impl Tools {
         Self { context }
     }
 
-    /// Resolve storage while serializing first-use workspace initialization.
+    /// Resolve cached storage under a shared lock, escalating only for first use.
     async fn storage_for(
         &self,
         workspace_root: Option<&str>,
     ) -> Result<Arc<RwLock<Box<dyn IssueStorage>>>> {
+        let workspace_path = workspace_root.map(Path::new);
+        {
+            let context = self.context.read().await;
+            match context.storage_for(workspace_path) {
+                Ok(storage) => return Ok(storage),
+                Err(Error::WorkspaceNotInitialized(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+
         let mut context = self.context.write().await;
-        context
-            .storage_for_or_init(workspace_root.map(Path::new))
-            .await
+        context.storage_for_or_init(workspace_path).await
     }
 
     /// Set the workspace context.
@@ -795,6 +803,25 @@ mod tests {
             ))
             .await
             .unwrap()
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn cached_storage_lookup_allows_concurrent_context_readers(#[future] tools: Tools) {
+        let tools = tools.await;
+        let context_reader = tools.context.read().await;
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            tools.list(list_params(None, None, None, None, None, None, None)),
+        )
+        .await;
+
+        drop(context_reader);
+        let issues = result
+            .expect("cached lookup should not wait for other context readers")
+            .expect("list should use cached storage");
+        assert!(issues.is_empty());
     }
 
     #[rstest]

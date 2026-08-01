@@ -257,9 +257,15 @@ impl Context {
             None => self.current_workspace.clone().ok_or(Error::NoContext)?,
         };
         let protected_workspace = self.current_workspace.clone();
-        self.initialize_workspace(&workspace, protected_workspace.as_deref())
+        let info = self
+            .initialize_workspace(&workspace, protected_workspace.as_deref())
             .await?;
-        self.storage_for(Some(&workspace))
+        self.storage_cache
+            .get(&info.workspace_root)
+            .cloned()
+            .ok_or_else(|| {
+                Error::WorkspaceNotInitialized(info.workspace_root.display().to_string())
+            })
     }
 
     /// Discover and set the workspace by walking up from the given directory.
