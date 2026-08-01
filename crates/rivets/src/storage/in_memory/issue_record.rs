@@ -304,8 +304,9 @@ impl IssueRecord {
 
         // Legacy `external_ref` migration (ADR-0003). Only a truly empty value
         // carries no context. Absolute Web URLs become Reference resources;
-        // every other non-empty value is preserved byte-for-byte in a migration
-        // Note rather than guessed or discarded.
+        // every other non-empty value is preserved visibly in a migration Note
+        // (with terminal-unsafe control characters and backslashes escaped)
+        // rather than guessed or discarded.
         if let Some(external_ref) = external_ref
             && !external_ref.is_empty()
         {
