@@ -71,7 +71,7 @@ RUST_LOG=debug rivets-mcp
 
 | Tool | Description |
 |------|-------------|
-| `set_context` | Set workspace root directory (call first!) |
+| `set_context` | Set the default workspace root for calls that omit `workspace_root` |
 | `where_am_i` | Show current workspace and database path |
 
 ### Query Tools
@@ -101,6 +101,10 @@ RUST_LOG=debug rivets-mcp
   "workspace_root": "/path/to/your/project"
 }
 ```
+
+Every issue tool also accepts an optional `workspace_root`. Supplying it loads and
+caches that Workspace directly; `set_context` is not required first and the default
+context is not changed.
 
 ### list
 

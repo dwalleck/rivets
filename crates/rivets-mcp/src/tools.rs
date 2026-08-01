@@ -87,6 +87,17 @@ impl Tools {
         Self { context }
     }
 
+    /// Resolve storage while serializing first-use workspace initialization.
+    async fn storage_for(
+        &self,
+        workspace_root: Option<&str>,
+    ) -> Result<Arc<RwLock<Box<dyn IssueStorage>>>> {
+        let mut context = self.context.write().await;
+        context
+            .storage_for_or_init(workspace_root.map(Path::new))
+            .await
+    }
+
     /// Set the workspace context.
     ///
     /// # Errors
@@ -163,10 +174,7 @@ impl Tools {
         let issue_kind = params.kind.resolve("ready");
 
         // Release context lock before acquiring storage lock to prevent deadlocks
-        let storage = {
-            let context = self.context.read().await;
-            context.storage_for(params.workspace_root.as_deref().map(Path::new))?
-        };
+        let storage = self.storage_for(params.workspace_root.as_deref()).await?;
         let storage = storage.read().await;
 
         let filter = IssueFilter {
@@ -197,10 +205,7 @@ impl Tools {
         let status = params.status.as_deref().map(validate_status).transpose()?;
         let issue_kind = params.kind.resolve("list");
 
-        let storage = {
-            let context = self.context.read().await;
-            context.storage_for(params.workspace_root.as_deref().map(Path::new))?
-        };
+        let storage = self.storage_for(params.workspace_root.as_deref()).await?;
         let storage = storage.read().await;
 
         let filter = IssueFilter {
@@ -224,10 +229,7 @@ impl Tools {
     /// Returns an error if no context is set, issue not found, or storage operations fail.
     #[instrument(skip(self), fields(%issue_id))]
     pub async fn show(&self, issue_id: &str, workspace_root: Option<&str>) -> Result<McpIssue> {
-        let storage = {
-            let context = self.context.read().await;
-            context.storage_for(workspace_root.map(Path::new))?
-        };
+        let storage = self.storage_for(workspace_root).await?;
         let storage = storage.read().await;
 
         let id = IssueId::new(issue_id);
@@ -245,10 +247,7 @@ impl Tools {
     /// Returns an error if no context is set or storage operations fail.
     #[instrument(skip(self))]
     pub async fn blocked(&self, workspace_root: Option<&str>) -> Result<Vec<BlockedIssueResponse>> {
-        let storage = {
-            let context = self.context.read().await;
-            context.storage_for(workspace_root.map(Path::new))?
-        };
+        let storage = self.storage_for(workspace_root).await?;
         let storage = storage.read().await;
 
         let blocked = storage.blocked_issues().await?;
@@ -272,10 +271,7 @@ impl Tools {
         let issue_kind = params.kind.resolve("create").unwrap_or(IssueKind::Task);
         let initial_note = params.initial_note.map(NoteContent::new).transpose()?;
 
-        let storage = {
-            let context = self.context.read().await;
-            context.storage_for(params.workspace_root.as_deref().map(Path::new))?
-        };
+        let storage = self.storage_for(params.workspace_root.as_deref()).await?;
         let mut storage = storage.write().await;
 
         let new_issue = NewIssue {
@@ -310,10 +306,7 @@ impl Tools {
             .assignee
             .map(|value| if value.is_empty() { None } else { Some(value) });
 
-        let storage = {
-            let context = self.context.read().await;
-            context.storage_for(params.workspace_root.as_deref().map(Path::new))?
-        };
+        let storage = self.storage_for(params.workspace_root.as_deref()).await?;
         let mut storage = storage.write().await;
 
         let id = IssueId::new(&params.issue_id);
@@ -350,10 +343,7 @@ impl Tools {
         workspace_root: Option<&str>,
     ) -> Result<McpIssue> {
         let note = NoteContent::new(content)?;
-        let storage = {
-            let workspace_context = self.context.read().await;
-            workspace_context.storage_for(workspace_root.map(Path::new))?
-        };
+        let storage = self.storage_for(workspace_root).await?;
         let mut storage = storage.write().await;
 
         let issue = storage
@@ -389,10 +379,7 @@ impl Tools {
             role: validate_resource_role(role)?,
             label: label.map(ResourceLabel::new).transpose()?,
         };
-        let storage = {
-            let context = self.context.read().await;
-            context.storage_for(workspace_root.map(Path::new))?
-        };
+        let storage = self.storage_for(workspace_root).await?;
         let mut storage = storage.write().await;
 
         let issue = storage
@@ -413,10 +400,7 @@ impl Tools {
         issue_id: &str,
         workspace_root: Option<&str>,
     ) -> Result<Vec<McpResource>> {
-        let storage = {
-            let context = self.context.read().await;
-            context.storage_for(workspace_root.map(Path::new))?
-        };
+        let storage = self.storage_for(workspace_root).await?;
         let storage = storage.read().await;
         let issue = storage
             .get(&IssueId::new(issue_id))
@@ -440,10 +424,7 @@ impl Tools {
     ) -> Result<McpIssue> {
         debug!("Closing issue");
         let note = reason.map(NoteContent::closing_reason).transpose()?;
-        let storage = {
-            let context = self.context.read().await;
-            context.storage_for(workspace_root.map(Path::new))?
-        };
+        let storage = self.storage_for(workspace_root).await?;
         let mut storage = storage.write().await;
 
         let id = IssueId::new(issue_id);
@@ -480,10 +461,7 @@ impl Tools {
             .transpose()?
             .unwrap_or(DependencyType::Blocks);
 
-        let storage = {
-            let context = self.context.read().await;
-            context.storage_for(workspace_root.map(Path::new))?
-        };
+        let storage = self.storage_for(workspace_root).await?;
         let mut storage = storage.write().await;
 
         let from = IssueId::new(issue_id);
@@ -514,10 +492,7 @@ impl Tools {
     ) -> Result<McpIssue> {
         debug!("Reopening issue");
         let note = reason.map(NoteContent::reopening_reason).transpose()?;
-        let storage = {
-            let context = self.context.read().await;
-            context.storage_for(workspace_root.map(Path::new))?
-        };
+        let storage = self.storage_for(workspace_root).await?;
         let mut storage = storage.write().await;
 
         let id = IssueId::new(issue_id);
@@ -557,10 +532,7 @@ impl Tools {
         let days = days.unwrap_or(30);
         let limit = limit.unwrap_or(DEFAULT_QUERY_LIMIT);
 
-        let storage = {
-            let context = self.context.read().await;
-            context.storage_for(workspace_root.map(Path::new))?
-        };
+        let storage = self.storage_for(workspace_root).await?;
         let storage = storage.read().await;
 
         // Get all issues with optional status filter
@@ -597,10 +569,7 @@ impl Tools {
         workspace_root: Option<&str>,
     ) -> Result<McpIssue> {
         debug!("Adding label to issue");
-        let storage = {
-            let context = self.context.read().await;
-            context.storage_for(workspace_root.map(Path::new))?
-        };
+        let storage = self.storage_for(workspace_root).await?;
         let mut storage = storage.write().await;
 
         let id = IssueId::new(issue_id);
@@ -623,10 +592,7 @@ impl Tools {
         workspace_root: Option<&str>,
     ) -> Result<McpIssue> {
         debug!("Removing label from issue");
-        let storage = {
-            let context = self.context.read().await;
-            context.storage_for(workspace_root.map(Path::new))?
-        };
+        let storage = self.storage_for(workspace_root).await?;
         let mut storage = storage.write().await;
 
         let id = IssueId::new(issue_id);
@@ -648,10 +614,7 @@ impl Tools {
         workspace_root: Option<&str>,
     ) -> Result<Vec<String>> {
         debug!("Listing labels for issue");
-        let storage = {
-            let context = self.context.read().await;
-            context.storage_for(workspace_root.map(Path::new))?
-        };
+        let storage = self.storage_for(workspace_root).await?;
         let storage = storage.read().await;
 
         let id = IssueId::new(issue_id);
@@ -672,10 +635,7 @@ impl Tools {
     #[instrument(skip(self))]
     pub async fn label_list_all(&self, workspace_root: Option<&str>) -> Result<Vec<String>> {
         debug!("Listing all labels");
-        let storage = {
-            let context = self.context.read().await;
-            context.storage_for(workspace_root.map(Path::new))?
-        };
+        let storage = self.storage_for(workspace_root).await?;
         let storage = storage.read().await;
 
         let issues = storage.list(&IssueFilter::default()).await?;

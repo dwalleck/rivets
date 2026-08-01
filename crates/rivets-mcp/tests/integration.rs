@@ -843,35 +843,13 @@ async fn test_error_workspace_not_found() {
     }
 }
 
-/// Test error response for workspace without .rivets directory.
+/// Test per-call `workspace_root` rejects a workspace without a `.rivets` directory.
 #[tokio::test]
 async fn test_error_no_rivets_directory() {
-    let temp = TempDir::new().unwrap();
-    // Don't create .rivets directory
+    let temp = TempDir::new().expect("temporary workspace should be created");
     let tools = create_tools();
+    let workspace_root = temp.path().display().to_string();
 
-    let result = tools.set_context(&temp.path().display().to_string()).await;
-
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        Error::NoRivetsDirectory(path) => {
-            assert!(!path.is_empty());
-        }
-        e => panic!("Expected NoRivetsDirectory error, got: {e:?}"),
-    }
-}
-
-/// Test error for accessing uninitialized workspace via `workspace_root` parameter.
-#[tokio::test]
-async fn test_error_workspace_not_initialized() {
-    let workspace_a = create_temp_workspace();
-    let workspace_b = create_temp_workspace();
-    let tools = create_tools();
-
-    // Only initialize workspace A
-    set_context(&tools, workspace_a.path()).await;
-
-    // Try to access B without initializing it
     let result = tools
         .list(list_params(
             None,
@@ -880,15 +858,151 @@ async fn test_error_workspace_not_initialized() {
             None,
             None,
             None,
-            Some(&workspace_b.path().display().to_string()),
+            Some(&workspace_root),
         ))
         .await;
 
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        Error::WorkspaceNotInitialized(_) => {} // Expected
-        e => panic!("Expected WorkspaceNotInitialized error, got: {e:?}"),
+    match result {
+        Err(Error::NoRivetsDirectory(path)) => assert_eq!(path, workspace_root),
+        Err(error) => panic!("Expected NoRivetsDirectory, got {error:?}"),
+        Ok(_) => panic!("Expected error, got Ok"),
     }
+}
+
+/// Test `workspace_root` initializes a valid workspace without setting context.
+#[tokio::test]
+async fn test_workspace_root_initializes_without_context() {
+    let workspace = create_temp_workspace();
+    let tools = create_tools();
+    let workspace_root = workspace.path().display().to_string();
+
+    let created = tools
+        .create(create_params(
+            "Created without context".to_string(),
+            None,
+            None,
+            Some("task"),
+            None,
+            None,
+            None,
+            None,
+            Some(&workspace_root),
+        ))
+        .await
+        .expect("create should initialize workspace_root");
+
+    assert_eq!(created.title, "Created without context");
+    let issues = tools
+        .list(list_params(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&workspace_root),
+        ))
+        .await
+        .expect("list should reuse initialized workspace_root");
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].id, created.id);
+    let context = tools
+        .where_am_i()
+        .await
+        .expect("where_am_i should remain available");
+    assert!(!context.context_set);
+}
+
+/// Test concurrent first use shares one initialized workspace storage.
+#[tokio::test]
+async fn test_concurrent_workspace_root_initialization() {
+    let workspace = create_temp_workspace();
+    let tools = create_tools();
+    let workspace_root = workspace.path().display().to_string();
+    let first_params = create_params(
+        "First concurrent issue".to_string(),
+        None,
+        None,
+        Some("task"),
+        None,
+        None,
+        None,
+        None,
+        Some(&workspace_root),
+    );
+    let second_params = create_params(
+        "Second concurrent issue".to_string(),
+        None,
+        None,
+        Some("task"),
+        None,
+        None,
+        None,
+        None,
+        Some(&workspace_root),
+    );
+
+    let (first, second) = tokio::join!(tools.create(first_params), tools.create(second_params));
+    let first = first.expect("first concurrent create should succeed");
+    let second = second.expect("second concurrent create should succeed");
+    assert_ne!(first.id, second.id);
+
+    let issues = tools
+        .list(list_params(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&workspace_root),
+        ))
+        .await
+        .expect("list should use the shared initialized storage");
+    assert_eq!(issues.len(), 2);
+}
+
+/// Test explicit workspace caching cannot evict the active default context.
+#[tokio::test]
+async fn test_explicit_workspace_cache_eviction_preserves_current_context() {
+    let current_workspace = create_temp_workspace();
+    let explicit_workspaces: Vec<_> = (0..32).map(|_| create_temp_workspace()).collect();
+    let tools = create_tools();
+    set_context(&tools, current_workspace.path()).await;
+    create_issue(&tools, "Current workspace issue").await;
+
+    for workspace in &explicit_workspaces {
+        let workspace_root = workspace.path().display().to_string();
+        tools
+            .list(list_params(
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(&workspace_root),
+            ))
+            .await
+            .expect("explicit workspace should initialize");
+    }
+
+    let context = tools
+        .where_am_i()
+        .await
+        .expect("where_am_i should report the current context");
+    assert!(context.context_set);
+    assert!(
+        context.database_path.is_some(),
+        "current workspace metadata should remain cached"
+    );
+
+    let current_issues = tools
+        .list(list_params(None, None, None, None, None, None, None))
+        .await
+        .expect("current context should remain cached");
+    assert_eq!(current_issues.len(), 1);
+    assert_eq!(current_issues[0].title, "Current workspace issue");
 }
 
 // ============================================================================
