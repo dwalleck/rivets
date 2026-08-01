@@ -849,6 +849,12 @@ async fn test_error_no_rivets_directory() {
     let temp = TempDir::new().expect("temporary workspace should be created");
     let tools = create_tools();
     let workspace_root = temp.path().display().to_string();
+    let expected_workspace_root = temp
+        .path()
+        .canonicalize()
+        .expect("temporary workspace should canonicalize")
+        .display()
+        .to_string();
 
     let result = tools
         .list(list_params(
@@ -863,7 +869,7 @@ async fn test_error_no_rivets_directory() {
         .await;
 
     match result {
-        Err(Error::NoRivetsDirectory(path)) => assert_eq!(path, workspace_root),
+        Err(Error::NoRivetsDirectory(path)) => assert_eq!(path, expected_workspace_root),
         Err(error) => panic!("Expected NoRivetsDirectory, got {error:?}"),
         Ok(_) => panic!("Expected error, got Ok"),
     }
