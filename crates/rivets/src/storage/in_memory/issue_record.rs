@@ -3,6 +3,7 @@
 use crate::domain::{
     AssociatedResource, Dependency, Issue, IssueId, IssueKind, IssueStatus, NewResource, Note,
     NoteContent, NoteError, ResourceId, ResourceLabel, ResourceRole, ResourceTarget, WebUrl,
+    is_unsafe_multiline_control,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -133,6 +134,27 @@ impl From<AssociatedResource> for ResourceRecord {
 
 /// Default next resource identifier for records that never held resources.
 const DEFAULT_NEXT_RESOURCE_ID: u64 = 1;
+
+const MIGRATED_EXTERNAL_REF_NOTE_PREFIX: &str = "Migrated legacy external reference: ";
+
+fn migrated_external_ref_note_text(external_ref: &str) -> String {
+    let escape_controls = external_ref.chars().any(is_unsafe_multiline_control);
+    let mut content =
+        String::with_capacity(MIGRATED_EXTERNAL_REF_NOTE_PREFIX.len() + external_ref.len());
+    content.push_str(MIGRATED_EXTERNAL_REF_NOTE_PREFIX);
+    if escape_controls {
+        for character in external_ref.chars() {
+            if is_unsafe_multiline_control(character) || character == '\\' {
+                content.extend(character.escape_default());
+            } else {
+                content.push(character);
+            }
+        }
+    } else {
+        content.push_str(external_ref);
+    }
+    content
+}
 
 fn default_next_resource_id() -> u64 {
     DEFAULT_NEXT_RESOURCE_ID
@@ -305,13 +327,11 @@ impl IssueRecord {
                     }
                 }
                 Err(_) => {
-                    let content = NoteContent::new(format!(
-                        "Migrated legacy external reference: {external_ref}"
-                    ))
-                    .map_err(|error| IssueRecordError::InvalidData {
-                        issue_id: issue.id.clone(),
-                        error: error.to_string(),
-                    })?;
+                    let content = NoteContent::new(migrated_external_ref_note_text(&external_ref))
+                        .map_err(|error| IssueRecordError::InvalidData {
+                            issue_id: issue.id.clone(),
+                            error: error.to_string(),
+                        })?;
                     issue.append_note(content, updated_at);
                 }
             }

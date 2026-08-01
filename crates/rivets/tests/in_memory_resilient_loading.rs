@@ -667,6 +667,40 @@ mod load_from_jsonl_tests {
     }
 
     #[tokio::test]
+    async fn unsafe_controls_in_opaque_external_ref_are_preserved_visibly() {
+        let json = r#"{"id":"test-control-ref","title":"Control Ref","description":"Test","status":"open","priority":2,"issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":"\u001bC:\\tmp\n","dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T03:04:05Z","closed_at":null}"#;
+        let file = create_temp_jsonl_file(json);
+
+        let (storage, warnings) = load_from_jsonl(file.path(), "test".to_string())
+            .await
+            .expect("unsafe controls should migrate visibly");
+        assert!(warnings.is_empty());
+        let issue = storage
+            .get(&IssueId::new("test-control-ref"))
+            .await
+            .expect("lookup should succeed")
+            .expect("Issue should load");
+        assert!(issue.resources().is_empty());
+        assert_eq!(issue.notes().len(), 1);
+        assert_eq!(
+            issue.notes()[0].content(),
+            "Migrated legacy external reference: \\u{1b}C:\\\\tmp\n"
+        );
+
+        save_to_jsonl(storage.as_ref(), file.path())
+            .await
+            .expect("canonical save should succeed");
+        let record: serde_json::Value =
+            serde_json::from_reader(std::fs::File::open(file.path()).unwrap())
+                .expect("canonical record should be JSON");
+        assert!(record.get("external_ref").is_none());
+        assert_eq!(
+            record["notes"][0]["content"],
+            "Migrated legacy external reference: \\u{1b}C:\\\\tmp\n"
+        );
+    }
+
+    #[tokio::test]
     async fn empty_legacy_external_ref_loads_without_resources_or_notes() {
         let json = r#"{"id":"test-empty-ref","title":"Empty Ref","description":"Test","status":"open","priority":2,"issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":"","dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#;
         let file = create_temp_jsonl_file(json);

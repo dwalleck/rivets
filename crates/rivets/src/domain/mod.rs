@@ -471,15 +471,17 @@ pub(crate) fn find_control_char(s: &str) -> Option<usize> {
     })
 }
 
+/// Whether a character is unsafe in a multiline domain text value.
+pub(crate) fn is_unsafe_multiline_control(character: char) -> bool {
+    let code = character as u32;
+    (code < 0x20 && code != 0x09 && code != 0x0A && code != 0x0D) || (0x7F..=0x9F).contains(&code)
+}
+
 /// Check a multi-line field for control characters, allowing tab, LF, and CR.
 ///
 /// Returns the position of the first offending character, if any.
 fn find_control_char_multiline(s: &str) -> Option<usize> {
-    s.chars().position(|c| {
-        let code = c as u32;
-        (code < 0x20 && code != 0x09 && code != 0x0A && code != 0x0D)
-            || (0x7F..=0x9F).contains(&code)
-    })
+    s.chars().position(is_unsafe_multiline_control)
 }
 
 /// Validate title and priority fields.
