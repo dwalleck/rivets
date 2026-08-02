@@ -217,7 +217,9 @@ fn legacy_external_ref_url(external_ref: &str) -> Result<Option<WebUrl>, Resourc
             | ResourceError::PathControlCharacter { .. }
             | ResourceError::AbsoluteWorkspacePath { .. }
             | ResourceError::WorkspacePathEscape { .. }
-            | ResourceError::EmptyNormalizedWorkspacePath { .. }),
+            | ResourceError::EmptyNormalizedWorkspacePath { .. }
+            | ResourceError::EmptyUpdate
+            | ResourceError::ResourceNotFound { .. }),
         ) => Err(error),
     }
 }
@@ -245,7 +247,9 @@ fn add_migrated_resource(issue: &mut Issue, resource: NewResource) -> Result<(),
             | ResourceError::PathControlCharacter { .. }
             | ResourceError::AbsoluteWorkspacePath { .. }
             | ResourceError::WorkspacePathEscape { .. }
-            | ResourceError::EmptyNormalizedWorkspacePath { .. }),
+            | ResourceError::EmptyNormalizedWorkspacePath { .. }
+            | ResourceError::EmptyUpdate
+            | ResourceError::ResourceNotFound { .. }),
         ) => Err(error),
     }
 }

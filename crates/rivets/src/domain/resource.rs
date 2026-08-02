@@ -370,6 +370,23 @@ pub struct NewResource {
     pub label: Option<ResourceLabel>,
 }
 
+/// Data for updating an existing Associated Resource, keyed by its stable
+/// identifier.
+///
+/// Every `None` field leaves that property unchanged, so an update never
+/// shifts the resource's position or reissues its identifier. The label uses
+/// the double-Option pattern (same as `IssueUpdate::assignee`): `None` keeps
+/// the current label, `Some(None)` clears it, and `Some(Some(label))` sets it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResourceUpdate {
+    /// New target (if updating).
+    pub target: Option<ResourceTarget>,
+    /// New role (if updating).
+    pub role: Option<ResourceRole>,
+    /// New label (if updating); `Some(None)` clears the label.
+    pub label: Option<Option<ResourceLabel>>,
+}
+
 /// A failure to construct or add an Associated Resource.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ResourceError {
@@ -466,6 +483,15 @@ pub enum ResourceError {
     /// A persisted resource identifier was empty.
     #[error("Resource identifier cannot be empty")]
     EmptyResourceId,
+    /// No field was provided to update.
+    #[error("Resource update requires at least one field")]
+    EmptyUpdate,
+    /// The referenced resource does not exist on this Issue.
+    #[error("Resource not found: {id}")]
+    ResourceNotFound {
+        /// The unknown identifier.
+        id: ResourceId,
+    },
 }
 
 #[cfg(test)]
