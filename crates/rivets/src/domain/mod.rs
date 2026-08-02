@@ -7,6 +7,7 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
+use std::sync::OnceLock;
 
 mod resource;
 #[cfg(test)]
@@ -407,6 +408,18 @@ impl Issue {
     }
 }
 
+/// Join every canonical value name of a vocabulary enum with `", "`.
+///
+/// Derived from the `clap` value names so a valid-values error string can
+/// never drift from the enum declaration it describes.
+pub(crate) fn join_canonical_names<T: ValueEnum + fmt::Display>() -> String {
+    T::value_variants()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Status of an issue
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
@@ -437,12 +450,27 @@ impl fmt::Display for IssueStatus {
     }
 }
 
+impl IssueStatus {
+    /// Comma-separated canonical status names, for error messages.
+    ///
+    /// Derived from the enum declaration rather than hand-written, so the
+    /// listed values cannot drift from the accepted vocabulary.
+    #[must_use]
+    pub fn valid_values() -> &'static str {
+        static VALUES: OnceLock<String> = OnceLock::new();
+        VALUES.get_or_init(join_canonical_names::<Self>)
+    }
+}
+
 /// A failure to parse an [`IssueStatus`] from a string.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IssueStatusError {
     /// The string was not a canonical Issue Status name.
     #[error("Unknown issue status '{status}'")]
-    UnknownStatus { status: String },
+    UnknownStatus {
+        /// The rejected input string.
+        status: String,
+    },
 }
 
 impl FromStr for IssueStatus {
@@ -498,7 +526,10 @@ impl fmt::Display for IssueKind {
 pub enum IssueKindError {
     /// The string was not a canonical Issue Kind name.
     #[error("Unknown issue kind '{kind}'")]
-    UnknownKind { kind: String },
+    UnknownKind {
+        /// The rejected input string.
+        kind: String,
+    },
 }
 
 impl FromStr for IssueKind {
@@ -556,12 +587,27 @@ impl fmt::Display for DependencyType {
     }
 }
 
+impl DependencyType {
+    /// Comma-separated canonical dependency-type names, for error messages.
+    ///
+    /// Derived from the enum declaration rather than hand-written, so the
+    /// listed values cannot drift from the accepted vocabulary.
+    #[must_use]
+    pub fn valid_values() -> &'static str {
+        static VALUES: OnceLock<String> = OnceLock::new();
+        VALUES.get_or_init(join_canonical_names::<Self>)
+    }
+}
+
 /// A failure to parse a [`DependencyType`] from a string.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DependencyTypeError {
     /// The string was not a canonical Dependency Type name.
     #[error("Unknown dependency type '{dependency_type}'")]
-    UnknownDependencyType { dependency_type: String },
+    UnknownDependencyType {
+        /// The rejected input string.
+        dependency_type: String,
+    },
 }
 
 impl FromStr for DependencyType {
@@ -1199,11 +1245,79 @@ mod tests {
         }
     }
 
+    // ===== Serde Wire-Format Fence Tests =====
+    //
+    // Serde is the wire form of the same vocabulary: every variant's JSON
+    // string must equal its Display string in both directions, so JSON
+    // output and human-readable output cannot diverge.
+
+    #[test]
+    fn test_issue_status_serde_matches_display() {
+        for status in [
+            IssueStatus::Open,
+            IssueStatus::InProgress,
+            IssueStatus::Blocked,
+            IssueStatus::Closed,
+        ] {
+            let json = serde_json::to_string(&status).expect("status serializes");
+            assert_eq!(json, format!("\"{status}\""));
+            let parsed: IssueStatus = serde_json::from_str(&json).expect("status deserializes");
+            assert_eq!(parsed, status);
+        }
+    }
+
+    #[test]
+    fn test_issue_kind_serde_matches_display() {
+        for kind in [
+            IssueKind::Bug,
+            IssueKind::Feature,
+            IssueKind::Task,
+            IssueKind::Epic,
+            IssueKind::Chore,
+        ] {
+            let json = serde_json::to_string(&kind).expect("kind serializes");
+            assert_eq!(json, format!("\"{kind}\""));
+            let parsed: IssueKind = serde_json::from_str(&json).expect("kind deserializes");
+            assert_eq!(parsed, kind);
+        }
+    }
+
+    #[test]
+    fn test_dependency_type_serde_matches_display() {
+        for dep_type in [
+            DependencyType::Blocks,
+            DependencyType::Related,
+            DependencyType::ParentChild,
+            DependencyType::DiscoveredFrom,
+        ] {
+            let json = serde_json::to_string(&dep_type).expect("dep type serializes");
+            assert_eq!(json, format!("\"{dep_type}\""));
+            let parsed: DependencyType =
+                serde_json::from_str(&json).expect("dep type deserializes");
+            assert_eq!(parsed, dep_type);
+        }
+    }
+
+    // ===== Valid-Values Fence Tests =====
+
+    #[test]
+    fn test_valid_values_list_every_canonical_name() {
+        // Pins the derived error-message lists to the shipped wording.
+        assert_eq!(
+            IssueStatus::valid_values(),
+            "open, in_progress, blocked, closed"
+        );
+        assert_eq!(
+            DependencyType::valid_values(),
+            "blocks, related, parent-child, discovered-from"
+        );
+    }
+
     // ===== CLI ValueEnum Vocabulary Tests =====
     //
     // The clap value name of every variant equals its Display string, and
     // the canonical name/alias pair of IssueStatus::InProgress is preserved
-    // (the CLI contract recorded by the rivets-bkjj probe).
+    // (the CLI contract recorded in .rivets-bkjj/baseline-cli-contract.txt).
 
     #[test]
     fn test_cli_value_names_match_display() {

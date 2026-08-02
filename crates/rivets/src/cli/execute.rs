@@ -161,8 +161,9 @@ pub async fn execute_create(
                 Ok(dep_type) => dep_type,
                 Err(_) => {
                     anyhow::bail!(
-                        "Invalid dependency type '{}'. Valid types: blocks, related, parent-child, discovered-from",
-                        dep_type_str
+                        "Invalid dependency type '{}'. Valid types: {}",
+                        dep_type_str,
+                        DomainDepType::valid_values()
                     );
                 }
             };

@@ -16,10 +16,10 @@ use serde::{Deserialize, Serialize};
 /// schemars cannot derive `JsonSchema` for the domain type from another
 /// crate (orphan rule), and the rivets crate must not gain a schemars
 /// dependency, so this local type renders the `issue_kind` enum values in
-/// tool schemas. It performs no parsing and holds no string table; the
-/// schema fence test (`issue_kind_schema_matches_domain_display`) pins its
-/// values to the domain enum's Display strings so a new Kind cannot
-/// silently drift.
+/// tool schemas. It performs no parsing; its variant list is a fenced
+/// duplicate of the domain vocabulary — the schema fence test
+/// (`issue_kind_schema_matches_domain_display`) pins its values to the
+/// domain enum's Display strings so a new Kind cannot silently drift.
 #[derive(JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum McpIssueKindSchema {
@@ -714,7 +714,7 @@ mod tests {
     #[case::epic("epic", IssueKind::Epic)]
     #[case::chore("chore", IssueKind::Chore)]
     fn mcp_kind_input_accepts_canonical_names(#[case] input: &str, #[case] expected: IssueKind) {
-        // rivets-bkjj C5: MCP accepts exactly the canonical domain strings.
+        // MCP accepts exactly the canonical domain strings.
         let params: ReadyParams =
             serde_json::from_value(serde_json::json!({ "issue_kind": input }))
                 .expect("canonical Issue Kind should deserialize");
@@ -727,8 +727,8 @@ mod tests {
     #[case::unknown("bogus")]
     #[case::empty("")]
     fn mcp_kind_input_rejects_noncanonical_names(#[case] input: &str) {
-        // rivets-bkjj C5: the former case-insensitive leniency is gone;
-        // non-canonical spellings fail with serde's unknown-variant error.
+        // The former case-insensitive leniency is gone; non-canonical
+        // spellings fail with serde's unknown-variant error.
         let result: Result<ReadyParams, _> =
             serde_json::from_value(serde_json::json!({ "issue_kind": input }));
         let error = result.expect_err("non-canonical Issue Kind must be rejected");
@@ -740,9 +740,9 @@ mod tests {
 
     #[test]
     fn issue_kind_schema_matches_domain_display() {
-        // rivets-bkjj C7 fence: the schema mirror's enum values must equal
-        // the domain enum's Display strings, so a new Kind cannot silently
-        // drift from the tool schema.
+        // Fence: the schema mirror's enum values must equal the domain
+        // enum's Display strings, so a new Kind cannot silently drift from
+        // the tool schema.
         use schemars::schema_for;
 
         let schema = schema_for!(IssueKindInput);

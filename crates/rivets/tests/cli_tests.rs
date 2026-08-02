@@ -423,8 +423,8 @@ fn test_cli_list_status_filter_parsing(initialized_dir: TempDir, #[case] status:
 
 #[test]
 fn test_cli_list_invalid_status_rejected() {
-    // Regression fence (rivets-bkjj C3): invalid enum strings must fail with
-    // clap's exit-2 "invalid value" error, listing the possible values.
+    // Regression fence: invalid enum strings must fail with clap's exit-2
+    // "invalid value" error, listing the possible values.
     let dir = tempfile::tempdir().expect("tempdir");
     let output = run_rivets_in_dir(dir.path(), &["list", "--status", "bogus"]);
     assert_eq!(output.status.code(), Some(2));
