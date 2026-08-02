@@ -57,18 +57,21 @@ rivets close rivets-xyz --reason "Implemented in commit abc123"
 
 ```bash
 # Basic issue
-rivets create --title "Fix the bug" --type bug --priority 2
+rivets create --yes --title "Fix the bug" --kind bug --priority 2
 
 # Full issue with design notes
 rivets create \
+  --yes \
   --title "Add new feature" \
-  --type feature \
+  --kind feature \
   --priority 2 \
   --description "Detailed description here" \
   --design "Implementation approach" \
   --acceptance "- [ ] Criterion 1
 - [ ] Criterion 2"
 ```
+
+**Scripting**: the issue kind flag is `--kind` (`-k`), not `--type`, and `create` prompts for confirmation unless `--yes` is passed.
 
 **Multi-line values**: rivets stores flag values verbatim and does NOT interpret `\n` escapes — and neither does bash inside double quotes, so `--acceptance "a\nb"` stores literal `\n` text. Use a real newline inside the quotes (as above), or bash ANSI-C quoting: `--acceptance $'- [ ] a\n- [ ] b'`.
 
@@ -93,8 +96,10 @@ cargo nextest run            # Run all tests (~1400 tests, parallel)
 cargo clippy                 # Lint (pedantic mode enabled)
 cargo fmt --check            # Check formatting
 cargo fmt                    # Auto-format
-cargo run -- <subcommand>    # Run rivets CLI
+cargo run --bin rivets -- <subcommand>    # Run rivets CLI (workspace has 2 binaries; bare `cargo run` fails)
 ```
+
+**Pre-commit hook**: `git commit` re-runs fmt check, clippy, and the full nextest suite — a red test blocks the commit, and there's no need to run the gates separately right before committing.
 
 **Testing**: Use `cargo nextest run` instead of `cargo test` for unit/integration tests. Nextest runs each test in its own process in parallel (~3.7x faster). Use `cargo test --doc` for doc tests only (nextest does not support doc tests).
 
