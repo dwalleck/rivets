@@ -45,3 +45,18 @@ three tables:
 (18 lines). After implementation, probe v2 (domain `ValueEnum` +
 `FromStr`) must reproduce the `[cli]` lines exactly; MCP lines become the
 canonical-only subset.
+
+## Final integration (2026-08-02, after all four slices)
+
+- Probe v2 (`after.rs`) vs `baseline-cli-contract.txt`: **AGREES, 19 lines**,
+  plus FromStr roundtrip + lenient-rejection checks pass.
+- CLI invalid-value oracle: 5 commands exit 2 with stderr byte-identical to
+  `cli-invalid-baseline.txt`; `--status in-progress` alias still exit 0.
+- Full gates: 1051 tests pass, clippy `--all-targets --all-features
+  -D warnings` clean, `cargo fmt --check` clean, doctests 42 pass.
+- Dependency edges: clap absent from `rivets-mcp/Cargo.toml` (before and
+  after; only transitive via rivets) — C8 holds.
+- Grep sweep: no Arg-mirror/MCP-table identifiers remain; remaining
+  `"in_progress"` etc. literals are JSON output keys, error-message
+  `valid_values` text, or test inputs.
+- Drift check vs `origin/main`: no `.jsonl`/`.lock` divergence.
