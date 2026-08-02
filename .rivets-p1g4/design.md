@@ -31,6 +31,12 @@ not exist). The workspace root is only a *meaning* anchor (portable across
 checkouts); it is not needed to validate or store. CLI resolves the root for
 help text only; MCP uses the workspace_root it already resolves for storage.
 
+**Subtractive sweep**: this change is purely additive — it adds a target
+variant, an update path, and a remove path, and removes no serialization
+point, guard, ordering, or uniqueness property. The invariants it touches
+(duplicate target-role detection, id monotonicity, insertion order) are
+re-asserted as claims 4, 5, 6, and 12 rather than relaxed.
+
 ## Input shapes
 
 **ResourceTarget**: `Web{url}` (existing), `Path{path}` (new).
