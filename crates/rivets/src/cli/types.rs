@@ -4,8 +4,13 @@
 //! DependencyType) are consumed directly from `crate::domain` by the CLI
 //! argument structs; their clap value names, Display, FromStr, and serde
 //! attributes all live on the domain declarations. This module keeps only
-//! the two sorting enums (which have no serde-wired domain twin) and the
-//! batch operation result types.
+//! the two sorting enums and the batch operation result types.
+//!
+//! `SortOrderArg` has no domain twin at all; `SortPolicyArg` mirrors the
+//! domain `SortPolicy` variant-for-variant, but that domain type is not on
+//! the wire (no serde derives) and is not part of the ADR-0004 vocabulary
+//! scope, so the CLI-side value enum stays here until a domain twin earns
+//! serde/Display/FromStr of its own.
 
 use clap::ValueEnum;
 use serde::Serialize;

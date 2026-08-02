@@ -778,16 +778,9 @@ mod tests {
     use std::path::PathBuf;
 
     fn kind_input(value: Option<&str>) -> crate::models::IssueKindInput {
-        use rivets::domain::IssueKind;
-
-        let issue_kind = value.map(|value| match value {
-            "bug" => IssueKind::Bug,
-            "feature" => IssueKind::Feature,
-            "task" => IssueKind::Task,
-            "epic" => IssueKind::Epic,
-            "chore" => IssueKind::Chore,
-            invalid => panic!("invalid test Issue Kind: {invalid}"),
-        });
+        // Parse through the domain FromStr so tests exercise the real
+        // vocabulary instead of a parallel arm table.
+        let issue_kind = value.map(|value| value.parse().expect("valid test Issue Kind"));
         crate::models::IssueKindInput::canonical(issue_kind)
     }
 
