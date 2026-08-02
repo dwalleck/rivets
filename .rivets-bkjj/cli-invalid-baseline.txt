@@ -1,0 +1,13 @@
+=== rivets list --status bogus ===
+exit=2
+=== rivets create --kind bogus --title t ===
+exit=2
+=== rivets dep add --type bogus rivets-a rivets-b ===
+exit=2
+=== rivets update rivets-x --status bogus ===
+exit=2
+=== rivets resource add --role bogus rivets-x ===
+exit=2
+=== stderr samples ===
+error: invalid value 'bogus' for '--status <STATUS>'
+  [possible values: open, in_progress, blocked, closed]

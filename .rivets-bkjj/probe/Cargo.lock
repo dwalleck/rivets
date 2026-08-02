@@ -304,6 +304,7 @@ dependencies = [
  "clap",
  "rivets",
  "rivets-mcp",
+ "serde",
  "serde_json",
 ]
 
