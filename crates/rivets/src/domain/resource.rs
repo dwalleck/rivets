@@ -20,7 +20,14 @@ use super::find_control_char;
 pub struct ResourceId(String);
 
 impl ResourceId {
-    pub(crate) fn new(id: impl Into<String>) -> Result<Self, ResourceError> {
+    /// Parse a non-empty, terminal-safe identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResourceError::EmptyResourceId`] when the value is empty
+    /// after trimming, or [`ResourceError::ResourceIdControlCharacter`] when
+    /// it contains a terminal-unsafe control character.
+    pub fn new(id: impl Into<String>) -> Result<Self, ResourceError> {
         let id = id.into();
         if id.trim().is_empty() {
             return Err(ResourceError::EmptyResourceId);
@@ -107,10 +114,100 @@ pub struct WebUrlSyntaxError {
     source: url::ParseError,
 }
 
+/// A normalized, workspace-relative path.
+///
+/// Construction applies purely lexical normalization (no filesystem access,
+/// so the target need not exist): `.` and empty components are dropped,
+/// in-bounds `..` components are resolved, and the result is stored in
+/// canonical relative form. Absolute paths (including Windows drive-qualified
+/// forms such as `C:...`), paths that escape the workspace root through
+/// parent traversal, empty values, and terminal-unsafe control characters
+/// are rejected. `/` is the only accepted separator: backslashes are
+/// rejected rather than reinterpreted, because `\` is a separator on Windows
+/// but an ordinary filename character on POSIX, and a portable
+/// workspace-relative path must mean the same target on both. Tab is
+/// permitted, matching the shared [`find_control_char`] convention used by
+/// labels and identifiers.
+///
+/// Comparison (including duplicate detection) is byte-wise: no Unicode
+/// normalization is applied, so NFC and NFD spellings of the same visual
+/// name are distinct targets (tracked in rivets-yuom).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct WorkspacePath(String);
+
+impl WorkspacePath {
+    /// Parse and normalize a workspace-relative path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResourceError::EmptyPath`] when the value is empty or
+    /// whitespace-only, [`ResourceError::PathControlCharacter`] when it
+    /// contains a character unsafe for terminal output,
+    /// [`ResourceError::WorkspacePathBackslash`] when it contains `\`,
+    /// [`ResourceError::AbsoluteWorkspacePath`] when it starts with a path
+    /// separator or a Windows drive prefix,
+    /// [`ResourceError::WorkspacePathEscape`] when parent
+    /// traversal leaves the workspace root, or
+    /// [`ResourceError::EmptyNormalizedWorkspacePath`] when normalization
+    /// leaves nothing (e.g. `a/..` or `.`).
+    pub fn new(raw: impl Into<String>) -> Result<Self, ResourceError> {
+        let raw = raw.into();
+        if raw.trim().is_empty() {
+            return Err(ResourceError::EmptyPath);
+        }
+        if let Some(position) = find_control_char(&raw) {
+            return Err(ResourceError::PathControlCharacter { position });
+        }
+        if let Some(position) = raw.chars().position(|c| c == '\\') {
+            return Err(ResourceError::WorkspacePathBackslash { position });
+        }
+        if raw.starts_with('/') || starts_with_drive_prefix(&raw) {
+            return Err(ResourceError::AbsoluteWorkspacePath { path: raw });
+        }
+        let mut stack: Vec<&str> = Vec::new();
+        for component in raw.split('/') {
+            match component {
+                "" | "." => {}
+                ".." => {
+                    if stack.pop().is_none() {
+                        return Err(ResourceError::WorkspacePathEscape { path: raw });
+                    }
+                }
+                component => stack.push(component),
+            }
+        }
+        let normalized = stack.join("/");
+        if normalized.is_empty() {
+            return Err(ResourceError::EmptyNormalizedWorkspacePath { path: raw });
+        }
+        Ok(Self(normalized))
+    }
+
+    /// Get the normalized path as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for WorkspacePath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// A `C:`-style drive prefix anchors the path outside any workspace on
+/// Windows even without a separator (`C:notes.txt` is drive-relative there).
+fn starts_with_drive_prefix(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+}
+
 /// The location of an Associated Resource.
 ///
-/// This slice supports Web URLs. Workspace Paths remain an accepted domain
-/// decision but are implemented by follow-up task `rivets-p1g4`.
+/// A Web URL is absolute; a Workspace Path is normalized relative to its
+/// Workspace root and cannot escape that boundary. See ADR-0003 and
+/// `CONTEXT.md`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResourceTarget {
@@ -119,6 +216,11 @@ pub enum ResourceTarget {
         /// The validated URL.
         url: WebUrl,
     },
+    /// A normalized path relative to the Workspace root.
+    Path {
+        /// The validated, normalized path.
+        path: WorkspacePath,
+    },
 }
 
 impl ResourceTarget {
@@ -126,12 +228,18 @@ impl ResourceTarget {
     pub fn web(url: WebUrl) -> Self {
         Self::Web { url }
     }
+
+    /// Construct a Workspace Path target from a validated [`WorkspacePath`].
+    pub fn path(path: WorkspacePath) -> Self {
+        Self::Path { path }
+    }
 }
 
 impl fmt::Display for ResourceTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Web { url } => write!(f, "{url}"),
+            Self::Path { path } => write!(f, "{path}"),
         }
     }
 }
@@ -290,6 +398,23 @@ pub struct NewResource {
     pub label: Option<ResourceLabel>,
 }
 
+/// Data for updating an existing Associated Resource, keyed by its stable
+/// identifier.
+///
+/// Every `None` field leaves that property unchanged, so an update never
+/// shifts the resource's position or reissues its identifier. The label uses
+/// the double-Option pattern (same as `IssueUpdate::assignee`): `None` keeps
+/// the current label, `Some(None)` clears it, and `Some(Some(label))` sets it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResourceUpdate {
+    /// New target (if updating).
+    pub target: Option<ResourceTarget>,
+    /// New role (if updating).
+    pub role: Option<ResourceRole>,
+    /// New label (if updating); `Some(None)` clears the label.
+    pub label: Option<Option<ResourceLabel>>,
+}
+
 /// A failure to construct or add an Associated Resource.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ResourceError {
@@ -333,6 +458,39 @@ pub enum ResourceError {
         /// Character offset of the invalid value.
         position: usize,
     },
+    /// The path was empty or whitespace-only.
+    #[error("Workspace path cannot be empty")]
+    EmptyPath,
+    /// The path included a terminal-unsafe control character.
+    #[error("Workspace path contains invalid control character at position {position}")]
+    PathControlCharacter {
+        /// Character offset of the invalid value.
+        position: usize,
+    },
+    /// The path used a backslash, which is not portable across platforms.
+    #[error("Workspace path contains '\\' at position {position}; use '/' as the separator")]
+    WorkspacePathBackslash {
+        /// Character offset of the backslash.
+        position: usize,
+    },
+    /// The path was absolute instead of workspace-relative.
+    #[error("Workspace path '{path}' must be relative to the workspace root")]
+    AbsoluteWorkspacePath {
+        /// The rejected value.
+        path: String,
+    },
+    /// Parent traversal left the workspace root.
+    #[error("Workspace path '{path}' escapes the workspace root")]
+    WorkspacePathEscape {
+        /// The rejected value.
+        path: String,
+    },
+    /// Normalization left the path empty (e.g. `a/..` or `.`).
+    #[error("Workspace path '{path}' does not refer to anything under the workspace root")]
+    EmptyNormalizedWorkspacePath {
+        /// The rejected value.
+        path: String,
+    },
     /// An identical target-and-role association already exists on the Issue.
     #[error("Resource with target '{target}' and role '{role}' already exists on this issue")]
     DuplicateTargetRole {
@@ -359,12 +517,181 @@ pub enum ResourceError {
     /// A persisted resource identifier was empty.
     #[error("Resource identifier cannot be empty")]
     EmptyResourceId,
+    /// No field was provided to update.
+    #[error("Resource update requires at least one field")]
+    EmptyUpdate,
+    /// The referenced resource does not exist on this Issue.
+    #[error("Resource not found: {id}")]
+    ResourceNotFound {
+        /// The unknown identifier.
+        id: ResourceId,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    // ===== WorkspacePath =====
+
+    #[rstest]
+    #[case::plain("docs/adr/0003.md", "docs/adr/0003.md")]
+    #[case::single_component("src", "src")]
+    #[case::drop_dot("a/./b", "a/b")]
+    #[case::collapse_slashes("a//b", "a/b")]
+    #[case::leading_dot("./x", "x")]
+    #[case::trailing_dot("x/.", "x")]
+    #[case::trailing_slash("src/", "src")]
+    #[case::in_bounds_traversal("docs/../src/lib.rs", "src/lib.rs")]
+    #[case::in_bounds_multi("a/b/../../c", "c")]
+    #[case::dot_then_parent("x/./../y", "y")]
+    #[case::unicode("é/文件.md", "é/文件.md")]
+    #[case::embedded_space("with space/y", "with space/y")]
+    #[case::hidden(".hidden", ".hidden")]
+    #[case::tab_allowed("un\tdir/x", "un\tdir/x")]
+    fn workspace_path_accepts_and_normalizes(#[case] input: &str, #[case] expected: &str) {
+        let path = WorkspacePath::new(input).expect("valid workspace path");
+        assert_eq!(path.as_str(), expected);
+        assert_eq!(path.to_string(), expected);
+    }
+
+    #[rstest]
+    #[case::empty("")]
+    #[case::whitespace("   ")]
+    #[case::tab("\t")]
+    #[case::absolute("/etc/passwd")]
+    #[case::double_absolute("//x")]
+    #[case::escape_first("../escape.md")]
+    #[case::escape_deep("a/../../b")]
+    #[case::escape_nested("a/b/../../../c")]
+    #[case::normalizes_to_root("a/..")]
+    #[case::dot(".")]
+    #[case::dot_slash("./")]
+    #[case::control_escape("\u{1b}x")]
+    #[case::backslash_traversal(r"..\..\secrets.txt")]
+    #[case::backslash_separator(r"docs\readme.md")]
+    #[case::backslash_rooted(r"\etc\passwd")]
+    #[case::unc(r"\\server\share")]
+    #[case::drive_backslash(r"C:\Windows")]
+    #[case::drive_forward_slash("C:/Windows/system32")]
+    #[case::drive_relative("C:relative.txt")]
+    fn workspace_path_rejects(#[case] input: &str) {
+        assert!(
+            WorkspacePath::new(input).is_err(),
+            "{input:?} should be rejected"
+        );
+    }
+
+    #[test]
+    fn workspace_path_matches_recorded_realpath_corpus() {
+        let corpus = super::super::workspace_path_corpus::CORPUS;
+        assert!(
+            corpus.len() >= 400,
+            "corpus should be substantial, got {}",
+            corpus.len()
+        );
+        for (input, expected) in corpus {
+            match WorkspacePath::new(*input) {
+                Ok(path) => {
+                    assert_eq!(
+                        Some(path.as_str()),
+                        *expected,
+                        "normalization mismatch for {input:?}"
+                    );
+                }
+                Err(_) => assert_eq!(
+                    None, *expected,
+                    "unexpected rejection for {input:?} (oracle accepts)"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn workspace_path_backslash_reports_char_position() {
+        assert_eq!(
+            WorkspacePath::new(r"docs\readme.md"),
+            Err(ResourceError::WorkspacePathBackslash { position: 4 })
+        );
+        // Char position, not byte offset: 'é' is one char but two bytes.
+        assert_eq!(
+            WorkspacePath::new("é\\x"),
+            Err(ResourceError::WorkspacePathBackslash { position: 1 })
+        );
+    }
+
+    #[test]
+    fn workspace_path_drive_prefix_is_absolute() {
+        for input in [
+            "C:/Windows/system32",
+            "C:relative.txt",
+            "c:x",
+            "a:notes.txt",
+        ] {
+            assert!(
+                matches!(
+                    WorkspacePath::new(input),
+                    Err(ResourceError::AbsoluteWorkspacePath { .. })
+                ),
+                "{input:?} must be rejected as absolute"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_path_drive_rule_is_prefix_only() {
+        // Only a single-ASCII-letter-plus-colon prefix is drive-like; longer
+        // first components and interior colons stay legal POSIX names.
+        for input in ["ab:notes.txt", "dir:/file.rs", "src/C:/nested"] {
+            assert!(
+                WorkspacePath::new(input).is_ok(),
+                "{input:?} must be accepted; colon rule is drive-prefix only"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_path_accepts_nonexistent_targets() {
+        // Purely lexical: branch-local and generated files are legal targets.
+        let path = WorkspacePath::new("target/generated/does-not-exist/report.html")
+            .expect("nonexistent target should be accepted");
+        assert_eq!(path.as_str(), "target/generated/does-not-exist/report.html");
+    }
+
+    #[test]
+    fn workspace_path_rejects_policy_cases() {
+        for input in super::super::workspace_path_corpus::POLICY_REJECT {
+            assert!(
+                WorkspacePath::new(*input).is_err(),
+                "policy rejection missing for {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_path_errors_are_typed_per_cause() {
+        assert!(matches!(
+            WorkspacePath::new("/x"),
+            Err(ResourceError::AbsoluteWorkspacePath { .. })
+        ));
+        assert!(matches!(
+            WorkspacePath::new("../x"),
+            Err(ResourceError::WorkspacePathEscape { .. })
+        ));
+        assert!(matches!(
+            WorkspacePath::new("a/.."),
+            Err(ResourceError::EmptyNormalizedWorkspacePath { .. })
+        ));
+        assert!(matches!(
+            WorkspacePath::new(""),
+            Err(ResourceError::EmptyPath)
+        ));
+        assert!(matches!(
+            WorkspacePath::new("x\u{1b}y"),
+            Err(ResourceError::PathControlCharacter { .. })
+        ));
+    }
 
     // ===== WebUrl =====
 

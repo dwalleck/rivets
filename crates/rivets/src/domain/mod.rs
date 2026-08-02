@@ -7,10 +7,12 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 mod resource;
+#[cfg(test)]
+mod workspace_path_corpus;
 
 pub use resource::{
     AssociatedResource, NewResource, ResourceError, ResourceId, ResourceLabel, ResourceRole,
-    ResourceTarget, WebUrl,
+    ResourceTarget, ResourceUpdate, WebUrl, WorkspacePath,
 };
 
 /// Unique identifier for an issue
@@ -304,6 +306,83 @@ impl Issue {
             new.label,
         ));
         Ok(id)
+    }
+
+    /// Update an existing resource by its stable identifier.
+    ///
+    /// Only the provided fields change; the resource keeps its identifier and
+    /// position. The duplicate check runs against the post-update state,
+    /// excluding the resource itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResourceError::EmptyUpdate`] when no field is provided,
+    /// [`ResourceError::ResourceNotFound`] when the identifier is unknown, or
+    /// [`ResourceError::DuplicateTargetRole`] when the post-update target and
+    /// role already exist on another resource.
+    pub fn update_resource(
+        &mut self,
+        id: &ResourceId,
+        update: ResourceUpdate,
+    ) -> Result<(), ResourceError> {
+        if update.target.is_none() && update.role.is_none() && update.label.is_none() {
+            return Err(ResourceError::EmptyUpdate);
+        }
+        let Some(index) = self
+            .resources
+            .iter()
+            .position(|resource| resource.id() == id)
+        else {
+            return Err(ResourceError::ResourceNotFound { id: id.clone() });
+        };
+        let ResourceUpdate {
+            target,
+            role,
+            label,
+        } = update;
+        let current = &self.resources[index];
+        let target = target.unwrap_or_else(|| current.target().clone());
+        let role = role.unwrap_or(current.role());
+        let label = match label {
+            Some(label) => label,
+            None => current.label().cloned(),
+        };
+        if self
+            .resources
+            .iter()
+            .enumerate()
+            .any(|(candidate_index, candidate)| {
+                candidate_index != index
+                    && *candidate.target() == target
+                    && candidate.role() == role
+            })
+        {
+            return Err(ResourceError::DuplicateTargetRole { target, role });
+        }
+        self.resources[index] = AssociatedResource::from_parts(id.clone(), target, role, label);
+        Ok(())
+    }
+
+    /// Remove a resource by its stable identifier.
+    ///
+    /// The remaining resources keep their identifiers and positions, and the
+    /// per-Issue identifier sequence is untouched, so identifiers are never
+    /// reused after a removal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResourceError::ResourceNotFound`] when the identifier is
+    /// unknown.
+    pub fn remove_resource(&mut self, id: &ResourceId) -> Result<(), ResourceError> {
+        let Some(index) = self
+            .resources
+            .iter()
+            .position(|resource| resource.id() == id)
+        else {
+            return Err(ResourceError::ResourceNotFound { id: id.clone() });
+        };
+        self.resources.remove(index);
+        Ok(())
     }
 
     /// Validate issue data integrity
@@ -1133,6 +1212,16 @@ mod tests {
             }
         }
 
+        fn path_resource(path: &str, role: ResourceRole) -> NewResource {
+            NewResource {
+                target: ResourceTarget::path(
+                    WorkspacePath::new(path).expect("valid workspace path"),
+                ),
+                role,
+                label: None,
+            }
+        }
+
         fn persisted_resource(id: &str, url: &str, role: ResourceRole) -> AssociatedResource {
             AssociatedResource::from_parts(
                 ResourceId::new(id).expect("valid resource ID"),
@@ -1200,6 +1289,53 @@ mod tests {
                     ResourceRole::Documentation,
                 ))
                 .expect("distinct role is allowed");
+            assert_eq!(issue.resources().len(), 2);
+        }
+
+        #[test]
+        fn duplicate_detection_normalizes_equivalent_paths() {
+            let mut issue = issue_with_next_id(1);
+            issue
+                .add_resource(path_resource("src/lib.rs", ResourceRole::Reference))
+                .expect("add succeeds");
+            let duplicate =
+                issue.add_resource(path_resource("docs/../src/lib.rs", ResourceRole::Reference));
+            assert!(matches!(
+                duplicate,
+                Err(ResourceError::DuplicateTargetRole { .. })
+            ));
+            assert_eq!(
+                issue.resources().len(),
+                1,
+                "equivalent normalized path must be a duplicate"
+            );
+        }
+
+        #[test]
+        fn duplicate_detection_distinguishes_path_from_web() {
+            let mut issue = issue_with_next_id(1);
+            issue
+                .add_resource(path_resource("docs/adr/0003.md", ResourceRole::Reference))
+                .expect("add succeeds");
+            // Same textual value as a URL is a different target kind.
+            issue
+                .add_resource(web_resource(
+                    "https://example.com/docs/adr/0003.md",
+                    ResourceRole::Reference,
+                ))
+                .expect("web and path targets are distinct");
+            assert_eq!(issue.resources().len(), 2);
+        }
+
+        #[test]
+        fn duplicate_detection_applies_to_paths_with_distinct_roles() {
+            let mut issue = issue_with_next_id(1);
+            issue
+                .add_resource(path_resource("src/lib.rs", ResourceRole::Reference))
+                .expect("add succeeds");
+            issue
+                .add_resource(path_resource("src/lib.rs", ResourceRole::Documentation))
+                .expect("same target with distinct role is allowed");
             assert_eq!(issue.resources().len(), 2);
         }
 
@@ -1279,6 +1415,334 @@ mod tests {
             ));
             assert_eq!(result, Err(ResourceError::IdSequenceExhausted));
             assert!(issue.resources().is_empty());
+        }
+
+        // ===== update_resource =====
+
+        fn three_resource_issue() -> Issue {
+            let mut issue = issue_with_next_id(1);
+            issue
+                .add_resource(path_resource("src/lib.rs", ResourceRole::Implementation))
+                .expect("add succeeds");
+            issue
+                .add_resource(web_resource(
+                    "https://b.example.com",
+                    ResourceRole::Evidence,
+                ))
+                .expect("add succeeds");
+            issue
+                .add_resource(path_resource("docs/adr/0003.md", ResourceRole::Reference))
+                .expect("add succeeds");
+            issue
+        }
+
+        #[test]
+        fn update_resource_changes_only_provided_fields_and_preserves_position() {
+            let mut issue = three_resource_issue();
+            let r2 = issue.resources()[1].id().clone();
+            issue
+                .update_resource(
+                    &r2,
+                    ResourceUpdate {
+                        target: Some(ResourceTarget::path(
+                            WorkspacePath::new("src/../src/main.rs").expect("normalizes"),
+                        )),
+                        role: None,
+                        label: Some(Some(ResourceLabel::new("main entry").expect("label"))),
+                    },
+                )
+                .expect("update succeeds");
+            let resources = issue.resources();
+            assert_eq!(resources.len(), 3);
+            assert_eq!(resources[1].id(), &r2, "id must not change");
+            assert_eq!(resources[0].id().as_str(), "r1", "position must not shift");
+            assert_eq!(resources[2].id().as_str(), "r3", "position must not shift");
+            assert_eq!(resources[1].target().to_string(), "src/main.rs");
+            assert_eq!(
+                resources[1].role(),
+                ResourceRole::Evidence,
+                "role unchanged"
+            );
+            assert_eq!(resources[1].label().map(|l| l.as_str()), Some("main entry"));
+        }
+
+        #[test]
+        fn update_resource_changes_role_and_clears_label() {
+            let mut issue = three_resource_issue();
+            issue
+                .add_resource(web_resource(
+                    "https://c.example.com",
+                    ResourceRole::Documentation,
+                ))
+                .expect("add succeeds");
+            let r4 = issue.resources()[3].id().clone();
+            issue
+                .update_resource(
+                    &r4,
+                    ResourceUpdate {
+                        target: None,
+                        role: Some(ResourceRole::Successor),
+                        label: Some(Some(ResourceLabel::new("temp").expect("label"))),
+                    },
+                )
+                .expect("set label");
+            issue
+                .update_resource(
+                    &r4,
+                    ResourceUpdate {
+                        target: None,
+                        role: None,
+                        label: Some(None),
+                    },
+                )
+                .expect("clear label");
+            let resources = issue.resources();
+            assert_eq!(resources[3].role(), ResourceRole::Successor);
+            assert!(resources[3].label().is_none(), "label must be cleared");
+        }
+
+        #[test]
+        fn update_resource_last_position_is_stable() {
+            let mut issue = three_resource_issue();
+            let r3 = issue.resources()[2].id().clone();
+            issue
+                .update_resource(
+                    &r3,
+                    ResourceUpdate {
+                        role: Some(ResourceRole::Successor),
+                        ..ResourceUpdate::default()
+                    },
+                )
+                .expect("update succeeds");
+            let ids: Vec<_> = issue.resources().iter().map(|r| r.id().as_str()).collect();
+            assert_eq!(
+                ids,
+                ["r1", "r2", "r3"],
+                "updating the last resource must not reorder"
+            );
+            assert_eq!(issue.resources()[2].role(), ResourceRole::Successor);
+        }
+
+        #[test]
+        fn update_resource_allows_web_to_path_and_back() {
+            let mut issue = issue_with_next_id(1);
+            issue
+                .add_resource(web_resource(
+                    "https://a.example.com",
+                    ResourceRole::Reference,
+                ))
+                .expect("add succeeds");
+            let r1 = issue.resources()[0].id().clone();
+            issue
+                .update_resource(
+                    &r1,
+                    ResourceUpdate {
+                        target: Some(ResourceTarget::path(
+                            WorkspacePath::new("docs/guide.md").expect("path"),
+                        )),
+                        role: None,
+                        label: None,
+                    },
+                )
+                .expect("web to path");
+            assert_eq!(issue.resources()[0].target().to_string(), "docs/guide.md");
+            issue
+                .update_resource(
+                    &r1,
+                    ResourceUpdate {
+                        target: Some(ResourceTarget::web(
+                            WebUrl::new("https://a.example.com").expect("url"),
+                        )),
+                        role: None,
+                        label: None,
+                    },
+                )
+                .expect("path to web");
+            assert_eq!(
+                issue.resources()[0].target().to_string(),
+                "https://a.example.com/"
+            );
+        }
+
+        #[test]
+        fn update_resource_rejects_empty_update() {
+            let mut issue = three_resource_issue();
+            let r1 = issue.resources()[0].id().clone();
+            assert_eq!(
+                issue.update_resource(&r1, ResourceUpdate::default()),
+                Err(ResourceError::EmptyUpdate)
+            );
+        }
+
+        #[test]
+        fn update_resource_rejects_unknown_id() {
+            let mut issue = three_resource_issue();
+            let unknown = ResourceId::new("r99").expect("valid id");
+            assert_eq!(
+                issue.update_resource(
+                    &unknown,
+                    ResourceUpdate {
+                        target: None,
+                        role: Some(ResourceRole::Successor),
+                        label: None,
+                    },
+                ),
+                Err(ResourceError::ResourceNotFound { id: unknown })
+            );
+        }
+
+        #[test]
+        fn update_resource_checks_duplicates_against_post_update_state() {
+            let mut issue = three_resource_issue();
+            // r1 is (src/lib.rs, implementation); changing r2's target to
+            // src/lib.rs with role implementation must collide via normalization.
+            let r2 = issue.resources()[1].id().clone();
+            let duplicate = issue.update_resource(
+                &r2,
+                ResourceUpdate {
+                    target: Some(ResourceTarget::path(
+                        WorkspacePath::new("src/../src/lib.rs").expect("normalizes"),
+                    )),
+                    role: Some(ResourceRole::Implementation),
+                    label: None,
+                },
+            );
+            assert!(matches!(
+                duplicate,
+                Err(ResourceError::DuplicateTargetRole { .. })
+            ));
+            assert_eq!(
+                issue.resources()[1].target().to_string(),
+                "https://b.example.com/"
+            );
+
+            // Same target with a distinct role is fine.
+            issue
+                .update_resource(
+                    &r2,
+                    ResourceUpdate {
+                        target: Some(ResourceTarget::path(
+                            WorkspacePath::new("src/lib.rs").expect("path"),
+                        )),
+                        role: Some(ResourceRole::Documentation),
+                        label: None,
+                    },
+                )
+                .expect("distinct role update succeeds");
+            assert_eq!(issue.resources()[1].role(), ResourceRole::Documentation);
+        }
+
+        #[test]
+        fn update_resource_does_not_consume_identifier_sequence() {
+            let mut issue = issue_with_next_id(1);
+            issue
+                .add_resource(web_resource(
+                    "https://a.example.com",
+                    ResourceRole::Reference,
+                ))
+                .expect("add succeeds");
+            let r1 = issue.resources()[0].id().clone();
+            issue
+                .update_resource(
+                    &r1,
+                    ResourceUpdate {
+                        target: None,
+                        role: Some(ResourceRole::Successor),
+                        label: None,
+                    },
+                )
+                .expect("update succeeds");
+            let next = issue
+                .add_resource(web_resource(
+                    "https://b.example.com",
+                    ResourceRole::Evidence,
+                ))
+                .expect("add succeeds");
+            assert_eq!(
+                next.as_str(),
+                "r2",
+                "update must not advance the id sequence"
+            );
+        }
+
+        // ===== remove_resource =====
+
+        #[test]
+        fn remove_resource_keeps_remaining_ids_and_positions() {
+            let mut issue = three_resource_issue();
+            let r2 = issue.resources()[1].id().clone();
+            issue.remove_resource(&r2).expect("remove succeeds");
+            let resources = issue.resources();
+            assert_eq!(resources.len(), 2);
+            assert_eq!(resources[0].id().as_str(), "r1");
+            assert_eq!(resources[0].role(), ResourceRole::Implementation);
+            assert_eq!(resources[1].id().as_str(), "r3");
+            assert_eq!(resources[1].role(), ResourceRole::Reference);
+        }
+
+        #[test]
+        fn remove_resource_first_middle_last_and_only() {
+            for position in 0..3 {
+                let mut issue = three_resource_issue();
+                let target = issue.resources()[position].id().clone();
+                issue.remove_resource(&target).expect("remove succeeds");
+                let expected: Vec<&str> = ["r1", "r2", "r3"]
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(index, _)| *index != position)
+                    .map(|(_, id)| id)
+                    .collect();
+                let actual: Vec<&str> = issue.resources().iter().map(|r| r.id().as_str()).collect();
+                assert_eq!(actual, expected, "removing position {position}");
+            }
+            let mut issue = three_resource_issue();
+            for resource in issue.resources().to_vec() {
+                issue
+                    .remove_resource(resource.id())
+                    .expect("remove succeeds");
+            }
+            assert!(issue.resources().is_empty());
+        }
+
+        #[test]
+        fn remove_resource_rejects_unknown_id() {
+            let mut issue = three_resource_issue();
+            let unknown = ResourceId::new("r99").expect("valid id");
+            assert_eq!(
+                issue.remove_resource(&unknown),
+                Err(ResourceError::ResourceNotFound { id: unknown })
+            );
+            assert_eq!(issue.resources().len(), 3, "failed removal must not mutate");
+        }
+
+        #[test]
+        fn remove_resource_from_empty_issue_is_not_found() {
+            let mut issue = issue_with_next_id(1);
+            let id = ResourceId::new("r1").expect("valid id");
+            assert!(matches!(
+                issue.remove_resource(&id),
+                Err(ResourceError::ResourceNotFound { .. })
+            ));
+        }
+
+        #[test]
+        fn remove_resource_never_reuses_identifiers() {
+            let mut issue = three_resource_issue();
+            let r2 = issue.resources()[1].id().clone();
+            issue.remove_resource(&r2).expect("remove succeeds");
+            let next = issue
+                .add_resource(web_resource(
+                    "https://new.example.com",
+                    ResourceRole::Evidence,
+                ))
+                .expect("add succeeds");
+            assert_eq!(
+                next.as_str(),
+                "r4",
+                "next id must continue the sequence, never reuse r2"
+            );
+            let ids: Vec<_> = issue.resources().iter().map(|r| r.id().as_str()).collect();
+            assert_eq!(ids, ["r1", "r3", "r4"]);
         }
     }
 }

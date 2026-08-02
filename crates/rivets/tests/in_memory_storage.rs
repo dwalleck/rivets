@@ -6,7 +6,8 @@
 
 use rivets::domain::{
     DependencyType, IssueFilter, IssueId, IssueKind, IssueStatus, IssueUpdate, MAX_PRIORITY,
-    NewIssue, NoteContent, SortPolicy,
+    NewIssue, NewResource, NoteContent, ResourceId, ResourceLabel, ResourceRole, ResourceTarget,
+    ResourceUpdate, SortPolicy, WebUrl, WorkspacePath,
 };
 use rivets::error::Error;
 use rivets::storage::IssueStorage;
@@ -1117,4 +1118,165 @@ async fn save_to_jsonl_is_byte_stable_across_reloads() {
     }
 
     temp_dir.close().unwrap();
+}
+
+// ========== Associated Resource Update/Remove Round-Trip ==========
+
+#[tokio::test]
+async fn resource_update_and_remove_round_trip_through_jsonl() {
+    let temp_dir = tempdir().expect("temp dir should be created");
+    let jsonl_path = temp_dir.path().join("issues.jsonl");
+
+    let mut storage = new_in_memory_storage("test".to_string());
+    let issue = storage
+        .create(create_test_issue("Resource owner"))
+        .await
+        .expect("issue should be created");
+    let issue_id = issue.id.clone();
+    let created_updated_at = issue.updated_at;
+
+    for (target, role) in [
+        (
+            ResourceTarget::web(WebUrl::new("https://a.example.com").expect("valid test URL")),
+            ResourceRole::Implementation,
+        ),
+        (
+            ResourceTarget::web(WebUrl::new("https://b.example.com").expect("valid test URL")),
+            ResourceRole::Evidence,
+        ),
+        (
+            ResourceTarget::path(WorkspacePath::new("docs/adr/0003.md").expect("valid test path")),
+            ResourceRole::Reference,
+        ),
+    ] {
+        storage
+            .add_resource(
+                &issue_id,
+                NewResource {
+                    target,
+                    role,
+                    label: None,
+                },
+            )
+            .await
+            .expect("resource should be added");
+    }
+
+    // Update the middle resource's role and label; bump updated_at.
+    let updated = storage
+        .update_resource(
+            &issue_id,
+            &ResourceId::new("r2").expect("valid resource id"),
+            ResourceUpdate {
+                target: None,
+                role: Some(ResourceRole::Documentation),
+                label: Some(Some(
+                    ResourceLabel::new("updated label").expect("valid test label"),
+                )),
+            },
+        )
+        .await
+        .expect("update should succeed");
+    assert!(
+        updated.updated_at > created_updated_at,
+        "update must bump updated_at"
+    );
+
+    // Remove the first resource; remaining keep ids/positions.
+    let after_remove = storage
+        .remove_resource(
+            &issue_id,
+            &ResourceId::new("r1").expect("valid resource id"),
+        )
+        .await
+        .expect("remove should succeed");
+    let ids: Vec<_> = after_remove
+        .resources()
+        .iter()
+        .map(|r| r.id().as_str())
+        .collect();
+    assert_eq!(ids, ["r2", "r3"]);
+    assert_eq!(
+        after_remove.resources()[0].role(),
+        ResourceRole::Documentation
+    );
+    assert_eq!(
+        after_remove.resources()[0].label().map(|l| l.as_str()),
+        Some("updated label")
+    );
+
+    // Persist and reload from disk; state must survive a fresh storage.
+    save_to_jsonl(storage.as_ref(), &jsonl_path)
+        .await
+        .expect("save should succeed");
+    let (mut reloaded, warnings) = load_from_jsonl(&jsonl_path, "test".to_string())
+        .await
+        .expect("reload should succeed");
+    assert!(warnings.is_empty(), "clean round-trip must not warn");
+    let reloaded_issue = reloaded
+        .get(&issue_id)
+        .await
+        .expect("get should succeed")
+        .expect("issue should exist after reload");
+    let ids: Vec<_> = reloaded_issue
+        .resources()
+        .iter()
+        .map(|r| r.id().as_str())
+        .collect();
+    assert_eq!(ids, ["r2", "r3"]);
+    assert_eq!(
+        reloaded_issue.resources()[0].role(),
+        ResourceRole::Documentation
+    );
+    assert_eq!(
+        reloaded_issue.resources()[1].target().to_string(),
+        "docs/adr/0003.md"
+    );
+
+    // The sequence never reuses the removed r1.
+    let with_new = reloaded
+        .add_resource(
+            &issue_id,
+            NewResource {
+                target: ResourceTarget::web(
+                    WebUrl::new("https://c.example.com").expect("valid test URL"),
+                ),
+                role: ResourceRole::Successor,
+                label: None,
+            },
+        )
+        .await
+        .expect("add after reload should succeed");
+    assert_eq!(
+        with_new
+            .resources()
+            .last()
+            .expect("resources should be non-empty")
+            .id()
+            .as_str(),
+        "r4"
+    );
+
+    // Duplicate detection flows through storage as a typed resource error:
+    // r3 updated to r2's target+role collides on the post-update state.
+    let duplicate = reloaded
+        .update_resource(
+            &issue_id,
+            &ResourceId::new("r3").expect("valid resource id"),
+            ResourceUpdate {
+                target: Some(ResourceTarget::web(
+                    WebUrl::new("https://b.example.com").expect("valid test URL"),
+                )),
+                role: Some(ResourceRole::Documentation),
+                label: None,
+            },
+        )
+        .await;
+    assert!(matches!(
+        duplicate,
+        Err(Error::Storage(rivets::error::StorageError::Resource(
+            rivets::domain::ResourceError::DuplicateTargetRole { .. }
+        )))
+    ));
+    temp_dir.close().expect("temp dir should close cleanly");
 }

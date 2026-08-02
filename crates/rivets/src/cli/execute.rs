@@ -1320,24 +1320,44 @@ pub async fn execute_label(
     }
 }
 
+/// Parse at most one of `--url`/`--path` into a Resource Target.
+///
+/// The four-arm match is the single canonical url/path classification for
+/// the CLI; `Add` layers its "exactly one" requirement on the `None` case.
+fn parse_target_flags(
+    url: Option<&str>,
+    path: Option<&str>,
+) -> Result<Option<crate::domain::ResourceTarget>> {
+    use crate::domain::{ResourceTarget, WebUrl, WorkspacePath};
+    match (url, path) {
+        (Some(url), None) => Ok(Some(ResourceTarget::web(WebUrl::new(url)?))),
+        (None, Some(path)) => Ok(Some(ResourceTarget::path(WorkspacePath::new(path)?))),
+        (None, None) => Ok(None),
+        (Some(_), Some(_)) => anyhow::bail!("only one of --url or --path may be given"),
+    }
+}
+
 /// Execute an Associated Resource command.
 pub async fn execute_resource(
     app: &mut crate::app::App,
     args: &ResourceArgs,
     output_mode: OutputMode,
 ) -> Result<()> {
-    use crate::domain::{IssueId, NewResource, ResourceLabel, ResourceTarget, WebUrl};
+    use crate::domain::{IssueId, NewResource, ResourceId, ResourceLabel, ResourceUpdate};
     use crate::output;
 
     match &args.action {
         ResourceAction::Add {
             issue_id,
             url,
+            path,
             role,
             label,
         } => {
+            let target = parse_target_flags(url.as_deref(), path.as_deref())?
+                .ok_or_else(|| anyhow::anyhow!("exactly one of --url or --path is required"))?;
             let resource = NewResource {
-                target: ResourceTarget::web(WebUrl::new(url)?),
+                target,
                 role: (*role).into(),
                 label: label.clone().map(ResourceLabel::new).transpose()?,
             };
@@ -1351,6 +1371,56 @@ pub async fn execute_resource(
                 output::OutputMode::Json => output::print_json(&issue)?,
                 output::OutputMode::Text => {
                     println!("Added resource to {}", issue.id);
+                }
+            }
+        }
+        ResourceAction::Update {
+            issue_id,
+            resource,
+            url,
+            path,
+            role,
+            label,
+            no_label,
+        } => {
+            let target = parse_target_flags(url.as_deref(), path.as_deref())?;
+            let label = match (label, no_label) {
+                (Some(label), false) => Some(Some(ResourceLabel::new(label)?)),
+                (None, true) => Some(None),
+                (None, false) => None,
+                (Some(_), true) => {
+                    anyhow::bail!("only one of --label or --no-label may be given")
+                }
+            };
+            let update = ResourceUpdate {
+                target,
+                role: role.map(Into::into),
+                label,
+            };
+            let issue = app
+                .storage_mut()
+                .update_resource(&IssueId::new(issue_id), &ResourceId::new(resource)?, update)
+                .await?;
+            app.save().await?;
+
+            match output_mode {
+                output::OutputMode::Json => output::print_json(&issue)?,
+                output::OutputMode::Text => {
+                    println!("Updated resource {resource} on {}", issue.id);
+                }
+            }
+        }
+        ResourceAction::Remove { issue_id, resource } => {
+            let issue = app
+                .storage_mut()
+                .remove_resource(&IssueId::new(issue_id), &ResourceId::new(resource)?)
+                .await?;
+            app.save().await?;
+
+            match output_mode {
+                output::OutputMode::Json => output::print_json(&issue)?,
+                output::OutputMode::Text => {
+                    println!("Removed resource {resource} from {}", issue.id);
                 }
             }
         }

@@ -809,6 +809,67 @@ mod load_from_jsonl_tests {
     }
 
     #[tokio::test]
+    async fn escaping_workspace_path_resource_is_rejected_with_visible_warning() {
+        let json = r#"{"id":"test-escape-path","title":"Bad Path","description":"Test","status":"open","priority":2,"issue_kind":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":[],"resources":[{"id":"r1","target":{"type":"path","path":"../../etc/passwd"},"role":"reference","label":null}],"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#;
+        let file = create_temp_jsonl_file(json);
+
+        let (storage, warnings) = load_from_jsonl(file.path(), "test".to_string())
+            .await
+            .expect("resilient load should report an escaping workspace path");
+        assert_eq!(warnings.len(), 1);
+        match &warnings[0] {
+            LoadWarning::InvalidResourceData { source, .. } => {
+                assert!(matches!(source, ResourceError::WorkspacePathEscape { .. }));
+            }
+            warning => panic!("expected InvalidResourceData warning, got {warning:?}"),
+        }
+        assert!(
+            storage
+                .export_all()
+                .await
+                .expect("export should succeed")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_path_resource_round_trips_normalized() {
+        let json = r#"{"id":"test-path-resource","title":"Path Resource","description":"Test","status":"open","priority":2,"issue_kind":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":[],"resources":[{"id":"r1","target":{"type":"path","path":"docs/../docs/adr/0003.md"},"role":"documentation","label":"ADR"}],"next_resource_id":2,"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#;
+        let file = create_temp_jsonl_file(json);
+
+        let (storage, warnings) = load_from_jsonl(file.path(), "test".to_string())
+            .await
+            .expect("valid path resource should load");
+        assert!(warnings.is_empty());
+        let issue = storage
+            .get(&IssueId::new("test-path-resource"))
+            .await
+            .expect("get should succeed")
+            .expect("issue should exist");
+        assert_eq!(issue.resources().len(), 1);
+        // The persisted raw form is re-validated and normalized on load.
+        assert_eq!(
+            issue.resources()[0].target().to_string(),
+            "docs/adr/0003.md"
+        );
+        assert_eq!(issue.resources()[0].role(), ResourceRole::Documentation);
+
+        // Saving writes the canonical normalized path record.
+        let out = create_temp_jsonl_file("");
+        save_to_jsonl(storage.as_ref(), out.path())
+            .await
+            .expect("save should succeed");
+        let written = std::fs::read_to_string(out.path()).expect("saved file should be readable");
+        let record: serde_json::Value =
+            serde_json::from_str(written.lines().next().expect("one record"))
+                .expect("record should be JSON");
+        assert_eq!(
+            record["resources"][0]["target"],
+            serde_json::json!({"type":"path","path":"docs/adr/0003.md"})
+        );
+    }
+
+    #[tokio::test]
     async fn load_preserves_valid_dependencies() {
         let content = format!(
             "{}\n{}",

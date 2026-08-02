@@ -5,7 +5,7 @@ use super::graph::{find_blocked_issues, get_dependency_tree_impl, has_cycle_impl
 use super::sorting::sort_by_policy;
 use crate::domain::{
     Dependency, DependencyType, Issue, IssueFilter, IssueId, IssueStatus, IssueUpdate,
-    MAX_PRIORITY, NewIssue, NewResource, Note, SortPolicy,
+    MAX_PRIORITY, NewIssue, NewResource, Note, ResourceId, ResourceUpdate, SortPolicy,
 };
 use crate::error::{Error, Result, StorageError};
 use crate::storage::IssueStorage;
@@ -193,6 +193,43 @@ impl IssueStorage for InMemoryStorage {
         let mut candidate = stored.clone();
         candidate
             .add_resource(resource)
+            .map_err(StorageError::from)?;
+        candidate.updated_at = Utc::now();
+
+        *stored = candidate.clone();
+        Ok(candidate)
+    }
+
+    async fn update_resource(
+        &mut self,
+        id: &IssueId,
+        resource_id: &ResourceId,
+        update: ResourceUpdate,
+    ) -> Result<Issue> {
+        let mut inner = self.lock().await;
+        let stored = inner
+            .issues
+            .get_mut(id)
+            .ok_or_else(|| Error::IssueNotFound(id.clone()))?;
+        let mut candidate = stored.clone();
+        candidate
+            .update_resource(resource_id, update)
+            .map_err(StorageError::from)?;
+        candidate.updated_at = Utc::now();
+
+        *stored = candidate.clone();
+        Ok(candidate)
+    }
+
+    async fn remove_resource(&mut self, id: &IssueId, resource_id: &ResourceId) -> Result<Issue> {
+        let mut inner = self.lock().await;
+        let stored = inner
+            .issues
+            .get_mut(id)
+            .ok_or_else(|| Error::IssueNotFound(id.clone()))?;
+        let mut candidate = stored.clone();
+        candidate
+            .remove_resource(resource_id)
             .map_err(StorageError::from)?;
         candidate.updated_at = Utc::now();
 

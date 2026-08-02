@@ -14,7 +14,7 @@ Rivets stores issues as JSONL files alongside your code—no external services, 
 - **Git-native** — Issues live in your repo, branch with your code, merge with your PRs
 - **Fast** — Built in Rust for instant responses, even with thousands of issues
 - **Dependency tracking** — Model blockers and relationships between issues
-- **Associated Resources** — Attach typed Web links with stable IDs and semantic roles
+- **Associated Resources** — Attach typed Web links and Workspace Paths with stable IDs and semantic roles
 - **AI-ready** — MCP server for seamless integration with AI coding assistants
 - **Scriptable** — JSON output mode for automation and custom tooling
 - **Human-readable** — JSONL storage you can grep, diff, and edit directly
@@ -75,19 +75,30 @@ rivets list --label backend
 
 ### Associated Resources
 
-Attach absolute HTTP/HTTPS URLs to an Issue. The same `resource_add` and
-`resource_list` operations are available through the MCP server.
+Attach absolute HTTP/HTTPS URLs or workspace-relative file paths to an
+Issue, then curate them in place: `update` changes only the fields you
+provide, and `remove` deletes a single resource — in both cases every
+other resource keeps its stable ID and position. The same operations are
+available through the MCP server as `resource_add`, `resource_list`,
+`resource_update`, and `resource_remove`.
 
 ```bash
 rivets resource add RIVETS-1 \
   --url https://example.com/pull/123 \
   --role implementation \
   --label "Implementation PR"
+rivets resource add RIVETS-1 --path docs/design/feature.md --role documentation
 rivets resource list RIVETS-1
+rivets resource update RIVETS-1 --resource r1 --role evidence --no-label
+rivets resource remove RIVETS-1 --resource r2
 ```
 
 Roles are `implementation`, `documentation`, `evidence`, `successor`, and
 `reference`. Resources retain insertion order and a stable per-Issue ID.
+Workspace paths are stored normalized (`docs/../docs/x` becomes `docs/x`),
+always use `/` as the separator, cannot be absolute or escape the
+workspace root, and need not exist yet — branch-local and generated files
+are fine.
 
 ### JSON Output
 

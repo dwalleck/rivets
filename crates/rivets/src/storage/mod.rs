@@ -71,7 +71,7 @@
 
 use crate::domain::{
     Dependency, DependencyType, Issue, IssueFilter, IssueId, IssueUpdate, NewIssue, NewResource,
-    SortPolicy,
+    ResourceId, ResourceUpdate, SortPolicy,
 };
 use crate::error::{PartialLoadError, Result, SkippedIssueRecordCause, StorageError};
 use async_trait::async_trait;
@@ -293,6 +293,36 @@ pub trait IssueStorage: Send + Sync {
     /// - `Error::IssueNotFound` if the issue doesn't exist
     /// - `Error::Storage(StorageError::Resource(ResourceError::DuplicateTargetRole))` on duplicate
     async fn add_resource(&mut self, id: &IssueId, resource: NewResource) -> Result<Issue>;
+
+    /// Atomically update an existing Associated Resource by its stable
+    /// identifier.
+    ///
+    /// Only the provided fields change; the resource keeps its identifier and
+    /// position. The duplicate check runs against the post-update state.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::IssueNotFound` if the issue doesn't exist
+    /// - `Error::Storage(StorageError::Resource(ResourceError::ResourceNotFound))` if the resource doesn't exist
+    /// - `Error::Storage(StorageError::Resource(ResourceError::EmptyUpdate))` if no field is provided
+    /// - `Error::Storage(StorageError::Resource(ResourceError::DuplicateTargetRole))` on duplicate
+    async fn update_resource(
+        &mut self,
+        id: &IssueId,
+        resource_id: &ResourceId,
+        update: ResourceUpdate,
+    ) -> Result<Issue>;
+
+    /// Atomically remove an Associated Resource by its stable identifier.
+    ///
+    /// The remaining resources keep their identifiers and positions, and
+    /// identifiers are never reused.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::IssueNotFound` if the issue doesn't exist
+    /// - `Error::Storage(StorageError::Resource(ResourceError::ResourceNotFound))` if the resource doesn't exist
+    async fn remove_resource(&mut self, id: &IssueId, resource_id: &ResourceId) -> Result<Issue>;
 
     // ========== Batch Operations ==========
 
@@ -536,6 +566,21 @@ impl IssueStorage for JsonlBackedStorage {
     async fn add_resource(&mut self, id: &IssueId, resource: NewResource) -> Result<Issue> {
         self.ensure_writable()?;
         self.inner.add_resource(id, resource).await
+    }
+
+    async fn update_resource(
+        &mut self,
+        id: &IssueId,
+        resource_id: &ResourceId,
+        update: ResourceUpdate,
+    ) -> Result<Issue> {
+        self.ensure_writable()?;
+        self.inner.update_resource(id, resource_id, update).await
+    }
+
+    async fn remove_resource(&mut self, id: &IssueId, resource_id: &ResourceId) -> Result<Issue> {
+        self.ensure_writable()?;
+        self.inner.remove_resource(id, resource_id).await
     }
 
     async fn import_issues(&mut self, issues: Vec<Issue>) -> Result<()> {
@@ -859,6 +904,23 @@ impl IssueStorage for MockStorage {
     async fn add_resource(&mut self, _id: &IssueId, _resource: NewResource) -> Result<Issue> {
         unimplemented!(
             "MockStorage::add_resource() is not implemented. Use in_memory::new_in_memory_storage() for full CRUD."
+        )
+    }
+
+    async fn update_resource(
+        &mut self,
+        _id: &IssueId,
+        _resource_id: &ResourceId,
+        _update: ResourceUpdate,
+    ) -> Result<Issue> {
+        unimplemented!(
+            "MockStorage::update_resource() is not implemented. Use in_memory::new_in_memory_storage() for full CRUD."
+        )
+    }
+
+    async fn remove_resource(&mut self, _id: &IssueId, _resource_id: &ResourceId) -> Result<Issue> {
+        unimplemented!(
+            "MockStorage::remove_resource() is not implemented. Use in_memory::new_in_memory_storage() for full CRUD."
         )
     }
 
