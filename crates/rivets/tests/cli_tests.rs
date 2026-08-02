@@ -2309,3 +2309,120 @@ fn resource_path_add_update_remove_and_error_cases(initialized_dir: TempDir) {
         .collect();
     assert_eq!(persisted_ids, ["r2", "r3"]);
 }
+
+#[rstest]
+fn resource_mutations_persist_across_process_generations(initialized_dir: TempDir) {
+    // Every run_rivets_in_dir call is a fresh process; generation boundaries
+    // are the process exits between invocations.
+    let issue_id = create_issue(initialized_dir.path(), "Generations", &[]);
+
+    // Generation 1: add a web target and a path target, then update r1's role.
+    run_ok(
+        initialized_dir.path(),
+        &[
+            "resource",
+            "add",
+            &issue_id,
+            "--url",
+            "https://example.com/pr/1",
+            "--role",
+            "implementation",
+        ],
+    );
+    run_ok(
+        initialized_dir.path(),
+        &[
+            "resource",
+            "add",
+            &issue_id,
+            "--path",
+            "docs/../docs/guide.md",
+            "--role",
+            "documentation",
+            "--label",
+            "Guide",
+        ],
+    );
+    run_ok(
+        initialized_dir.path(),
+        &[
+            "resource",
+            "update",
+            &issue_id,
+            "--resource",
+            "r1",
+            "--role",
+            "successor",
+        ],
+    );
+
+    // Generation 2: state survived the process boundary exactly.
+    let resources = list_resources(initialized_dir.path(), &issue_id);
+    assert_eq!(resources.len(), 2);
+    assert_eq!(resources[0]["id"], "r1");
+    assert_eq!(resources[0]["role"], "successor");
+    assert_eq!(resources[1]["id"], "r2");
+    assert_eq!(resources[1]["target"]["type"], "path");
+    assert_eq!(resources[1]["target"]["path"], "docs/guide.md");
+
+    // Generation 3: remove r1 and add a new resource; the new id is r3,
+    // continuing the sequence rather than reusing r1.
+    run_ok(
+        initialized_dir.path(),
+        &["resource", "remove", &issue_id, "--resource", "r1"],
+    );
+    run_ok(
+        initialized_dir.path(),
+        &[
+            "resource",
+            "add",
+            &issue_id,
+            "--path",
+            "src/main.rs",
+            "--role",
+            "implementation",
+        ],
+    );
+
+    // Generation 4: removal, order, and the continued sequence all persist.
+    let resources = list_resources(initialized_dir.path(), &issue_id);
+    let ids: Vec<_> = resources
+        .iter()
+        .map(|r| r["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["r2", "r3"]);
+    assert_eq!(resources[1]["target"]["path"], "src/main.rs");
+
+    let canonical = std::fs::read_to_string(initialized_dir.path().join(".rivets/issues.jsonl"))
+        .expect("canonical file readable");
+    let record: serde_json::Value = canonical
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("record"))
+        .find(|record: &serde_json::Value| record["id"] == issue_id)
+        .expect("record exists");
+    assert_eq!(record["next_resource_id"], 4);
+}
+
+fn run_ok(dir: &Path, args: &[&str]) {
+    let output = run_rivets_in_dir(dir, args);
+    assert!(
+        output.status.success(),
+        "rivets {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn list_resources(dir: &Path, issue_id: &str) -> Vec<serde_json::Value> {
+    let output = run_rivets_in_dir(dir, &["--json", "resource", "list", issue_id]);
+    assert!(
+        output.status.success(),
+        "resource list failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .expect("resource list should be JSON")
+        .as_array()
+        .expect("resource list should be an array")
+        .clone()
+}

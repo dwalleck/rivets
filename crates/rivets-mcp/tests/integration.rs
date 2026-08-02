@@ -3704,3 +3704,74 @@ async fn resource_update_remove_errors_are_typed_without_mutation() {
         "all failures must leave storage unmutated"
     );
 }
+
+#[tokio::test]
+async fn resource_mutations_persist_across_context_restart() {
+    let workspace = create_temp_workspace();
+    let issues_path = workspace.path().join(".rivets/issues.jsonl");
+    let issue_id: String;
+
+    // Session 1: add, update, and remove in one context.
+    {
+        let tools = create_tools();
+        set_context(&tools, workspace.path()).await;
+        let issue = create_issue(&tools, "Restart owner").await;
+        issue_id = issue.id.clone();
+        add_three_resources(&tools, &issue_id).await;
+        tools
+            .resource_update(rivets_mcp::models::ResourceUpdateParams {
+                issue_id: issue_id.clone(),
+                resource_id: "r1".to_string(),
+                url: None,
+                path: None,
+                role: Some("successor".to_string()),
+                label: None,
+                clear_label: true,
+                workspace_root: None,
+            })
+            .await
+            .expect("update should succeed");
+        tools
+            .resource_remove(&issue_id, "r2", None)
+            .await
+            .expect("remove should succeed");
+    }
+
+    // Session 2: a fresh Tools (context restart) sees the exact same state.
+    {
+        let tools = create_tools();
+        set_context(&tools, workspace.path()).await;
+        let persisted = tools
+            .resource_list(&issue_id, None)
+            .await
+            .expect("resources should survive context recreation");
+        assert_eq!(
+            persisted.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["r1", "r3"],
+            "removal keeps remaining ids and positions"
+        );
+        assert_eq!(persisted[0].role, "successor");
+        assert!(persisted[0].label.is_none(), "label clear must persist");
+        assert_eq!(
+            persisted[1].target,
+            McpResourceTarget::Path {
+                path: "docs/adr/0003.md".to_string()
+            },
+            "normalized path target must persist"
+        );
+    }
+
+    // The raw JSONL records the same state; the sequence never reuses r2.
+    let canonical =
+        std::fs::read_to_string(issues_path).expect("canonical record should be readable");
+    let record: serde_json::Value =
+        serde_json::from_str(canonical.trim()).expect("record should be JSON");
+    assert_eq!(record["next_resource_id"], 4);
+    let persisted_ids: Vec<_> = record["resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(persisted_ids, ["r1", "r3"]);
+}
