@@ -1343,7 +1343,8 @@ pub async fn execute_resource(
             let target = match (url, path) {
                 (Some(url), None) => ResourceTarget::web(WebUrl::new(url)?),
                 (None, Some(path)) => ResourceTarget::path(WorkspacePath::new(path)?),
-                _ => anyhow::bail!("exactly one of --url or --path is required"),
+                (None, None) => anyhow::bail!("exactly one of --url or --path is required"),
+                (Some(_), Some(_)) => anyhow::bail!("only one of --url or --path may be given"),
             };
             let resource = NewResource {
                 target,
