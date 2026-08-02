@@ -3,8 +3,11 @@
 //! This module contains the core domain types for the rivets issue tracker.
 
 use chrono::{DateTime, Utc};
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::str::FromStr;
+use std::sync::OnceLock;
 
 mod resource;
 #[cfg(test)]
@@ -405,8 +408,20 @@ impl Issue {
     }
 }
 
+/// Join every canonical value name of a vocabulary enum with `", "`.
+///
+/// Derived from the `clap` value names so a valid-values error string can
+/// never drift from the enum declaration it describes.
+pub(crate) fn join_canonical_names<T: ValueEnum + fmt::Display>() -> String {
+    T::value_variants()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Status of an issue
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum IssueStatus {
     /// Issue is open and ready to work on
@@ -414,6 +429,7 @@ pub enum IssueStatus {
 
     /// Issue is currently being worked on
     #[serde(rename = "in_progress")]
+    #[value(name = "in_progress", alias = "in-progress")]
     InProgress,
 
     /// Issue is blocked by dependencies
@@ -434,8 +450,47 @@ impl fmt::Display for IssueStatus {
     }
 }
 
+impl IssueStatus {
+    /// Comma-separated canonical status names, for error messages.
+    ///
+    /// Derived from the enum declaration rather than hand-written, so the
+    /// listed values cannot drift from the accepted vocabulary.
+    #[must_use]
+    pub fn valid_values() -> &'static str {
+        static VALUES: OnceLock<String> = OnceLock::new();
+        VALUES.get_or_init(join_canonical_names::<Self>)
+    }
+}
+
+/// A failure to parse an [`IssueStatus`] from a string.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum IssueStatusError {
+    /// The string was not a canonical Issue Status name.
+    #[error("Unknown issue status '{status}'")]
+    UnknownStatus {
+        /// The rejected input string.
+        status: String,
+    },
+}
+
+impl FromStr for IssueStatus {
+    type Err = IssueStatusError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "open" => Ok(Self::Open),
+            "in_progress" => Ok(Self::InProgress),
+            "blocked" => Ok(Self::Blocked),
+            "closed" => Ok(Self::Closed),
+            _ => Err(IssueStatusError::UnknownStatus {
+                status: s.to_string(),
+            }),
+        }
+    }
+}
+
 /// Current classification of an issue
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum IssueKind {
     /// Bug fix
@@ -466,6 +521,34 @@ impl fmt::Display for IssueKind {
     }
 }
 
+/// A failure to parse an [`IssueKind`] from a string.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum IssueKindError {
+    /// The string was not a canonical Issue Kind name.
+    #[error("Unknown issue kind '{kind}'")]
+    UnknownKind {
+        /// The rejected input string.
+        kind: String,
+    },
+}
+
+impl FromStr for IssueKind {
+    type Err = IssueKindError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "bug" => Ok(Self::Bug),
+            "feature" => Ok(Self::Feature),
+            "task" => Ok(Self::Task),
+            "epic" => Ok(Self::Epic),
+            "chore" => Ok(Self::Chore),
+            _ => Err(IssueKindError::UnknownKind {
+                kind: s.to_string(),
+            }),
+        }
+    }
+}
+
 /// Dependency between issues
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Dependency {
@@ -477,7 +560,7 @@ pub struct Dependency {
 }
 
 /// Type of dependency relationship
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum DependencyType {
     /// Hard blocker - prevents work
@@ -500,6 +583,45 @@ impl fmt::Display for DependencyType {
             Self::Related => write!(f, "related"),
             Self::ParentChild => write!(f, "parent-child"),
             Self::DiscoveredFrom => write!(f, "discovered-from"),
+        }
+    }
+}
+
+impl DependencyType {
+    /// Comma-separated canonical dependency-type names, for error messages.
+    ///
+    /// Derived from the enum declaration rather than hand-written, so the
+    /// listed values cannot drift from the accepted vocabulary.
+    #[must_use]
+    pub fn valid_values() -> &'static str {
+        static VALUES: OnceLock<String> = OnceLock::new();
+        VALUES.get_or_init(join_canonical_names::<Self>)
+    }
+}
+
+/// A failure to parse a [`DependencyType`] from a string.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DependencyTypeError {
+    /// The string was not a canonical Dependency Type name.
+    #[error("Unknown dependency type '{dependency_type}'")]
+    UnknownDependencyType {
+        /// The rejected input string.
+        dependency_type: String,
+    },
+}
+
+impl FromStr for DependencyType {
+    type Err = DependencyTypeError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "blocks" => Ok(Self::Blocks),
+            "related" => Ok(Self::Related),
+            "parent-child" => Ok(Self::ParentChild),
+            "discovered-from" => Ok(Self::DiscoveredFrom),
+            _ => Err(DependencyTypeError::UnknownDependencyType {
+                dependency_type: s.to_string(),
+            }),
         }
     }
 }
@@ -1044,6 +1166,210 @@ mod tests {
         assert_eq!(
             format!("{}", DependencyType::DiscoveredFrom),
             "discovered-from"
+        );
+    }
+
+    // ===== FromStr Roundtrip Tests =====
+    //
+    // parse(display(variant)) == variant for every variant; non-canonical
+    // spellings (uppercase, empty, CLI/MCP aliases, unknown) are rejected
+    // with the typed error carrying the offending string.
+
+    #[test]
+    fn test_issue_status_from_str_roundtrip() {
+        for status in [
+            IssueStatus::Open,
+            IssueStatus::InProgress,
+            IssueStatus::Blocked,
+            IssueStatus::Closed,
+        ] {
+            assert_eq!(status.to_string().parse::<IssueStatus>(), Ok(status));
+        }
+    }
+
+    #[test]
+    fn test_issue_status_from_str_rejects_noncanonical() {
+        for invalid in ["", "OPEN", "in-progress", "in_progress ", "bogus"] {
+            let error = invalid.parse::<IssueStatus>().unwrap_err();
+            assert!(matches!(
+                error,
+                IssueStatusError::UnknownStatus { status } if status == invalid
+            ));
+        }
+    }
+
+    #[test]
+    fn test_issue_kind_from_str_roundtrip() {
+        for kind in [
+            IssueKind::Bug,
+            IssueKind::Feature,
+            IssueKind::Task,
+            IssueKind::Epic,
+            IssueKind::Chore,
+        ] {
+            assert_eq!(kind.to_string().parse::<IssueKind>(), Ok(kind));
+        }
+    }
+
+    #[test]
+    fn test_issue_kind_from_str_rejects_noncanonical() {
+        for invalid in ["", "BUG", "task ", "bogus"] {
+            let error = invalid.parse::<IssueKind>().unwrap_err();
+            assert!(matches!(
+                error,
+                IssueKindError::UnknownKind { kind } if kind == invalid
+            ));
+        }
+    }
+
+    #[test]
+    fn test_dependency_type_from_str_roundtrip() {
+        for dep_type in [
+            DependencyType::Blocks,
+            DependencyType::Related,
+            DependencyType::ParentChild,
+            DependencyType::DiscoveredFrom,
+        ] {
+            assert_eq!(dep_type.to_string().parse::<DependencyType>(), Ok(dep_type));
+        }
+    }
+
+    #[test]
+    fn test_dependency_type_from_str_rejects_noncanonical() {
+        for invalid in ["", "BLOCKS", "parent_child", "discovered_from", "bogus"] {
+            let error = invalid.parse::<DependencyType>().unwrap_err();
+            assert!(matches!(
+                error,
+                DependencyTypeError::UnknownDependencyType { dependency_type } if dependency_type == invalid
+            ));
+        }
+    }
+
+    // ===== Serde Wire-Format Fence Tests =====
+    //
+    // Serde is the wire form of the same vocabulary: every variant's JSON
+    // string must equal its Display string in both directions, so JSON
+    // output and human-readable output cannot diverge.
+
+    #[test]
+    fn test_issue_status_serde_matches_display() {
+        for status in [
+            IssueStatus::Open,
+            IssueStatus::InProgress,
+            IssueStatus::Blocked,
+            IssueStatus::Closed,
+        ] {
+            let json = serde_json::to_string(&status).expect("status serializes");
+            assert_eq!(json, format!("\"{status}\""));
+            let parsed: IssueStatus = serde_json::from_str(&json).expect("status deserializes");
+            assert_eq!(parsed, status);
+        }
+    }
+
+    #[test]
+    fn test_issue_kind_serde_matches_display() {
+        for kind in [
+            IssueKind::Bug,
+            IssueKind::Feature,
+            IssueKind::Task,
+            IssueKind::Epic,
+            IssueKind::Chore,
+        ] {
+            let json = serde_json::to_string(&kind).expect("kind serializes");
+            assert_eq!(json, format!("\"{kind}\""));
+            let parsed: IssueKind = serde_json::from_str(&json).expect("kind deserializes");
+            assert_eq!(parsed, kind);
+        }
+    }
+
+    #[test]
+    fn test_dependency_type_serde_matches_display() {
+        for dep_type in [
+            DependencyType::Blocks,
+            DependencyType::Related,
+            DependencyType::ParentChild,
+            DependencyType::DiscoveredFrom,
+        ] {
+            let json = serde_json::to_string(&dep_type).expect("dep type serializes");
+            assert_eq!(json, format!("\"{dep_type}\""));
+            let parsed: DependencyType =
+                serde_json::from_str(&json).expect("dep type deserializes");
+            assert_eq!(parsed, dep_type);
+        }
+    }
+
+    // ===== Valid-Values Fence Tests =====
+
+    #[test]
+    fn test_valid_values_list_every_canonical_name() {
+        // Pins the derived error-message lists to the shipped wording.
+        assert_eq!(
+            IssueStatus::valid_values(),
+            "open, in_progress, blocked, closed"
+        );
+        assert_eq!(
+            DependencyType::valid_values(),
+            "blocks, related, parent-child, discovered-from"
+        );
+    }
+
+    // ===== CLI ValueEnum Vocabulary Tests =====
+    //
+    // The clap value name of every variant equals its Display string, and
+    // the canonical name/alias pair of IssueStatus::InProgress is preserved
+    // (the CLI contract recorded in .rivets-bkjj/baseline-cli-contract.txt).
+
+    #[test]
+    fn test_cli_value_names_match_display() {
+        for status in [
+            IssueStatus::Open,
+            IssueStatus::InProgress,
+            IssueStatus::Blocked,
+            IssueStatus::Closed,
+        ] {
+            let possible = status.to_possible_value().expect("possible value");
+            assert_eq!(possible.get_name(), status.to_string());
+        }
+        for kind in [
+            IssueKind::Bug,
+            IssueKind::Feature,
+            IssueKind::Task,
+            IssueKind::Epic,
+            IssueKind::Chore,
+        ] {
+            let possible = kind.to_possible_value().expect("possible value");
+            assert_eq!(possible.get_name(), kind.to_string());
+        }
+        for role in [
+            ResourceRole::Implementation,
+            ResourceRole::Documentation,
+            ResourceRole::Evidence,
+            ResourceRole::Successor,
+            ResourceRole::Reference,
+        ] {
+            let possible = role.to_possible_value().expect("possible value");
+            assert_eq!(possible.get_name(), role.to_string());
+        }
+        for dep_type in [
+            DependencyType::Blocks,
+            DependencyType::Related,
+            DependencyType::ParentChild,
+            DependencyType::DiscoveredFrom,
+        ] {
+            let possible = dep_type.to_possible_value().expect("possible value");
+            assert_eq!(possible.get_name(), dep_type.to_string());
+        }
+    }
+
+    #[test]
+    fn test_in_progress_alias_preserved() {
+        let possible = IssueStatus::InProgress
+            .to_possible_value()
+            .expect("possible value");
+        assert_eq!(possible.get_name(), "in_progress");
+        assert_eq!(
+            possible.get_name_and_aliases().collect::<Vec<_>>(),
+            vec!["in_progress", "in-progress"]
         );
     }
 

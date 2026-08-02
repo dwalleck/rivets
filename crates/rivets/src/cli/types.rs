@@ -1,12 +1,21 @@
-//! CLI value enums and domain type conversions.
+//! CLI value enums and batch operation results.
 //!
-//! This module contains the value enums used for CLI argument parsing
-//! and their conversions to/from domain types.
+//! The four Issue-vocabulary enums (IssueKind, IssueStatus, ResourceRole,
+//! DependencyType) are consumed directly from `crate::domain` by the CLI
+//! argument structs; their clap value names, Display, FromStr, and serde
+//! attributes all live on the domain declarations. This module keeps only
+//! the two sorting enums and the batch operation result types.
+//!
+//! `SortOrderArg` has no domain twin at all; `SortPolicyArg` mirrors the
+//! domain `SortPolicy` variant-for-variant, but that domain type is not on
+//! the wire (no serde derives) and is not part of the ADR-0004 vocabulary
+//! scope, so the CLI-side value enum stays here until a domain twin earns
+//! serde/Display/FromStr of its own.
 
 use clap::ValueEnum;
 use serde::Serialize;
 
-use crate::domain::{DependencyType, Issue, IssueKind, IssueStatus, ResourceRole};
+use crate::domain::Issue;
 
 // ============================================================================
 // Batch Operation Results
@@ -74,111 +83,6 @@ pub struct BatchError {
 // Value Enums
 // ============================================================================
 
-/// Issue kind for CLI arguments
-#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IssueKindArg {
-    /// Bug fix
-    Bug,
-    /// New feature
-    Feature,
-    /// General task
-    Task,
-    /// Epic (parent issue)
-    Epic,
-    /// Maintenance/chore
-    Chore,
-}
-
-impl std::fmt::Display for IssueKindArg {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Bug => write!(f, "bug"),
-            Self::Feature => write!(f, "feature"),
-            Self::Task => write!(f, "task"),
-            Self::Epic => write!(f, "epic"),
-            Self::Chore => write!(f, "chore"),
-        }
-    }
-}
-
-/// Issue status for CLI arguments
-#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IssueStatusArg {
-    /// Open and ready to work on
-    Open,
-    /// Currently being worked on
-    #[value(name = "in_progress", alias = "in-progress")]
-    InProgress,
-    /// Blocked by dependencies
-    Blocked,
-    /// Completed
-    Closed,
-}
-
-impl std::fmt::Display for IssueStatusArg {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Open => write!(f, "open"),
-            Self::InProgress => write!(f, "in_progress"),
-            Self::Blocked => write!(f, "blocked"),
-            Self::Closed => write!(f, "closed"),
-        }
-    }
-}
-
-/// Associated Resource role for CLI arguments.
-#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResourceRoleArg {
-    /// Delivers work for the Issue.
-    Implementation,
-    /// Explains the Issue or its context.
-    Documentation,
-    /// Supports a finding or decision.
-    Evidence,
-    /// Identifies where the Issue continues.
-    Successor,
-    /// Generic external context.
-    Reference,
-}
-
-impl std::fmt::Display for ResourceRoleArg {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Implementation => write!(f, "implementation"),
-            Self::Documentation => write!(f, "documentation"),
-            Self::Evidence => write!(f, "evidence"),
-            Self::Successor => write!(f, "successor"),
-            Self::Reference => write!(f, "reference"),
-        }
-    }
-}
-
-/// Dependency type for CLI arguments
-#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DependencyTypeArg {
-    /// Hard blocker - prevents work
-    Blocks,
-    /// Soft link - informational
-    Related,
-    /// Hierarchical - epic to task
-    #[value(name = "parent-child")]
-    ParentChild,
-    /// Found during work
-    #[value(name = "discovered-from")]
-    DiscoveredFrom,
-}
-
-impl std::fmt::Display for DependencyTypeArg {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Blocks => write!(f, "blocks"),
-            Self::Related => write!(f, "related"),
-            Self::ParentChild => write!(f, "parent-child"),
-            Self::DiscoveredFrom => write!(f, "discovered-from"),
-        }
-    }
-}
-
 /// Sort order for list command
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SortOrderArg {
@@ -226,161 +130,12 @@ impl std::fmt::Display for SortPolicyArg {
     }
 }
 
-// ============================================================================
-// Domain Type Conversions
-// ============================================================================
-
-impl From<IssueKindArg> for IssueKind {
-    fn from(arg: IssueKindArg) -> Self {
-        match arg {
-            IssueKindArg::Bug => IssueKind::Bug,
-            IssueKindArg::Feature => IssueKind::Feature,
-            IssueKindArg::Task => IssueKind::Task,
-            IssueKindArg::Epic => IssueKind::Epic,
-            IssueKindArg::Chore => IssueKind::Chore,
-        }
-    }
-}
-
-impl From<IssueKind> for IssueKindArg {
-    fn from(t: IssueKind) -> Self {
-        match t {
-            IssueKind::Bug => IssueKindArg::Bug,
-            IssueKind::Feature => IssueKindArg::Feature,
-            IssueKind::Task => IssueKindArg::Task,
-            IssueKind::Epic => IssueKindArg::Epic,
-            IssueKind::Chore => IssueKindArg::Chore,
-        }
-    }
-}
-
-impl From<IssueStatusArg> for IssueStatus {
-    fn from(arg: IssueStatusArg) -> Self {
-        match arg {
-            IssueStatusArg::Open => IssueStatus::Open,
-            IssueStatusArg::InProgress => IssueStatus::InProgress,
-            IssueStatusArg::Blocked => IssueStatus::Blocked,
-            IssueStatusArg::Closed => IssueStatus::Closed,
-        }
-    }
-}
-
-impl From<IssueStatus> for IssueStatusArg {
-    fn from(s: IssueStatus) -> Self {
-        match s {
-            IssueStatus::Open => IssueStatusArg::Open,
-            IssueStatus::InProgress => IssueStatusArg::InProgress,
-            IssueStatus::Blocked => IssueStatusArg::Blocked,
-            IssueStatus::Closed => IssueStatusArg::Closed,
-        }
-    }
-}
-
-impl From<ResourceRoleArg> for ResourceRole {
-    fn from(arg: ResourceRoleArg) -> Self {
-        match arg {
-            ResourceRoleArg::Implementation => ResourceRole::Implementation,
-            ResourceRoleArg::Documentation => ResourceRole::Documentation,
-            ResourceRoleArg::Evidence => ResourceRole::Evidence,
-            ResourceRoleArg::Successor => ResourceRole::Successor,
-            ResourceRoleArg::Reference => ResourceRole::Reference,
-        }
-    }
-}
-
-impl From<DependencyTypeArg> for DependencyType {
-    fn from(arg: DependencyTypeArg) -> Self {
-        match arg {
-            DependencyTypeArg::Blocks => DependencyType::Blocks,
-            DependencyTypeArg::Related => DependencyType::Related,
-            DependencyTypeArg::ParentChild => DependencyType::ParentChild,
-            DependencyTypeArg::DiscoveredFrom => DependencyType::DiscoveredFrom,
-        }
-    }
-}
-
-impl From<DependencyType> for DependencyTypeArg {
-    fn from(d: DependencyType) -> Self {
-        match d {
-            DependencyType::Blocks => DependencyTypeArg::Blocks,
-            DependencyType::Related => DependencyTypeArg::Related,
-            DependencyType::ParentChild => DependencyTypeArg::ParentChild,
-            DependencyType::DiscoveredFrom => DependencyTypeArg::DiscoveredFrom,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_issue_kind_conversion() {
-        assert_eq!(IssueKind::from(IssueKindArg::Bug), IssueKind::Bug);
-        assert_eq!(IssueKind::from(IssueKindArg::Feature), IssueKind::Feature);
-        assert_eq!(IssueKind::from(IssueKindArg::Task), IssueKind::Task);
-        assert_eq!(IssueKind::from(IssueKindArg::Epic), IssueKind::Epic);
-        assert_eq!(IssueKind::from(IssueKindArg::Chore), IssueKind::Chore);
-
-        // Reverse conversion
-        assert_eq!(IssueKindArg::from(IssueKind::Bug), IssueKindArg::Bug);
-        assert_eq!(
-            IssueKindArg::from(IssueKind::Feature),
-            IssueKindArg::Feature
-        );
-    }
-
-    #[test]
-    fn test_issue_status_conversion() {
-        assert_eq!(IssueStatus::from(IssueStatusArg::Open), IssueStatus::Open);
-        assert_eq!(
-            IssueStatus::from(IssueStatusArg::InProgress),
-            IssueStatus::InProgress
-        );
-        assert_eq!(
-            IssueStatus::from(IssueStatusArg::Blocked),
-            IssueStatus::Blocked
-        );
-        assert_eq!(
-            IssueStatus::from(IssueStatusArg::Closed),
-            IssueStatus::Closed
-        );
-
-        // Reverse conversion
-        assert_eq!(
-            IssueStatusArg::from(IssueStatus::Open),
-            IssueStatusArg::Open
-        );
-    }
-
-    #[test]
-    fn test_dependency_type_conversion() {
-        assert_eq!(
-            DependencyType::from(DependencyTypeArg::Blocks),
-            DependencyType::Blocks
-        );
-        assert_eq!(
-            DependencyType::from(DependencyTypeArg::Related),
-            DependencyType::Related
-        );
-        assert_eq!(
-            DependencyType::from(DependencyTypeArg::ParentChild),
-            DependencyType::ParentChild
-        );
-        assert_eq!(
-            DependencyType::from(DependencyTypeArg::DiscoveredFrom),
-            DependencyType::DiscoveredFrom
-        );
-    }
-
-    #[test]
     fn test_display_implementations() {
-        assert_eq!(format!("{}", IssueKindArg::Bug), "bug");
-        assert_eq!(format!("{}", IssueStatusArg::InProgress), "in_progress");
-        assert_eq!(
-            format!("{}", DependencyTypeArg::ParentChild),
-            "parent-child"
-        );
         assert_eq!(format!("{}", SortOrderArg::Priority), "priority");
         assert_eq!(format!("{}", SortPolicyArg::Hybrid), "hybrid");
     }

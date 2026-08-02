@@ -10,8 +10,8 @@
 use rivets_mcp::context::Context;
 use rivets_mcp::error::Error;
 use rivets_mcp::models::{
-    CreateParams, IssueKindInput, ListParams, McpIssue, McpIssueKind, McpResourceTarget,
-    ReadyParams, UpdateParams,
+    CreateParams, IssueKindInput, ListParams, McpIssue, McpResourceTarget, ReadyParams,
+    UpdateParams,
 };
 use rivets_mcp::tools::Tools;
 use rstest::rstest;
@@ -20,14 +20,9 @@ use tempfile::TempDir;
 use tokio::sync::RwLock;
 
 fn kind_input(value: Option<&str>) -> IssueKindInput {
-    let issue_kind = value.map(|value| match value {
-        "bug" => McpIssueKind::Bug,
-        "feature" => McpIssueKind::Feature,
-        "task" => McpIssueKind::Task,
-        "epic" => McpIssueKind::Epic,
-        "chore" => McpIssueKind::Chore,
-        invalid => panic!("invalid test Issue Kind: {invalid}"),
-    });
+    // Parse through the domain FromStr so tests exercise the real
+    // vocabulary instead of a parallel arm table.
+    let issue_kind = value.map(|value| value.parse().expect("valid test Issue Kind"));
     IssueKindInput::canonical(issue_kind)
 }
 

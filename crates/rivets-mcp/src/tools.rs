@@ -19,8 +19,7 @@ use crate::context::Context;
 use crate::error::{Error, Result};
 use crate::models::{
     BlockedIssueResponse, CreateParams, ListParams, McpIssue, McpResource, ReadyParams,
-    ResourceUpdateParams, SetContextResponse, UpdateParams, WhereAmIResponse, dep_type_to_str,
-    parse_dep_type, parse_status,
+    ResourceUpdateParams, SetContextResponse, UpdateParams, WhereAmIResponse,
 };
 use rivets::domain::{
     DependencyType, IssueFilter, IssueId, IssueKind, IssueStatus, IssueUpdate, NewIssue,
@@ -41,10 +40,10 @@ const DEFAULT_QUERY_LIMIT: usize = 100;
 
 /// Parse and validate a status string.
 fn validate_status(status: &str) -> Result<IssueStatus> {
-    parse_status(status).ok_or_else(|| Error::InvalidArgument {
+    status.parse().map_err(|_| Error::InvalidArgument {
         field: "status",
         value: status.to_string(),
-        valid_values: "open, in_progress, blocked, closed",
+        valid_values: IssueStatus::valid_values(),
     })
 }
 
@@ -53,7 +52,7 @@ fn validate_resource_role(role: &str) -> Result<ResourceRole> {
     role.parse().map_err(|_| Error::InvalidArgument {
         field: "role",
         value: role.to_string(),
-        valid_values: "implementation, documentation, evidence, successor, reference",
+        valid_values: ResourceRole::valid_values(),
     })
 }
 
@@ -89,10 +88,10 @@ fn parse_resource_target(url: Option<String>, path: Option<String>) -> Result<Re
 
 /// Parse and validate a dependency type string.
 fn validate_dep_type(dep_type: &str) -> Result<DependencyType> {
-    parse_dep_type(dep_type).ok_or_else(|| Error::InvalidArgument {
+    dep_type.parse().map_err(|_| Error::InvalidArgument {
         field: "dep_type",
         value: dep_type.to_string(),
-        valid_values: "blocks, related, parent-child, discovered-from",
+        valid_values: DependencyType::valid_values(),
     })
 }
 
@@ -591,7 +590,7 @@ impl Tools {
         storage.add_dependency(&from, &to, dep_type).await?;
         save_or_reload(storage.as_mut()).await?;
 
-        let dep_type_str = dep_type_to_str(dep_type);
+        let dep_type_str = dep_type.to_string();
         debug!(dep_type = %dep_type_str, "Added dependency");
         Ok(format!(
             "Added dependency: {issue_id} depends on {depends_on_id} ({dep_type_str})"
@@ -779,17 +778,81 @@ mod tests {
     use std::path::PathBuf;
 
     fn kind_input(value: Option<&str>) -> crate::models::IssueKindInput {
-        use crate::models::McpIssueKind;
-
-        let issue_kind = value.map(|value| match value {
-            "bug" => McpIssueKind::Bug,
-            "feature" => McpIssueKind::Feature,
-            "task" => McpIssueKind::Task,
-            "epic" => McpIssueKind::Epic,
-            "chore" => McpIssueKind::Chore,
-            invalid => panic!("invalid test Issue Kind: {invalid}"),
-        });
+        // Parse through the domain FromStr so tests exercise the real
+        // vocabulary instead of a parallel arm table.
+        let issue_kind = value.map(|value| value.parse().expect("valid test Issue Kind"));
         crate::models::IssueKindInput::canonical(issue_kind)
+    }
+
+    #[rstest]
+    #[case::open("open", IssueStatus::Open)]
+    #[case::in_progress("in_progress", IssueStatus::InProgress)]
+    #[case::blocked("blocked", IssueStatus::Blocked)]
+    #[case::closed("closed", IssueStatus::Closed)]
+    fn validate_status_accepts_canonical(#[case] input: &str, #[case] expected: IssueStatus) {
+        assert_eq!(validate_status(input).expect("canonical status"), expected);
+    }
+
+    #[rstest]
+    #[case::uppercase("OPEN")]
+    #[case::cli_alias("in-progress")]
+    #[case::unknown("bogus")]
+    #[case::empty("")]
+    fn validate_status_rejects_lenient(#[case] lenient: &str) {
+        // The former lenient spellings (case-folded, in-progress alias) are
+        // rejected with the existing InvalidArgument shape.
+        let error = validate_status(lenient).expect_err("lenient status rejected");
+        match error {
+            Error::InvalidArgument {
+                field,
+                value,
+                valid_values,
+            } => {
+                assert_eq!(field, "status");
+                assert_eq!(value, lenient);
+                assert_eq!(valid_values, "open, in_progress, blocked, closed");
+            }
+            other => panic!("expected InvalidArgument, got: {other:?}"),
+        }
+    }
+
+    #[rstest]
+    #[case::blocks("blocks", DependencyType::Blocks)]
+    #[case::related("related", DependencyType::Related)]
+    #[case::parent_child("parent-child", DependencyType::ParentChild)]
+    #[case::discovered_from("discovered-from", DependencyType::DiscoveredFrom)]
+    fn validate_dep_type_accepts_canonical(#[case] input: &str, #[case] expected: DependencyType) {
+        assert_eq!(
+            validate_dep_type(input).expect("canonical dep type"),
+            expected
+        );
+    }
+
+    #[rstest]
+    #[case::uppercase("BLOCKS")]
+    #[case::underscore_parent("parent_child")]
+    #[case::underscore_discovered("discovered_from")]
+    #[case::unknown("bogus")]
+    #[case::empty("")]
+    fn validate_dep_type_rejects_lenient(#[case] lenient: &str) {
+        // The former lenient spellings (case-folded, underscore forms) are
+        // rejected with the existing InvalidArgument shape.
+        let error = validate_dep_type(lenient).expect_err("lenient dep type rejected");
+        match error {
+            Error::InvalidArgument {
+                field,
+                value,
+                valid_values,
+            } => {
+                assert_eq!(field, "dep_type");
+                assert_eq!(value, lenient);
+                assert_eq!(
+                    valid_values,
+                    "blocks, related, parent-child, discovered-from"
+                );
+            }
+            other => panic!("expected InvalidArgument, got: {other:?}"),
+        }
     }
 
     fn ready_params(

@@ -4,11 +4,13 @@
 //! information or an artifact. Resources form a mutable curated index with no
 //! effect on workflow or readiness. See ADR-0003 and `CONTEXT.md`.
 
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
+use std::sync::OnceLock;
 
-use super::find_control_char;
+use super::{find_control_char, join_canonical_names};
 
 /// Opaque, stable identifier of an Associated Resource within its Issue.
 ///
@@ -245,7 +247,9 @@ impl fmt::Display for ResourceTarget {
 }
 
 /// The reason an Associated Resource matters to its Issue.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ValueEnum,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceRole {
     /// Delivers work for the Issue (e.g., an implementation PR).
@@ -269,6 +273,18 @@ impl fmt::Display for ResourceRole {
             Self::Successor => write!(f, "successor"),
             Self::Reference => write!(f, "reference"),
         }
+    }
+}
+
+impl ResourceRole {
+    /// Comma-separated canonical role names, for error messages.
+    ///
+    /// Derived from the enum declaration rather than hand-written, so the
+    /// listed values cannot drift from the accepted vocabulary.
+    #[must_use]
+    pub fn valid_values() -> &'static str {
+        static VALUES: OnceLock<String> = OnceLock::new();
+        VALUES.get_or_init(join_canonical_names::<Self>)
     }
 }
 
@@ -774,6 +790,47 @@ mod tests {
             "provider".parse::<ResourceRole>(),
             Err(ResourceError::UnknownRole { .. })
         ));
+    }
+
+    #[test]
+    fn resource_role_cli_value_name_matches_display() {
+        for role in [
+            ResourceRole::Implementation,
+            ResourceRole::Documentation,
+            ResourceRole::Evidence,
+            ResourceRole::Successor,
+            ResourceRole::Reference,
+        ] {
+            let possible = role.to_possible_value().expect("possible value");
+            assert_eq!(possible.get_name(), role.to_string());
+        }
+    }
+
+    #[test]
+    fn resource_role_serde_matches_display() {
+        // Serde is the wire form of the same vocabulary: every variant's
+        // JSON string must equal its Display string in both directions.
+        for role in [
+            ResourceRole::Implementation,
+            ResourceRole::Documentation,
+            ResourceRole::Evidence,
+            ResourceRole::Successor,
+            ResourceRole::Reference,
+        ] {
+            let json = serde_json::to_string(&role).expect("role serializes");
+            assert_eq!(json, format!("\"{role}\""));
+            let parsed: ResourceRole = serde_json::from_str(&json).expect("role deserializes");
+            assert_eq!(parsed, role);
+        }
+    }
+
+    #[test]
+    fn resource_role_valid_values_lists_every_canonical_name() {
+        // Pins the derived error-message list to the shipped wording.
+        assert_eq!(
+            ResourceRole::valid_values(),
+            "implementation, documentation, evidence, successor, reference"
+        );
     }
 
     // ===== ResourceLabel =====

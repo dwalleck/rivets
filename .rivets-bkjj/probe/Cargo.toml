@@ -1,0 +1,14 @@
+[workspace]
+
+[package]
+name = "enum-vocab-probe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+rivets = { path = "../../crates/rivets" }
+rivets-mcp = { path = "../../crates/rivets-mcp" }
+clap = "4.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

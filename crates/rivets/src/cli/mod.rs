@@ -46,10 +46,7 @@ pub use args::{
 };
 
 // Re-export types
-pub use types::{
-    BatchError, BatchResult, DependencyTypeArg, IssueKindArg, IssueStatusArg, ResourceRoleArg,
-    SortOrderArg, SortPolicyArg,
-};
+pub use types::{BatchError, BatchResult, SortOrderArg, SortPolicyArg};
 
 // Re-export validators for external use
 pub use validators::{validate_description, validate_issue_id, validate_prefix, validate_title};
@@ -275,6 +272,7 @@ impl Cli {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{DependencyType, IssueKind, IssueStatus};
 
     // ========== CLI Parsing Tests ==========
 
@@ -369,7 +367,7 @@ mod tests {
             Some(Commands::Create(args)) => {
                 assert!(args.title.is_none());
                 assert_eq!(args.priority, 2); // default
-                assert_eq!(args.issue_kind, IssueKindArg::Task); // default
+                assert_eq!(args.issue_kind, IssueKind::Task); // default
             }
             _ => panic!("Expected Create command"),
         }
@@ -400,7 +398,7 @@ mod tests {
                 assert_eq!(args.title, Some("Fix bug".to_string()));
                 assert_eq!(args.description, Some("Detailed desc".to_string()));
                 assert_eq!(args.priority, 1);
-                assert_eq!(args.issue_kind, IssueKindArg::Bug);
+                assert_eq!(args.issue_kind, IssueKind::Bug);
                 assert_eq!(args.assignee, Some("alice".to_string()));
                 assert_eq!(args.labels, vec!["urgent", "backend"]);
             }
@@ -448,9 +446,9 @@ mod tests {
 
         match cli.command {
             Some(Commands::List(args)) => {
-                assert_eq!(args.status, Some(IssueStatusArg::Open));
+                assert_eq!(args.status, Some(IssueStatus::Open));
                 assert_eq!(args.priority, Some(1));
-                assert_eq!(args.issue_kind, Some(IssueKindArg::Bug));
+                assert_eq!(args.issue_kind, Some(IssueKind::Bug));
                 assert_eq!(args.assignee, Some("bob".to_string()));
                 assert_eq!(args.limit, 10);
             }
@@ -463,7 +461,7 @@ mod tests {
         let cli = Cli::try_parse_from(["rivets", "list", "--status", "in_progress"]).unwrap();
         match cli.command {
             Some(Commands::List(args)) => {
-                assert_eq!(args.status, Some(IssueStatusArg::InProgress));
+                assert_eq!(args.status, Some(IssueStatus::InProgress));
             }
             _ => panic!("Expected List command"),
         }
@@ -474,7 +472,7 @@ mod tests {
         let cli = Cli::try_parse_from(["rivets", "list", "--status", "in-progress"]).unwrap();
         match cli.command {
             Some(Commands::List(args)) => {
-                assert_eq!(args.status, Some(IssueStatusArg::InProgress));
+                assert_eq!(args.status, Some(IssueStatus::InProgress));
             }
             _ => panic!("Expected List command"),
         }
@@ -528,7 +526,7 @@ mod tests {
             Some(Commands::Update(args)) => {
                 assert_eq!(args.issue_ids, vec!["proj-abc"]);
                 assert_eq!(args.title, Some("New title".to_string()));
-                assert_eq!(args.status, Some(IssueStatusArg::InProgress));
+                assert_eq!(args.status, Some(IssueStatus::InProgress));
                 assert_eq!(args.priority, Some(0));
             }
             _ => panic!("Expected Update command"),
@@ -550,7 +548,7 @@ mod tests {
         match cli.command {
             Some(Commands::Update(args)) => {
                 assert_eq!(args.issue_ids, vec!["proj-abc", "proj-def"]);
-                assert_eq!(args.status, Some(IssueStatusArg::InProgress));
+                assert_eq!(args.status, Some(IssueStatus::InProgress));
             }
             _ => panic!("Expected Update command"),
         }
@@ -715,7 +713,7 @@ mod tests {
                 DepAction::Add { from, to, dep_type } => {
                     assert_eq!(from, "proj-abc");
                     assert_eq!(to, "proj-xyz");
-                    assert_eq!(dep_type, DependencyTypeArg::Blocks);
+                    assert_eq!(dep_type, DependencyType::Blocks);
                 }
                 _ => panic!("Expected Add action"),
             },
