@@ -20,7 +20,14 @@ use super::find_control_char;
 pub struct ResourceId(String);
 
 impl ResourceId {
-    pub(crate) fn new(id: impl Into<String>) -> Result<Self, ResourceError> {
+    /// Parse a non-empty, terminal-safe identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResourceError::EmptyResourceId`] when the value is empty
+    /// after trimming, or [`ResourceError::ResourceIdControlCharacter`] when
+    /// it contains a terminal-unsafe control character.
+    pub fn new(id: impl Into<String>) -> Result<Self, ResourceError> {
         let id = id.into();
         if id.trim().is_empty() {
             return Err(ResourceError::EmptyResourceId);
