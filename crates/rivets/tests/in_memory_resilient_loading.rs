@@ -12,7 +12,9 @@
 //! - Round-trip persistence through save and load
 
 use chrono::Utc;
-use rivets::domain::{DependencyType, IssueId, IssueKind, IssueStatus, NewIssue, ResourceRole};
+use rivets::domain::{
+    DependencyType, IssueId, IssueKind, IssueStatus, NewIssue, ResourceError, ResourceRole,
+};
 use rivets::storage::in_memory::{
     LoadWarning, MigrationField, load_from_jsonl, new_in_memory_storage, save_to_jsonl,
 };
@@ -143,6 +145,41 @@ mod load_warning_tests {
             }
             _ => panic!("Expected InvalidIssueData variant"),
         }
+    }
+
+    #[test]
+    fn load_warning_invalid_resource_data_contains_details() {
+        let warning = LoadWarning::InvalidResourceData {
+            issue_id: IssueId::new("test-resource"),
+            line_number: 8,
+            source: ResourceError::EmptyResourceId,
+        };
+
+        match warning {
+            LoadWarning::InvalidResourceData {
+                issue_id,
+                line_number,
+                source,
+            } => {
+                assert_eq!(issue_id.as_str(), "test-resource");
+                assert_eq!(line_number, 8);
+                assert!(matches!(source, ResourceError::EmptyResourceId));
+            }
+            _ => panic!("Expected InvalidResourceData variant"),
+        }
+    }
+
+    #[test]
+    fn load_warning_migration_conflict_display_names_both_fields() {
+        let warning = LoadWarning::MigrationConflict {
+            issue_id: IssueId::new("test-conflict"),
+            line_number: 4,
+            field: MigrationField::IssueKind,
+        };
+        assert_eq!(
+            warning.to_string(),
+            "line 4: Issue test-conflict has legacy field issue_type conflicting with canonical issue_kind"
+        );
     }
 
     #[test]
@@ -458,8 +495,9 @@ mod load_from_jsonl_tests {
                 LoadWarning::MalformedJson { .. } => has_malformed = true,
                 LoadWarning::OrphanedDependency { .. } => has_orphaned = true,
                 LoadWarning::InvalidIssueData { .. } => has_invalid = true,
-                LoadWarning::CircularDependency { .. } => {}
-                LoadWarning::MigrationConflict { .. } => {}
+                LoadWarning::CircularDependency { .. }
+                | LoadWarning::MigrationConflict { .. }
+                | LoadWarning::InvalidResourceData { .. } => {}
             }
         }
 
@@ -729,10 +767,10 @@ mod load_from_jsonl_tests {
             .expect("resilient load should report invalid resource ID");
         assert_eq!(warnings.len(), 1);
         match &warnings[0] {
-            LoadWarning::InvalidIssueData { error, .. } => {
-                assert!(error.contains("Resource identifier cannot be empty"));
+            LoadWarning::InvalidResourceData { source, .. } => {
+                assert!(matches!(source, ResourceError::EmptyResourceId));
             }
-            warning => panic!("expected InvalidIssueData warning, got {warning:?}"),
+            warning => panic!("expected InvalidResourceData warning, got {warning:?}"),
         }
         assert!(
             storage
@@ -753,10 +791,13 @@ mod load_from_jsonl_tests {
             .expect("resilient load should report unsafe resource ID");
         assert_eq!(warnings.len(), 1);
         match &warnings[0] {
-            LoadWarning::InvalidIssueData { error, .. } => {
-                assert!(error.contains("Resource identifier contains invalid control character"));
+            LoadWarning::InvalidResourceData { source, .. } => {
+                assert!(matches!(
+                    source,
+                    ResourceError::ResourceIdControlCharacter { .. }
+                ));
             }
-            warning => panic!("expected InvalidIssueData warning, got {warning:?}"),
+            warning => panic!("expected InvalidResourceData warning, got {warning:?}"),
         }
         assert!(
             storage

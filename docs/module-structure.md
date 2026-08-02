@@ -4,69 +4,85 @@
 
 ```
 rivets/
-├── Cargo.toml                 # Workspace definition
+├── Cargo.toml                     # Workspace definition
 ├── crates/
-│   ├── rivets-jsonl/         # General-purpose JSONL library
-│   │   ├── Cargo.toml
+│   ├── rivets-jsonl/              # General-purpose JSONL library
 │   │   ├── src/
-│   │   │   ├── lib.rs
-│   │   │   ├── reader.rs
-│   │   │   ├── writer.rs
-│   │   │   └── query.rs
+│   │   │   ├── lib.rs             # Public API
+│   │   │   ├── reader.rs          # JSONL reading operations
+│   │   │   ├── writer.rs          # JSONL writing operations
+│   │   │   ├── stream.rs          # Streaming operations
+│   │   │   ├── atomic.rs          # Atomic write operations
+│   │   │   ├── query.rs           # Query and filter operations
+│   │   │   ├── warning.rs         # Non-fatal warning types
+│   │   │   └── error.rs           # Error types
 │   │   └── tests/
-│   │       └── integration_tests.rs
+│   │       ├── resilient_loading.rs
+│   │       └── roundtrip.rs
 │   │
-│   └── rivets/               # Main CLI application
-│       ├── Cargo.toml
+│   ├── rivets/                    # Core issue tracker + CLI (bin + lib)
+│   │   ├── src/
+│   │   │   ├── main.rs            # CLI entry point
+│   │   │   ├── lib.rs             # Library root
+│   │   │   ├── app.rs             # Application context for command execution
+│   │   │   ├── config.rs          # Configuration management
+│   │   │   ├── error.rs           # Error types
+│   │   │   ├── id_generation.rs   # Hash-based ID generation
+│   │   │   ├── cli/
+│   │   │   │   ├── mod.rs         # Argument parsing and command dispatch
+│   │   │   │   ├── args.rs        # Argument structs for all commands
+│   │   │   │   ├── execute.rs     # Command execution logic
+│   │   │   │   ├── types.rs       # Value enums and domain type conversions
+│   │   │   │   └── validators.rs  # Input validation functions
+│   │   │   ├── commands/
+│   │   │   │   ├── mod.rs
+│   │   │   │   └── init.rs        # `rivets init` implementation
+│   │   │   ├── domain/
+│   │   │   │   ├── mod.rs         # Issue, Note, filters, and shared domain types
+│   │   │   │   └── resource.rs    # Associated Resource domain types
+│   │   │   ├── output/
+│   │   │   │   ├── mod.rs         # Output formatting for CLI commands
+│   │   │   │   ├── color.rs       # Color and styling helpers
+│   │   │   │   ├── json.rs        # JSON output formatting
+│   │   │   │   └── tree.rs        # Dependency tree rendering
+│   │   │   └── storage/
+│   │   │       ├── mod.rs         # IssueStorage trait, backends, factory, JSONL guard
+│   │   │       └── in_memory/
+│   │   │           ├── mod.rs     # In-memory backend (HashMap + petgraph)
+│   │   │           ├── inner.rs   # Core data structures
+│   │   │           ├── trait_impl.rs  # IssueStorage implementation
+│   │   │           ├── graph.rs   # Dependency graph operations
+│   │   │           ├── sorting.rs # Ready-work sort policies
+│   │   │           ├── issue_record.rs  # Persisted-record compatibility DTOs
+│   │   │           └── jsonl.rs   # JSONL load/save for the backend
+│   │   └── tests/
+│   │       ├── cli_tests.rs
+│   │       ├── init_integration.rs
+│   │       ├── in_memory_storage.rs
+│   │       ├── in_memory_resilient_loading.rs
+│   │       └── common/
+│   │
+│   └── rivets-mcp/                # MCP server (bin + lib)
 │       ├── src/
-│       │   ├── main.rs
-│       │   ├── lib.rs
-│       │   ├── cli.rs
-│       │   ├── app.rs
-│       │   ├── config.rs
-│       │   ├── error.rs
-│       │   ├── domain/
-│       │   │   ├── mod.rs
-│       │   │   ├── issue.rs
-│       │   │   ├── dependency.rs
-│       │   │   ├── filter.rs
-│       │   │   └── types.rs
-│       │   ├── storage/
-│       │   │   ├── mod.rs
-│       │   │   ├── trait.rs
-│       │   │   ├── memory.rs
-│       │   │   ├── postgres.rs      # Phase 3
-│       │   │   └── factory.rs
-│       │   ├── commands/
-│       │   │   ├── mod.rs
-│       │   │   ├── create.rs
-│       │   │   ├── list.rs
-│       │   │   ├── show.rs
-│       │   │   ├── update.rs
-│       │   │   ├── close.rs
-│       │   │   ├── delete.rs
-│       │   │   ├── init.rs
-│       │   │   └── ready.rs
-│       │   └── ids/
-│       │       ├── mod.rs
-│       │       ├── generator.rs
-│       │       └── validation.rs
+│       │   ├── main.rs            # Server entry point
+│       │   ├── lib.rs             # Library root
+│       │   ├── server.rs          # MCP server implementation
+│       │   ├── tools.rs           # MCP tool implementations
+│       │   ├── context.rs         # Workspace context management
+│       │   ├── models.rs          # MCP models
+│       │   └── error.rs           # Error types
 │       └── tests/
-│           ├── cli_tests.rs
-│           └── integration_tests.rs
+│           └── integration.rs
 │
-├── docs/
-│   ├── architecture.md
-│   ├── storage-architecture.md
-│   ├── module-structure.md      # This file
-│   ├── data-flow.md
-│   └── terminology.md
+├── docs/                          # Architecture, design, and agent docs
 │
-└── .rivets/                      # User workspace (created by init)
+└── .rivets/                       # User workspace (created by init)
     ├── issues.jsonl
-    ├── config.yaml
-    └── .gitignore
+    └── config.yaml
 ```
+
+> **Tethys** (code intelligence engine) has moved to its own repository and is
+> no longer part of this workspace.
 
 ## Crate: rivets-jsonl
 
@@ -76,54 +92,35 @@ rivets/
 graph TD
     subgraph "rivets-jsonl crate"
         Lib[lib.rs<br/>Public API]
-        Reader[reader.rs<br/>Streaming reads]
-        Writer[writer.rs<br/>Atomic writes]
+        Reader[reader.rs<br/>Reads]
+        Writer[writer.rs<br/>Writes]
+        Stream[stream.rs<br/>Streaming]
+        Atomic[atomic.rs<br/>Atomic writes]
         Query[query.rs<br/>Filtering]
+        Warning[warning.rs<br/>Non-fatal warnings]
 
         Lib --> Reader
         Lib --> Writer
+        Lib --> Stream
+        Lib --> Atomic
         Lib --> Query
+        Lib --> Warning
     end
 
     External[External users] -.can use.-> Lib
     Rivets[rivets crate] --> Lib
 ```
 
-### Public API (rivets-jsonl/src/lib.rs)
-
-```rust
-pub struct JsonlReader<R: AsyncBufRead> {
-    reader: BufReader<R>,
-}
-
-impl<R: AsyncBufRead> JsonlReader<R> {
-    pub fn new(reader: R) -> Self;
-    pub async fn read_line<T: DeserializeOwned>(&mut self) -> Result<Option<T>>;
-    pub fn stream<T: DeserializeOwned>(self) -> impl Stream<Item = Result<T>>;
-}
-
-pub struct JsonlWriter<W: AsyncWrite> {
-    writer: BufWriter<W>,
-}
-
-impl<W: AsyncWrite> JsonlWriter<W> {
-    pub fn new(writer: W) -> Self;
-    pub async fn write<T: Serialize>(&mut self, value: &T) -> Result<()>;
-    pub async fn flush(&mut self) -> Result<()>;
-}
-
-// Atomic file operations
-pub async fn atomic_write<T: Serialize>(
-    path: &Path,
-    items: impl Iterator<Item = &T>
-) -> Result<()>;
-```
+The resilient entry point used by the rivets storage layer is
+`read_jsonl_resilient_with_line_numbers`, which returns successfully parsed
+records alongside `Warning` values (from `warning.rs`) for lines it skipped.
 
 ### Design Goals
+
 - **Generic**: Works with any serde-compatible type
 - **Async**: Non-blocking I/O with tokio
 - **Streaming**: Memory-efficient for large files
-- **Atomic**: Safe concurrent access via temp files
+- **Atomic**: Safe writes via temp-file-then-rename
 - **Standalone**: No rivets-specific dependencies
 
 ## Crate: rivets (Main Application)
@@ -132,23 +129,21 @@ pub async fn atomic_write<T: Serialize>(
 
 ```mermaid
 graph TD
-    Main[main.rs] --> App[app.rs]
-    Main --> CLI[cli.rs]
+    Main[main.rs] --> CLI[cli/]
+
+    CLI --> App[app.rs]
+    CLI --> Commands[commands/]
+    CLI --> Output[output/]
 
     App --> Config[config.rs]
-    App --> Storage[storage/*]
-    App --> Commands[commands/*]
+    App --> Storage[storage/]
 
-    CLI --> Commands
-
-    Commands --> Domain[domain/*]
-    Commands --> Storage
+    Commands --> Config
+    Output --> Domain[domain/]
 
     Storage --> Domain
-    Storage --> IDs[ids/*]
+    Storage --> IDs[id_generation.rs]
     Storage --> JSONL[rivets-jsonl]
-
-    Domain --> IDs
 
     style Main fill:#FFE4B5
     style App fill:#ADD8E6
@@ -156,206 +151,49 @@ graph TD
     style Domain fill:#FFB6C1
 ```
 
-## Module: main.rs
+### main.rs
 
-**Responsibility**: CLI entry point and async runtime setup
+CLI entry point. Initializes the `tracing` subscriber (controlled via
+`RUST_LOG`), parses arguments with `Cli::parse_args()`, and dispatches through
+`cli.execute()` on a current-thread tokio runtime.
 
-```rust
-use clap::Parser;
-use rivets::{cli::Cli, app::App, config::Config};
+### cli/
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> anyhow::Result<()> {
-    // Parse command-line arguments
-    let cli = Cli::parse();
+Argument parsing and command dispatch, split by responsibility:
 
-    // Load configuration
-    let config = Config::load().await?;
+- `args.rs` — clap argument structs for every subcommand
+- `execute.rs` — command execution logic (create, list, show, update, close, dependencies, labels, resources, …)
+- `types.rs` — CLI value enums and conversions into domain types
+- `validators.rs` — input validation functions
 
-    // Create application
-    let mut app = App::new(config).await?;
+### app.rs
 
-    // Execute command
-    if let Some(command) = cli.command {
-        command.execute(&mut app).await?;
-    } else {
-        // No command: show default (ready work or help)
-        println!("Run 'rivets --help' for usage");
-    }
+Application context for CLI command execution: locates the workspace, loads
+configuration, and constructs the storage backend commands operate on.
 
-    Ok(())
-}
-```
+### commands/
 
-## Module: cli.rs
+Command implementations that do not go through storage-backed dispatch.
+Currently holds `init.rs` (workspace creation).
 
-**Responsibility**: Argument parsing and validation
-
-```rust
-use clap::{Parser, Subcommand, ValueEnum};
-
-#[derive(Parser)]
-#[command(name = "rivets", version, about)]
-pub struct Cli {
-    #[arg(long, global = true)]
-    pub json: bool,
-
-    #[command(subcommand)]
-    pub command: Option<Commands>,
-}
-
-#[derive(Subcommand)]
-pub enum Commands {
-    Init(init::Args),
-    Create(create::Args),
-    List(list::Args),
-    Show(show::Args),
-    Update(update::Args),
-    Close(close::Args),
-    Delete(delete::Args),
-    Ready(ready::Args),
-}
-
-impl Commands {
-    pub async fn execute(&self, app: &mut App) -> Result<()> {
-        match self {
-            Self::Init(args) => init::execute(args, app).await,
-            Self::Create(args) => create::execute(args, app).await,
-            // ... other commands
-        }
-    }
-}
-```
-
-## Module: app.rs
-
-**Responsibility**: Application state and lifecycle
-
-```rust
-use crate::{config::Config, storage::IssueStorage};
-
-pub struct App {
-    storage: Box<dyn IssueStorage>,
-    config: Config,
-}
-
-impl App {
-    pub async fn new(config: Config) -> Result<Self> {
-        let storage = storage::create_storage(&config.storage).await?;
-        Ok(Self { storage, config })
-    }
-
-    pub fn storage(&mut self) -> &mut dyn IssueStorage {
-        &mut *self.storage
-    }
-
-    pub fn config(&self) -> &Config {
-        &self.config
-    }
-}
-```
-
-## Module: domain/
+### domain/
 
 **Responsibility**: Core business types and logic
 
 ```mermaid
 graph TD
-    ModRS[domain/mod.rs<br/>Public exports] --> Issue[issue.rs<br/>Issue, NewIssue, IssueUpdate]
-    ModRS --> Dep[dependency.rs<br/>Dependency, DependencyType]
-    ModRS --> Filter[filter.rs<br/>IssueFilter, builder]
-    ModRS --> Types[types.rs<br/>IssueId, Status, Priority, IssueType]
-
-    Issue --> Types
-    Dep --> Types
-    Filter --> Types
+    ModRS[domain/mod.rs<br/>Issue, Note, filters, shared types] --> Resource[resource.rs<br/>AssociatedResource, targets, roles, identifiers]
 
     style ModRS fill:#ADD8E6
-    style Issue fill:#90EE90
-    style Dep fill:#90EE90
-    style Filter fill:#90EE90
-    style Types fill:#90EE90
+    style Resource fill:#90EE90
 ```
 
-### domain/types.rs
+#### domain/mod.rs
+
+Central domain types: `IssueId`, `IssueStatus`, `IssueKind`, `Dependency`,
+`DependencyType`, `IssueFilter`, Notes, and the Issue aggregate:
 
 ```rust
-use serde::{Deserialize, Serialize};
-use std::fmt;
-
-// Newtype for type safety
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct IssueId(String);
-
-impl IssueId {
-    pub fn new(s: impl Into<String>) -> Self {
-        Self(s.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for IssueId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Status {
-    Open,
-    InProgress,
-    Blocked,
-    Closed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Priority(u8);  // 0-4
-
-impl Priority {
-    pub fn new(p: u8) -> Result<Self> {
-        if p <= 4 {
-            Ok(Self(p))
-        } else {
-            Err(Error::InvalidPriority(p))
-        }
-    }
-
-    pub fn value(&self) -> u8 {
-        self.0
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum IssueType {
-    Bug,
-    Feature,
-    Task,
-    Epic,
-    Chore,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum DependencyType {
-    Blocks,
-    Related,
-    ParentChild,
-    DiscoveredFrom,
-}
-```
-
-### domain/issue.rs
-
-```rust
-use chrono::{DateTime, Utc};
-use serde::Serialize;
-use super::{Dependency, DependencyType, IssueId, IssueKind, IssueStatus};
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Note {
     content: String,
@@ -378,7 +216,9 @@ pub struct Issue {
     pub design: Option<String>,
     pub acceptance_criteria: Option<String>,
     pub(crate) notes: Vec<Note>,
-    pub external_ref: Option<String>,
+    pub(crate) resources: Vec<AssociatedResource>,
+    #[serde(skip)]
+    pub(crate) next_resource_id: u64,
     pub dependencies: Vec<Dependency>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -396,7 +236,6 @@ pub struct NewIssue {
     pub design: Option<String>,
     pub acceptance_criteria: Option<String>,
     pub initial_note: Option<NoteContent>,
-    pub external_ref: Option<String>,
     pub dependencies: Vec<(IssueId, DependencyType)>,
 }
 
@@ -411,7 +250,6 @@ pub struct IssueUpdate {
     pub design: Option<String>,
     pub acceptance_criteria: Option<String>,
     pub note: Option<NoteContent>,
-    pub external_ref: Option<String>,
     pub labels: Option<Vec<String>>,
 }
 ```
@@ -420,391 +258,127 @@ pub struct IssueUpdate {
 uses the compatibility `IssueRecord` DTO in `storage/in_memory/issue_record.rs`,
 then converts validated records into the domain model.
 
-### domain/filter.rs
+#### domain/resource.rs
 
-```rust
-use super::{Status, Priority, IssueType, IssueId};
-use chrono::{DateTime, Utc};
+Associated Resource types: `AssociatedResource`, `NewResource`,
+`ResourceTarget`/`WebUrl`, `ResourceRole`, `ResourceId`, `ResourceLabel`, and
+the typed `ResourceError` enum covering every resource invariant violation.
 
-#[derive(Debug, Clone, Default)]
-pub struct IssueFilter {
-    pub ids: Option<Vec<IssueId>>,
-    pub status: Option<Vec<Status>>,
-    pub priority_min: Option<Priority>,
-    pub priority_max: Option<Priority>,
-    pub issue_type: Option<Vec<IssueType>>,
-    pub assignee: Option<String>,
-    pub labels_all: Option<Vec<String>>,   // AND
-    pub labels_any: Option<Vec<String>>,   // OR
-    pub created_after: Option<DateTime<Utc>>,
-    pub created_before: Option<DateTime<Utc>>,
-    pub title_contains: Option<String>,
-    pub limit: Option<usize>,
-}
-
-impl IssueFilter {
-    pub fn builder() -> IssueFilterBuilder {
-        IssueFilterBuilder::default()
-    }
-}
-
-#[derive(Default)]
-pub struct IssueFilterBuilder {
-    filter: IssueFilter,
-}
-
-impl IssueFilterBuilder {
-    pub fn status(mut self, status: Vec<Status>) -> Self {
-        self.filter.status = Some(status);
-        self
-    }
-
-    pub fn priority_range(mut self, min: u8, max: u8) -> Result<Self> {
-        self.filter.priority_min = Some(Priority::new(min)?);
-        self.filter.priority_max = Some(Priority::new(max)?);
-        Ok(self)
-    }
-
-    // ... more builder methods
-
-    pub fn build(self) -> IssueFilter {
-        self.filter
-    }
-}
-```
-
-## Module: storage/
+### storage/
 
 **Responsibility**: Storage abstraction and implementations
 
 ```mermaid
 graph TD
-    ModRS[storage/mod.rs] --> Trait[trait.rs<br/>IssueStorage trait]
-    ModRS --> Memory[memory.rs<br/>InMemoryStorage]
-    ModRS --> Postgres[postgres.rs<br/>PostgresStorage]
-    ModRS --> Factory[factory.rs<br/>create_storage]
+    ModRS[storage/mod.rs<br/>IssueStorage trait, StorageBackend,<br/>create_storage, JsonlBackedStorage] --> InMem[in_memory/<br/>InMemoryStorage backend]
 
-    Memory --> Trait
-    Postgres --> Trait
-    Factory --> Memory
-    Factory --> Postgres
+    InMem --> Inner[inner.rs<br/>HashMap + petgraph state]
+    InMem --> TraitImpl[trait_impl.rs<br/>IssueStorage impl]
+    InMem --> Graph[graph.rs<br/>cycle detection]
+    InMem --> Sorting[sorting.rs<br/>ready-work ordering]
+    InMem --> Record[issue_record.rs<br/>persistence DTOs + migration]
+    InMem --> Jsonl[jsonl.rs<br/>load_from_jsonl / save_to_jsonl]
 
-    style Trait fill:#ADD8E6
-    style Memory fill:#90EE90
-    style Postgres fill:#FFE4B5
+    style ModRS fill:#ADD8E6
+    style InMem fill:#90EE90
 ```
 
-### storage/trait.rs
+#### storage/mod.rs
 
-```rust
-use async_trait::async_trait;
-use crate::domain::*;
+Defines the `IssueStorage` trait (CRUD, dependencies, labels, resources,
+queries, import/export, `save`, `reload`), the `StorageBackend` enum
+(`InMemory`, `Jsonl(PathBuf)`, `PostgreSQL` placeholder), and the
+`create_storage` factory.
 
-#[async_trait]
-pub trait IssueStorage: Send + Sync {
-    // CRUD
-    async fn create(&mut self, issue: NewIssue) -> Result<Issue>;
-    async fn get(&self, id: &IssueId) -> Result<Option<Issue>>;
-    async fn update(&mut self, id: &IssueId, updates: IssueUpdate) -> Result<Issue>;
-    async fn delete(&mut self, id: &IssueId) -> Result<()>;
+It also contains `JsonlBackedStorage`, a wrapper that adds guarded file
+persistence to the in-memory backend: after a resilient partial load, reads
+remain available but every mutation and save fails with
+`StorageError::UnsafePartialLoad` (a typed `PartialLoadError` carrying one
+`SkippedIssueRecordCause` per omitted record) until the file is repaired.
 
-    // Dependencies
-    async fn add_dependency(
-        &mut self,
-        from: &IssueId,
-        to: &IssueId,
-        dep_type: DependencyType
-    ) -> Result<()>;
-    async fn remove_dependency(&mut self, from: &IssueId, to: &IssueId) -> Result<()>;
-    async fn get_dependencies(&self, id: &IssueId) -> Result<Vec<Dependency>>;
-    async fn get_dependents(&self, id: &IssueId) -> Result<Vec<Dependency>>;
-    async fn has_cycle(&self, from: &IssueId, to: &IssueId) -> Result<bool>;
+#### storage/in_memory/
 
-    // Queries
-    async fn list(&self, filter: &IssueFilter) -> Result<Vec<Issue>>;
-    async fn ready_to_work(&self, filter: Option<&IssueFilter>) -> Result<Vec<Issue>>;
-    async fn blocked_issues(&self) -> Result<Vec<(Issue, Vec<Issue>)>>;
+The only fully implemented backend. `inner.rs` holds issues in a `HashMap`
+with a petgraph dependency graph; `issue_record.rs` is the compatibility
+boundary that decodes persisted records, applies legacy migrations
+(`issue_type` → `issue_kind`, `external_ref` → resource or migration Note),
+and revalidates before anything reaches the domain; `jsonl.rs` performs
+resilient loads (returning `LoadWarning`s) and atomic saves.
 
-    // Persistence
-    async fn save(&self) -> Result<()>;
-}
-```
+### output/
 
-### storage/memory.rs
+CLI output formatting: human-readable rendering with color support
+(`color.rs`), machine-readable JSON (`json.rs`), and dependency tree rendering
+(`tree.rs`).
 
-```rust
-use petgraph::graph::{DiGraph, NodeIndex};
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::Mutex;
+### id_generation.rs
 
-pub struct InMemoryStorageInner {
-    issues: HashMap<IssueId, Issue>,
-    graph: DiGraph<IssueId, DependencyType>,
-    node_map: HashMap<IssueId, NodeIndex>,
-    config: InMemoryConfig,
-}
+Hash-based ID generation: SHA-256 over issue content, base36-encoded with an
+adaptive length and nonce-based collision retry, registered against all loaded
+IDs to prevent collisions.
 
-pub type InMemoryStorage = Arc<Mutex<InMemoryStorageInner>>;
+## Crate: rivets-mcp
 
-impl InMemoryStorageInner {
-    pub fn new() -> Self {
-        Self {
-            issues: HashMap::new(),
-            graph: DiGraph::new(),
-            node_map: HashMap::new(),
-            config: InMemoryConfig::default(),
-        }
-    }
-}
+**Purpose**: MCP server exposing rivets issue tracking to AI assistants.
 
-#[async_trait]
-impl IssueStorage for InMemoryStorage {
-    async fn create(&mut self, new: NewIssue) -> Result<Issue> {
-        let mut inner = self.lock().await;
-        // Implementation...
-    }
-
-    // ... other trait methods
-}
-
-impl InMemoryStorage {
-    pub async fn load_from_jsonl(path: &Path) -> Result<(Self, Vec<LoadWarning>)> {
-        // Two-pass loading with error recovery
-    }
-
-    pub async fn save_to_jsonl(&self, path: &Path) -> Result<()> {
-        // Atomic write via temp file
-    }
-}
-```
-
-## Module: commands/
-
-**Responsibility**: CLI command implementations
-
-```mermaid
-graph LR
-    ModRS[commands/mod.rs] --> Create[create.rs]
-    ModRS --> List[list.rs]
-    ModRS --> Show[show.rs]
-    ModRS --> Update[update.rs]
-    ModRS --> Close[close.rs]
-    ModRS --> Delete[delete.rs]
-    ModRS --> Init[init.rs]
-    ModRS --> Ready[ready.rs]
-
-    style Create fill:#90EE90
-    style List fill:#90EE90
-    style Show fill:#90EE90
-```
-
-### Command Structure Pattern
-
-Each command module follows this pattern:
-
-```rust
-// commands/create.rs
-
-use clap::Parser;
-use crate::{app::App, domain::*};
-
-#[derive(Parser)]
-pub struct Args {
-    #[arg(short, long)]
-    pub title: Option<String>,
-
-    #[arg(short, long)]
-    pub description: Option<String>,
-
-    #[arg(short, long, value_parser = clap::value_parser!(u8).range(0..=4))]
-    pub priority: Option<u8>,
-
-    // ... more fields
-}
-
-pub async fn execute(args: &Args, app: &mut App) -> Result<()> {
-    // 1. Gather input (interactive if needed)
-    let title = args.title.clone()
-        .or_else(|| prompt_string("Title"));
-
-    // 2. Build domain object
-    let new_issue = NewIssue {
-        title,
-        description: args.description.clone().unwrap_or_default(),
-        priority: Priority::new(args.priority.unwrap_or(2))?,
-        // ...
-    };
-
-    // 3. Execute via storage
-    let issue = app.storage().create(new_issue).await?;
-
-    // 4. Auto-save
-    app.storage().save().await?;
-
-    // 5. Display result
-    println!("Created: {}", issue.id);
-
-    Ok(())
-}
-
-fn prompt_string(label: &str) -> String {
-    // Interactive prompt implementation
-}
-```
-
-## Module: ids/
-
-**Responsibility**: Hash-based ID generation and validation
-
-```mermaid
-graph LR
-    ModRS[ids/mod.rs] --> Gen[generator.rs<br/>hash generation]
-    ModRS --> Val[validation.rs<br/>format checking]
-
-    Gen --> Hasher[SHA256]
-    Gen --> Base36[Base36 encoding]
-
-    style Gen fill:#90EE90
-    style Val fill:#90EE90
-```
-
-### ids/generator.rs
-
-```rust
-use sha2::{Sha256, Digest};
-use crate::domain::IssueId;
-
-pub struct IdGenerator {
-    prefix: String,
-    issue_count: usize,
-}
-
-impl IdGenerator {
-    pub fn new(prefix: String) -> Self {
-        Self { prefix, issue_count: 0 }
-    }
-
-    pub fn generate(&self, new_issue: &NewIssue) -> IssueId {
-        let length = self.adaptive_length();
-
-        for nonce in 0..100 {
-            let hash = self.hash_content(new_issue, nonce);
-            let encoded = base36_encode(&hash, length);
-            let id = format!("{}-{}", self.prefix, encoded);
-
-            if !self.exists(&id) {
-                return IssueId::new(id);
-            }
-        }
-
-        // All nonces collided, increase length
-        self.generate_with_length(new_issue, length + 1)
-    }
-
-    fn adaptive_length(&self) -> usize {
-        match self.issue_count {
-            0..=500 => 4,
-            501..=1500 => 5,
-            _ => 6,
-        }
-    }
-
-    fn hash_content(&self, issue: &NewIssue, nonce: u32) -> Vec<u8> {
-        let mut hasher = Sha256::new();
-        hasher.update(issue.title.as_bytes());
-        hasher.update(issue.description.as_bytes());
-        hasher.update(&nonce.to_le_bytes());
-        hasher.finalize().to_vec()
-    }
-}
-
-fn base36_encode(bytes: &[u8], length: usize) -> String {
-    const CHARSET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
-    // Base36 encoding implementation
-}
-```
+| Module | Responsibility |
+|--------|----------------|
+| `server.rs` | MCP server implementation and protocol wiring |
+| `tools.rs` | MCP tool implementations (create, list, show, update, …) |
+| `context.rs` | Workspace context management |
+| `models.rs` | MCP request/response models |
+| `error.rs` | MCP error types; classifies storage errors via `StorageError::try_into_resource_error` |
 
 ## Testing Structure
 
 ```
-tests/
-├── cli_tests.rs              # CLI argument parsing tests
-├── integration_tests.rs      # End-to-end tests
-├── storage_tests.rs          # Storage backend tests
-└── fixtures/
-    ├── sample.jsonl
-    ├── corrupted.jsonl
-    └── circular-deps.jsonl
+crates/rivets/tests/
+├── cli_tests.rs                    # End-to-end CLI tests
+├── init_integration.rs             # `rivets init` integration tests
+├── in_memory_storage.rs            # Storage backend behavior
+├── in_memory_resilient_loading.rs  # Corrupted-file loading and warnings
+└── common/                         # Shared test helpers
+
+crates/rivets-jsonl/tests/
+├── resilient_loading.rs
+└── roundtrip.rs
+
+crates/rivets-mcp/tests/
+└── integration.rs
 ```
 
-### Integration Test Example
-
-```rust
-// tests/integration_tests.rs
-
-#[tokio::test]
-async fn test_create_list_workflow() {
-    let temp = TempDir::new().unwrap();
-    let config = Config {
-        storage: StorageConfig {
-            backend: StorageBackend::InMemory,
-            data_file: Some(temp.path().join("issues.jsonl")),
-        },
-        // ...
-    };
-
-    let mut app = App::new(config).await.unwrap();
-
-    // Create issue
-    let issue = app.storage().create(NewIssue {
-        title: "Test issue".into(),
-        // ...
-    }).await.unwrap();
-
-    // List issues
-    let issues = app.storage().list(&IssueFilter::default()).await.unwrap();
-    assert_eq!(issues.len(), 1);
-    assert_eq!(issues[0].id, issue.id);
-
-    // Verify persisted
-    app.storage().save().await.unwrap();
-    let (loaded, warnings) = InMemoryStorage::load_from_jsonl(
-        &temp.path().join("issues.jsonl")
-    ).await.unwrap();
-    assert!(warnings.is_empty());
-}
-```
+Unit tests live in `#[cfg(test)]` modules next to the code they cover.
 
 ## Import Relationships
 
 ```mermaid
 graph TD
     Main[main.rs] --> CLI[cli]
-    Main --> App[app]
-    Main --> Config[config]
 
+    CLI --> App[app]
     CLI --> Commands[commands]
+    CLI --> Output[output]
 
+    App --> Config[config]
     App --> Storage[storage]
-    App --> Config
 
-    Commands --> App
-    Commands --> Domain[domain]
-    Commands --> Storage
+    Output --> Domain[domain]
 
     Storage --> Domain
-    Storage --> IDs[ids]
+    Storage --> IDs[id_generation]
     Storage --> JSONL[rivets-jsonl]
 
-    Domain --> IDs
+    MCP[rivets-mcp] --> Storage
+    MCP --> Domain
 
     style Main fill:#FFE4B5
     style JSONL fill:#ADD8E6
+    style MCP fill:#D8BFD8
 ```
 
 **Key Design Principles**:
+
 - **No circular dependencies**: Module graph is a DAG
 - **Domain at core**: No dependencies on other modules
-- **Storage abstraction**: Commands use trait, not concrete types
+- **Storage abstraction**: Commands use the `IssueStorage` trait, not concrete types
 - **External library**: rivets-jsonl is standalone and reusable

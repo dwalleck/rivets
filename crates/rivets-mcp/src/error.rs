@@ -1,6 +1,6 @@
 //! Error types for the rivets MCP server.
 
-use rivets::error::{Error as RivetsError, StorageError};
+use rivets::error::Error as RivetsError;
 use thiserror::Error;
 
 /// Errors that can occur in the rivets MCP server.
@@ -82,10 +82,12 @@ impl From<RivetsError> for Error {
     fn from(error: RivetsError) -> Self {
         match error {
             RivetsError::IssueNotFound(issue_id) => Self::IssueNotFound(issue_id.to_string()),
-            RivetsError::Storage(StorageError::Resource(source)) => Self::InvalidResource(source),
+            RivetsError::Storage(storage_error) => match storage_error.try_into_resource_error() {
+                Ok(source) => Self::InvalidResource(source),
+                Err(storage_error) => Self::Storage(RivetsError::Storage(storage_error)),
+            },
             error @ (RivetsError::Io(_)
             | RivetsError::Config(_)
-            | RivetsError::Storage(_)
             | RivetsError::Validation { .. }
             | RivetsError::HasDependents { .. }
             | RivetsError::CircularDependency { .. }
@@ -102,6 +104,7 @@ impl From<RivetsError> for Error {
 mod tests {
     use super::*;
     use rivets::domain::{IssueId, ResourceError};
+    use rivets::error::StorageError;
 
     #[test]
     fn core_issue_not_found_maps_to_mcp_issue_not_found() {
@@ -120,6 +123,18 @@ mod tests {
         assert!(matches!(
             error,
             Error::InvalidResource(ResourceError::EmptyLabel)
+        ));
+    }
+
+    #[test]
+    fn non_resource_storage_error_remains_a_storage_error() {
+        let error = Error::from(RivetsError::Storage(StorageError::InvalidFormat(
+            "bad record".to_string(),
+        )));
+        assert!(matches!(
+            error,
+            Error::Storage(RivetsError::Storage(StorageError::InvalidFormat(message)))
+                if message == "bad record"
         ));
     }
 }

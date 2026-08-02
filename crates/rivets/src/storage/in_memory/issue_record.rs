@@ -2,8 +2,8 @@
 
 use crate::domain::{
     AssociatedResource, Dependency, Issue, IssueId, IssueKind, IssueStatus, NewResource, Note,
-    NoteContent, NoteError, ResourceId, ResourceLabel, ResourceRole, ResourceTarget, WebUrl,
-    is_unsafe_multiline_control,
+    NoteContent, NoteError, ResourceError, ResourceId, ResourceLabel, ResourceRole, ResourceTarget,
+    WebUrl, is_unsafe_multiline_control,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -31,13 +31,45 @@ impl MigrationField {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub(super) enum IssueRecordError {
+    #[error("invalid data for Issue '{issue_id}': {error}")]
     InvalidData {
         issue_id: IssueId,
         error: String,
         migration_conflict: Option<MigrationField>,
     },
+    #[error("invalid Associated Resource for Issue '{issue_id}': {source}")]
+    InvalidResource {
+        issue_id: IssueId,
+        #[source]
+        source: ResourceError,
+        migration_conflict: Option<MigrationField>,
+    },
+}
+
+fn invalid_resource_error(
+    issue_id: &IssueId,
+    migration_conflict: Option<MigrationField>,
+    source: ResourceError,
+) -> IssueRecordError {
+    IssueRecordError::InvalidResource {
+        issue_id: issue_id.clone(),
+        source,
+        migration_conflict,
+    }
+}
+
+fn invalid_data_error(
+    issue_id: &IssueId,
+    migration_conflict: Option<MigrationField>,
+    error: impl ToString,
+) -> IssueRecordError {
+    IssueRecordError::InvalidData {
+        issue_id: issue_id.clone(),
+        error: error.to_string(),
+        migration_conflict,
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -153,6 +185,55 @@ fn migrated_external_ref_note_text(external_ref: &str) -> String {
     content
 }
 
+/// Classifies a legacy `external_ref` as a migratable Web URL or opaque text.
+///
+/// The error arms are enumerated exhaustively on purpose: adding a
+/// [`ResourceError`] variant must force an explicit decision about whether it
+/// means "not a URL, keep as a Note" or "corrupt data, skip the Issue loudly".
+fn legacy_external_ref_url(external_ref: &str) -> Result<Option<WebUrl>, ResourceError> {
+    match WebUrl::new(external_ref) {
+        Ok(url) => Ok(Some(url)),
+        Err(
+            ResourceError::MalformedWebUrl { .. }
+            | ResourceError::MissingWebUrlAuthority { .. }
+            | ResourceError::UnsupportedWebUrlScheme { .. },
+        ) => Ok(None),
+        Err(
+            error @ (ResourceError::UnknownRole { .. }
+            | ResourceError::EmptyLabel
+            | ResourceError::LabelControlCharacter { .. }
+            | ResourceError::DuplicateTargetRole { .. }
+            | ResourceError::ResourceIdControlCharacter { .. }
+            | ResourceError::DuplicateResourceId { .. }
+            | ResourceError::IdSequenceExhausted
+            | ResourceError::EmptyResourceId),
+        ) => Err(error),
+    }
+}
+
+/// Attaches a migrated resource, tolerating only an already-migrated duplicate.
+///
+/// Exhaustive for the same reason as [`legacy_external_ref_url`]: a new
+/// [`ResourceError`] variant must be explicitly sorted into "benign for
+/// re-migration" or "fail the record".
+fn add_migrated_resource(issue: &mut Issue, resource: NewResource) -> Result<(), ResourceError> {
+    match issue.add_resource(resource) {
+        Ok(_) | Err(ResourceError::DuplicateTargetRole { .. }) => Ok(()),
+        Err(
+            error @ (ResourceError::MalformedWebUrl { .. }
+            | ResourceError::MissingWebUrlAuthority { .. }
+            | ResourceError::UnsupportedWebUrlScheme { .. }
+            | ResourceError::UnknownRole { .. }
+            | ResourceError::EmptyLabel
+            | ResourceError::LabelControlCharacter { .. }
+            | ResourceError::ResourceIdControlCharacter { .. }
+            | ResourceError::DuplicateResourceId { .. }
+            | ResourceError::IdSequenceExhausted
+            | ResourceError::EmptyResourceId),
+        ) => Err(error),
+    }
+}
+
 fn default_next_resource_id() -> u64 {
     DEFAULT_NEXT_RESOURCE_ID
 }
@@ -237,24 +318,15 @@ impl IssueRecord {
             (Some(issue_kind), Some(issue_type)) if issue_kind == issue_type => (issue_kind, None),
             (Some(issue_kind), Some(_)) => (issue_kind, Some(MigrationField::IssueKind)),
             (None, None) => {
-                return Err(IssueRecordError::InvalidData {
-                    issue_id: id,
-                    error: "missing issue kind (`issue_kind` or legacy `issue_type`)".to_string(),
-                    migration_conflict: None,
-                });
+                return Err(invalid_data_error(
+                    &id,
+                    None,
+                    "missing issue kind (`issue_kind` or legacy `issue_type`)",
+                ));
             }
         };
 
-        let note_error = |error: NoteError| IssueRecordError::InvalidData {
-            issue_id: id.clone(),
-            error: error.to_string(),
-            migration_conflict,
-        };
-        let resource_error = |error: crate::domain::ResourceError| IssueRecordError::InvalidData {
-            issue_id: id.clone(),
-            error: error.to_string(),
-            migration_conflict,
-        };
+        let note_error = |error: NoteError| invalid_data_error(&id, migration_conflict, error);
         let notes = match notes {
             PersistedNotes::Empty(()) => Vec::new(),
             PersistedNotes::Legacy(content) if content.trim().is_empty() => Vec::new(),
@@ -273,7 +345,7 @@ impl IssueRecord {
             .into_iter()
             .map(ResourceRecord::into_domain)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(&resource_error)?;
+            .map_err(|source| invalid_resource_error(&id, migration_conflict, source))?;
 
         let mut issue = Issue {
             id,
@@ -296,11 +368,7 @@ impl IssueRecord {
         };
         issue
             .rehydrate_resources(resources, next_resource_id)
-            .map_err(|error| IssueRecordError::InvalidData {
-                issue_id: issue.id.clone(),
-                error: error.to_string(),
-                migration_conflict,
-            })?;
+            .map_err(|source| invalid_resource_error(&issue.id, migration_conflict, source))?;
 
         // Legacy `external_ref` migration (ADR-0003). Only a truly empty value
         // carries no context. Absolute Web URLs become Reference resources;
@@ -310,30 +378,23 @@ impl IssueRecord {
         if let Some(external_ref) = external_ref
             && !external_ref.is_empty()
         {
-            match WebUrl::new(&external_ref) {
-                Ok(url) => {
+            match legacy_external_ref_url(&external_ref)
+                .map_err(|source| invalid_resource_error(&issue.id, migration_conflict, source))?
+            {
+                Some(url) => {
                     let resource = NewResource {
                         target: ResourceTarget::web(url),
                         role: ResourceRole::Reference,
                         label: None,
                     };
-                    match issue.add_resource(resource) {
-                        Ok(_) | Err(crate::domain::ResourceError::DuplicateTargetRole { .. }) => {}
-                        Err(error) => {
-                            return Err(IssueRecordError::InvalidData {
-                                issue_id: issue.id.clone(),
-                                error: error.to_string(),
-                                migration_conflict,
-                            });
-                        }
-                    }
+                    add_migrated_resource(&mut issue, resource).map_err(|source| {
+                        invalid_resource_error(&issue.id, migration_conflict, source)
+                    })?;
                 }
-                Err(_) => {
+                None => {
                     let content = NoteContent::new(migrated_external_ref_note_text(&external_ref))
-                        .map_err(|error| IssueRecordError::InvalidData {
-                            issue_id: issue.id.clone(),
-                            error: error.to_string(),
-                            migration_conflict,
+                        .map_err(|error| {
+                            invalid_data_error(&issue.id, migration_conflict, error)
                         })?;
                     issue.append_note(content, updated_at);
                 }
@@ -341,11 +402,7 @@ impl IssueRecord {
         }
         issue
             .validate()
-            .map_err(|error| IssueRecordError::InvalidData {
-                issue_id: issue.id.clone(),
-                error,
-                migration_conflict,
-            })?;
+            .map_err(|error| invalid_data_error(&issue.id, migration_conflict, error))?;
 
         Ok(IssueRecordConversion {
             issue,
