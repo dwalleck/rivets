@@ -623,13 +623,30 @@ mod tests {
 
     #[test]
     fn workspace_path_drive_prefix_is_absolute() {
-        for input in ["C:/Windows/system32", "C:relative.txt", "c:x"] {
+        for input in [
+            "C:/Windows/system32",
+            "C:relative.txt",
+            "c:x",
+            "a:notes.txt",
+        ] {
             assert!(
                 matches!(
                     WorkspacePath::new(input),
                     Err(ResourceError::AbsoluteWorkspacePath { .. })
                 ),
                 "{input:?} must be rejected as absolute"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_path_drive_rule_is_prefix_only() {
+        // Only a single-ASCII-letter-plus-colon prefix is drive-like; longer
+        // first components and interior colons stay legal POSIX names.
+        for input in ["ab:notes.txt", "dir:/file.rs", "src/C:/nested"] {
+            assert!(
+                WorkspacePath::new(input).is_ok(),
+                "{input:?} must be accepted; colon rule is drive-prefix only"
             );
         }
     }

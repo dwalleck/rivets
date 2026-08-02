@@ -14,7 +14,7 @@ Rivets stores issues as JSONL files alongside your code—no external services, 
 - **Git-native** — Issues live in your repo, branch with your code, merge with your PRs
 - **Fast** — Built in Rust for instant responses, even with thousands of issues
 - **Dependency tracking** — Model blockers and relationships between issues
-- **Associated Resources** — Attach typed Web links with stable IDs and semantic roles
+- **Associated Resources** — Attach typed Web links and Workspace Paths with stable IDs and semantic roles
 - **AI-ready** — MCP server for seamless integration with AI coding assistants
 - **Scriptable** — JSON output mode for automation and custom tooling
 - **Human-readable** — JSONL storage you can grep, diff, and edit directly
