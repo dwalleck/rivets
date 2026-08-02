@@ -128,6 +128,10 @@ pub struct WebUrlSyntaxError {
 /// workspace-relative path must mean the same target on both. Tab is
 /// permitted, matching the shared [`find_control_char`] convention used by
 /// labels and identifiers.
+///
+/// Comparison (including duplicate detection) is byte-wise: no Unicode
+/// normalization is applied, so NFC and NFD spellings of the same visual
+/// name are distinct targets (tracked in rivets-yuom).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct WorkspacePath(String);
