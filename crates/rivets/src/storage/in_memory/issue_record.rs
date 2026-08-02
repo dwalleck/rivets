@@ -3,7 +3,7 @@
 use crate::domain::{
     AssociatedResource, Dependency, Issue, IssueId, IssueKind, IssueStatus, NewResource, Note,
     NoteContent, NoteError, ResourceError, ResourceId, ResourceLabel, ResourceRole, ResourceTarget,
-    WebUrl, is_unsafe_multiline_control,
+    WebUrl, WorkspacePath, is_unsafe_multiline_control,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -114,11 +114,13 @@ impl Default for PersistedNotes {
 /// Persisted form of a Resource Target.
 ///
 /// Stringly typed on purpose: the record is an adapter DTO, and conversion
-/// into the domain revalidates through the [`WebUrl`] constructor.
+/// into the domain revalidates through the [`WebUrl`] and [`WorkspacePath`]
+/// constructors.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ResourceTargetRecord {
     Web { url: String },
+    Path { path: String },
 }
 
 /// Persisted form of an Associated Resource.
@@ -134,6 +136,7 @@ impl ResourceRecord {
     fn into_domain(self) -> Result<AssociatedResource, crate::domain::ResourceError> {
         let target = match self.target {
             ResourceTargetRecord::Web { url } => ResourceTarget::web(WebUrl::new(url)?),
+            ResourceTargetRecord::Path { path } => ResourceTarget::path(WorkspacePath::new(path)?),
         };
         let label = self.label.map(ResourceLabel::new).transpose()?;
         Ok(AssociatedResource::from_parts(
@@ -150,6 +153,9 @@ impl From<AssociatedResource> for ResourceRecord {
         let target = match resource.target() {
             ResourceTarget::Web { url } => ResourceTargetRecord::Web {
                 url: url.as_str().to_string(),
+            },
+            ResourceTarget::Path { path } => ResourceTargetRecord::Path {
+                path: path.as_str().to_string(),
             },
         };
         Self {
@@ -206,7 +212,12 @@ fn legacy_external_ref_url(external_ref: &str) -> Result<Option<WebUrl>, Resourc
             | ResourceError::ResourceIdControlCharacter { .. }
             | ResourceError::DuplicateResourceId { .. }
             | ResourceError::IdSequenceExhausted
-            | ResourceError::EmptyResourceId),
+            | ResourceError::EmptyResourceId
+            | ResourceError::EmptyPath
+            | ResourceError::PathControlCharacter { .. }
+            | ResourceError::AbsoluteWorkspacePath { .. }
+            | ResourceError::WorkspacePathEscape { .. }
+            | ResourceError::EmptyNormalizedWorkspacePath { .. }),
         ) => Err(error),
     }
 }
@@ -229,7 +240,12 @@ fn add_migrated_resource(issue: &mut Issue, resource: NewResource) -> Result<(),
             | ResourceError::ResourceIdControlCharacter { .. }
             | ResourceError::DuplicateResourceId { .. }
             | ResourceError::IdSequenceExhausted
-            | ResourceError::EmptyResourceId),
+            | ResourceError::EmptyResourceId
+            | ResourceError::EmptyPath
+            | ResourceError::PathControlCharacter { .. }
+            | ResourceError::AbsoluteWorkspacePath { .. }
+            | ResourceError::WorkspacePathEscape { .. }
+            | ResourceError::EmptyNormalizedWorkspacePath { .. }),
         ) => Err(error),
     }
 }

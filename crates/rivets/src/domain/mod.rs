@@ -7,10 +7,12 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 mod resource;
+#[cfg(test)]
+mod workspace_path_corpus;
 
 pub use resource::{
     AssociatedResource, NewResource, ResourceError, ResourceId, ResourceLabel, ResourceRole,
-    ResourceTarget, WebUrl,
+    ResourceTarget, WebUrl, WorkspacePath,
 };
 
 /// Unique identifier for an issue
@@ -1133,6 +1135,16 @@ mod tests {
             }
         }
 
+        fn path_resource(path: &str, role: ResourceRole) -> NewResource {
+            NewResource {
+                target: ResourceTarget::path(
+                    WorkspacePath::new(path).expect("valid workspace path"),
+                ),
+                role,
+                label: None,
+            }
+        }
+
         fn persisted_resource(id: &str, url: &str, role: ResourceRole) -> AssociatedResource {
             AssociatedResource::from_parts(
                 ResourceId::new(id).expect("valid resource ID"),
@@ -1200,6 +1212,53 @@ mod tests {
                     ResourceRole::Documentation,
                 ))
                 .expect("distinct role is allowed");
+            assert_eq!(issue.resources().len(), 2);
+        }
+
+        #[test]
+        fn duplicate_detection_normalizes_equivalent_paths() {
+            let mut issue = issue_with_next_id(1);
+            issue
+                .add_resource(path_resource("src/lib.rs", ResourceRole::Reference))
+                .expect("add succeeds");
+            let duplicate =
+                issue.add_resource(path_resource("docs/../src/lib.rs", ResourceRole::Reference));
+            assert!(matches!(
+                duplicate,
+                Err(ResourceError::DuplicateTargetRole { .. })
+            ));
+            assert_eq!(
+                issue.resources().len(),
+                1,
+                "equivalent normalized path must be a duplicate"
+            );
+        }
+
+        #[test]
+        fn duplicate_detection_distinguishes_path_from_web() {
+            let mut issue = issue_with_next_id(1);
+            issue
+                .add_resource(path_resource("docs/adr/0003.md", ResourceRole::Reference))
+                .expect("add succeeds");
+            // Same textual value as a URL is a different target kind.
+            issue
+                .add_resource(web_resource(
+                    "https://example.com/docs/adr/0003.md",
+                    ResourceRole::Reference,
+                ))
+                .expect("web and path targets are distinct");
+            assert_eq!(issue.resources().len(), 2);
+        }
+
+        #[test]
+        fn duplicate_detection_applies_to_paths_with_distinct_roles() {
+            let mut issue = issue_with_next_id(1);
+            issue
+                .add_resource(path_resource("src/lib.rs", ResourceRole::Reference))
+                .expect("add succeeds");
+            issue
+                .add_resource(path_resource("src/lib.rs", ResourceRole::Documentation))
+                .expect("same target with distinct role is allowed");
             assert_eq!(issue.resources().len(), 2);
         }
 

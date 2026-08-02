@@ -469,6 +469,11 @@ pub enum McpResourceTarget {
         /// Normalized URL.
         url: String,
     },
+    /// Normalized path relative to the Workspace root.
+    Path {
+        /// Normalized workspace-relative path.
+        path: String,
+    },
 }
 
 /// Associated Resource representation for MCP responses.
@@ -489,6 +494,9 @@ impl From<&AssociatedResource> for McpResource {
         let target = match resource.target() {
             ResourceTarget::Web { url } => McpResourceTarget::Web {
                 url: url.as_str().to_string(),
+            },
+            ResourceTarget::Path { path } => McpResourceTarget::Path {
+                path: path.as_str().to_string(),
             },
         };
         Self {

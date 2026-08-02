@@ -107,10 +107,79 @@ pub struct WebUrlSyntaxError {
     source: url::ParseError,
 }
 
+/// A normalized, workspace-relative path.
+///
+/// Construction applies purely lexical normalization (no filesystem access,
+/// so the target need not exist): `.` and empty components are dropped,
+/// in-bounds `..` components are resolved, and the result is stored in
+/// canonical relative form. Absolute paths, paths that escape the workspace
+/// root through parent traversal, empty values, and terminal-unsafe control
+/// characters are rejected. Tab is permitted, matching the shared
+/// [`find_control_char`] convention used by labels and identifiers.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct WorkspacePath(String);
+
+impl WorkspacePath {
+    /// Parse and normalize a workspace-relative path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResourceError::EmptyPath`] when the value is empty or
+    /// whitespace-only, [`ResourceError::PathControlCharacter`] when it
+    /// contains a character unsafe for terminal output,
+    /// [`ResourceError::AbsoluteWorkspacePath`] when it starts with a path
+    /// separator, [`ResourceError::WorkspacePathEscape`] when parent
+    /// traversal leaves the workspace root, or
+    /// [`ResourceError::EmptyNormalizedWorkspacePath`] when normalization
+    /// leaves nothing (e.g. `a/..` or `.`).
+    pub fn new(raw: impl Into<String>) -> Result<Self, ResourceError> {
+        let raw = raw.into();
+        if raw.trim().is_empty() {
+            return Err(ResourceError::EmptyPath);
+        }
+        if let Some(position) = find_control_char(&raw) {
+            return Err(ResourceError::PathControlCharacter { position });
+        }
+        if raw.starts_with('/') {
+            return Err(ResourceError::AbsoluteWorkspacePath { path: raw });
+        }
+        let mut stack: Vec<&str> = Vec::new();
+        for component in raw.split('/') {
+            match component {
+                "" | "." => {}
+                ".." => {
+                    if stack.pop().is_none() {
+                        return Err(ResourceError::WorkspacePathEscape { path: raw });
+                    }
+                }
+                component => stack.push(component),
+            }
+        }
+        let normalized = stack.join("/");
+        if normalized.is_empty() {
+            return Err(ResourceError::EmptyNormalizedWorkspacePath { path: raw });
+        }
+        Ok(Self(normalized))
+    }
+
+    /// Get the normalized path as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for WorkspacePath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// The location of an Associated Resource.
 ///
-/// This slice supports Web URLs. Workspace Paths remain an accepted domain
-/// decision but are implemented by follow-up task `rivets-p1g4`.
+/// A Web URL is absolute; a Workspace Path is normalized relative to its
+/// Workspace root and cannot escape that boundary. See ADR-0003 and
+/// `CONTEXT.md`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResourceTarget {
@@ -119,6 +188,11 @@ pub enum ResourceTarget {
         /// The validated URL.
         url: WebUrl,
     },
+    /// A normalized path relative to the Workspace root.
+    Path {
+        /// The validated, normalized path.
+        path: WorkspacePath,
+    },
 }
 
 impl ResourceTarget {
@@ -126,12 +200,18 @@ impl ResourceTarget {
     pub fn web(url: WebUrl) -> Self {
         Self::Web { url }
     }
+
+    /// Construct a Workspace Path target from a validated [`WorkspacePath`].
+    pub fn path(path: WorkspacePath) -> Self {
+        Self::Path { path }
+    }
 }
 
 impl fmt::Display for ResourceTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Web { url } => write!(f, "{url}"),
+            Self::Path { path } => write!(f, "{path}"),
         }
     }
 }
@@ -333,6 +413,33 @@ pub enum ResourceError {
         /// Character offset of the invalid value.
         position: usize,
     },
+    /// The path was empty or whitespace-only.
+    #[error("Workspace path cannot be empty")]
+    EmptyPath,
+    /// The path included a terminal-unsafe control character.
+    #[error("Workspace path contains invalid control character at position {position}")]
+    PathControlCharacter {
+        /// Character offset of the invalid value.
+        position: usize,
+    },
+    /// The path was absolute instead of workspace-relative.
+    #[error("Workspace path '{path}' must be relative to the workspace root")]
+    AbsoluteWorkspacePath {
+        /// The rejected value.
+        path: String,
+    },
+    /// Parent traversal left the workspace root.
+    #[error("Workspace path '{path}' escapes the workspace root")]
+    WorkspacePathEscape {
+        /// The rejected value.
+        path: String,
+    },
+    /// Normalization left the path empty (e.g. `a/..` or `.`).
+    #[error("Workspace path '{path}' does not refer to anything under the workspace root")]
+    EmptyNormalizedWorkspacePath {
+        /// The rejected value.
+        path: String,
+    },
     /// An identical target-and-role association already exists on the Issue.
     #[error("Resource with target '{target}' and role '{role}' already exists on this issue")]
     DuplicateTargetRole {
@@ -365,6 +472,108 @@ pub enum ResourceError {
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    // ===== WorkspacePath =====
+
+    #[rstest]
+    #[case::plain("docs/adr/0003.md", "docs/adr/0003.md")]
+    #[case::single_component("src", "src")]
+    #[case::drop_dot("a/./b", "a/b")]
+    #[case::collapse_slashes("a//b", "a/b")]
+    #[case::leading_dot("./x", "x")]
+    #[case::trailing_dot("x/.", "x")]
+    #[case::trailing_slash("src/", "src")]
+    #[case::in_bounds_traversal("docs/../src/lib.rs", "src/lib.rs")]
+    #[case::in_bounds_multi("a/b/../../c", "c")]
+    #[case::dot_then_parent("x/./../y", "y")]
+    #[case::unicode("é/文件.md", "é/文件.md")]
+    #[case::embedded_space("with space/y", "with space/y")]
+    #[case::hidden(".hidden", ".hidden")]
+    #[case::tab_allowed("un\tdir/x", "un\tdir/x")]
+    fn workspace_path_accepts_and_normalizes(#[case] input: &str, #[case] expected: &str) {
+        let path = WorkspacePath::new(input).expect("valid workspace path");
+        assert_eq!(path.as_str(), expected);
+        assert_eq!(path.to_string(), expected);
+    }
+
+    #[rstest]
+    #[case::empty("")]
+    #[case::whitespace("   ")]
+    #[case::tab("\t")]
+    #[case::absolute("/etc/passwd")]
+    #[case::double_absolute("//x")]
+    #[case::escape_first("../escape.md")]
+    #[case::escape_deep("a/../../b")]
+    #[case::escape_nested("a/b/../../../c")]
+    #[case::normalizes_to_root("a/..")]
+    #[case::dot(".")]
+    #[case::dot_slash("./")]
+    #[case::control_escape("\u{1b}x")]
+    fn workspace_path_rejects(#[case] input: &str) {
+        assert!(
+            WorkspacePath::new(input).is_err(),
+            "{input:?} should be rejected"
+        );
+    }
+
+    #[test]
+    fn workspace_path_matches_recorded_realpath_corpus() {
+        let mut checked = 0;
+        for (input, expected) in super::super::workspace_path_corpus::CORPUS {
+            match WorkspacePath::new(*input) {
+                Ok(path) => {
+                    assert_eq!(
+                        Some(path.as_str()),
+                        *expected,
+                        "normalization mismatch for {input:?}"
+                    );
+                }
+                Err(_) => assert_eq!(
+                    None, *expected,
+                    "unexpected rejection for {input:?} (oracle accepts)"
+                ),
+            }
+            checked += 1;
+        }
+        assert!(
+            checked >= 400,
+            "corpus should be substantial, got {checked}"
+        );
+    }
+
+    #[test]
+    fn workspace_path_rejects_policy_cases() {
+        for input in super::super::workspace_path_corpus::POLICY_REJECT {
+            assert!(
+                WorkspacePath::new(*input).is_err(),
+                "policy rejection missing for {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_path_errors_are_typed_per_cause() {
+        assert!(matches!(
+            WorkspacePath::new("/x"),
+            Err(ResourceError::AbsoluteWorkspacePath { .. })
+        ));
+        assert!(matches!(
+            WorkspacePath::new("../x"),
+            Err(ResourceError::WorkspacePathEscape { .. })
+        ));
+        assert!(matches!(
+            WorkspacePath::new("a/.."),
+            Err(ResourceError::EmptyNormalizedWorkspacePath { .. })
+        ));
+        assert!(matches!(
+            WorkspacePath::new(""),
+            Err(ResourceError::EmptyPath)
+        ));
+        assert!(matches!(
+            WorkspacePath::new("x\u{1b}y"),
+            Err(ResourceError::PathControlCharacter { .. })
+        ));
+    }
 
     // ===== WebUrl =====
 

@@ -33,6 +33,12 @@ update; sequence continues at `r4`).
    `ResourceId` reject control characters). The design must keep
    "accepted inputs normalize exactly like `realpath -m`" and
    "policy rejects X" as distinct claims with distinct falsifiers.
+   **Implementation refinement (S1 drift):** the shared `find_control_char`
+   helper *allows tab* (`code != 0x09`), so `'un\tdir/x'` is a legal
+   workspace path in the shipped rule — the probe's tab-rejection was an
+   over-strict proposal. Policy rejections that ship: whitespace-only and
+   the `find_control_char` set (tab excluded). The corpus's `POLICY_REJECT`
+   array and case tables reflect this.
 
 2. **The persistence substrate already guarantees id stability and sequence
    monotonicity across removal.** `Issue::rehydrate_resources` preserves

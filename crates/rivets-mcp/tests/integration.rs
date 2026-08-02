@@ -3309,6 +3309,7 @@ async fn resource_add_list_and_context_recreation_use_real_storage() {
         McpResourceTarget::Web { url } => {
             assert_eq!(url, "https://example.com/pr/123");
         }
+        McpResourceTarget::Path { .. } => panic!("web add must not produce a path target"),
     }
 
     let restarted = create_tools();
