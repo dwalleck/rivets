@@ -6,8 +6,9 @@ How the engineering skills should consume this repo's domain documentation when 
 
 - `CONTEXT.md` at the repository root.
 - Relevant ADRs under `docs/adr/`.
+- `docs/module-structure.md` — the module map: which crate/module owns what. Consult it before deciding where new code belongs; if it contradicts the code, flag the drift rather than silently following either side.
 
-If either location does not exist, proceed silently. Domain-modeling workflows create these documents lazily when terms or decisions are resolved.
+If a location does not exist, proceed silently. Domain-modeling workflows create these documents lazily when terms or decisions are resolved.
 
 ## Configured layout
 
@@ -17,6 +18,7 @@ This is a single-context repository:
 /
 ├── CONTEXT.md
 ├── docs/adr/
+├── docs/module-structure.md
 └── crates/
 ```
 
