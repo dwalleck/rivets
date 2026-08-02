@@ -2069,3 +2069,243 @@ fn legacy_web_external_ref_migrates_then_rewrites_canonically(initialized_dir: T
     assert_eq!(record["resources"].as_array().unwrap().len(), 2);
     assert_eq!(record["next_resource_id"], 3);
 }
+
+#[rstest]
+fn resource_path_add_update_remove_and_error_cases(initialized_dir: TempDir) {
+    let issue_id = create_issue(initialized_dir.path(), "Path owner", &[]);
+
+    // Path resources: stored normalized, workspace-root-relative.
+    let added = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "resource",
+            "add",
+            &issue_id,
+            "--path",
+            "docs/../docs/adr/0003.md",
+            "--role",
+            "documentation",
+            "--label",
+            "ADR 3",
+        ],
+    );
+    assert!(
+        added.status.success(),
+        "path add failed: {}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    // Unicode paths are stored as given (normalized).
+    let unicode = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "resource",
+            "add",
+            &issue_id,
+            "--path",
+            "é/文件.md",
+            "--role",
+            "evidence",
+        ],
+    );
+    assert!(
+        unicode.status.success(),
+        "unicode path add failed: {}",
+        String::from_utf8_lossy(&unicode.stderr)
+    );
+    // Path inputs are workspace-root-relative even from a subdirectory.
+    let subdir = initialized_dir.path().join("crates/x");
+    std::fs::create_dir_all(&subdir).expect("subdir should be created");
+    let from_subdir = run_rivets_in_dir(
+        &subdir,
+        &[
+            "resource",
+            "add",
+            &issue_id,
+            "--path",
+            "crates/x/src/lib.rs",
+            "--role",
+            "implementation",
+        ],
+    );
+    assert!(
+        from_subdir.status.success(),
+        "subdir path add failed: {}",
+        String::from_utf8_lossy(&from_subdir.stderr)
+    );
+
+    let list = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["--json", "resource", "list", &issue_id],
+    );
+    assert!(list.status.success());
+    let resources: serde_json::Value =
+        serde_json::from_slice(&list.stdout).expect("list should be JSON");
+    let resources = resources.as_array().expect("array");
+    assert_eq!(resources.len(), 3);
+    assert_eq!(resources[0]["id"], "r1");
+    assert_eq!(resources[0]["target"]["type"], "path");
+    assert_eq!(resources[0]["target"]["path"], "docs/adr/0003.md");
+    assert_eq!(resources[1]["target"]["path"], "é/文件.md");
+    assert_eq!(resources[2]["target"]["path"], "crates/x/src/lib.rs");
+
+    // Escape, absolute, and conflict errors are all rejected without persisting.
+    let escape = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "resource",
+            "add",
+            &issue_id,
+            "--path",
+            "../escape.md",
+            "--role",
+            "reference",
+        ],
+    );
+    assert!(!escape.status.success(), "escape must fail");
+    assert!(String::from_utf8_lossy(&escape.stderr).contains("escapes the workspace root"));
+
+    let absolute = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "resource",
+            "add",
+            &issue_id,
+            "--path",
+            "/etc/passwd",
+            "--role",
+            "reference",
+        ],
+    );
+    assert!(!absolute.status.success(), "absolute must fail");
+
+    let conflict = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "resource",
+            "add",
+            &issue_id,
+            "--url",
+            "https://example.com",
+            "--path",
+            "src/lib.rs",
+            "--role",
+            "reference",
+        ],
+    );
+    assert!(!conflict.status.success(), "--url with --path must fail");
+
+    // Normalized-equivalent duplicate is rejected with a typed message.
+    let duplicate = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "resource",
+            "add",
+            &issue_id,
+            "--path",
+            "crates/../crates/x/src/lib.rs",
+            "--role",
+            "implementation",
+        ],
+    );
+    assert!(
+        !duplicate.status.success(),
+        "normalized duplicate must fail"
+    );
+    assert!(String::from_utf8_lossy(&duplicate.stderr).contains("already exists"));
+
+    // Update: role change + label clear keep id and position.
+    let updated = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "resource",
+            "update",
+            &issue_id,
+            "--resource",
+            "r1",
+            "--role",
+            "reference",
+            "--no-label",
+        ],
+    );
+    assert!(
+        updated.status.success(),
+        "update failed: {}",
+        String::from_utf8_lossy(&updated.stderr)
+    );
+    // Update: target change normalizes and preserves position.
+    let target_update = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "resource",
+            "update",
+            &issue_id,
+            "--resource",
+            "r2",
+            "--path",
+            "specs/../specs/0x/0004.md",
+        ],
+    );
+    assert!(target_update.status.success());
+    let after_update = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["--json", "resource", "list", &issue_id],
+    );
+    let resources: serde_json::Value =
+        serde_json::from_slice(&after_update.stdout).expect("list should be JSON");
+    let resources = resources.as_array().expect("array");
+    assert_eq!(resources.len(), 3);
+    assert_eq!(resources[0]["id"], "r1");
+    assert_eq!(resources[0]["role"], "reference");
+    assert!(resources[0]["label"].is_null(), "label must be cleared");
+    assert_eq!(resources[1]["id"], "r2");
+    assert_eq!(resources[1]["target"]["path"], "specs/0x/0004.md");
+
+    // Unknown resource id is a typed error that does not persist.
+    let unknown = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["resource", "remove", &issue_id, "--resource", "r99"],
+    );
+    assert!(!unknown.status.success());
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("Resource not found: r99"));
+
+    // Remove: remaining resources keep ids and positions.
+    let removed = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["resource", "remove", &issue_id, "--resource", "r1"],
+    );
+    assert!(removed.status.success());
+    let after_remove = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["--json", "resource", "list", &issue_id],
+    );
+    let resources: serde_json::Value =
+        serde_json::from_slice(&after_remove.stdout).expect("list should be JSON");
+    let ids: Vec<_> = resources
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        ids,
+        ["r2", "r3"],
+        "remaining resources keep ids and positions"
+    );
+
+    // The persisted file is the same state, and next_resource_id never reuses.
+    let issues_path = initialized_dir.path().join(".rivets/issues.jsonl");
+    let canonical = std::fs::read_to_string(&issues_path).expect("canonical file readable");
+    let record: serde_json::Value = canonical
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("record"))
+        .find(|record: &serde_json::Value| record["id"] == issue_id)
+        .expect("record exists");
+    assert_eq!(record["next_resource_id"], 4);
+    let persisted_ids: Vec<_> = record["resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(persisted_ids, ["r2", "r3"]);
+}

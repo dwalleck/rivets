@@ -1326,18 +1326,27 @@ pub async fn execute_resource(
     args: &ResourceArgs,
     output_mode: OutputMode,
 ) -> Result<()> {
-    use crate::domain::{IssueId, NewResource, ResourceLabel, ResourceTarget, WebUrl};
+    use crate::domain::{
+        IssueId, NewResource, ResourceId, ResourceLabel, ResourceTarget, ResourceUpdate, WebUrl,
+        WorkspacePath,
+    };
     use crate::output;
 
     match &args.action {
         ResourceAction::Add {
             issue_id,
             url,
+            path,
             role,
             label,
         } => {
+            let target = match (url, path) {
+                (Some(url), None) => ResourceTarget::web(WebUrl::new(url)?),
+                (None, Some(path)) => ResourceTarget::path(WorkspacePath::new(path)?),
+                _ => anyhow::bail!("exactly one of --url or --path is required"),
+            };
             let resource = NewResource {
-                target: ResourceTarget::web(WebUrl::new(url)?),
+                target,
                 role: (*role).into(),
                 label: label.clone().map(ResourceLabel::new).transpose()?,
             };
@@ -1351,6 +1360,61 @@ pub async fn execute_resource(
                 output::OutputMode::Json => output::print_json(&issue)?,
                 output::OutputMode::Text => {
                     println!("Added resource to {}", issue.id);
+                }
+            }
+        }
+        ResourceAction::Update {
+            issue_id,
+            resource,
+            url,
+            path,
+            role,
+            label,
+            no_label,
+        } => {
+            let target = match (url, path) {
+                (Some(url), None) => Some(ResourceTarget::web(WebUrl::new(url)?)),
+                (None, Some(path)) => Some(ResourceTarget::path(WorkspacePath::new(path)?)),
+                (None, None) => None,
+                (Some(_), Some(_)) => anyhow::bail!("only one of --url or --path may be given"),
+            };
+            let label = match (label, no_label) {
+                (Some(label), false) => Some(Some(ResourceLabel::new(label)?)),
+                (None, true) => Some(None),
+                (None, false) => None,
+                (Some(_), true) => {
+                    anyhow::bail!("only one of --label or --no-label may be given")
+                }
+            };
+            let update = ResourceUpdate {
+                target,
+                role: role.map(Into::into),
+                label,
+            };
+            let issue = app
+                .storage_mut()
+                .update_resource(&IssueId::new(issue_id), &ResourceId::new(resource)?, update)
+                .await?;
+            app.save().await?;
+
+            match output_mode {
+                output::OutputMode::Json => output::print_json(&issue)?,
+                output::OutputMode::Text => {
+                    println!("Updated resource {resource} on {}", issue.id);
+                }
+            }
+        }
+        ResourceAction::Remove { issue_id, resource } => {
+            let issue = app
+                .storage_mut()
+                .remove_resource(&IssueId::new(issue_id), &ResourceId::new(resource)?)
+                .await?;
+            app.save().await?;
+
+            match output_mode {
+                output::OutputMode::Json => output::print_json(&issue)?,
+                output::OutputMode::Text => {
+                    println!("Removed resource {resource} from {}", issue.id);
                 }
             }
         }

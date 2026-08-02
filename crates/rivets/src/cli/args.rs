@@ -448,15 +448,19 @@ pub struct ResourceArgs {
 /// Associated Resource management actions.
 #[derive(Subcommand, Debug, Clone)]
 pub enum ResourceAction {
-    /// Associate an absolute HTTP or HTTPS URL with an Issue.
+    /// Associate a target with an Issue.
     Add {
         /// Issue ID.
         #[arg(value_parser = validate_issue_id)]
         issue_id: String,
 
-        /// Absolute HTTP or HTTPS URL.
+        /// Absolute HTTP or HTTPS URL (conflicts with --path).
+        #[arg(long, conflicts_with = "path", required_unless_present = "path")]
+        url: Option<String>,
+
+        /// Path relative to the workspace root (conflicts with --url).
         #[arg(long)]
-        url: String,
+        path: Option<String>,
 
         /// Why this resource matters to the Issue.
         #[arg(long, value_enum)]
@@ -465,6 +469,53 @@ pub enum ResourceAction {
         /// Optional human-readable label.
         #[arg(long)]
         label: Option<String>,
+    },
+
+    /// Update an existing Associated Resource by its stable identifier.
+    ///
+    /// Only the provided fields change; the resource keeps its identifier and
+    /// position. At least one field is required.
+    Update {
+        /// Issue ID.
+        #[arg(value_parser = validate_issue_id)]
+        issue_id: String,
+
+        /// Stable resource identifier (e.g. r3).
+        #[arg(long, value_name = "RESOURCE_ID")]
+        resource: String,
+
+        /// New absolute HTTP or HTTPS URL (conflicts with --path).
+        #[arg(long, conflicts_with = "path")]
+        url: Option<String>,
+
+        /// New path relative to the workspace root (conflicts with --url).
+        #[arg(long)]
+        path: Option<String>,
+
+        /// New role.
+        #[arg(long, value_enum)]
+        role: Option<ResourceRoleArg>,
+
+        /// New human-readable label (conflicts with --no-label).
+        #[arg(long, conflicts_with = "no_label")]
+        label: Option<String>,
+
+        /// Clear the resource's label.
+        #[arg(long)]
+        no_label: bool,
+    },
+
+    /// Remove an Associated Resource by its stable identifier.
+    ///
+    /// The remaining resources keep their identifiers and positions.
+    Remove {
+        /// Issue ID.
+        #[arg(value_parser = validate_issue_id)]
+        issue_id: String,
+
+        /// Stable resource identifier (e.g. r3).
+        #[arg(long, value_name = "RESOURCE_ID")]
+        resource: String,
     },
 
     /// List an Issue's Associated Resources in insertion order.
