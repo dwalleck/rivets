@@ -148,6 +148,41 @@ mod load_warning_tests {
     }
 
     #[test]
+    fn load_warning_invalid_resource_data_contains_details() {
+        let warning = LoadWarning::InvalidResourceData {
+            issue_id: IssueId::new("test-resource"),
+            line_number: 8,
+            source: ResourceError::EmptyResourceId,
+        };
+
+        match warning {
+            LoadWarning::InvalidResourceData {
+                issue_id,
+                line_number,
+                source,
+            } => {
+                assert_eq!(issue_id.as_str(), "test-resource");
+                assert_eq!(line_number, 8);
+                assert!(matches!(source, ResourceError::EmptyResourceId));
+            }
+            _ => panic!("Expected InvalidResourceData variant"),
+        }
+    }
+
+    #[test]
+    fn load_warning_migration_conflict_display_names_both_fields() {
+        let warning = LoadWarning::MigrationConflict {
+            issue_id: IssueId::new("test-conflict"),
+            line_number: 4,
+            field: MigrationField::IssueKind,
+        };
+        assert_eq!(
+            warning.to_string(),
+            "line 4: Issue test-conflict has legacy field issue_type conflicting with canonical issue_kind"
+        );
+    }
+
+    #[test]
     fn load_warning_is_clone() {
         let warning = LoadWarning::MalformedJson {
             line_number: 1,
@@ -460,9 +495,9 @@ mod load_from_jsonl_tests {
                 LoadWarning::MalformedJson { .. } => has_malformed = true,
                 LoadWarning::OrphanedDependency { .. } => has_orphaned = true,
                 LoadWarning::InvalidIssueData { .. } => has_invalid = true,
-                LoadWarning::CircularDependency { .. } => {}
-                LoadWarning::MigrationConflict { .. } => {}
-                LoadWarning::InvalidResourceData { .. } => has_invalid = true,
+                LoadWarning::CircularDependency { .. }
+                | LoadWarning::MigrationConflict { .. }
+                | LoadWarning::InvalidResourceData { .. } => {}
             }
         }
 

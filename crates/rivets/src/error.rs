@@ -161,7 +161,17 @@ impl fmt::Display for PartialLoadError {
     }
 }
 
-impl std::error::Error for PartialLoadError {}
+impl std::error::Error for PartialLoadError {
+    /// Exposes the first (lowest line number) cause on the standard error
+    /// chain, so generic reporters like `anyhow` surface a typed cause without
+    /// knowing about [`causes`](Self::causes). The full set remains available
+    /// only through [`causes`](Self::causes).
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.causes
+            .first()
+            .map(|cause| cause as &(dyn std::error::Error + 'static))
+    }
+}
 
 /// Storage-layer errors.
 #[derive(Debug, Error)]
@@ -218,7 +228,7 @@ impl StorageError {
     ///
     /// Returns the original error unchanged when it is not an Associated
     /// Resource invariant failure.
-    pub fn into_resource_error(self) -> std::result::Result<crate::domain::ResourceError, Self> {
+    pub fn try_into_resource_error(self) -> std::result::Result<ResourceError, Self> {
         match self {
             Self::Resource(source) => Ok(source),
             error @ (Self::Validation(_)
@@ -401,6 +411,109 @@ mod tests {
     )]
     fn storage_error_display(#[case] error: StorageError, #[case] expected: &str) {
         assert_eq!(error.to_string(), expected);
+    }
+
+    #[rstest]
+    #[case::malformed_json(
+        SkippedIssueRecordCause::MalformedJson {
+            line_number: 3,
+            error: "unexpected end of input".to_string(),
+        },
+        "line 3: malformed JSON (unexpected end of input)"
+    )]
+    #[case::invalid_issue_data(
+        SkippedIssueRecordCause::InvalidIssueData {
+            line_number: 7,
+            issue_id: IssueId::new("proj-abc"),
+            error: "Priority exceeds maximum".to_string(),
+        },
+        "line 7: issue proj-abc is invalid (Priority exceeds maximum)"
+    )]
+    #[case::invalid_resource_data(
+        SkippedIssueRecordCause::InvalidResourceData {
+            line_number: 9,
+            issue_id: IssueId::new("proj-def"),
+            source: ResourceError::EmptyResourceId,
+        },
+        "line 9: issue proj-def has an invalid Associated Resource (Resource identifier cannot be empty)"
+    )]
+    fn skipped_issue_record_cause_display(
+        #[case] cause: SkippedIssueRecordCause,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(cause.to_string(), expected);
+    }
+
+    #[test]
+    fn partial_load_error_display_orders_causes_by_line() {
+        let error = PartialLoadError::new(vec![
+            SkippedIssueRecordCause::InvalidIssueData {
+                line_number: 5,
+                issue_id: IssueId::new("proj-abc"),
+                error: "bad data".to_string(),
+            },
+            SkippedIssueRecordCause::MalformedJson {
+                line_number: 2,
+                error: "truncated".to_string(),
+            },
+        ])
+        .expect("two causes should produce an error");
+        assert_eq!(
+            error.to_string(),
+            "Refusing to modify storage after an incomplete JSONL load: \
+             2 issue record(s) were skipped: \
+             line 2: malformed JSON (truncated); \
+             line 5: issue proj-abc is invalid (bad data)"
+        );
+    }
+
+    #[test]
+    fn partial_load_error_requires_at_least_one_cause() {
+        assert!(
+            PartialLoadError::new(Vec::new()).is_none(),
+            "an empty cause list must not build a PartialLoadError"
+        );
+    }
+
+    #[test]
+    fn partial_load_error_source_chain_reaches_typed_resource_error() {
+        let error = PartialLoadError::new(vec![SkippedIssueRecordCause::InvalidResourceData {
+            line_number: 1,
+            issue_id: IssueId::new("proj-abc"),
+            source: ResourceError::EmptyResourceId,
+        }])
+        .expect("one cause should produce an error");
+
+        let cause = error
+            .source()
+            .expect("PartialLoadError should expose its first cause as source");
+        let skipped = cause
+            .downcast_ref::<SkippedIssueRecordCause>()
+            .expect("source should be a SkippedIssueRecordCause");
+        let resource_error = skipped
+            .source()
+            .expect("InvalidResourceData should expose its typed source")
+            .downcast_ref::<ResourceError>()
+            .expect("cause source should be a ResourceError");
+        assert!(matches!(resource_error, ResourceError::EmptyResourceId));
+    }
+
+    #[test]
+    fn try_into_resource_error_extracts_resource_variant() {
+        let error = StorageError::Resource(ResourceError::EmptyLabel);
+        assert!(matches!(
+            error.try_into_resource_error(),
+            Ok(ResourceError::EmptyLabel)
+        ));
+    }
+
+    #[test]
+    fn try_into_resource_error_returns_other_variants_unchanged() {
+        let error = StorageError::Validation("title is required".to_string());
+        assert!(matches!(
+            error.try_into_resource_error(),
+            Err(StorageError::Validation(reason)) if reason == "title is required"
+        ));
     }
 
     #[test]

@@ -1049,15 +1049,16 @@ mod tests {
     async fn partial_resource_load_preserves_typed_cause() {
         use tempfile::TempDir;
 
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("temp dir should be created");
         let jsonl_path = temp_dir.path().join("issues.jsonl");
         let invalid_resource = br#"{"id":"test-invalid-resource","title":"Invalid resource","description":"","status":"open","priority":2,"issue_kind":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":[],"resources":[{"id":"","target":{"type":"web","url":"https://example.com"},"role":"reference","label":null}],"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}
 "#;
-        std::fs::write(&jsonl_path, invalid_resource).unwrap();
+        std::fs::write(&jsonl_path, invalid_resource)
+            .expect("fixture JSONL file should be written");
 
         let mut storage = create_storage(StorageBackend::Jsonl(jsonl_path), "test".into())
             .await
-            .unwrap();
+            .expect("storage should open with a resource load warning");
         let result = storage
             .create(NewIssue {
                 title: "Rejected issue".to_string(),

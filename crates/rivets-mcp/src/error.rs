@@ -82,7 +82,7 @@ impl From<RivetsError> for Error {
     fn from(error: RivetsError) -> Self {
         match error {
             RivetsError::IssueNotFound(issue_id) => Self::IssueNotFound(issue_id.to_string()),
-            RivetsError::Storage(storage_error) => match storage_error.into_resource_error() {
+            RivetsError::Storage(storage_error) => match storage_error.try_into_resource_error() {
                 Ok(source) => Self::InvalidResource(source),
                 Err(storage_error) => Self::Storage(RivetsError::Storage(storage_error)),
             },

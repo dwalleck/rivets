@@ -110,7 +110,11 @@ pub enum LoadWarning {
     ///
     /// **Effect**: The canonical emitted field wins and the issue remains loaded.
     /// **Common causes**: Interrupted migrations or conflicting manual edits.
-    #[error("line {line_number}: Issue {issue_id} has conflicting migration field {field:?}")]
+    #[error(
+        "line {line_number}: Issue {issue_id} has legacy field {} conflicting with canonical {}",
+        field.accepted_migration_name(),
+        field.emitted_name()
+    )]
     MigrationConflict {
         issue_id: IssueId,
         line_number: usize,
@@ -224,56 +228,48 @@ pub async fn load_from_jsonl(
     // Convert and validate persisted records at the compatibility boundary.
     let mut issues = Vec::new();
     for (line_number, record) in parsed_records {
-        match record.into_domain() {
+        let (issue_id, migration_conflict, outcome) = match record.into_domain() {
             Ok(IssueRecordConversion {
                 issue,
                 migration_conflict,
-            }) => {
-                if let Some(field) = migration_conflict {
-                    warnings.push(LoadWarning::MigrationConflict {
-                        issue_id: issue.id.clone(),
-                        line_number,
-                        field,
-                    });
-                }
-                issues.push(issue);
-            }
+            }) => (issue.id.clone(), migration_conflict, Ok(issue)),
             Err(IssueRecordError::InvalidData {
                 issue_id,
                 error,
                 migration_conflict,
-            }) => {
-                if let Some(field) = migration_conflict {
-                    warnings.push(LoadWarning::MigrationConflict {
-                        issue_id: issue_id.clone(),
-                        line_number,
-                        field,
-                    });
-                }
-                warnings.push(LoadWarning::InvalidIssueData {
+            }) => (
+                issue_id.clone(),
+                migration_conflict,
+                Err(LoadWarning::InvalidIssueData {
                     issue_id,
                     line_number,
                     error,
-                });
-            }
+                }),
+            ),
             Err(IssueRecordError::InvalidResource {
                 issue_id,
                 source,
                 migration_conflict,
-            }) => {
-                if let Some(field) = migration_conflict {
-                    warnings.push(LoadWarning::MigrationConflict {
-                        issue_id: issue_id.clone(),
-                        line_number,
-                        field,
-                    });
-                }
-                warnings.push(LoadWarning::InvalidResourceData {
+            }) => (
+                issue_id.clone(),
+                migration_conflict,
+                Err(LoadWarning::InvalidResourceData {
                     issue_id,
                     line_number,
                     source,
-                });
-            }
+                }),
+            ),
+        };
+        if let Some(field) = migration_conflict {
+            warnings.push(LoadWarning::MigrationConflict {
+                issue_id,
+                line_number,
+                field,
+            });
+        }
+        match outcome {
+            Ok(issue) => issues.push(issue),
+            Err(warning) => warnings.push(warning),
         }
     }
 

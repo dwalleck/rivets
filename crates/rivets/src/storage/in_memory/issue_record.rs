@@ -60,6 +60,18 @@ fn invalid_resource_error(
     }
 }
 
+fn invalid_data_error(
+    issue_id: &IssueId,
+    migration_conflict: Option<MigrationField>,
+    error: impl ToString,
+) -> IssueRecordError {
+    IssueRecordError::InvalidData {
+        issue_id: issue_id.clone(),
+        error: error.to_string(),
+        migration_conflict,
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct NoteRecord {
     content: String,
@@ -173,6 +185,11 @@ fn migrated_external_ref_note_text(external_ref: &str) -> String {
     content
 }
 
+/// Classifies a legacy `external_ref` as a migratable Web URL or opaque text.
+///
+/// The error arms are enumerated exhaustively on purpose: adding a
+/// [`ResourceError`] variant must force an explicit decision about whether it
+/// means "not a URL, keep as a Note" or "corrupt data, skip the Issue loudly".
 fn legacy_external_ref_url(external_ref: &str) -> Result<Option<WebUrl>, ResourceError> {
     match WebUrl::new(external_ref) {
         Ok(url) => Ok(Some(url)),
@@ -194,6 +211,11 @@ fn legacy_external_ref_url(external_ref: &str) -> Result<Option<WebUrl>, Resourc
     }
 }
 
+/// Attaches a migrated resource, tolerating only an already-migrated duplicate.
+///
+/// Exhaustive for the same reason as [`legacy_external_ref_url`]: a new
+/// [`ResourceError`] variant must be explicitly sorted into "benign for
+/// re-migration" or "fail the record".
 fn add_migrated_resource(issue: &mut Issue, resource: NewResource) -> Result<(), ResourceError> {
     match issue.add_resource(resource) {
         Ok(_) | Err(ResourceError::DuplicateTargetRole { .. }) => Ok(()),
@@ -296,19 +318,15 @@ impl IssueRecord {
             (Some(issue_kind), Some(issue_type)) if issue_kind == issue_type => (issue_kind, None),
             (Some(issue_kind), Some(_)) => (issue_kind, Some(MigrationField::IssueKind)),
             (None, None) => {
-                return Err(IssueRecordError::InvalidData {
-                    issue_id: id,
-                    error: "missing issue kind (`issue_kind` or legacy `issue_type`)".to_string(),
-                    migration_conflict: None,
-                });
+                return Err(invalid_data_error(
+                    &id,
+                    None,
+                    "missing issue kind (`issue_kind` or legacy `issue_type`)",
+                ));
             }
         };
 
-        let note_error = |error: NoteError| IssueRecordError::InvalidData {
-            issue_id: id.clone(),
-            error: error.to_string(),
-            migration_conflict,
-        };
+        let note_error = |error: NoteError| invalid_data_error(&id, migration_conflict, error);
         let notes = match notes {
             PersistedNotes::Empty(()) => Vec::new(),
             PersistedNotes::Legacy(content) if content.trim().is_empty() => Vec::new(),
@@ -375,10 +393,8 @@ impl IssueRecord {
                 }
                 None => {
                     let content = NoteContent::new(migrated_external_ref_note_text(&external_ref))
-                        .map_err(|error| IssueRecordError::InvalidData {
-                            issue_id: issue.id.clone(),
-                            error: error.to_string(),
-                            migration_conflict,
+                        .map_err(|error| {
+                            invalid_data_error(&issue.id, migration_conflict, error)
                         })?;
                     issue.append_note(content, updated_at);
                 }
@@ -386,11 +402,7 @@ impl IssueRecord {
         }
         issue
             .validate()
-            .map_err(|error| IssueRecordError::InvalidData {
-                issue_id: issue.id.clone(),
-                error,
-                migration_conflict,
-            })?;
+            .map_err(|error| invalid_data_error(&issue.id, migration_conflict, error))?;
 
         Ok(IssueRecordConversion {
             issue,
