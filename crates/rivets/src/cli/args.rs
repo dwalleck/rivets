@@ -475,6 +475,10 @@ pub enum ResourceAction {
     ///
     /// Only the provided fields change; the resource keeps its identifier and
     /// position. At least one field is required.
+    #[command(group = clap::ArgGroup::new("resource_update_field")
+        .args(["url", "path", "role", "label", "no_label"])
+        .required(true)
+        .multiple(true))]
     Update {
         /// Issue ID.
         #[arg(value_parser = validate_issue_id)]

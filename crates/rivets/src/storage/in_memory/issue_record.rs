@@ -215,6 +215,7 @@ fn legacy_external_ref_url(external_ref: &str) -> Result<Option<WebUrl>, Resourc
             | ResourceError::EmptyResourceId
             | ResourceError::EmptyPath
             | ResourceError::PathControlCharacter { .. }
+            | ResourceError::WorkspacePathBackslash { .. }
             | ResourceError::AbsoluteWorkspacePath { .. }
             | ResourceError::WorkspacePathEscape { .. }
             | ResourceError::EmptyNormalizedWorkspacePath { .. }
@@ -245,6 +246,7 @@ fn add_migrated_resource(issue: &mut Issue, resource: NewResource) -> Result<(),
             | ResourceError::EmptyResourceId
             | ResourceError::EmptyPath
             | ResourceError::PathControlCharacter { .. }
+            | ResourceError::WorkspacePathBackslash { .. }
             | ResourceError::AbsoluteWorkspacePath { .. }
             | ResourceError::WorkspacePathEscape { .. }
             | ResourceError::EmptyNormalizedWorkspacePath { .. }

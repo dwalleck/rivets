@@ -1320,16 +1320,30 @@ pub async fn execute_label(
     }
 }
 
+/// Parse at most one of `--url`/`--path` into a Resource Target.
+///
+/// The four-arm match is the single canonical url/path classification for
+/// the CLI; `Add` layers its "exactly one" requirement on the `None` case.
+fn parse_target_flags(
+    url: Option<&str>,
+    path: Option<&str>,
+) -> Result<Option<crate::domain::ResourceTarget>> {
+    use crate::domain::{ResourceTarget, WebUrl, WorkspacePath};
+    match (url, path) {
+        (Some(url), None) => Ok(Some(ResourceTarget::web(WebUrl::new(url)?))),
+        (None, Some(path)) => Ok(Some(ResourceTarget::path(WorkspacePath::new(path)?))),
+        (None, None) => Ok(None),
+        (Some(_), Some(_)) => anyhow::bail!("only one of --url or --path may be given"),
+    }
+}
+
 /// Execute an Associated Resource command.
 pub async fn execute_resource(
     app: &mut crate::app::App,
     args: &ResourceArgs,
     output_mode: OutputMode,
 ) -> Result<()> {
-    use crate::domain::{
-        IssueId, NewResource, ResourceId, ResourceLabel, ResourceTarget, ResourceUpdate, WebUrl,
-        WorkspacePath,
-    };
+    use crate::domain::{IssueId, NewResource, ResourceId, ResourceLabel, ResourceUpdate};
     use crate::output;
 
     match &args.action {
@@ -1340,12 +1354,8 @@ pub async fn execute_resource(
             role,
             label,
         } => {
-            let target = match (url, path) {
-                (Some(url), None) => ResourceTarget::web(WebUrl::new(url)?),
-                (None, Some(path)) => ResourceTarget::path(WorkspacePath::new(path)?),
-                (None, None) => anyhow::bail!("exactly one of --url or --path is required"),
-                (Some(_), Some(_)) => anyhow::bail!("only one of --url or --path may be given"),
-            };
+            let target = parse_target_flags(url.as_deref(), path.as_deref())?
+                .ok_or_else(|| anyhow::anyhow!("exactly one of --url or --path is required"))?;
             let resource = NewResource {
                 target,
                 role: (*role).into(),
@@ -1373,12 +1383,7 @@ pub async fn execute_resource(
             label,
             no_label,
         } => {
-            let target = match (url, path) {
-                (Some(url), None) => Some(ResourceTarget::web(WebUrl::new(url)?)),
-                (None, Some(path)) => Some(ResourceTarget::path(WorkspacePath::new(path)?)),
-                (None, None) => None,
-                (Some(_), Some(_)) => anyhow::bail!("only one of --url or --path may be given"),
-            };
+            let target = parse_target_flags(url.as_deref(), path.as_deref())?;
             let label = match (label, no_label) {
                 (Some(label), false) => Some(Some(ResourceLabel::new(label)?)),
                 (None, true) => Some(None),

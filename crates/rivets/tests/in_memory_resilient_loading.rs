@@ -861,7 +861,8 @@ mod load_from_jsonl_tests {
             .expect("save should succeed");
         let written = std::fs::read_to_string(out.path()).expect("saved file should be readable");
         let record: serde_json::Value =
-            serde_json::from_str(written.lines().next().expect("one record")).unwrap();
+            serde_json::from_str(written.lines().next().expect("one record"))
+                .expect("record should be JSON");
         assert_eq!(
             record["resources"][0]["target"],
             serde_json::json!({"type":"path","path":"docs/adr/0003.md"})

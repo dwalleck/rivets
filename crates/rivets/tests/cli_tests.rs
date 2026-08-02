@@ -2178,6 +2178,24 @@ fn resource_path_add_update_remove_and_error_cases(initialized_dir: TempDir) {
     );
     assert!(!absolute.status.success(), "absolute must fail");
 
+    let backslash = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "resource",
+            "add",
+            &issue_id,
+            "--path",
+            r"docs\readme.md",
+            "--role",
+            "reference",
+        ],
+    );
+    assert!(!backslash.status.success(), "backslash must fail");
+    assert!(
+        String::from_utf8_lossy(&backslash.stderr).contains("use '/' as the separator"),
+        "backslash rejection should name the portable separator"
+    );
+
     let conflict = run_rivets_in_dir(
         initialized_dir.path(),
         &[
@@ -2268,6 +2286,22 @@ fn resource_path_add_update_remove_and_error_cases(initialized_dir: TempDir) {
     assert!(!unknown.status.success());
     assert!(String::from_utf8_lossy(&unknown.stderr).contains("Resource not found: r99"));
 
+    // An empty label is a typed error that does not persist.
+    let empty_label = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "resource",
+            "update",
+            &issue_id,
+            "--resource",
+            "r2",
+            "--label",
+            "",
+        ],
+    );
+    assert!(!empty_label.status.success(), "empty label must fail");
+    assert!(String::from_utf8_lossy(&empty_label.stderr).contains("label cannot be empty"));
+
     // Remove: remaining resources keep ids and positions.
     let removed = run_rivets_in_dir(
         initialized_dir.path(),
@@ -2284,7 +2318,7 @@ fn resource_path_add_update_remove_and_error_cases(initialized_dir: TempDir) {
         .as_array()
         .expect("array")
         .iter()
-        .map(|r| r["id"].as_str().unwrap().to_string())
+        .map(|r| r["id"].as_str().expect("id is a string").to_string())
         .collect();
     assert_eq!(
         ids,
@@ -2303,11 +2337,29 @@ fn resource_path_add_update_remove_and_error_cases(initialized_dir: TempDir) {
     assert_eq!(record["next_resource_id"], 4);
     let persisted_ids: Vec<_> = record["resources"]
         .as_array()
-        .unwrap()
+        .expect("resources should be an array")
         .iter()
-        .map(|r| r["id"].as_str().unwrap().to_string())
+        .map(|r| r["id"].as_str().expect("id is a string").to_string())
         .collect();
     assert_eq!(persisted_ids, ["r2", "r3"]);
+}
+
+#[rstest]
+fn resource_update_requires_at_least_one_field(initialized_dir: TempDir) {
+    let issue_id = create_issue(initialized_dir.path(), "No-op update", &[]);
+    let output = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["resource", "update", &issue_id, "--resource", "r1"],
+    );
+    assert!(
+        !output.status.success(),
+        "zero-field update must fail at parse time"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("required arguments"),
+        "clap should reject before touching the workspace: {stderr}"
+    );
 }
 
 #[rstest]
@@ -2388,7 +2440,7 @@ fn resource_mutations_persist_across_process_generations(initialized_dir: TempDi
     let resources = list_resources(initialized_dir.path(), &issue_id);
     let ids: Vec<_> = resources
         .iter()
-        .map(|r| r["id"].as_str().unwrap())
+        .map(|r| r["id"].as_str().expect("id is a string"))
         .collect();
     assert_eq!(ids, ["r2", "r3"]);
     assert_eq!(resources[1]["target"]["path"], "src/main.rs");

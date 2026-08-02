@@ -57,22 +57,34 @@ fn validate_resource_role(role: &str) -> Result<ResourceRole> {
     })
 }
 
-/// Parse exactly one Resource Target argument into the domain type.
-fn parse_resource_target(url: Option<String>, path: Option<String>) -> Result<ResourceTarget> {
+/// Parse at most one Resource Target argument into the domain type.
+///
+/// The four-arm match is the single canonical url/path classification for
+/// this crate; `parse_resource_target` layers the "exactly one" requirement
+/// on top of it.
+fn parse_optional_resource_target(
+    url: Option<String>,
+    path: Option<String>,
+) -> Result<Option<ResourceTarget>> {
     match (url, path) {
-        (Some(url), None) => Ok(ResourceTarget::web(WebUrl::new(url)?)),
-        (None, Some(path)) => Ok(ResourceTarget::path(WorkspacePath::new(path)?)),
-        (None, None) => Err(Error::InvalidArgument {
-            field: "target",
-            value: "neither url nor path provided".to_string(),
-            valid_values: "exactly one of url or path",
-        }),
+        (Some(url), None) => Ok(Some(ResourceTarget::web(WebUrl::new(url)?))),
+        (None, Some(path)) => Ok(Some(ResourceTarget::path(WorkspacePath::new(path)?))),
+        (None, None) => Ok(None),
         (Some(_), Some(_)) => Err(Error::InvalidArgument {
             field: "target",
             value: "url and path both provided".to_string(),
-            valid_values: "exactly one of url or path",
+            valid_values: "at most one of url or path",
         }),
     }
+}
+
+/// Parse exactly one Resource Target argument into the domain type.
+fn parse_resource_target(url: Option<String>, path: Option<String>) -> Result<ResourceTarget> {
+    parse_optional_resource_target(url, path)?.ok_or(Error::InvalidArgument {
+        field: "target",
+        value: "neither url nor path provided".to_string(),
+        valid_values: "exactly one of url or path",
+    })
 }
 
 /// Parse and validate a dependency type string.
@@ -441,18 +453,7 @@ impl Tools {
             clear_label,
             workspace_root,
         } = params;
-        let target = match (url, path) {
-            (None, None) => None,
-            (Some(url), None) => Some(ResourceTarget::web(WebUrl::new(url)?)),
-            (None, Some(path)) => Some(ResourceTarget::path(WorkspacePath::new(path)?)),
-            (Some(_), Some(_)) => {
-                return Err(Error::InvalidArgument {
-                    field: "target",
-                    value: "url and path both provided".to_string(),
-                    valid_values: "at most one of url or path",
-                });
-            }
-        };
+        let target = parse_optional_resource_target(url, path)?;
         let label = match (label, clear_label) {
             (Some(label), false) => Some(Some(ResourceLabel::new(label)?)),
             (None, true) => Some(None),

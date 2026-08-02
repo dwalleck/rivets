@@ -119,10 +119,15 @@ pub struct WebUrlSyntaxError {
 /// Construction applies purely lexical normalization (no filesystem access,
 /// so the target need not exist): `.` and empty components are dropped,
 /// in-bounds `..` components are resolved, and the result is stored in
-/// canonical relative form. Absolute paths, paths that escape the workspace
-/// root through parent traversal, empty values, and terminal-unsafe control
-/// characters are rejected. Tab is permitted, matching the shared
-/// [`find_control_char`] convention used by labels and identifiers.
+/// canonical relative form. Absolute paths (including Windows drive-qualified
+/// forms such as `C:...`), paths that escape the workspace root through
+/// parent traversal, empty values, and terminal-unsafe control characters
+/// are rejected. `/` is the only accepted separator: backslashes are
+/// rejected rather than reinterpreted, because `\` is a separator on Windows
+/// but an ordinary filename character on POSIX, and a portable
+/// workspace-relative path must mean the same target on both. Tab is
+/// permitted, matching the shared [`find_control_char`] convention used by
+/// labels and identifiers.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct WorkspacePath(String);
@@ -135,8 +140,10 @@ impl WorkspacePath {
     /// Returns [`ResourceError::EmptyPath`] when the value is empty or
     /// whitespace-only, [`ResourceError::PathControlCharacter`] when it
     /// contains a character unsafe for terminal output,
+    /// [`ResourceError::WorkspacePathBackslash`] when it contains `\`,
     /// [`ResourceError::AbsoluteWorkspacePath`] when it starts with a path
-    /// separator, [`ResourceError::WorkspacePathEscape`] when parent
+    /// separator or a Windows drive prefix,
+    /// [`ResourceError::WorkspacePathEscape`] when parent
     /// traversal leaves the workspace root, or
     /// [`ResourceError::EmptyNormalizedWorkspacePath`] when normalization
     /// leaves nothing (e.g. `a/..` or `.`).
@@ -148,7 +155,10 @@ impl WorkspacePath {
         if let Some(position) = find_control_char(&raw) {
             return Err(ResourceError::PathControlCharacter { position });
         }
-        if raw.starts_with('/') {
+        if let Some(position) = raw.chars().position(|c| c == '\\') {
+            return Err(ResourceError::WorkspacePathBackslash { position });
+        }
+        if raw.starts_with('/') || starts_with_drive_prefix(&raw) {
             return Err(ResourceError::AbsoluteWorkspacePath { path: raw });
         }
         let mut stack: Vec<&str> = Vec::new();
@@ -180,6 +190,13 @@ impl fmt::Display for WorkspacePath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
+}
+
+/// A `C:`-style drive prefix anchors the path outside any workspace on
+/// Windows even without a separator (`C:notes.txt` is drive-relative there).
+fn starts_with_drive_prefix(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
 /// The location of an Associated Resource.
@@ -446,6 +463,12 @@ pub enum ResourceError {
         /// Character offset of the invalid value.
         position: usize,
     },
+    /// The path used a backslash, which is not portable across platforms.
+    #[error("Workspace path contains '\\' at position {position}; use '/' as the separator")]
+    WorkspacePathBackslash {
+        /// Character offset of the backslash.
+        position: usize,
+    },
     /// The path was absolute instead of workspace-relative.
     #[error("Workspace path '{path}' must be relative to the workspace root")]
     AbsoluteWorkspacePath {
@@ -542,6 +565,13 @@ mod tests {
     #[case::dot(".")]
     #[case::dot_slash("./")]
     #[case::control_escape("\u{1b}x")]
+    #[case::backslash_traversal(r"..\..\secrets.txt")]
+    #[case::backslash_separator(r"docs\readme.md")]
+    #[case::backslash_rooted(r"\etc\passwd")]
+    #[case::unc(r"\\server\share")]
+    #[case::drive_backslash(r"C:\Windows")]
+    #[case::drive_forward_slash("C:/Windows/system32")]
+    #[case::drive_relative("C:relative.txt")]
     fn workspace_path_rejects(#[case] input: &str) {
         assert!(
             WorkspacePath::new(input).is_err(),
@@ -551,8 +581,13 @@ mod tests {
 
     #[test]
     fn workspace_path_matches_recorded_realpath_corpus() {
-        let mut checked = 0;
-        for (input, expected) in super::super::workspace_path_corpus::CORPUS {
+        let corpus = super::super::workspace_path_corpus::CORPUS;
+        assert!(
+            corpus.len() >= 400,
+            "corpus should be substantial, got {}",
+            corpus.len()
+        );
+        for (input, expected) in corpus {
             match WorkspacePath::new(*input) {
                 Ok(path) => {
                     assert_eq!(
@@ -566,12 +601,41 @@ mod tests {
                     "unexpected rejection for {input:?} (oracle accepts)"
                 ),
             }
-            checked += 1;
         }
-        assert!(
-            checked >= 400,
-            "corpus should be substantial, got {checked}"
+    }
+
+    #[test]
+    fn workspace_path_backslash_reports_char_position() {
+        assert_eq!(
+            WorkspacePath::new(r"docs\readme.md"),
+            Err(ResourceError::WorkspacePathBackslash { position: 4 })
         );
+        // Char position, not byte offset: 'é' is one char but two bytes.
+        assert_eq!(
+            WorkspacePath::new("é\\x"),
+            Err(ResourceError::WorkspacePathBackslash { position: 1 })
+        );
+    }
+
+    #[test]
+    fn workspace_path_drive_prefix_is_absolute() {
+        for input in ["C:/Windows/system32", "C:relative.txt", "c:x"] {
+            assert!(
+                matches!(
+                    WorkspacePath::new(input),
+                    Err(ResourceError::AbsoluteWorkspacePath { .. })
+                ),
+                "{input:?} must be rejected as absolute"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_path_accepts_nonexistent_targets() {
+        // Purely lexical: branch-local and generated files are legal targets.
+        let path = WorkspacePath::new("target/generated/does-not-exist/report.html")
+            .expect("nonexistent target should be accepted");
+        assert_eq!(path.as_str(), "target/generated/does-not-exist/report.html");
     }
 
     #[test]

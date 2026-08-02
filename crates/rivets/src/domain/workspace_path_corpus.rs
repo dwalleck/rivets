@@ -210,29 +210,7 @@ pub(super) const CORPUS: &[(&str, Option<&str>)] = &[
     ("/é/.hidden/文件.md/dir:", None),
     ("/é/a b", None),
     ("/文件.md", None),
-    ("C:", Some("C:")),
     ("C:/..", None),
-    ("C:/../lib.rs/a b/a b", Some("lib.rs/a b/a b")),
-    ("C:/./文件.md", Some("C:/文件.md")),
-    ("C:/./文件.md/文件.md", Some("C:/文件.md/文件.md")),
-    ("C:/.hidden", Some("C:/.hidden")),
-    ("C:/a b/C:/deep/.hidden", Some("C:/a b/C:/deep/.hidden")),
-    ("C:/deep/..", Some("C:")),
-    ("C:/deep/./with space/C:", Some("C:/deep/with space/C:")),
-    ("C:/dir:", Some("C:/dir:")),
-    ("C:/lib.rs/dir:/deep/..", Some("C:/lib.rs/dir:")),
-    ("C:/src", Some("C:/src")),
-    ("C:/with space/lib.rs/", Some("C:/with space/lib.rs")),
-    (
-        "C:/with space/文件.md/lib.rs",
-        Some("C:/with space/文件.md/lib.rs"),
-    ),
-    ("C:/x.y.z/..", Some("C:")),
-    ("C:/x.y.z//../é", Some("C:/é")),
-    ("C:/x.y.z/é", Some("C:/x.y.z/é")),
-    ("C:/é", Some("C:/é")),
-    ("C:/é/.hidden/.hidden", Some("C:/é/.hidden/.hidden")),
-    ("C:/文件.md/.hidden", Some("C:/文件.md/.hidden")),
     ("a b", Some("a b")),
     ("a b/./.hidden/src/..", Some("a b/.hidden")),
     ("a b/.hidden/C:", Some("a b/.hidden/C:")),
@@ -564,4 +542,37 @@ pub(super) const CORPUS: &[(&str, Option<&str>)] = &[
 
 #[cfg(test)]
 /// Policy rejections realpath cannot express (legal filenames, rejected by domain policy).
-pub(super) const POLICY_REJECT: &[&str] = &["   "];
+///
+/// The backslash and drive-prefix forms are legal single-component filenames
+/// to the POSIX `realpath -m` oracle, but on Windows they are separators,
+/// absolute anchors, or drive-relative anchors, so the domain rejects them
+/// for portability.
+pub(super) const POLICY_REJECT: &[&str] = &[
+    "   ",
+    r"..\..\secrets.txt",
+    r"docs\readme.md",
+    r"C:\Windows",
+    "C:/Windows/system32",
+    "C:relative.txt",
+    r"\\server\share",
+    r"\etc\passwd",
+    "C:",
+    "C:/../lib.rs/a b/a b",
+    "C:/./文件.md",
+    "C:/./文件.md/文件.md",
+    "C:/.hidden",
+    "C:/a b/C:/deep/.hidden",
+    "C:/deep/..",
+    "C:/deep/./with space/C:",
+    "C:/dir:",
+    "C:/lib.rs/dir:/deep/..",
+    "C:/src",
+    "C:/with space/lib.rs/",
+    "C:/with space/文件.md/lib.rs",
+    "C:/x.y.z/..",
+    "C:/x.y.z//../é",
+    "C:/x.y.z/é",
+    "C:/é",
+    "C:/é/.hidden/.hidden",
+    "C:/文件.md/.hidden",
+];

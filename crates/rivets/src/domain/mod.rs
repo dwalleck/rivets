@@ -1502,6 +1502,28 @@ mod tests {
         }
 
         #[test]
+        fn update_resource_last_position_is_stable() {
+            let mut issue = three_resource_issue();
+            let r3 = issue.resources()[2].id().clone();
+            issue
+                .update_resource(
+                    &r3,
+                    ResourceUpdate {
+                        role: Some(ResourceRole::Successor),
+                        ..ResourceUpdate::default()
+                    },
+                )
+                .expect("update succeeds");
+            let ids: Vec<_> = issue.resources().iter().map(|r| r.id().as_str()).collect();
+            assert_eq!(
+                ids,
+                ["r1", "r2", "r3"],
+                "updating the last resource must not reorder"
+            );
+            assert_eq!(issue.resources()[2].role(), ResourceRole::Successor);
+        }
+
+        #[test]
         fn update_resource_allows_web_to_path_and_back() {
             let mut issue = issue_with_next_id(1);
             issue

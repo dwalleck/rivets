@@ -3769,9 +3769,9 @@ async fn resource_mutations_persist_across_context_restart() {
     assert_eq!(record["next_resource_id"], 4);
     let persisted_ids: Vec<_> = record["resources"]
         .as_array()
-        .unwrap()
+        .expect("resources should be an array")
         .iter()
-        .map(|r| r["id"].as_str().unwrap().to_string())
+        .map(|r| r["id"].as_str().expect("id is a string").to_string())
         .collect();
     assert_eq!(persisted_ids, ["r1", "r3"]);
 }
