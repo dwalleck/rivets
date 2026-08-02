@@ -363,6 +363,28 @@ impl Issue {
         Ok(())
     }
 
+    /// Remove a resource by its stable identifier.
+    ///
+    /// The remaining resources keep their identifiers and positions, and the
+    /// per-Issue identifier sequence is untouched, so identifiers are never
+    /// reused after a removal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResourceError::ResourceNotFound`] when the identifier is
+    /// unknown.
+    pub fn remove_resource(&mut self, id: &ResourceId) -> Result<(), ResourceError> {
+        let Some(index) = self
+            .resources
+            .iter()
+            .position(|resource| resource.id() == id)
+        else {
+            return Err(ResourceError::ResourceNotFound { id: id.clone() });
+        };
+        self.resources.remove(index);
+        Ok(())
+    }
+
     /// Validate issue data integrity
     ///
     /// Checks:
@@ -1619,6 +1641,86 @@ mod tests {
                 "r2",
                 "update must not advance the id sequence"
             );
+        }
+
+        // ===== remove_resource =====
+
+        #[test]
+        fn remove_resource_keeps_remaining_ids_and_positions() {
+            let mut issue = three_resource_issue();
+            let r2 = issue.resources()[1].id().clone();
+            issue.remove_resource(&r2).expect("remove succeeds");
+            let resources = issue.resources();
+            assert_eq!(resources.len(), 2);
+            assert_eq!(resources[0].id().as_str(), "r1");
+            assert_eq!(resources[0].role(), ResourceRole::Implementation);
+            assert_eq!(resources[1].id().as_str(), "r3");
+            assert_eq!(resources[1].role(), ResourceRole::Reference);
+        }
+
+        #[test]
+        fn remove_resource_first_middle_last_and_only() {
+            for position in 0..3 {
+                let mut issue = three_resource_issue();
+                let target = issue.resources()[position].id().clone();
+                issue.remove_resource(&target).expect("remove succeeds");
+                let expected: Vec<&str> = ["r1", "r2", "r3"]
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(index, _)| *index != position)
+                    .map(|(_, id)| id)
+                    .collect();
+                let actual: Vec<&str> = issue.resources().iter().map(|r| r.id().as_str()).collect();
+                assert_eq!(actual, expected, "removing position {position}");
+            }
+            let mut issue = three_resource_issue();
+            for resource in issue.resources().to_vec() {
+                issue
+                    .remove_resource(resource.id())
+                    .expect("remove succeeds");
+            }
+            assert!(issue.resources().is_empty());
+        }
+
+        #[test]
+        fn remove_resource_rejects_unknown_id() {
+            let mut issue = three_resource_issue();
+            let unknown = ResourceId::new("r99").expect("valid id");
+            assert_eq!(
+                issue.remove_resource(&unknown),
+                Err(ResourceError::ResourceNotFound { id: unknown })
+            );
+            assert_eq!(issue.resources().len(), 3, "failed removal must not mutate");
+        }
+
+        #[test]
+        fn remove_resource_from_empty_issue_is_not_found() {
+            let mut issue = issue_with_next_id(1);
+            let id = ResourceId::new("r1").expect("valid id");
+            assert!(matches!(
+                issue.remove_resource(&id),
+                Err(ResourceError::ResourceNotFound { .. })
+            ));
+        }
+
+        #[test]
+        fn remove_resource_never_reuses_identifiers() {
+            let mut issue = three_resource_issue();
+            let r2 = issue.resources()[1].id().clone();
+            issue.remove_resource(&r2).expect("remove succeeds");
+            let next = issue
+                .add_resource(web_resource(
+                    "https://new.example.com",
+                    ResourceRole::Evidence,
+                ))
+                .expect("add succeeds");
+            assert_eq!(
+                next.as_str(),
+                "r4",
+                "next id must continue the sequence, never reuse r2"
+            );
+            let ids: Vec<_> = issue.resources().iter().map(|r| r.id().as_str()).collect();
+            assert_eq!(ids, ["r1", "r3", "r4"]);
         }
     }
 }
