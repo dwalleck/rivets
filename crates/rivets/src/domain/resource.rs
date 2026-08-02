@@ -4,6 +4,7 @@
 //! information or an artifact. Resources form a mutable curated index with no
 //! effect on workflow or readiness. See ADR-0003 and `CONTEXT.md`.
 
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -245,7 +246,9 @@ impl fmt::Display for ResourceTarget {
 }
 
 /// The reason an Associated Resource matters to its Issue.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ValueEnum,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceRole {
     /// Delivers work for the Issue (e.g., an implementation PR).
@@ -774,6 +777,20 @@ mod tests {
             "provider".parse::<ResourceRole>(),
             Err(ResourceError::UnknownRole { .. })
         ));
+    }
+
+    #[test]
+    fn resource_role_cli_value_name_matches_display() {
+        for role in [
+            ResourceRole::Implementation,
+            ResourceRole::Documentation,
+            ResourceRole::Evidence,
+            ResourceRole::Successor,
+            ResourceRole::Reference,
+        ] {
+            let possible = role.to_possible_value().expect("possible value");
+            assert_eq!(possible.get_name(), role.to_string());
+        }
     }
 
     // ===== ResourceLabel =====
