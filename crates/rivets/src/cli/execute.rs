@@ -11,7 +11,8 @@ use super::args::{
     LabelAction, LabelArgs, ListArgs, ReadyArgs, ReopenArgs, ResourceAction, ResourceArgs,
     ShowArgs, StaleArgs, StatsArgs, UpdateArgs,
 };
-use super::types::{DependencyTypeArg, SortOrderArg, SortPolicyArg};
+use super::types::{SortOrderArg, SortPolicyArg};
+use crate::domain::DependencyType;
 use crate::output::OutputMode;
 
 /// Execute the init command
@@ -156,12 +157,9 @@ pub async fn execute_create(
     for dep_str in &args.deps {
         // Format: "issue-id" or "type:issue-id"
         if let Some((dep_type_str, issue_id)) = dep_str.split_once(':') {
-            let dep_type = match dep_type_str {
-                "blocks" => DomainDepType::Blocks,
-                "related" => DomainDepType::Related,
-                "parent-child" => DomainDepType::ParentChild,
-                "discovered-from" => DomainDepType::DiscoveredFrom,
-                _ => {
+            let dep_type = match dep_type_str.parse::<DomainDepType>() {
+                Ok(dep_type) => dep_type,
+                Err(_) => {
                     anyhow::bail!(
                         "Invalid dependency type '{}'. Valid types: blocks, related, parent-child, discovered-from",
                         dep_type_str
@@ -179,7 +177,7 @@ pub async fn execute_create(
         title,
         description: args.description.clone().unwrap_or_default(),
         priority: args.priority,
-        issue_kind: args.issue_kind.into(),
+        issue_kind: args.issue_kind,
         assignee: args.assignee.clone(),
         labels: args.labels.clone(),
         design: args.design.clone(),
@@ -214,9 +212,9 @@ pub async fn execute_list(
 
     // Don't apply limit in filter - we need to sort first, then limit
     let filter = IssueFilter {
-        status: args.status.map(|s| s.into()),
+        status: args.status,
         priority: args.priority,
-        issue_kind: args.issue_kind.map(|t| t.into()),
+        issue_kind: args.issue_kind,
         assignee: args.assignee.clone(),
         label: args.label.clone(),
         limit: None,
@@ -360,9 +358,9 @@ pub async fn execute_update(
         let update = IssueUpdate {
             title: args.title.clone(),
             description: args.description.clone(),
-            status: args.status.map(|s| s.into()),
+            status: args.status,
             priority: args.priority,
-            issue_kind: args.issue_kind.map(Into::into),
+            issue_kind: args.issue_kind,
             assignee: if args.no_assignee {
                 Some(None) // Clear the assignee
             } else {
@@ -801,7 +799,7 @@ pub async fn execute_ready(
         Some(IssueFilter {
             assignee: args.assignee.clone(),
             priority: args.priority,
-            issue_kind: args.issue_kind.map(Into::into),
+            issue_kind: args.issue_kind,
             label: args.label.clone(),
             ..Default::default()
         })
@@ -848,7 +846,7 @@ async fn execute_dep_add(
     app: &mut crate::app::App,
     from: &str,
     to: &str,
-    dep_type: DependencyTypeArg,
+    dep_type: DependencyType,
     output_mode: OutputMode,
 ) -> Result<()> {
     use crate::domain::IssueId;
@@ -858,7 +856,7 @@ async fn execute_dep_add(
     let to_id = IssueId::new(to);
 
     app.storage_mut()
-        .add_dependency(&from_id, &to_id, dep_type.into())
+        .add_dependency(&from_id, &to_id, dep_type)
         .await?;
     app.save().await?;
 
@@ -1358,7 +1356,7 @@ pub async fn execute_resource(
                 .ok_or_else(|| anyhow::anyhow!("exactly one of --url or --path is required"))?;
             let resource = NewResource {
                 target,
-                role: (*role).into(),
+                role: *role,
                 label: label.clone().map(ResourceLabel::new).transpose()?,
             };
             let issue = app
@@ -1394,7 +1392,7 @@ pub async fn execute_resource(
             };
             let update = ResourceUpdate {
                 target,
-                role: role.map(Into::into),
+                role: *role,
                 label,
             };
             let issue = app
@@ -1467,7 +1465,7 @@ pub async fn execute_stale(
 
     // Build filter based on status if provided
     let filter = IssueFilter {
-        status: args.status.map(|s| s.into()),
+        status: args.status,
         ..Default::default()
     };
 

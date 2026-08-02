@@ -5,13 +5,13 @@
 
 use clap::{Parser, Subcommand};
 
-use super::types::{
-    DependencyTypeArg, IssueKindArg, IssueStatusArg, ResourceRoleArg, SortOrderArg, SortPolicyArg,
-};
+use super::types::{SortOrderArg, SortPolicyArg};
 use super::validators::{
     validate_description, validate_issue_id, validate_label, validate_prefix, validate_title,
 };
-use crate::domain::{MAX_PRIORITY, MIN_PRIORITY};
+use crate::domain::{
+    DependencyType, IssueKind, IssueStatus, MAX_PRIORITY, MIN_PRIORITY, ResourceRole,
+};
 
 /// Arguments for the `init` command
 #[derive(Parser, Debug, Clone)]
@@ -51,7 +51,7 @@ pub struct CreateArgs {
 
     /// Issue kind
     #[arg(short = 'k', long = "kind", value_enum, default_value = "task")]
-    pub issue_kind: IssueKindArg,
+    pub issue_kind: IssueKind,
 
     /// Assignee username
     #[arg(short, long)]
@@ -86,7 +86,7 @@ pub struct CreateArgs {
 pub struct ListArgs {
     /// Filter by status
     #[arg(short, long, value_enum)]
-    pub status: Option<IssueStatusArg>,
+    pub status: Option<IssueStatus>,
 
     /// Filter by priority
     #[arg(short, long, value_parser = clap::value_parser!(u8).range(MIN_PRIORITY as i64..=MAX_PRIORITY as i64))]
@@ -94,7 +94,7 @@ pub struct ListArgs {
 
     /// Filter by issue kind
     #[arg(short = 'k', long = "kind", value_enum)]
-    pub issue_kind: Option<IssueKindArg>,
+    pub issue_kind: Option<IssueKind>,
 
     /// Filter by assignee
     #[arg(short, long)]
@@ -146,7 +146,7 @@ pub struct UpdateArgs {
 
     /// New status
     #[arg(short, long, value_enum)]
-    pub status: Option<IssueStatusArg>,
+    pub status: Option<IssueStatus>,
 
     /// New priority
     #[arg(short, long, value_parser = clap::value_parser!(u8).range(MIN_PRIORITY as i64..=MAX_PRIORITY as i64))]
@@ -154,7 +154,7 @@ pub struct UpdateArgs {
 
     /// New issue kind
     #[arg(short = 'k', long = "kind", value_enum)]
-    pub issue_kind: Option<IssueKindArg>,
+    pub issue_kind: Option<IssueKind>,
 
     /// New assignee
     ///
@@ -272,7 +272,7 @@ pub struct ReadyArgs {
 
     /// Filter by issue kind
     #[arg(short = 'k', long = "kind", value_enum)]
-    pub issue_kind: Option<IssueKindArg>,
+    pub issue_kind: Option<IssueKind>,
 
     /// Filter by label
     #[arg(short, long)]
@@ -310,7 +310,7 @@ pub enum DepAction {
 
         /// Dependency type
         #[arg(short = 't', long = "type", value_enum, default_value = "blocks")]
-        dep_type: DependencyTypeArg,
+        dep_type: DependencyType,
     },
 
     /// Remove a dependency
@@ -378,7 +378,7 @@ pub struct StaleArgs {
 
     /// Filter by status
     #[arg(short, long, value_enum)]
-    pub status: Option<IssueStatusArg>,
+    pub status: Option<IssueStatus>,
 
     /// Maximum number of issues to display
     #[arg(short = 'n', long, default_value = "50")]
@@ -464,7 +464,7 @@ pub enum ResourceAction {
 
         /// Why this resource matters to the Issue.
         #[arg(long, value_enum)]
-        role: ResourceRoleArg,
+        role: ResourceRole,
 
         /// Optional human-readable label.
         #[arg(long)]
@@ -498,7 +498,7 @@ pub enum ResourceAction {
 
         /// New role.
         #[arg(long, value_enum)]
-        role: Option<ResourceRoleArg>,
+        role: Option<ResourceRole>,
 
         /// New human-readable label (conflicts with --no-label).
         #[arg(long, conflicts_with = "no_label")]
@@ -576,7 +576,7 @@ mod tests {
         #[test]
         fn test_has_updates_status() {
             let mut args = create_empty_update_args();
-            args.status = Some(IssueStatusArg::InProgress);
+            args.status = Some(IssueStatus::InProgress);
             assert!(args.has_updates());
         }
 
@@ -590,7 +590,7 @@ mod tests {
         #[test]
         fn test_has_updates_issue_kind() {
             let mut args = create_empty_update_args();
-            args.issue_kind = Some(IssueKindArg::Bug);
+            args.issue_kind = Some(IssueKind::Bug);
             assert!(args.has_updates());
         }
 

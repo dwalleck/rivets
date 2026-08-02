@@ -421,6 +421,21 @@ fn test_cli_list_status_filter_parsing(initialized_dir: TempDir, #[case] status:
     );
 }
 
+#[test]
+fn test_cli_list_invalid_status_rejected() {
+    // Regression fence (rivets-bkjj C3): invalid enum strings must fail with
+    // clap's exit-2 "invalid value" error, listing the possible values.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let output = run_rivets_in_dir(dir.path(), &["list", "--status", "bogus"]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("invalid value 'bogus' for '--status <STATUS>'"),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("possible values: open, in_progress, blocked, closed"));
+}
+
 #[rstest]
 fn test_cli_list_status_filters_match_issues(initialized_dir: TempDir) {
     // Create issues with different statuses
