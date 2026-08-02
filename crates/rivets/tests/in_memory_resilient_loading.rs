@@ -12,7 +12,9 @@
 //! - Round-trip persistence through save and load
 
 use chrono::Utc;
-use rivets::domain::{DependencyType, IssueId, IssueKind, IssueStatus, NewIssue, ResourceRole};
+use rivets::domain::{
+    DependencyType, IssueId, IssueKind, IssueStatus, NewIssue, ResourceError, ResourceRole,
+};
 use rivets::storage::in_memory::{
     LoadWarning, MigrationField, load_from_jsonl, new_in_memory_storage, save_to_jsonl,
 };
@@ -460,6 +462,7 @@ mod load_from_jsonl_tests {
                 LoadWarning::InvalidIssueData { .. } => has_invalid = true,
                 LoadWarning::CircularDependency { .. } => {}
                 LoadWarning::MigrationConflict { .. } => {}
+                LoadWarning::InvalidResourceData { .. } => has_invalid = true,
             }
         }
 
@@ -729,10 +732,10 @@ mod load_from_jsonl_tests {
             .expect("resilient load should report invalid resource ID");
         assert_eq!(warnings.len(), 1);
         match &warnings[0] {
-            LoadWarning::InvalidIssueData { error, .. } => {
-                assert!(error.contains("Resource identifier cannot be empty"));
+            LoadWarning::InvalidResourceData { source, .. } => {
+                assert!(matches!(source, ResourceError::EmptyResourceId));
             }
-            warning => panic!("expected InvalidIssueData warning, got {warning:?}"),
+            warning => panic!("expected InvalidResourceData warning, got {warning:?}"),
         }
         assert!(
             storage
@@ -753,10 +756,13 @@ mod load_from_jsonl_tests {
             .expect("resilient load should report unsafe resource ID");
         assert_eq!(warnings.len(), 1);
         match &warnings[0] {
-            LoadWarning::InvalidIssueData { error, .. } => {
-                assert!(error.contains("Resource identifier contains invalid control character"));
+            LoadWarning::InvalidResourceData { source, .. } => {
+                assert!(matches!(
+                    source,
+                    ResourceError::ResourceIdControlCharacter { .. }
+                ));
             }
-            warning => panic!("expected InvalidIssueData warning, got {warning:?}"),
+            warning => panic!("expected InvalidResourceData warning, got {warning:?}"),
         }
         assert!(
             storage

@@ -26,11 +26,8 @@ rivets/
 │       │   ├── config.rs
 │       │   ├── error.rs
 │       │   ├── domain/
-│       │   │   ├── mod.rs
-│       │   │   ├── issue.rs
-│       │   │   ├── dependency.rs
-│       │   │   ├── filter.rs
-│       │   │   └── types.rs
+│       │   │   ├── mod.rs           # Issue, Note, filters, and shared domain types
+│       │   │   └── resource.rs      # Associated Resource domain types
 │       │   ├── storage/
 │       │   │   ├── mod.rs
 │       │   │   ├── trait.rs
@@ -261,20 +258,10 @@ impl App {
 
 ```mermaid
 graph TD
-    ModRS[domain/mod.rs<br/>Public exports] --> Issue[issue.rs<br/>Issue, NewIssue, IssueUpdate]
-    ModRS --> Dep[dependency.rs<br/>Dependency, DependencyType]
-    ModRS --> Filter[filter.rs<br/>IssueFilter, builder]
-    ModRS --> Types[types.rs<br/>IssueId, Status, Priority, IssueType]
-
-    Issue --> Types
-    Dep --> Types
-    Filter --> Types
+    ModRS[domain/mod.rs<br/>Issue, Note, filters, shared types] --> Resource[resource.rs<br/>AssociatedResource, targets, roles, identifiers]
 
     style ModRS fill:#ADD8E6
-    style Issue fill:#90EE90
-    style Dep fill:#90EE90
-    style Filter fill:#90EE90
-    style Types fill:#90EE90
+    style Resource fill:#90EE90
 ```
 
 ### domain/types.rs
@@ -354,7 +341,9 @@ pub enum DependencyType {
 ```rust
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use super::{Dependency, DependencyType, IssueId, IssueKind, IssueStatus};
+use super::{
+    AssociatedResource, Dependency, DependencyType, IssueId, IssueKind, IssueStatus,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Note {
@@ -378,7 +367,9 @@ pub struct Issue {
     pub design: Option<String>,
     pub acceptance_criteria: Option<String>,
     pub(crate) notes: Vec<Note>,
-    pub external_ref: Option<String>,
+    pub(crate) resources: Vec<AssociatedResource>,
+    #[serde(skip)]
+    pub(crate) next_resource_id: u64,
     pub dependencies: Vec<Dependency>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -396,7 +387,6 @@ pub struct NewIssue {
     pub design: Option<String>,
     pub acceptance_criteria: Option<String>,
     pub initial_note: Option<NoteContent>,
-    pub external_ref: Option<String>,
     pub dependencies: Vec<(IssueId, DependencyType)>,
 }
 
@@ -411,7 +401,6 @@ pub struct IssueUpdate {
     pub design: Option<String>,
     pub acceptance_criteria: Option<String>,
     pub note: Option<NoteContent>,
-    pub external_ref: Option<String>,
     pub labels: Option<Vec<String>>,
 }
 ```

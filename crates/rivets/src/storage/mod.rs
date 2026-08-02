@@ -428,6 +428,15 @@ impl JsonlBackedStorage {
                     issue_id: issue_id.clone(),
                     error: error.clone(),
                 }),
+                in_memory::LoadWarning::InvalidResourceData {
+                    issue_id,
+                    line_number,
+                    source,
+                } => Some(SkippedIssueRecordCause::InvalidResourceData {
+                    line_number: *line_number,
+                    issue_id: issue_id.clone(),
+                    source: source.clone(),
+                }),
             })
             .collect();
 
@@ -1034,6 +1043,41 @@ mod tests {
             "rejected mutation must not change in-memory state"
         );
         assert_eq!(std::fs::read(&jsonl_path).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn partial_resource_load_preserves_typed_cause() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let jsonl_path = temp_dir.path().join("issues.jsonl");
+        let invalid_resource = br#"{"id":"test-invalid-resource","title":"Invalid resource","description":"","status":"open","priority":2,"issue_kind":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":[],"resources":[{"id":"","target":{"type":"web","url":"https://example.com"},"role":"reference","label":null}],"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}
+"#;
+        std::fs::write(&jsonl_path, invalid_resource).unwrap();
+
+        let mut storage = create_storage(StorageBackend::Jsonl(jsonl_path), "test".into())
+            .await
+            .unwrap();
+        let result = storage
+            .create(NewIssue {
+                title: "Rejected issue".to_string(),
+                ..Default::default()
+            })
+            .await;
+
+        match result {
+            Err(crate::error::Error::Storage(StorageError::UnsafePartialLoad(error))) => {
+                assert!(matches!(
+                    error.causes(),
+                    [crate::error::SkippedIssueRecordCause::InvalidResourceData {
+                        line_number: 1,
+                        source: crate::domain::ResourceError::EmptyResourceId,
+                        ..
+                    }]
+                ));
+            }
+            other => panic!("expected a typed resource load error, got {other:?}"),
+        }
     }
 
     #[tokio::test]

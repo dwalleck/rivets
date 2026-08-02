@@ -1,6 +1,6 @@
 //! Error types for rivets CLI operations.
 
-use crate::domain::IssueId;
+use crate::domain::{IssueId, ResourceError};
 use std::{fmt, io};
 use thiserror::Error;
 
@@ -66,10 +66,11 @@ pub enum ConfigError {
 }
 
 /// The reason one persisted Issue record was omitted during resilient loading.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum SkippedIssueRecordCause {
     /// The record could not be decoded from its JSONL representation.
+    #[error("line {line_number}: malformed JSON ({error})")]
     MalformedJson {
         /// Physical 1-based line number in the JSONL file.
         line_number: usize,
@@ -77,6 +78,7 @@ pub enum SkippedIssueRecordCause {
         error: String,
     },
     /// The decoded record violated an Issue invariant.
+    #[error("line {line_number}: issue {issue_id} is invalid ({error})")]
     InvalidIssueData {
         /// Physical 1-based line number in the JSONL file.
         line_number: usize,
@@ -84,6 +86,17 @@ pub enum SkippedIssueRecordCause {
         issue_id: IssueId,
         /// Domain validation error.
         error: String,
+    },
+    /// One of the decoded record's Associated Resources violated an invariant.
+    #[error("line {line_number}: issue {issue_id} has an invalid Associated Resource ({source})")]
+    InvalidResourceData {
+        /// Physical 1-based line number in the JSONL file.
+        line_number: usize,
+        /// Issue identifier decoded before resource validation failed.
+        issue_id: IssueId,
+        /// Typed resource validation failure.
+        #[source]
+        source: ResourceError,
     },
 }
 
@@ -93,25 +106,8 @@ impl SkippedIssueRecordCause {
     pub const fn line_number(&self) -> usize {
         match self {
             Self::MalformedJson { line_number, .. }
-            | Self::InvalidIssueData { line_number, .. } => *line_number,
-        }
-    }
-}
-
-impl fmt::Display for SkippedIssueRecordCause {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MalformedJson { line_number, error } => {
-                write!(f, "line {line_number}: malformed JSON ({error})")
-            }
-            Self::InvalidIssueData {
-                line_number,
-                issue_id,
-                error,
-            } => write!(
-                f,
-                "line {line_number}: issue {issue_id} is invalid ({error})"
-            ),
+            | Self::InvalidIssueData { line_number, .. }
+            | Self::InvalidResourceData { line_number, .. } => *line_number,
         }
     }
 }
@@ -208,6 +204,31 @@ pub enum StorageError {
     /// An Associated Resource invariant was violated.
     #[error(transparent)]
     Resource(#[from] crate::domain::ResourceError),
+}
+
+impl StorageError {
+    /// Separates an Associated Resource invariant failure from other storage failures.
+    ///
+    /// This classification lives in the owning crate so adding a new
+    /// [`StorageError`] variant forces an explicit decision here. External
+    /// adapters can special-case resource input errors without a wildcard over
+    /// this non-exhaustive enum.
+    ///
+    /// # Errors
+    ///
+    /// Returns the original error unchanged when it is not an Associated
+    /// Resource invariant failure.
+    pub fn into_resource_error(self) -> std::result::Result<crate::domain::ResourceError, Self> {
+        match self {
+            Self::Resource(source) => Ok(source),
+            error @ (Self::Validation(_)
+            | Self::IdGeneration(_)
+            | Self::DuplicateDependency { .. }
+            | Self::InvalidFormat(_)
+            | Self::UnsafePartialLoad(_)
+            | Self::Serialization(_)) => Err(error),
+        }
+    }
 }
 
 /// The error type for rivets operations.

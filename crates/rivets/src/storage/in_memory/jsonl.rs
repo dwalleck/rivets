@@ -8,7 +8,7 @@ use super::inner::InMemoryStorageInner;
 use super::issue_record::{
     CanonicalIssueRecord, IssueRecord, IssueRecordConversion, IssueRecordError, MigrationField,
 };
-use crate::domain::IssueId;
+use crate::domain::{IssueId, ResourceError};
 use crate::error::{Error, Result, StorageError};
 use crate::storage::IssueStorage;
 use rivets_jsonl::{Warning as JsonlWarning, read_jsonl_resilient_with_line_numbers};
@@ -58,6 +58,14 @@ use tokio::sync::Mutex;
 ///         rivets::storage::in_memory::LoadWarning::InvalidIssueData { issue_id, line_number, error } => {
 ///             eprintln!("Skipped invalid issue {} at line {}: {}", issue_id, line_number, error);
 ///         }
+///         rivets::storage::in_memory::LoadWarning::InvalidResourceData {
+///             issue_id, line_number, source
+///         } => {
+///             eprintln!(
+///                 "Skipped invalid resource on issue {} at line {}: {}",
+///                 issue_id, line_number, source
+///             );
+///         }
 ///         rivets::storage::in_memory::LoadWarning::MigrationConflict {
 ///             issue_id, field, ..
 ///         } => {
@@ -73,12 +81,13 @@ use tokio::sync::Mutex;
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum LoadWarning {
     /// Malformed JSON line that couldn't be parsed
     ///
     /// **Effect**: Line is skipped entirely; no issue created from this line.
     /// **Common causes**: File corruption, manual editing errors, incomplete writes.
+    #[error("line {line_number}: malformed JSON ({error})")]
     MalformedJson { line_number: usize, error: String },
 
     /// Dependency references an issue that doesn't exist in the file
@@ -86,6 +95,7 @@ pub enum LoadWarning {
     /// **Effect**: The dependency edge is skipped; both issues are still loaded,
     /// but the dependency relationship is not created.
     /// **Common causes**: Partial exports, deleted dependencies, file corruption.
+    #[error("orphaned dependency from {from} to {to}")]
     OrphanedDependency { from: IssueId, to: IssueId },
 
     /// Adding a dependency would create a circular reference
@@ -93,12 +103,14 @@ pub enum LoadWarning {
     /// **Effect**: The dependency edge is skipped to break the cycle; both issues
     /// are loaded but one dependency edge is omitted.
     /// **Common causes**: Manual JSONL editing, bugs in earlier versions.
+    #[error("circular dependency from {from} to {to}")]
     CircularDependency { from: IssueId, to: IssueId },
 
     /// Emitted and migration-only persisted fields disagree.
     ///
     /// **Effect**: The canonical emitted field wins and the issue remains loaded.
     /// **Common causes**: Interrupted migrations or conflicting manual edits.
+    #[error("line {line_number}: Issue {issue_id} has conflicting migration field {field:?}")]
     MigrationConflict {
         issue_id: IssueId,
         line_number: usize,
@@ -109,10 +121,23 @@ pub enum LoadWarning {
     ///
     /// **Effect**: The entire issue is skipped and not loaded into storage.
     /// **Common causes**: Manual editing, version mismatches, data corruption.
+    #[error("line {line_number}: Issue {issue_id} is invalid ({error})")]
     InvalidIssueData {
         issue_id: IssueId,
         line_number: usize,
         error: String,
+    },
+
+    /// An Associated Resource failed domain validation.
+    ///
+    /// **Effect**: The entire issue is skipped and not loaded into storage.
+    /// **Common causes**: Manual editing, version mismatches, data corruption.
+    #[error("line {line_number}: Issue {issue_id} has an invalid Associated Resource ({source})")]
+    InvalidResourceData {
+        issue_id: IssueId,
+        line_number: usize,
+        #[source]
+        source: ResourceError,
     },
 }
 
@@ -229,6 +254,24 @@ pub async fn load_from_jsonl(
                     issue_id,
                     line_number,
                     error,
+                });
+            }
+            Err(IssueRecordError::InvalidResource {
+                issue_id,
+                source,
+                migration_conflict,
+            }) => {
+                if let Some(field) = migration_conflict {
+                    warnings.push(LoadWarning::MigrationConflict {
+                        issue_id: issue_id.clone(),
+                        line_number,
+                        field,
+                    });
+                }
+                warnings.push(LoadWarning::InvalidResourceData {
+                    issue_id,
+                    line_number,
+                    source,
                 });
             }
         }
