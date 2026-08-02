@@ -3,10 +3,7 @@
 //! This module contains types for MCP tool inputs and outputs.
 //! They wrap or transform rivets domain types for MCP compatibility.
 
-use rivets::domain::{
-    AssociatedResource, Dependency, DependencyType, Issue, IssueKind, IssueStatus, Note,
-    ResourceTarget,
-};
+use rivets::domain::{AssociatedResource, Dependency, Issue, IssueKind, Note, ResourceTarget};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -14,10 +11,18 @@ use serde::{Deserialize, Serialize};
 // Tool Input Parameters
 // ============================================================================
 
-/// Issue Kind values accepted by MCP tool inputs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+/// Schema-only stand-in for the domain [`IssueKind`] wire vocabulary.
+///
+/// schemars cannot derive `JsonSchema` for the domain type from another
+/// crate (orphan rule), and the rivets crate must not gain a schemars
+/// dependency, so this local type renders the `issue_kind` enum values in
+/// tool schemas. It performs no parsing and holds no string table; the
+/// schema fence test (`issue_kind_schema_matches_domain_display`) pins its
+/// values to the domain enum's Display strings so a new Kind cannot
+/// silently drift.
+#[derive(JsonSchema)]
 #[serde(rename_all = "lowercase")]
-pub enum McpIssueKind {
+pub enum McpIssueKindSchema {
     /// Bug fix.
     Bug,
     /// New feature.
@@ -30,51 +35,6 @@ pub enum McpIssueKind {
     Chore,
 }
 
-/// Declares the MCP Issue Kind table and its expected-names slice from a single
-/// list, so adding a Kind never requires updating match arms and names in lockstep.
-macro_rules! mcp_issue_kinds {
-    ($(($name:literal, $variant:ident)),+ $(,)?) => {
-        const VALID_KINDS: &[(&str, McpIssueKind)] = &[$(($name, McpIssueKind::$variant)),+];
-        const VALID_KIND_NAMES: &[&str] = &[$($name),+];
-    };
-}
-
-impl<'de> Deserialize<'de> for McpIssueKind {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        mcp_issue_kinds![
-            ("bug", Bug),
-            ("feature", Feature),
-            ("task", Task),
-            ("epic", Epic),
-            ("chore", Chore),
-        ];
-
-        let value = String::deserialize(deserializer)?;
-        VALID_KINDS
-            .iter()
-            .find(|(name, _)| value.eq_ignore_ascii_case(name))
-            .map(|(_, kind)| *kind)
-            .ok_or_else(|| {
-                <D::Error as serde::de::Error>::unknown_variant(&value, VALID_KIND_NAMES)
-            })
-    }
-}
-
-impl From<McpIssueKind> for IssueKind {
-    fn from(value: McpIssueKind) -> Self {
-        match value {
-            McpIssueKind::Bug => Self::Bug,
-            McpIssueKind::Feature => Self::Feature,
-            McpIssueKind::Task => Self::Task,
-            McpIssueKind::Epic => Self::Epic,
-            McpIssueKind::Chore => Self::Chore,
-        }
-    }
-}
-
 /// Canonical and migration-only names for an MCP Issue Kind input.
 ///
 /// `issue_type` remains accepted for compatibility but is omitted from the
@@ -83,17 +43,18 @@ impl From<McpIssueKind> for IssueKind {
 pub struct IssueKindInput {
     /// Canonical Issue Kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub issue_kind: Option<McpIssueKind>,
+    #[schemars(with = "Option<McpIssueKindSchema>")]
+    pub issue_kind: Option<IssueKind>,
 
     #[serde(default, rename = "issue_type", skip_serializing)]
     #[schemars(skip)]
-    legacy_issue_type: Option<McpIssueKind>,
+    legacy_issue_type: Option<IssueKind>,
 }
 
 impl IssueKindInput {
     /// Construct a canonical MCP Issue Kind input.
     #[must_use]
-    pub const fn canonical(issue_kind: Option<McpIssueKind>) -> Self {
+    pub const fn canonical(issue_kind: Option<IssueKind>) -> Self {
         Self {
             issue_kind,
             legacy_issue_type: None,
@@ -111,9 +72,9 @@ impl IssueKindInput {
                     issue_type = ?issue_type,
                     "Conflicting MCP Issue Kind fields; using issue_kind"
                 );
-                Some(issue_kind.into())
+                Some(issue_kind)
             }
-            (Some(issue_kind), _) | (None, Some(issue_kind)) => Some(issue_kind.into()),
+            (Some(issue_kind), _) | (None, Some(issue_kind)) => Some(issue_kind),
             (None, None) => None,
         }
     }
@@ -619,9 +580,9 @@ impl From<Issue> for McpIssue {
             id: issue.id.to_string(),
             title: issue.title,
             description: issue.description,
-            status: status_to_str(issue.status).to_string(),
+            status: issue.status.to_string(),
             priority: issue.priority,
-            issue_kind: issue_kind_to_str(issue.issue_kind).to_string(),
+            issue_kind: issue.issue_kind.to_string(),
             assignee: issue.assignee,
             labels: issue.labels,
             design: issue.design,
@@ -650,7 +611,7 @@ impl From<Dependency> for McpDependency {
     fn from(dep: Dependency) -> Self {
         Self {
             depends_on_id: dep.depends_on_id.to_string(),
-            dep_type: dep_type_to_str(dep.dep_type).to_string(),
+            dep_type: dep.dep_type.to_string(),
         }
     }
 }
@@ -685,63 +646,6 @@ pub struct StatsResponse {
 
     /// Number of ready-to-work issues.
     pub ready: usize,
-}
-
-// Helper functions for converting enums to strings
-// These return &'static str to avoid unnecessary allocations
-
-fn status_to_str(status: IssueStatus) -> &'static str {
-    match status {
-        IssueStatus::Open => "open",
-        IssueStatus::InProgress => "in_progress",
-        IssueStatus::Blocked => "blocked",
-        IssueStatus::Closed => "closed",
-    }
-}
-
-fn issue_kind_to_str(issue_kind: IssueKind) -> &'static str {
-    match issue_kind {
-        IssueKind::Bug => "bug",
-        IssueKind::Feature => "feature",
-        IssueKind::Task => "task",
-        IssueKind::Epic => "epic",
-        IssueKind::Chore => "chore",
-    }
-}
-
-/// Convert a `DependencyType` to its string representation.
-#[must_use]
-pub fn dep_type_to_str(dep_type: DependencyType) -> &'static str {
-    match dep_type {
-        DependencyType::Blocks => "blocks",
-        DependencyType::Related => "related",
-        DependencyType::ParentChild => "parent-child",
-        DependencyType::DiscoveredFrom => "discovered-from",
-    }
-}
-
-/// Parse a status string into an `IssueStatus`.
-#[must_use]
-pub fn parse_status(s: &str) -> Option<IssueStatus> {
-    match s.to_lowercase().as_str() {
-        "open" => Some(IssueStatus::Open),
-        "in_progress" | "in-progress" => Some(IssueStatus::InProgress),
-        "blocked" => Some(IssueStatus::Blocked),
-        "closed" => Some(IssueStatus::Closed),
-        _ => None,
-    }
-}
-
-/// Parse a dependency type string into a `DependencyType`.
-#[must_use]
-pub fn parse_dep_type(s: &str) -> Option<DependencyType> {
-    match s.to_lowercase().as_str() {
-        "blocks" => Some(DependencyType::Blocks),
-        "related" => Some(DependencyType::Related),
-        "parent-child" | "parent_child" => Some(DependencyType::ParentChild),
-        "discovered-from" | "discovered_from" => Some(DependencyType::DiscoveredFrom),
-        _ => None,
-    }
 }
 
 #[cfg(test)]
@@ -803,39 +707,78 @@ mod tests {
         assert_eq!(params.kind.resolve("create"), Some(IssueKind::Feature));
     }
 
+    #[rstest]
+    #[case::bug("bug", IssueKind::Bug)]
+    #[case::feature("feature", IssueKind::Feature)]
+    #[case::task("task", IssueKind::Task)]
+    #[case::epic("epic", IssueKind::Epic)]
+    #[case::chore("chore", IssueKind::Chore)]
+    fn mcp_kind_input_accepts_canonical_names(#[case] input: &str, #[case] expected: IssueKind) {
+        // rivets-bkjj C5: MCP accepts exactly the canonical domain strings.
+        let params: ReadyParams =
+            serde_json::from_value(serde_json::json!({ "issue_kind": input }))
+                .expect("canonical Issue Kind should deserialize");
+        assert_eq!(params.kind.resolve("ready"), Some(expected));
+    }
+
+    #[rstest]
+    #[case::uppercase("BUG")]
+    #[case::mixed_case("bUg")]
+    #[case::unknown("bogus")]
+    #[case::empty("")]
+    fn mcp_kind_input_rejects_noncanonical_names(#[case] input: &str) {
+        // rivets-bkjj C5: the former case-insensitive leniency is gone;
+        // non-canonical spellings fail with serde's unknown-variant error.
+        let result: Result<ReadyParams, _> =
+            serde_json::from_value(serde_json::json!({ "issue_kind": input }));
+        let error = result.expect_err("non-canonical Issue Kind must be rejected");
+        assert!(
+            error.to_string().contains("unknown variant"),
+            "error should be serde's unknown-variant shape: {error}"
+        );
+    }
+
     #[test]
-    fn mcp_kind_input_remains_case_insensitive() {
-        let params: ReadyParams = serde_json::from_value(serde_json::json!({
-            "issue_kind": "BUG"
-        }))
-        .expect("Issue Kind parsing should remain case-insensitive");
+    fn issue_kind_schema_matches_domain_display() {
+        // rivets-bkjj C7 fence: the schema mirror's enum values must equal
+        // the domain enum's Display strings, so a new Kind cannot silently
+        // drift from the tool schema.
+        use schemars::schema_for;
 
-        assert_eq!(params.kind.resolve("ready"), Some(IssueKind::Bug));
-    }
-
-    #[rstest]
-    #[case::open("open", Some(IssueStatus::Open))]
-    #[case::open_uppercase("OPEN", Some(IssueStatus::Open))]
-    #[case::in_progress_underscore("in_progress", Some(IssueStatus::InProgress))]
-    #[case::in_progress_hyphen("in-progress", Some(IssueStatus::InProgress))]
-    #[case::blocked("blocked", Some(IssueStatus::Blocked))]
-    #[case::closed("closed", Some(IssueStatus::Closed))]
-    #[case::invalid("invalid", None)]
-    #[case::empty("", None)]
-    fn test_parse_status(#[case] input: &str, #[case] expected: Option<IssueStatus>) {
-        assert_eq!(parse_status(input), expected);
-    }
-
-    #[rstest]
-    #[case::blocks("blocks", Some(DependencyType::Blocks))]
-    #[case::related("related", Some(DependencyType::Related))]
-    #[case::parent_child_hyphen("parent-child", Some(DependencyType::ParentChild))]
-    #[case::parent_child_underscore("parent_child", Some(DependencyType::ParentChild))]
-    #[case::discovered_from_hyphen("discovered-from", Some(DependencyType::DiscoveredFrom))]
-    #[case::discovered_from_underscore("discovered_from", Some(DependencyType::DiscoveredFrom))]
-    #[case::uppercase("BLOCKS", Some(DependencyType::Blocks))]
-    #[case::invalid("invalid", None)]
-    fn test_parse_dep_type(#[case] input: &str, #[case] expected: Option<DependencyType>) {
-        assert_eq!(parse_dep_type(input), expected);
+        let schema = schema_for!(IssueKindInput);
+        let schema_json = serde_json::to_value(&schema).expect("schema serializes");
+        let kind_schema = &schema_json["properties"]["issue_kind"];
+        // Option<T> renders as `anyOf: [{ $ref: #/$defs/... }, { type: null }]`;
+        // resolve the reference; schemars 1.x lists enum values as `oneOf`
+        // const entries inside the referenced definition.
+        let reference = kind_schema["anyOf"][0]["$ref"]
+            .as_str()
+            .expect("issue_kind schema references its definition");
+        let def_name = reference
+            .rsplit('/')
+            .next()
+            .expect("reference names a definition");
+        let enum_values: Vec<String> = schema_json["$defs"][def_name]["oneOf"]
+            .as_array()
+            .expect("issue_kind definition lists oneOf const values")
+            .iter()
+            .map(|entry| {
+                entry["const"]
+                    .as_str()
+                    .expect("const value is a string")
+                    .to_string()
+            })
+            .collect();
+        let expected: Vec<String> = [
+            IssueKind::Bug,
+            IssueKind::Feature,
+            IssueKind::Task,
+            IssueKind::Epic,
+            IssueKind::Chore,
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        assert_eq!(enum_values, expected);
     }
 }

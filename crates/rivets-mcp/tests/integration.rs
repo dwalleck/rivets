@@ -7,11 +7,12 @@
 //! - Error response verification
 //! - Real storage persistence
 
+use rivets::domain::IssueKind;
 use rivets_mcp::context::Context;
 use rivets_mcp::error::Error;
 use rivets_mcp::models::{
-    CreateParams, IssueKindInput, ListParams, McpIssue, McpIssueKind, McpResourceTarget,
-    ReadyParams, UpdateParams,
+    CreateParams, IssueKindInput, ListParams, McpIssue, McpResourceTarget, ReadyParams,
+    UpdateParams,
 };
 use rivets_mcp::tools::Tools;
 use rstest::rstest;
@@ -21,11 +22,11 @@ use tokio::sync::RwLock;
 
 fn kind_input(value: Option<&str>) -> IssueKindInput {
     let issue_kind = value.map(|value| match value {
-        "bug" => McpIssueKind::Bug,
-        "feature" => McpIssueKind::Feature,
-        "task" => McpIssueKind::Task,
-        "epic" => McpIssueKind::Epic,
-        "chore" => McpIssueKind::Chore,
+        "bug" => IssueKind::Bug,
+        "feature" => IssueKind::Feature,
+        "task" => IssueKind::Task,
+        "epic" => IssueKind::Epic,
+        "chore" => IssueKind::Chore,
         invalid => panic!("invalid test Issue Kind: {invalid}"),
     });
     IssueKindInput::canonical(issue_kind)

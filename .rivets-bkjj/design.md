@@ -96,6 +96,12 @@ including the `in-progress` alias and kebab-case names.
    conversions onto `Display`.
 5. **`valid_values` literals stay** — error-message text, not parse tables;
    AC 4 pins the error shape. No golden contract test here (habf's scope).
+   Implementation note (post-approval): `McpIssueKind` is replaced by a
+   local **schema-only** mirror `McpIssueKindSchema` (derive-only, no
+   strings/parsing) because schemars cannot impl `JsonSchema` for the
+   foreign domain type (orphan rule) and adding schemars to rivets would be
+   a new dependency edge; a fence test pins its rendered values to the
+   domain Display strings.
 6. **No `IssueStatus::Blocked` removal** — legacy persisted variant;
    vocabulary change only.
 

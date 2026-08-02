@@ -33,8 +33,7 @@ error — `""`, `"OPEN"`, `"in-progress"`, `"parent_child"`,
 production loops added.
 
 **Files:**
-- `crates/rivets/src/domain/mod.rs` — `pub use clap::ValueEnum;` (derive in
-  scope for this module + downstream re-export for the MCP schema bridge);
+- `crates/rivets/src/domain/mod.rs` — `use clap::ValueEnum;`;
   `use std::str::FromStr;`; `ValueEnum` in the derives of `IssueStatus`
   (plus `#[value(name = "in_progress", alias = "in-progress")]` on
   `InProgress`, alongside its serde rename), `IssueKind`, `DependencyType`;
@@ -135,11 +134,14 @@ shape drift (kind no longer lowercase), schema drift.
 **Files:**
 - `crates/rivets-mcp/src/models.rs` — delete `McpIssueKind` +
   `mcp_issue_kinds!` macro + `From<McpIssueKind>`; `IssueKindInput` fields
-  become `Option<IssueKind>`; implement `JsonSchema for IssueKind` here
-  (manual impl building `enum_values` from `IssueKind::value_variants()`
-  names via the `rivets::domain::ValueEnum` re-export — runtime-derived, no
-  second string table, no clap dep in rivets-mcp); delete `status_to_str`,
-  `issue_kind_to_str`, `dep_type_to_str`, `parse_status`, `parse_dep_type`;
+  become `Option<IssueKind>` with `#[schemars(with = "Option<McpIssueKindSchema>")]`
+  on `issue_kind` (orphan rule forbids `impl JsonSchema for IssueKind` here —
+  both trait and type are foreign — and adding schemars to the rivets crate
+  would be a new dependency edge, so the schema stands in via a local
+  derive-only mirror); add local `McpIssueKindSchema` (`#[derive(JsonSchema)]`
+  + `#[serde(rename_all = "lowercase")]`, documented as schema-only, neither
+  to-str nor parse); delete `status_to_str`, `issue_kind_to_str`,
+  `dep_type_to_str`, `parse_status`, `parse_dep_type`;
   `McpIssue::from` / `McpDependency::from` use `Display` (`.to_string()`);
   rewrite tests: drop `mcp_kind_input_remains_case_insensitive` (replaced
   by canonical-accepted + "BUG" rejected), drop the `test_parse_status` /
