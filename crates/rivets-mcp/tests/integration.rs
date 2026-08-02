@@ -3272,7 +3272,8 @@ async fn resource_add_list_and_context_recreation_use_real_storage() {
     let first = tools
         .resource_add(
             &issue.id,
-            "https://example.com/pr/123".to_string(),
+            Some("https://example.com/pr/123".to_string()),
+            None,
             "implementation",
             Some("Implementation PR".to_string()),
             None,
@@ -3285,7 +3286,8 @@ async fn resource_add_list_and_context_recreation_use_real_storage() {
     let second = tools
         .resource_add(
             &issue.id,
-            "https://example.com/pr/123".to_string(),
+            Some("https://example.com/pr/123".to_string()),
+            None,
             "documentation",
             None,
             None,
@@ -3348,7 +3350,8 @@ async fn resource_add_rejects_invalid_inputs_without_mutation() {
     tools
         .resource_add(
             &issue.id,
-            "https://example.com/pr/123".to_string(),
+            Some("https://example.com/pr/123".to_string()),
+            None,
             "implementation",
             None,
             None,
@@ -3359,7 +3362,8 @@ async fn resource_add_rejects_invalid_inputs_without_mutation() {
     let duplicate = tools
         .resource_add(
             &issue.id,
-            "https://example.com/pr/123".to_string(),
+            Some("https://example.com/pr/123".to_string()),
+            None,
             "implementation",
             None,
             None,
@@ -3372,7 +3376,8 @@ async fn resource_add_rejects_invalid_inputs_without_mutation() {
         tools
             .resource_add(
                 &issue.id,
-                "docs/adr/0003-associated-resources.md".to_string(),
+                Some("docs/adr/0003-associated-resources.md".to_string()),
+                None,
                 "reference",
                 None,
                 None,
@@ -3384,7 +3389,8 @@ async fn resource_add_rejects_invalid_inputs_without_mutation() {
         tools
             .resource_add(
                 &issue.id,
-                "https://example.com/evidence".to_string(),
+                Some("https://example.com/evidence".to_string()),
+                None,
                 "evidence",
                 Some("   ".to_string()),
                 None,
@@ -3396,7 +3402,8 @@ async fn resource_add_rejects_invalid_inputs_without_mutation() {
         tools
             .resource_add(
                 &issue.id,
-                "https://example.com/evidence".to_string(),
+                Some("https://example.com/evidence".to_string()),
+                None,
                 "Evidence",
                 None,
                 None,
@@ -3408,7 +3415,8 @@ async fn resource_add_rejects_invalid_inputs_without_mutation() {
         tools
             .resource_add(
                 "test-missing",
-                "https://example.com/reference".to_string(),
+                Some("https://example.com/reference".to_string()),
+                None,
                 "reference",
                 None,
                 None,
@@ -3446,7 +3454,8 @@ async fn legacy_web_external_ref_migrates_through_mcp_and_persists() {
     let updated = tools
         .resource_add(
             "test-legacy",
-            "https://example.com/new".to_string(),
+            Some("https://example.com/new".to_string()),
+            None,
             "evidence",
             None,
             None,
@@ -3474,4 +3483,224 @@ async fn legacy_web_external_ref_migrates_through_mcp_and_persists() {
     assert_eq!(record["issue_kind"], "task");
     assert_eq!(record["resources"].as_array().unwrap().len(), 2);
     assert_eq!(record["next_resource_id"], 3);
+}
+
+async fn add_three_resources(tools: &Tools, issue_id: &str) {
+    tools
+        .resource_add(
+            issue_id,
+            Some("https://example.com/pr/123".to_string()),
+            None,
+            "implementation",
+            Some("PR".to_string()),
+            None,
+        )
+        .await
+        .expect("web add should succeed");
+    tools
+        .resource_add(
+            issue_id,
+            None,
+            Some("\u{e9}/\u{6587}\u{4ef6}.md".to_string()),
+            "evidence",
+            None,
+            None,
+        )
+        .await
+        .expect("unicode path add should succeed");
+    tools
+        .resource_add(
+            issue_id,
+            None,
+            Some("docs/../docs/adr/0003.md".to_string()),
+            "documentation",
+            None,
+            None,
+        )
+        .await
+        .expect("path add should succeed");
+}
+
+#[tokio::test]
+async fn resource_add_accepts_path_targets_and_normalizes() {
+    let workspace = create_temp_workspace();
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+    let issue = create_issue(&tools, "Path owner").await;
+    add_three_resources(&tools, &issue.id).await;
+
+    let resources = tools
+        .resource_list(&issue.id, None)
+        .await
+        .expect("list should succeed");
+    assert_eq!(resources.len(), 3);
+    assert_eq!(
+        resources[1].target,
+        McpResourceTarget::Path {
+            path: "\u{e9}/\u{6587}\u{4ef6}.md".to_string()
+        },
+        "unicode path must be preserved"
+    );
+    assert_eq!(
+        resources[2].target,
+        McpResourceTarget::Path {
+            path: "docs/adr/0003.md".to_string()
+        },
+        "persisted target must be the normalized path"
+    );
+}
+
+#[tokio::test]
+async fn resource_update_remove_keep_identity_and_position() {
+    let workspace = create_temp_workspace();
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+    let issue = create_issue(&tools, "Update owner").await;
+    add_three_resources(&tools, &issue.id).await;
+
+    // Update middle resource: role + label, id and position preserved.
+    let updated = tools
+        .resource_update(rivets_mcp::models::ResourceUpdateParams {
+            issue_id: issue.id.clone(),
+            resource_id: "r2".to_string(),
+            url: None,
+            path: None,
+            role: Some("reference".to_string()),
+            label: Some("evidence note".to_string()),
+            clear_label: false,
+            workspace_root: None,
+        })
+        .await
+        .expect("update should succeed");
+    assert_eq!(updated.resources.len(), 3);
+    assert_eq!(updated.resources[1].id, "r2");
+    assert_eq!(updated.resources[1].role, "reference");
+    assert_eq!(updated.resources[1].label.as_deref(), Some("evidence note"));
+
+    // Update target web -> path, then clear the label.
+    let retargeted = tools
+        .resource_update(rivets_mcp::models::ResourceUpdateParams {
+            issue_id: issue.id.clone(),
+            resource_id: "r1".to_string(),
+            url: None,
+            path: Some("crates/rivets/src/main.rs".to_string()),
+            role: None,
+            label: None,
+            clear_label: true,
+            workspace_root: None,
+        })
+        .await
+        .expect("target change should succeed");
+    assert_eq!(
+        retargeted.resources[0].target,
+        McpResourceTarget::Path {
+            path: "crates/rivets/src/main.rs".to_string()
+        }
+    );
+    assert!(
+        retargeted.resources[0].label.is_none(),
+        "label must be cleared"
+    );
+
+    // Remove middle resource; remaining keep ids/positions.
+    let removed = tools
+        .resource_remove(&issue.id, "r2", None)
+        .await
+        .expect("remove should succeed");
+    assert_eq!(
+        removed
+            .resources
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect::<Vec<_>>(),
+        ["r1", "r3"]
+    );
+}
+
+#[tokio::test]
+async fn resource_update_remove_errors_are_typed_without_mutation() {
+    let workspace = create_temp_workspace();
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+    let issue = create_issue(&tools, "Error owner").await;
+    tools
+        .resource_add(
+            &issue.id,
+            None,
+            Some("docs/adr/0003.md".to_string()),
+            "documentation",
+            None,
+            None,
+        )
+        .await
+        .expect("path add should succeed");
+
+    // Duplicate target-role is a typed InvalidResource error.
+    let duplicate = tools
+        .resource_add(
+            &issue.id,
+            None,
+            Some("docs/adr/0003.md".to_string()),
+            "documentation",
+            None,
+            None,
+        )
+        .await;
+    assert!(matches!(duplicate, Err(Error::InvalidResource(_))));
+
+    // Unknown resource id is a typed InvalidResource error.
+    let unknown = tools.resource_remove(&issue.id, "r99", None).await;
+    assert!(matches!(unknown, Err(Error::InvalidResource(_))));
+
+    // An escaping path is a typed InvalidResource error.
+    let escaping = tools
+        .resource_add(
+            &issue.id,
+            None,
+            Some("../outside.md".to_string()),
+            "reference",
+            None,
+            None,
+        )
+        .await;
+    assert!(matches!(escaping, Err(Error::InvalidResource(_))));
+
+    // Conflicting or missing target arguments are typed InvalidArgument errors.
+    let both_targets = tools
+        .resource_add(
+            &issue.id,
+            Some("https://example.com/x".to_string()),
+            Some("src/y.rs".to_string()),
+            "reference",
+            None,
+            None,
+        )
+        .await;
+    assert!(matches!(
+        both_targets,
+        Err(Error::InvalidArgument {
+            field: "target",
+            ..
+        })
+    ));
+    let neither = tools
+        .resource_add(&issue.id, None, None, "reference", None, None)
+        .await;
+    assert!(matches!(
+        neither,
+        Err(Error::InvalidArgument {
+            field: "target",
+            ..
+        })
+    ));
+
+    assert_eq!(
+        tools
+            .resource_list(&issue.id, None)
+            .await
+            .expect("list should succeed")
+            .len(),
+        1,
+        "all failures must leave storage unmutated"
+    );
 }

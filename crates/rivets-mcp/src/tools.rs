@@ -19,12 +19,13 @@ use crate::context::Context;
 use crate::error::{Error, Result};
 use crate::models::{
     BlockedIssueResponse, CreateParams, ListParams, McpIssue, McpResource, ReadyParams,
-    SetContextResponse, UpdateParams, WhereAmIResponse, dep_type_to_str, parse_dep_type,
-    parse_status,
+    ResourceUpdateParams, SetContextResponse, UpdateParams, WhereAmIResponse, dep_type_to_str,
+    parse_dep_type, parse_status,
 };
 use rivets::domain::{
     DependencyType, IssueFilter, IssueId, IssueKind, IssueStatus, IssueUpdate, NewIssue,
-    NewResource, NoteContent, ResourceLabel, ResourceRole, ResourceTarget, WebUrl,
+    NewResource, NoteContent, ResourceId, ResourceLabel, ResourceRole, ResourceTarget,
+    ResourceUpdate, WebUrl, WorkspacePath,
 };
 use rivets::storage::IssueStorage;
 use std::path::Path;
@@ -54,6 +55,24 @@ fn validate_resource_role(role: &str) -> Result<ResourceRole> {
         value: role.to_string(),
         valid_values: "implementation, documentation, evidence, successor, reference",
     })
+}
+
+/// Parse exactly one Resource Target argument into the domain type.
+fn parse_resource_target(url: Option<String>, path: Option<String>) -> Result<ResourceTarget> {
+    match (url, path) {
+        (Some(url), None) => Ok(ResourceTarget::web(WebUrl::new(url)?)),
+        (None, Some(path)) => Ok(ResourceTarget::path(WorkspacePath::new(path)?)),
+        (None, None) => Err(Error::InvalidArgument {
+            field: "target",
+            value: "neither url nor path provided".to_string(),
+            valid_values: "exactly one of url or path",
+        }),
+        (Some(_), Some(_)) => Err(Error::InvalidArgument {
+            field: "target",
+            value: "url and path both provided".to_string(),
+            valid_values: "exactly one of url or path",
+        }),
+    }
 }
 
 /// Parse and validate a dependency type string.
@@ -367,23 +386,26 @@ impl Tools {
         Ok(issue.into())
     }
 
-    /// Associate an absolute Web URL with an Issue.
+    /// Associate a Web URL or Workspace Path target with an Issue.
     ///
     /// # Errors
     ///
-    /// Returns an error for an invalid URL, role, label, missing Issue, context
-    /// failure, duplicate target-and-role association, or persistence failure.
-    #[instrument(skip(self, url, label), fields(%issue_id, %role))]
+    /// Returns an error for an invalid URL, path, role, or label, a missing
+    /// Issue, a context failure, a duplicate target-and-role association, or
+    /// a persistence failure. Exactly one of `url`/`path` is required.
+    #[instrument(skip(self, url, path, label), fields(%issue_id, %role))]
     pub async fn resource_add(
         &self,
         issue_id: &str,
-        url: String,
+        url: Option<String>,
+        path: Option<String>,
         role: &str,
         label: Option<String>,
         workspace_root: Option<&str>,
     ) -> Result<McpIssue> {
+        let target = parse_resource_target(url, path)?;
         let resource = NewResource {
-            target: ResourceTarget::web(WebUrl::new(url)?),
+            target,
             role: validate_resource_role(role)?,
             label: label.map(ResourceLabel::new).transpose()?,
         };
@@ -392,6 +414,96 @@ impl Tools {
 
         let issue = storage
             .add_resource(&IssueId::new(issue_id), resource)
+            .await?;
+        save_or_reload(storage.as_mut()).await?;
+        Ok(issue.into())
+    }
+
+    /// Update an Issue's Associated Resource by its stable identifier.
+    ///
+    /// Only the provided fields change; the resource keeps its identifier and
+    /// position.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid URL, path, role, or label, a missing
+    /// Issue or resource identifier, a duplicate post-update target-and-role
+    /// association, an update with no fields, or a persistence failure.
+    #[instrument(skip(self, params), fields(%params.issue_id, %params.resource_id))]
+    pub async fn resource_update(&self, params: ResourceUpdateParams) -> Result<McpIssue> {
+        let ResourceUpdateParams {
+            issue_id,
+            resource_id,
+            url,
+            path,
+            role,
+            label,
+            clear_label,
+            workspace_root,
+        } = params;
+        let target = match (url, path) {
+            (None, None) => None,
+            (Some(url), None) => Some(ResourceTarget::web(WebUrl::new(url)?)),
+            (None, Some(path)) => Some(ResourceTarget::path(WorkspacePath::new(path)?)),
+            (Some(_), Some(_)) => {
+                return Err(Error::InvalidArgument {
+                    field: "target",
+                    value: "url and path both provided".to_string(),
+                    valid_values: "at most one of url or path",
+                });
+            }
+        };
+        let label = match (label, clear_label) {
+            (Some(label), false) => Some(Some(ResourceLabel::new(label)?)),
+            (None, true) => Some(None),
+            (None, false) => None,
+            (Some(_), true) => {
+                return Err(Error::InvalidArgument {
+                    field: "label",
+                    value: "label and clear_label both provided".to_string(),
+                    valid_values: "at most one of label or clear_label",
+                });
+            }
+        };
+        let update = ResourceUpdate {
+            target,
+            role: role.as_deref().map(validate_resource_role).transpose()?,
+            label,
+        };
+        let storage = self.storage_for(workspace_root.as_deref()).await?;
+        let mut storage = storage.write().await;
+
+        let issue = storage
+            .update_resource(
+                &IssueId::new(issue_id),
+                &ResourceId::new(resource_id)?,
+                update,
+            )
+            .await?;
+        save_or_reload(storage.as_mut()).await?;
+        Ok(issue.into())
+    }
+
+    /// Remove an Issue's Associated Resource by its stable identifier.
+    ///
+    /// The remaining resources keep their identifiers and positions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the context, Issue, or resource identifier is
+    /// missing, or storage fails.
+    #[instrument(skip(self), fields(%issue_id, %resource_id))]
+    pub async fn resource_remove(
+        &self,
+        issue_id: &str,
+        resource_id: &str,
+        workspace_root: Option<&str>,
+    ) -> Result<McpIssue> {
+        let storage = self.storage_for(workspace_root).await?;
+        let mut storage = storage.write().await;
+
+        let issue = storage
+            .remove_resource(&IssueId::new(issue_id), &ResourceId::new(resource_id)?)
             .await?;
         save_or_reload(storage.as_mut()).await?;
         Ok(issue.into())

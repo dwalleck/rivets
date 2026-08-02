@@ -284,14 +284,63 @@ pub struct ResourceAddParams {
     /// The Issue receiving the Associated Resource.
     pub issue_id: String,
 
-    /// Absolute HTTP or HTTPS URL.
-    pub url: String,
+    /// Absolute HTTP or HTTPS URL (exactly one of url/path is required).
+    pub url: Option<String>,
+
+    /// Path relative to the workspace root (exactly one of url/path is required).
+    pub path: Option<String>,
 
     /// Resource Role (implementation, documentation, evidence, successor, reference).
     pub role: String,
 
     /// Optional human-readable label.
     pub label: Option<String>,
+
+    /// Optional workspace root (uses current context if not specified).
+    pub workspace_root: Option<String>,
+}
+
+/// Parameters for the `resource_update` tool.
+///
+/// Only the provided fields change; the resource keeps its stable identifier
+/// and position. At least one of `url`/`path`/`role`/`label`/`clear_label` is
+/// required.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ResourceUpdateParams {
+    /// The Issue whose Associated Resource should be updated.
+    pub issue_id: String,
+
+    /// Stable resource identifier (e.g. "r3").
+    pub resource_id: String,
+
+    /// New absolute HTTP or HTTPS URL (at most one of url/path).
+    pub url: Option<String>,
+
+    /// New path relative to the workspace root (at most one of url/path).
+    pub path: Option<String>,
+
+    /// New Resource Role.
+    pub role: Option<String>,
+
+    /// New human-readable label (at most one of `label`/`clear_label`).
+    pub label: Option<String>,
+
+    /// Clear the resource's label.
+    #[serde(default)]
+    pub clear_label: bool,
+
+    /// Optional workspace root (uses current context if not specified).
+    pub workspace_root: Option<String>,
+}
+
+/// Parameters for the `resource_remove` tool.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ResourceRemoveParams {
+    /// The Issue whose Associated Resource should be removed.
+    pub issue_id: String,
+
+    /// Stable resource identifier (e.g. "r3").
+    pub resource_id: String,
 
     /// Optional workspace root (uses current context if not specified).
     pub workspace_root: Option<String>,

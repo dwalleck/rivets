@@ -7,7 +7,8 @@ use crate::error::Error;
 use crate::models::{
     AddNoteParams, BlockedParams, CloseParams, CreateParams, DepParams, LabelAddParams,
     LabelListAllParams, LabelListParams, LabelRemoveParams, ListParams, ReadyParams, ReopenParams,
-    ResourceAddParams, ResourceListParams, SetContextParams, ShowParams, StaleParams, UpdateParams,
+    ResourceAddParams, ResourceListParams, ResourceRemoveParams, ResourceUpdateParams,
+    SetContextParams, ShowParams, StaleParams, UpdateParams,
 };
 use crate::tools::Tools;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -185,9 +186,9 @@ impl RivetsMcpServer {
         }
     }
 
-    /// Associate an absolute Web URL with an Issue.
+    /// Associate a Web URL or Workspace Path target with an Issue.
     #[tool(
-        description = "Associate an absolute HTTP or HTTPS Web URL with an issue using a canonical role and optional label. Uses workspace_root if provided, otherwise uses current context."
+        description = "Associate an absolute HTTP or HTTPS Web URL or a workspace-relative Path with an issue using a canonical role and optional label. Exactly one of url/path is required. Uses workspace_root if provided, otherwise uses current context."
     )]
     async fn resource_add(
         &self,
@@ -198,8 +199,45 @@ impl RivetsMcpServer {
             .resource_add(
                 &params.issue_id,
                 params.url,
+                params.path,
                 &params.role,
                 params.label,
+                params.workspace_root.as_deref(),
+            )
+            .await
+        {
+            Ok(issue) => Ok(CallToolResult::success(vec![Content::json(issue)?])),
+            Err(error) => Err(to_mcp_error(&error)),
+        }
+    }
+
+    /// Update an Issue's Associated Resource by its stable identifier.
+    #[tool(
+        description = "Update an issue's Associated Resource by its stable resource identifier. Only the provided fields change; the resource keeps its identifier and position. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn resource_update(
+        &self,
+        Parameters(params): Parameters<ResourceUpdateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self.tools.resource_update(params).await {
+            Ok(issue) => Ok(CallToolResult::success(vec![Content::json(issue)?])),
+            Err(error) => Err(to_mcp_error(&error)),
+        }
+    }
+
+    /// Remove an Issue's Associated Resource by its stable identifier.
+    #[tool(
+        description = "Remove an issue's Associated Resource by its stable resource identifier. The remaining resources keep their identifiers and positions. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn resource_remove(
+        &self,
+        Parameters(params): Parameters<ResourceRemoveParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .tools
+            .resource_remove(
+                &params.issue_id,
+                &params.resource_id,
                 params.workspace_root.as_deref(),
             )
             .await
@@ -495,6 +533,8 @@ mod tests {
         assert!(tool_names.contains(&"label_list_all"));
         assert!(tool_names.contains(&"resource_add"));
         assert!(tool_names.contains(&"resource_list"));
+        assert!(tool_names.contains(&"resource_update"));
+        assert!(tool_names.contains(&"resource_remove"));
         let input_properties = |name: &str| {
             tools
                 .iter()
@@ -507,8 +547,11 @@ mod tests {
         assert!(!input_properties("update").contains_key("notes"));
         assert!(input_properties("add_note").contains_key("content"));
         assert!(input_properties("resource_add").contains_key("url"));
+        assert!(input_properties("resource_add").contains_key("path"));
         assert!(input_properties("resource_add").contains_key("role"));
-        assert_eq!(tools.len(), 19);
+        assert!(input_properties("resource_update").contains_key("resource_id"));
+        assert!(input_properties("resource_remove").contains_key("resource_id"));
+        assert_eq!(tools.len(), 21);
     }
 
     #[test]
