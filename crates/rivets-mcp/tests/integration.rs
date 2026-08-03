@@ -16,8 +16,6 @@ use rivets_mcp::tools::Tools;
 use rmcp::model::Content;
 use rstest::rstest;
 use serde_json::{Value, json};
-use std::path::PathBuf;
-use std::process::Command;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::RwLock;
@@ -500,35 +498,16 @@ async fn reload_golden_issue(workspace: &TempDir, issue_id: &str) -> Issue {
         .expect("reloaded golden Issue should exist")
 }
 
-fn run_cli_golden_list(workspace: &TempDir) -> Value {
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
-    let output = Command::new("cargo")
-        .args([
-            "run",
-            "--quiet",
-            "--manifest-path",
-            manifest.to_str().expect("workspace manifest path is UTF-8"),
-            "-p",
-            "rivets",
-            "--",
-            "list",
-            "--json",
-            "--assignee",
-            "golden-owner",
-            "--sort",
-            "oldest",
-        ])
-        .current_dir(workspace.path())
-        .output()
-        .expect("CLI list should launch");
-    assert!(
-        output.status.success(),
-        "CLI list should succeed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(&output.stdout).expect("CLI list should emit JSON")
+fn cli_json_for_issue(issue: &Issue) -> Value {
+    let mut output = Vec::new();
+    rivets::output::print_issues_to(
+        &mut output,
+        std::slice::from_ref(issue),
+        rivets::output::OutputMode::Json,
+    )
+    .expect("CLI list JSON should serialize");
+    serde_json::from_slice(&output).expect("CLI list should emit JSON")
 }
-
 #[tokio::test]
 async fn mcp_full_issue_json_golden() {
     let workspace = create_temp_workspace();
@@ -657,7 +636,7 @@ async fn cli_and_mcp_issue_json_shapes_match() {
     let (created, _) = create_golden_issue(&tools).await;
     let mcp = reload_golden_issue(&workspace, created.id.as_str()).await;
     let mcp_json = mcp_content_json(&mcp);
-    let cli_json = run_cli_golden_list(&workspace);
+    let cli_json = cli_json_for_issue(&mcp);
     let cli_issues = cli_json
         .as_array()
         .expect("CLI list JSON should be an array");

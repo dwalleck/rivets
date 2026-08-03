@@ -247,15 +247,23 @@ pub fn print_issue(issue: &Issue, mode: OutputMode) -> io::Result<()> {
     }
 }
 
-/// Print a list of issues in the specified format
+/// Print a list of issues in the specified format.
 pub fn print_issues(issues: &[Issue], mode: OutputMode) -> io::Result<()> {
     let stdout = io::stdout();
     let mut handle = stdout.lock();
+    print_issues_to(&mut handle, issues, mode)
+}
+
+/// Write a list of issues in the specified format.
+///
+/// This is the writer-backed form used by callers that own an output stream,
+/// including contract tests for the CLI JSON representation.
+pub fn print_issues_to<W: Write>(w: &mut W, issues: &[Issue], mode: OutputMode) -> io::Result<()> {
     let config = OutputConfig::from_env();
 
     match mode {
-        OutputMode::Text => print_issues_text(&mut handle, issues, &config),
-        OutputMode::Json => print_issues_json(&mut handle, issues),
+        OutputMode::Text => print_issues_text(w, issues, &config),
+        OutputMode::Json => print_issues_json(w, issues),
     }
 }
 
