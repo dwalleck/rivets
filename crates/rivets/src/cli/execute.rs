@@ -516,71 +516,6 @@ fn count_by_status(issues: &[crate::domain::Issue]) -> StatusCounts {
         })
 }
 
-/// Fetch an issue for a batch operation, recording failures if not found.
-///
-/// Returns `Some(issue)` if found, `None` if not found or error (failure recorded in result).
-async fn get_issue_for_batch_op(
-    app: &crate::app::App,
-    result: &mut super::types::BatchResult,
-    id_str: &str,
-) -> Option<crate::domain::Issue> {
-    use super::types::BatchError;
-    use crate::domain::IssueId;
-
-    let issue_id = IssueId::new(id_str);
-    match app.storage().get(&issue_id).await {
-        Ok(Some(issue)) => Some(issue),
-        Ok(None) => {
-            result.failed.push(BatchError {
-                issue_id: id_str.to_string(),
-                error: format!("Issue not found: {}", id_str),
-            });
-            None
-        }
-        Err(e) => {
-            result.failed.push(BatchError {
-                issue_id: id_str.to_string(),
-                error: e.to_string(),
-            });
-            None
-        }
-    }
-}
-
-/// Validate that an issue can transition to a target status.
-///
-/// # Valid Transitions
-///
-/// - Any non-closed status → Closed (close operation)
-/// - Closed → Open (reopen operation)
-/// - Any other transition is allowed by default
-///
-/// # Invalid Transitions
-///
-/// - Closed → Closed: Cannot close an already closed issue
-/// - Open/InProgress/Blocked → Open: Cannot reopen a non-closed issue
-///
-/// Returns `Ok(())` if the transition is valid, or an error message describing why not.
-fn validate_status_transition(
-    current: crate::domain::IssueStatus,
-    target: crate::domain::IssueStatus,
-) -> Result<(), String> {
-    use crate::domain::IssueStatus;
-
-    match (current, target) {
-        // Close: must not already be closed
-        (IssueStatus::Closed, IssueStatus::Closed) => {
-            Err(format!("Issue is already closed (status: {})", current))
-        }
-        // Reopen: must be closed
-        (status, IssueStatus::Open) if status != IssueStatus::Closed => {
-            Err(format!("Issue is not closed (status: {})", current))
-        }
-        // Valid transitions
-        _ => Ok(()),
-    }
-}
-
 /// Prompt the user for confirmation and return whether they accepted.
 ///
 /// Prints `prompt` to stderr, reads a line from stdin, and returns `true`
@@ -633,7 +568,7 @@ pub async fn execute_close(
     output_mode: OutputMode,
     skip_confirm: bool,
 ) -> Result<()> {
-    use super::types::{BatchError, BatchResult};
+    use super::types::BatchResult;
     use crate::domain::{IssueId, IssueStatus, IssueUpdate, NoteContent};
 
     if !confirm_batch("Close", args.issue_ids.len(), skip_confirm)? {
@@ -649,19 +584,6 @@ pub async fn execute_close(
     let mut result = BatchResult::new();
 
     for id_str in &args.issue_ids {
-        let Some(existing) = get_issue_for_batch_op(app, &mut result, id_str).await else {
-            continue;
-        };
-
-        // Validate status transition
-        if let Err(err) = validate_status_transition(existing.status, IssueStatus::Closed) {
-            result.failed.push(BatchError {
-                issue_id: id_str.clone(),
-                error: err,
-            });
-            continue;
-        }
-
         let issue_id = IssueId::new(id_str);
         let update = IssueUpdate {
             status: Some(IssueStatus::Closed),
@@ -669,6 +591,8 @@ pub async fn execute_close(
             ..Default::default()
         };
 
+        // Missing issues and invalid transitions are rejected by the
+        // storage/domain seam (ADR-0005); no adapter-local checks here.
         let storage_result = app.storage_mut().update(&issue_id, update).await;
         save_or_record_failure(app, &mut result, id_str, storage_result).await;
     }
@@ -692,7 +616,7 @@ pub async fn execute_reopen(
     output_mode: OutputMode,
     skip_confirm: bool,
 ) -> Result<()> {
-    use super::types::{BatchError, BatchResult};
+    use super::types::BatchResult;
     use crate::domain::{IssueId, IssueStatus, IssueUpdate, NoteContent};
 
     if !confirm_batch("Reopen", args.issue_ids.len(), skip_confirm)? {
@@ -708,19 +632,6 @@ pub async fn execute_reopen(
     let mut result = BatchResult::new();
 
     for id_str in &args.issue_ids {
-        let Some(existing) = get_issue_for_batch_op(app, &mut result, id_str).await else {
-            continue;
-        };
-
-        // Validate status transition
-        if let Err(err) = validate_status_transition(existing.status, IssueStatus::Open) {
-            result.failed.push(BatchError {
-                issue_id: id_str.clone(),
-                error: err,
-            });
-            continue;
-        }
-
         let issue_id = IssueId::new(id_str);
         let update = IssueUpdate {
             status: Some(IssueStatus::Open),
@@ -728,6 +639,8 @@ pub async fn execute_reopen(
             ..Default::default()
         };
 
+        // Missing issues and invalid transitions are rejected by the
+        // storage/domain seam (ADR-0005); no adapter-local checks here.
         let storage_result = app.storage_mut().update(&issue_id, update).await;
         save_or_record_failure(app, &mut result, id_str, storage_result).await;
     }
@@ -1822,84 +1735,6 @@ mod tests {
             let result = resolve_label_issue_ids(&None, &[]);
             assert!(result.is_err());
             assert!(result.unwrap_err().to_string().contains("Must provide"));
-        }
-    }
-
-    mod validate_status_transition_tests {
-        use super::super::validate_status_transition;
-        use crate::domain::IssueStatus;
-        use rstest::rstest;
-
-        #[rstest]
-        #[case::open_to_closed(IssueStatus::Open, IssueStatus::Closed, true)]
-        #[case::in_progress_to_closed(IssueStatus::InProgress, IssueStatus::Closed, true)]
-        #[case::blocked_to_closed(IssueStatus::Blocked, IssueStatus::Closed, true)]
-        #[case::closed_to_closed(IssueStatus::Closed, IssueStatus::Closed, false)]
-        #[case::closed_to_open(IssueStatus::Closed, IssueStatus::Open, true)]
-        #[case::open_to_open(IssueStatus::Open, IssueStatus::Open, false)]
-        #[case::in_progress_to_open(IssueStatus::InProgress, IssueStatus::Open, false)]
-        #[case::blocked_to_open(IssueStatus::Blocked, IssueStatus::Open, false)]
-        fn test_status_transitions(
-            #[case] current: IssueStatus,
-            #[case] target: IssueStatus,
-            #[case] should_succeed: bool,
-        ) {
-            let result = validate_status_transition(current, target);
-            assert_eq!(
-                result.is_ok(),
-                should_succeed,
-                "Transition {:?} -> {:?} expected success={}, got {:?}",
-                current,
-                target,
-                should_succeed,
-                result
-            );
-        }
-
-        #[test]
-        fn test_closed_to_closed_error_message() {
-            let result = validate_status_transition(IssueStatus::Closed, IssueStatus::Closed);
-            assert!(result.is_err());
-            let error = result.unwrap_err();
-            assert!(
-                error.contains("already closed"),
-                "Error should mention 'already closed', got: {}",
-                error
-            );
-        }
-
-        #[test]
-        fn test_open_to_open_error_message() {
-            let result = validate_status_transition(IssueStatus::Open, IssueStatus::Open);
-            assert!(result.is_err());
-            let error = result.unwrap_err();
-            assert!(
-                error.contains("not closed"),
-                "Error should mention 'not closed', got: {}",
-                error
-            );
-        }
-
-        #[rstest]
-        #[case::open_to_in_progress(IssueStatus::Open, IssueStatus::InProgress, true)]
-        #[case::open_to_blocked(IssueStatus::Open, IssueStatus::Blocked, true)]
-        #[case::in_progress_to_blocked(IssueStatus::InProgress, IssueStatus::Blocked, true)]
-        #[case::blocked_to_in_progress(IssueStatus::Blocked, IssueStatus::InProgress, true)]
-        fn test_general_status_transitions_allowed(
-            #[case] current: IssueStatus,
-            #[case] target: IssueStatus,
-            #[case] should_succeed: bool,
-        ) {
-            let result = validate_status_transition(current, target);
-            assert_eq!(
-                result.is_ok(),
-                should_succeed,
-                "Transition {:?} -> {:?} expected success={}, got {:?}",
-                current,
-                target,
-                should_succeed,
-                result
-            );
         }
     }
 

@@ -8,7 +8,9 @@
 //! - Real storage persistence
 
 use chrono::{DateTime, Utc};
-use rivets::domain::{Issue, IssueKind, IssueStatus, ResourceTarget, WorkspacePath};
+use rivets::domain::{
+    Issue, IssueKind, IssueStatus, ResourceTarget, StatusTransitionError, WorkspacePath,
+};
 use rivets::error::{Error as RivetsError, StorageError};
 use rivets_mcp::context::Context;
 use rivets_mcp::error::Error;
@@ -653,6 +655,118 @@ async fn cli_and_mcp_issue_json_shapes_match() {
 // ============================================================================
 // Issue Lifecycle Tests
 // ============================================================================
+
+/// ADR-0005: the domain rejects closing an already-closed Issue, and MCP
+/// surfaces the identical observable message the CLI prints.
+#[tokio::test]
+async fn close_rejects_already_closed_issue_without_mutation() {
+    let workspace = create_temp_workspace();
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+    let issue = create_issue(&tools, "Close twice").await;
+    let closed = tools
+        .close(issue.id.as_str(), Some("Done".to_string()), None)
+        .await
+        .expect("first close should succeed");
+
+    let rejected = tools
+        .close(issue.id.as_str(), Some("Again".to_string()), None)
+        .await
+        .expect_err("second close must be rejected");
+    assert!(
+        matches!(
+            &rejected,
+            Error::InvalidStatusTransition(StatusTransitionError::AlreadyClosed {
+                current: IssueStatus::Closed
+            })
+        ),
+        "unexpected error: {rejected:?}"
+    );
+    assert_eq!(
+        rejected.to_string(),
+        "Issue is already closed (status: closed)",
+        "MCP must surface the domain message the CLI prints"
+    );
+
+    let unchanged = tools
+        .show(issue.id.as_str(), None)
+        .await
+        .expect("show should succeed after a rejected close");
+    assert_eq!(unchanged.status, IssueStatus::Closed);
+    assert_eq!(
+        unchanged.closed_at, closed.closed_at,
+        "a rejected close must not touch closed_at"
+    );
+    assert_eq!(
+        unchanged.notes().len(),
+        closed.notes().len(),
+        "a rejected close must not append its Note"
+    );
+}
+
+/// ADR-0005: the domain rejects reopening a non-closed Issue, and MCP
+/// surfaces the identical observable message the CLI prints.
+#[rstest]
+#[case::open(None, IssueStatus::Open)]
+#[case::in_progress(Some("in_progress"), IssueStatus::InProgress)]
+#[case::blocked(Some("blocked"), IssueStatus::Blocked)]
+#[tokio::test]
+async fn reopen_rejects_non_closed_issue_without_mutation(
+    #[case] setup_status: Option<&str>,
+    #[case] expected_current: IssueStatus,
+) {
+    let workspace = create_temp_workspace();
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+    let issue = create_issue(&tools, "Not closed").await;
+    if let Some(status) = setup_status {
+        tools
+            .update(update_params(
+                issue.id.as_str(),
+                None,
+                None,
+                Some(status),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("status setup should succeed");
+    }
+
+    let rejected = tools
+        .reopen(issue.id.as_str(), Some("Not done yet".to_string()), None)
+        .await
+        .expect_err("reopening a non-closed Issue must be rejected");
+    assert!(
+        matches!(
+            &rejected,
+            Error::InvalidStatusTransition(StatusTransitionError::NotClosed { current })
+                if *current == expected_current
+        ),
+        "unexpected error: {rejected:?}"
+    );
+    assert_eq!(
+        rejected.to_string(),
+        format!("Issue is not closed (status: {expected_current})"),
+        "MCP must surface the domain message the CLI prints"
+    );
+
+    let unchanged = tools
+        .show(issue.id.as_str(), None)
+        .await
+        .expect("show should succeed after a rejected reopen");
+    assert_eq!(unchanged.status, expected_current);
+    assert_eq!(
+        unchanged.notes().len(),
+        0,
+        "a rejected reopen must not append its Note"
+    );
+}
 
 /// Test complete issue lifecycle: create -> update -> close
 #[tokio::test]

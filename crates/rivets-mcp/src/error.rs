@@ -29,6 +29,13 @@ pub enum Error {
     #[error("Invalid resource: {0}")]
     InvalidResource(#[from] rivets::domain::ResourceError),
 
+    /// A status change violated the domain transition rules.
+    ///
+    /// Transparent so MCP rejects a transition with the same observable
+    /// error as the CLI (ADR-0005: the domain owns transition rules).
+    #[error(transparent)]
+    InvalidStatusTransition(#[from] rivets::domain::StatusTransitionError),
+
     /// The requested issue was not found.
     #[error("Issue not found: {0}")]
     IssueNotFound(String),
@@ -84,7 +91,10 @@ impl From<RivetsError> for Error {
             RivetsError::IssueNotFound(issue_id) => Self::IssueNotFound(issue_id.to_string()),
             RivetsError::Storage(storage_error) => match storage_error.try_into_resource_error() {
                 Ok(source) => Self::InvalidResource(source),
-                Err(storage_error) => Self::Storage(RivetsError::Storage(storage_error)),
+                Err(storage_error) => match storage_error.try_into_status_transition_error() {
+                    Ok(source) => Self::InvalidStatusTransition(source),
+                    Err(storage_error) => Self::Storage(RivetsError::Storage(storage_error)),
+                },
             },
             error @ (RivetsError::Io(_)
             | RivetsError::Config(_)

@@ -1,6 +1,6 @@
 //! Error types for rivets CLI operations.
 
-use crate::domain::{IssueId, ResourceError};
+use crate::domain::{IssueId, ResourceError, StatusTransitionError};
 use std::{fmt, io};
 use thiserror::Error;
 
@@ -214,6 +214,14 @@ pub enum StorageError {
     /// An Associated Resource invariant was violated.
     #[error(transparent)]
     Resource(#[from] crate::domain::ResourceError),
+
+    /// A status change violated the domain transition rules.
+    ///
+    /// Transparent so every adapter surfaces the domain's message unchanged:
+    /// CLI and MCP must reject a transition with the same observable error
+    /// (ADR-0005).
+    #[error(transparent)]
+    InvalidStatusTransition(#[from] StatusTransitionError),
 }
 
 impl StorageError {
@@ -236,7 +244,34 @@ impl StorageError {
             | Self::DuplicateDependency { .. }
             | Self::InvalidFormat(_)
             | Self::UnsafePartialLoad(_)
-            | Self::Serialization(_)) => Err(error),
+            | Self::Serialization(_)
+            | Self::InvalidStatusTransition(_)) => Err(error),
+        }
+    }
+
+    /// Separates a rejected status transition from other storage failures.
+    ///
+    /// Same rationale as [`try_into_resource_error`](Self::try_into_resource_error):
+    /// the classification lives here so external adapters can surface the
+    /// domain rejection first-class without a wildcard over this
+    /// non-exhaustive enum.
+    ///
+    /// # Errors
+    ///
+    /// Returns the original error unchanged when it is not a rejected
+    /// status transition.
+    pub fn try_into_status_transition_error(
+        self,
+    ) -> std::result::Result<StatusTransitionError, Self> {
+        match self {
+            Self::InvalidStatusTransition(source) => Ok(source),
+            error @ (Self::Validation(_)
+            | Self::IdGeneration(_)
+            | Self::DuplicateDependency { .. }
+            | Self::InvalidFormat(_)
+            | Self::UnsafePartialLoad(_)
+            | Self::Serialization(_)
+            | Self::Resource(_)) => Err(error),
         }
     }
 }

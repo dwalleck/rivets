@@ -147,6 +147,12 @@ impl IssueStorage for InMemoryStorage {
             candidate.description = description;
         }
         if let Some(status) = updates.status {
+            // The domain owns transition rules (ADR-0005); this is the single
+            // application site, not a storage-local re-validation.
+            candidate
+                .status
+                .validate_transition(status)
+                .map_err(StorageError::InvalidStatusTransition)?;
             candidate.status = status;
             if status == IssueStatus::Closed && candidate.closed_at.is_none() {
                 candidate.closed_at = Some(now);
