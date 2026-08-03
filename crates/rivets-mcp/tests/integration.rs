@@ -13,6 +13,7 @@ use rivets_mcp::context::Context;
 use rivets_mcp::error::Error;
 use rivets_mcp::models::{CreateParams, IssueKindInput, ListParams, ReadyParams, UpdateParams};
 use rivets_mcp::tools::Tools;
+use rmcp::model::Content;
 use rstest::rstest;
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -366,6 +367,11 @@ fn timestamp_as_utc(value: &Value, field: &str) -> DateTime<Utc> {
         .unwrap_or_else(|error| panic!("{field} must parse as RFC 3339: {error}"))
         .with_timezone(&Utc)
 }
+fn mcp_content_json<T: serde::Serialize>(value: &T) -> Value {
+    let content = Content::json(value).expect("MCP Content::json should serialize");
+    let text = content.as_text().expect("MCP JSON should use text content");
+    serde_json::from_str(&text.text).expect("MCP JSON content should parse")
+}
 
 fn assert_utc_timestamp_strings(value: &Value) -> usize {
     match value {
@@ -531,7 +537,7 @@ async fn mcp_full_issue_json_golden() {
     let (created, dependencies) = create_golden_issue(&tools).await;
     let issue = reload_golden_issue(&workspace, created.id.as_str()).await;
 
-    let mut actual = serde_json::to_value(&issue).expect("Issue should serialize");
+    let mut actual = mcp_content_json(&issue);
     normalize_wire_timestamps(&mut actual);
 
     let mut expected_dependencies: Vec<Value> = dependencies
@@ -615,7 +621,7 @@ async fn mcp_timestamps_use_z_suffix() {
     set_context(&tools, workspace.path()).await;
     let (created, _) = create_golden_issue(&tools).await;
     let issue = reload_golden_issue(&workspace, created.id.as_str()).await;
-    let wire = serde_json::to_value(&issue).expect("Issue should serialize");
+    let wire = mcp_content_json(&issue);
 
     assert_eq!(assert_utc_timestamp_strings(&wire), 7);
     assert_eq!(
@@ -650,7 +656,7 @@ async fn cli_and_mcp_issue_json_shapes_match() {
     set_context(&tools, workspace.path()).await;
     let (created, _) = create_golden_issue(&tools).await;
     let mcp = reload_golden_issue(&workspace, created.id.as_str()).await;
-    let mcp_json = serde_json::to_value(mcp).expect("MCP Issue should serialize");
+    let mcp_json = mcp_content_json(&mcp);
     let cli_json = run_cli_golden_list(&workspace);
     let cli_issues = cli_json
         .as_array()
@@ -1406,6 +1412,13 @@ async fn test_all_dependency_types() {
             .expect("dep should succeed");
 
         assert!(result.contains(dep_type));
+        let duplicate = tools
+            .dep(issue1.id.as_str(), issue2.id.as_str(), Some("blocks"), None)
+            .await;
+        assert!(
+            duplicate.is_err(),
+            "repeated dependency endpoints must be rejected"
+        );
     }
 }
 

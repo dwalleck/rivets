@@ -70,9 +70,9 @@ The approved design is in `.rivets-habf/design.md`; the probe/oracle is `.rivets
 
 **Claim:** A fully populated Issue pins the exact external JSON shape and the CLI list representation equals the MCP representation for the same Issue.
 
-**Oracle:** A hand-written `serde_json::json!` golden object after replacing only dynamic timestamp strings with a fixed marker, plus a second value built through the CLI list serialization shape (`serde_json::to_value([&issue])`) and the MCP `show` result. The expected object does not use any MCP mirror type or conversion.
+**Oracle:** A hand-written `serde_json::json!` golden object after replacing only dynamic timestamp strings with a fixed marker, plus an independently parsed CLI `list --json` value and an MCP `Content::json` payload from `show`. The expected object does not use any MCP mirror type or conversion.
 
-**Stress fixture:** In a temporary real workspace, create an Issue with every optional field, four ordered Notes, both Web and Path resources, all five resource roles where target uniqueness permits, all four dependency kinds, labels, a closed timestamp, and a nonzero internal `next_resource_id`. Assert exact normalized JSON keys/tags/values, `next_resource_id` omission, array order, and `Z` suffixes. Compare the same Issue through the CLI list and MCP show paths after removing the CLI array wrapper.
+**Stress fixture:** In a temporary real workspace, create an Issue with every optional field, four ordered Notes, both Web and Path resources, all five resource roles where target uniqueness permits, all four dependency kinds, labels, a closed timestamp, and a nonzero internal `next_resource_id`. Assert exact normalized JSON keys/tags/values, `next_resource_id` omission, array order, and `Z` suffixes. Compare the same persisted Issue through the CLI list and freshly loaded MCP show paths after removing the CLI array wrapper.
 
 **Loop budget:** Test-only recursive timestamp normalization is `O(serialized JSON nodes)`; the fixture has fewer than `10^2` nodes. No production loop or syscall is introduced.
 
