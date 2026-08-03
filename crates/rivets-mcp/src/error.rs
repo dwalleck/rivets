@@ -113,7 +113,7 @@ impl From<RivetsError> for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rivets::domain::{IssueId, ResourceError};
+    use rivets::domain::{IssueId, IssueStatus, ResourceError, StatusTransitionError};
     use rivets::error::StorageError;
 
     #[test]
@@ -133,6 +133,21 @@ mod tests {
         assert!(matches!(
             error,
             Error::InvalidResource(ResourceError::EmptyLabel)
+        ));
+    }
+
+    #[test]
+    fn storage_transition_error_maps_to_invalid_status_transition() {
+        let error = Error::from(RivetsError::Storage(StorageError::InvalidStatusTransition(
+            StatusTransitionError::NotClosed {
+                current: IssueStatus::Open,
+            },
+        )));
+        assert!(matches!(
+            error,
+            Error::InvalidStatusTransition(StatusTransitionError::NotClosed {
+                current: IssueStatus::Open
+            })
         ));
     }
 

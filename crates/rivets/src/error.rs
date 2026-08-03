@@ -552,6 +552,30 @@ mod tests {
     }
 
     #[test]
+    fn try_into_status_transition_error_extracts_transition_variant() {
+        use crate::domain::IssueStatus;
+
+        let error = StorageError::InvalidStatusTransition(StatusTransitionError::AlreadyClosed {
+            current: IssueStatus::Closed,
+        });
+        assert!(matches!(
+            error.try_into_status_transition_error(),
+            Ok(StatusTransitionError::AlreadyClosed {
+                current: IssueStatus::Closed
+            })
+        ));
+    }
+
+    #[test]
+    fn try_into_status_transition_error_returns_other_variants_unchanged() {
+        let error = StorageError::Validation("title is required".to_string());
+        assert!(matches!(
+            error.try_into_status_transition_error(),
+            Err(StorageError::Validation(reason)) if reason == "title is required"
+        ));
+    }
+
+    #[test]
     fn storage_serialization_display() {
         let json_err = serde_json::from_str::<String>("not json").unwrap_err();
         let error = StorageError::Serialization(json_err);
