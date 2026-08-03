@@ -1,0 +1,15 @@
+# Review decisions — round 1 (rivets-rb3h, PR #93)
+
+Findings from `/code-review xhigh PR 93` (two-axis: Standards, Spec). Each finding
+verified against the code before deciding, per `assessing-review-feedback`.
+
+| # | Finding (one line) | Reviewer | Category | Verified? | Decision | Note |
+|---|---|---|---|---|---|---|
+| S1 | `try_into_status_transition_error` has no unit tests; sibling extractor has two; MCP `From` mapping likewise unpinned | standards axis | Test coverage | Yes (`error.rs` extractor untested; MCP test mod had resource cases only) | Accept | Added mirroring extractor pair in `rivets::error` tests + `storage_transition_error_maps_to_invalid_status_transition` in `rivets-mcp::error` tests |
+| S2 | ADR-0005 drifts from glossary ("status" vs Workflow State) and entrenches the `Blocked` variant without flagging ADR-0002 | standards axis | Convention (`docs/agents/domain.md`: use glossary vocabulary; flag ADR conflicts) | Yes (`CONTEXT.md` avoids "Status"; ADR-0002 slates `Blocked` removal; matrix spans it) | Modify | Amended ADR-0005 prose: names Workflow State as the glossary concept, flags the ADR-0002 interaction explicitly. No code rename — `IssueStatus` is the shipped code/wire name. Removal work already tracked (rivets-brai, rivets-5mlg) |
+| S3 | Duplicated exhaustive variant list across the two `try_into_*` extractors (possible Repeated Switches) | standards axis | Smell (judgement) | Yes (lists duplicated) | Reject | The no-wildcard lists are the documented mechanism (`error.rs` doc comment): a new `StorageError` variant breaks both matches, forcing an explicit classification decision at each extractor. Two sites don't justify a shared classifier; revisit if a third extractor appears |
+| S4 | Identical two-line ADR-0005 comment in `execute_close` and `execute_reopen` | standards axis | Polish | Yes | Reject | WHY comments explaining absent validation, endorsed by CLAUDE.md commenting rules; deduplicating two lines adds indirection for nothing |
+| P1 | `to_mcp_error` omits `InvalidStatusTransition`, so the JSON-RPC boundary returns `internal_error` (-32603) instead of `invalid_params` (-32602) | spec axis | Bug | Yes (reproduced red: new test asserted -32602, got -32603) | Accept | Added the variant to the `invalid_params` arm; pinned wire codes for all mapped cases plus an `internal_error` counter-case in `server.rs` tests |
+| P2 | Generic status-update path now guarded — behavior beyond the literal close/reopen rules | spec axis | Scope observation | Yes | Reject (no change) | Entailed by the spec's placement line ("applied where IssueUpdate is applied"); disclosed in PR body and ADR-0005 |
+| P3 | Collateral changes: not-found detection moved to storage; new public extractor API | spec axis | Scope observation | Yes | Reject (no change) | Not-found message preserved verbatim; extractor mirrors the established resource-error pattern |
+| P4 | No CLI end-to-end test for close-already-closed (only reopen-already-open existed) | spec axis | Test gap | Yes (`cli_tests.rs` had only the reopen variant) | Accept | Added `test_cli_close_already_closed_issue` mirroring the reopen test |
