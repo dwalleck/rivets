@@ -247,15 +247,23 @@ pub fn print_issue(issue: &Issue, mode: OutputMode) -> io::Result<()> {
     }
 }
 
-/// Print a list of issues in the specified format
+/// Print a list of issues in the specified format.
 pub fn print_issues(issues: &[Issue], mode: OutputMode) -> io::Result<()> {
     let stdout = io::stdout();
     let mut handle = stdout.lock();
+    print_issues_to(&mut handle, issues, mode)
+}
+
+/// Write a list of issues in the specified format.
+///
+/// This is the writer-backed form used by callers that own an output stream,
+/// including contract tests for the CLI JSON representation.
+pub fn print_issues_to<W: Write>(w: &mut W, issues: &[Issue], mode: OutputMode) -> io::Result<()> {
     let config = OutputConfig::from_env();
 
     match mode {
-        OutputMode::Text => print_issues_text(&mut handle, issues, &config),
-        OutputMode::Json => print_issues_json(&mut handle, issues),
+        OutputMode::Text => print_issues_text(w, issues, &config),
+        OutputMode::Json => print_issues_json(w, issues),
     }
 }
 
@@ -573,6 +581,38 @@ mod tests {
             updated_at: Utc::now(),
             closed_at: None,
         }
+    }
+
+    #[test]
+    fn print_issues_to_json_matches_domain_serialization() {
+        let issue = test_issue();
+        let mut buffer = Vec::new();
+        print_issues_to(&mut buffer, std::slice::from_ref(&issue), OutputMode::Json)
+            .expect("JSON output should write to an in-memory buffer");
+
+        let printed: serde_json::Value =
+            serde_json::from_slice(&buffer).expect("printed JSON should parse");
+        let expected = serde_json::to_value(std::slice::from_ref(&issue))
+            .expect("Issue should serialize to a Value");
+        assert_eq!(printed, expected);
+    }
+
+    #[test]
+    fn print_issues_to_text_includes_id_and_title() {
+        let issue = test_issue();
+        let mut buffer = Vec::new();
+        print_issues_to(&mut buffer, std::slice::from_ref(&issue), OutputMode::Text)
+            .expect("text output should write to an in-memory buffer");
+
+        let text = String::from_utf8(buffer).expect("text output should be UTF-8");
+        assert!(
+            text.contains("test-abc"),
+            "text output should include the id: {text}"
+        );
+        assert!(
+            text.contains("Test Issue"),
+            "text output should include the title: {text}"
+        );
     }
 
     #[test]
