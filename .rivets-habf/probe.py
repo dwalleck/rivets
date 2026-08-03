@@ -39,7 +39,15 @@ assert shown == oracle, f"canonical CLI probe disagrees with JSONL oracle: {show
 assert "next_resource_id" not in shown
 mcp = run_mcp(shown["id"])
 assert "+00:00" not in json.dumps(mcp), f"MCP retained non-canonical UTC offset: {shown['id']}"
-normalized_mcp = json.loads(json.dumps(mcp).replace("+00:00", "Z"))
-assert normalized_mcp == oracle, f"MCP differs beyond timestamp offset: {shown['id']}"
-print(json.dumps({"id": shown["id"], "keys": sorted(shown), "notes": len(shown["notes"]), "dependencies": len(shown["dependencies"])}))
-print("oracle=JSONL record; canonical_cli_matches_oracle=true; mcp_matches_after_utc_normalization=true")
+assert mcp == oracle, f"MCP differs from JSONL oracle: {shown['id']}"
+print(
+    json.dumps(
+        {
+            "id": shown["id"],
+            "keys": sorted(shown),
+            "notes": len(shown["notes"]),
+            "dependencies": len(shown["dependencies"]),
+        }
+    )
+)
+print("oracle=JSONL record; canonical_cli_matches_oracle=true; mcp_matches_oracle=true")

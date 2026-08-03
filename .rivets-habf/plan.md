@@ -1,6 +1,6 @@
 # Plan: Delete MCP Issue output mirrors
 
-The approved design is in `.rivets-habf/design.md`; the probe/oracle is `.rivets-habf/probe.py` and `.rivets-habf/findings.md`. Slices are ordered because the production return-type cutover must precede integration-test migration, and the permanent contract fences are added only after the test helpers use domain values.
+The approved design is in `.rivets-habf/design.md`; the probe/oracle is `.rivets-habf/probe.py` and `.rivets-habf/findings.md`. The repository's all-target quality gate requires integration callers to compile with the production return-type cutover, so Slice 1 and the originally planned Slice 2 migration landed atomically in commit `f13e105`; Slice 2's verification gates are recorded as satisfied below.
 
 ## Slice 1: Return canonical domain Issues from MCP tools
 
@@ -17,31 +17,32 @@ The approved design is in `.rivets-habf/design.md`; the probe/oracle is `.rivets
 **Files:**
 - `crates/rivets-mcp/src/models.rs`
 - `crates/rivets-mcp/src/tools.rs`
+- `crates/rivets-mcp/tests/integration.rs`
 
 **Change:**
 - Delete `McpIssue`, `McpNote`, `McpResource`, `McpResourceTarget`, `McpDependency`, and all five output conversions.
 - Change `BlockedIssueResponse` to serialize domain `Issue` fields in its envelope without `Deserialize`/`JsonSchema` requirements that the domain Issue does not satisfy.
 - Change every `Tools` return type and collection path from mirror values to `Issue`/`Vec<Issue>`; remove `Into` conversions.
-- Update the `tools.rs` unit helper and assertions to use domain enum values and Issue IDs.
+- Migrate every integration caller and assertion from mirror fields to domain enums, IDs, accessors, and typed resource targets so the all-target quality gate remains green.
 - Preserve all MCP input model imports, compatibility fields, validation functions, storage/context behavior, and output stream classification (`Content::json` data remains stdout; tracing remains stderr).
 
-**Impact analysis:** Existing callers are `RivetsMcpServer` methods in `crates/rivets-mcp/src/server.rs`, the `tools.rs` unit tests, and `crates/rivets-mcp/tests/integration.rs`. The integration test callers are intentionally migrated in Slice 2; the library unit target is the gate for this production cutover.
+**Impact analysis:** Existing callers are `RivetsMcpServer` methods in `crates/rivets-mcp/src/server.rs`, the `tools.rs` unit tests, and `crates/rivets-mcp/tests/integration.rs`; all callers are migrated in this atomic cutover.
 
 **Verification:**
-- [ ] `cargo nextest run -p rivets-mcp --lib`
-- [ ] `.rivets-habf/probe.py` produces direct MCP/JSONL agreement and `Z` timestamps
-- [ ] Unit stress fixture exercises create/show/update/close/reopen and invalid input behavior
-- [ ] `cargo fmt --check` for touched Rust files
-- [ ] No new loop or wall-budget violation
-- [ ] `cargo test -p rivets-mcp --lib` regression fence passes
+- [x] `cargo nextest run -p rivets-mcp --lib`
+- [x] `cargo nextest run -p rivets-mcp` (all 189 unit and integration tests)
+- [x] `.rivets-habf/probe.py` produces direct MCP/JSONL agreement and `Z` timestamps
+- [x] Unit and integration stress fixtures exercise create/show/update/close/reopen, notes, resources, persistence, and invalid input behavior
+- [x] `cargo fmt -- --check` for touched Rust files
+- [x] `cargo clippy -p rivets-mcp --all-targets --all-features -- -D warnings`
 
-## Slice 2: Migrate integration fixtures to domain accessors
+## Slice 2: Integration-domain verification (completed with Slice 1)
 
 **Claim:** Existing MCP integration behavior and assertions remain valid when test callers consume domain `Issue`, `Note`, `AssociatedResource`, and `ResourceTarget` values directly.
 
 **Oracle:** The pre-existing integration expectations plus direct `serde_json::to_value` of returned domain values. The oracle does not call any deleted mirror conversion.
 
-**Stress fixture:** Run the resource lifecycle test with Web and Unicode/space-containing Workspace Path targets, the Note lifecycle test with four ordered Notes, and the persistence reload tests. These fixtures exercise private domain collections through `notes()`, `resources()`, Note accessors, and ResourceTarget newtypes rather than public mirror fields.
+**Stress fixture:** The resource lifecycle test with Web and Unicode/space-containing Workspace Path targets, the Note lifecycle test with four ordered Notes, and the persistence reload tests all passed in the atomic Slice 1 commit.
 
 **Loop budget:** No production loops. Test-only assertions traverse `O(notes + resources)` values; fixture scale is at most four Notes and five resources, under `10^2` visits.
 
@@ -51,19 +52,19 @@ The approved design is in `.rivets-habf/design.md`; the probe/oracle is `.rivets
 - `crates/rivets-mcp/tests/integration.rs`
 
 **Change:**
-- Replace `McpIssue` and `McpResourceTarget` imports with domain `Issue`/`ResourceTarget` as needed.
+- Replace mirror imports and return annotations with domain `Issue`/`ResourceTarget` values.
 - Update helper return types and assertions from mirror strings/fields to domain enums, `IssueId`, Note accessors, AssociatedResource accessors, and typed target matching.
 - Preserve every existing lifecycle, error, persistence, workspace, filter, relationship, and resource expectation; this slice changes only how tests observe the same public behavior.
 
-**Impact analysis:** All helper call sites in `helpers::create_issue`, `helpers::create_custom_issue`, note lifecycle tests, resource lifecycle tests, and legacy migration tests are within this file; no production symbol changes occur.
+**Impact analysis:** All helper call sites and assertions in `crates/rivets-mcp/tests/integration.rs` were migrated in `f13e105`; no production symbol changes occur.
 
 **Verification:**
-- [ ] `cargo nextest run -p rivets-mcp --test integration`
-- [ ] Resource target stress fixture passes for Web, Unicode Path, and normalized Path values
-- [ ] Note ordering and timestamp assertions pass after accessor migration
-- [ ] `.rivets-habf/probe.py` still agrees with the binary
-- [ ] `cargo fmt --check` for the test file
-- [ ] No new loop or wall-budget violation
+- [x] `cargo nextest run -p rivets-mcp` — 189 tests passed
+- [x] Resource target stress fixture passed for Web, Unicode Path, and normalized Path values
+- [x] Note ordering and timestamp assertions passed after accessor migration
+- [x] `.rivets-habf/probe.py` still agrees with the binary
+- [x] `cargo fmt -- --check`
+- [x] No new loop or wall-budget violation
 
 ## Slice 3: Add permanent golden and CLI/MCP parity fences
 
@@ -98,9 +99,9 @@ The approved design is in `.rivets-habf/design.md`; the probe/oracle is `.rivets
 
 ## Plan self-review
 
-- **Loops:** Slice 1 has no new production loop; Slice 2 and Slice 3 bound test-only traversals in terms of Notes/resources/JSON nodes and give fixture-scale bounds.
+- **Loops:** Slices 1 and 2 add no production loops; their test-only traversals are bounded in terms of Notes/resources, and Slice 3 bounds JSON traversal by node count.
 - **Fixtures:** Every logic slice has an adversarial fixture: populated real Issue, typed Unicode/space path plus ordered Notes, and a fully populated all-variant golden Issue.
 - **Doc-comment preconditions:** No new doc-comment preconditions are introduced; existing domain constructors enforce value invariants at their seams.
 - **Writes:** MCP Issue payloads and CLI JSON are data on stdout; tracing and process diagnostics remain stderr. Tests write only temporary workspace fixtures.
 - **Tracker references:** No deferral or anonymous future-work reference appears in this plan.
-- **Known transitional boundary:** Slice 1 is gated with the library unit target while its integration callers are migrated in Slice 2; the full `rivets-mcp` test suite is a mandatory gate before Slice 3 is accepted.
+- **Gate correction:** The all-target quality hook made the production cutover and integration accessor migration one atomic commit; both slices' gates passed before Slice 3.
