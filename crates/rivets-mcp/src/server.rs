@@ -23,8 +23,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// Maps error types to appropriate MCP error codes:
-/// - `NoContext`, `InvalidArgument`, `InvalidNote`, `InvalidResource` ->
-///   `invalid_params` (user needs to fix their request)
+/// - `NoContext`, `InvalidArgument`, `InvalidNote`, `InvalidResource`,
+///   `InvalidStatusTransition` -> `invalid_params` (user needs to fix their request)
 /// - `IssueNotFound` -> `invalid_params` (requested resource doesn't exist)
 /// - Other errors -> `internal_error`
 fn to_mcp_error(e: &Error) -> McpError {
@@ -33,6 +33,7 @@ fn to_mcp_error(e: &Error) -> McpError {
         | Error::InvalidArgument { .. }
         | Error::InvalidNote(_)
         | Error::InvalidResource(_)
+        | Error::InvalidStatusTransition(_)
         | Error::IssueNotFound(_) => McpError::invalid_params(e.to_string(), None),
         _ => McpError::internal_error(e.to_string(), None),
     }
@@ -681,8 +682,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_to_mcp_error_maps_correctly() {
+        use rmcp::model::ErrorCode;
+
         // Test NoContext -> invalid_params
         let err = to_mcp_error(&Error::NoContext);
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
         assert!(err.message.contains("No workspace context set"));
 
         // Test InvalidArgument -> invalid_params
@@ -691,10 +695,40 @@ mod tests {
             value: "bad".to_string(),
             valid_values: "open, closed",
         });
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
         assert!(err.message.contains("Invalid status"));
 
         // Test IssueNotFound -> invalid_params
         let err = to_mcp_error(&Error::IssueNotFound("test-123".to_string()));
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
         assert!(err.message.contains("Issue not found: test-123"));
+    }
+
+    #[test]
+    fn test_to_mcp_error_classifies_rejected_transition_as_invalid_params() {
+        use rivets::domain::{IssueStatus, StatusTransitionError};
+        use rmcp::model::ErrorCode;
+
+        // A rejected transition is a client-fixable request, not a server
+        // fault: the JSON-RPC boundary must say invalid_params (-32602).
+        let err = to_mcp_error(&Error::InvalidStatusTransition(
+            StatusTransitionError::AlreadyClosed {
+                current: IssueStatus::Closed,
+            },
+        ));
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+        assert!(err.message.contains("Issue is already closed"));
+
+        let err = to_mcp_error(&Error::InvalidStatusTransition(
+            StatusTransitionError::NotClosed {
+                current: IssueStatus::Open,
+            },
+        ));
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+        assert!(err.message.contains("Issue is not closed"));
+
+        // Counter-case: non-domain failures stay internal_error.
+        let err = to_mcp_error(&Error::WorkspaceNotInitialized("/tmp/x".to_string()));
+        assert_eq!(err.code, ErrorCode::INTERNAL_ERROR);
     }
 }

@@ -783,6 +783,31 @@ fn test_cli_close_issue(initialized_dir: TempDir) {
 }
 
 #[rstest]
+fn test_cli_close_already_closed_issue(initialized_dir: TempDir) {
+    let issue_id = create_issue(initialized_dir.path(), "Closed issue", &[]);
+
+    let close = run_rivets_in_dir(initialized_dir.path(), &["close", &issue_id]);
+    assert!(
+        close.status.success(),
+        "First close failed: {:?}",
+        String::from_utf8_lossy(&close.stderr)
+    );
+
+    // Try to close it again - should fail since it's already closed
+    let output = run_rivets_in_dir(initialized_dir.path(), &["close", &issue_id]);
+
+    assert!(
+        !output.status.success(),
+        "Close should fail for already-closed issues"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("already closed"),
+        "Error should mention issue is already closed: {stderr}"
+    );
+}
+
+#[rstest]
 fn test_cli_close_and_reopen_reasons_append_notes(initialized_dir: TempDir) {
     let issue_id = create_issue(initialized_dir.path(), "Lifecycle history", &[]);
 

@@ -460,6 +460,52 @@ impl IssueStatus {
         static VALUES: OnceLock<String> = OnceLock::new();
         VALUES.get_or_init(join_canonical_names::<Self>)
     }
+
+    /// Validate a status transition per the domain rules (ADR-0005).
+    ///
+    /// The domain owns these rules; adapters and storage implementations
+    /// must not re-validate them.
+    ///
+    /// # Invalid Transitions
+    ///
+    /// - `Closed` → `Closed`: an Issue cannot be closed twice.
+    /// - Any non-`Closed` status → `Open`: only closed Issues can be reopened.
+    ///
+    /// Every other transition is allowed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`StatusTransitionError`] describing the rejected transition.
+    pub const fn validate_transition(self, target: Self) -> Result<(), StatusTransitionError> {
+        match (self, target) {
+            (Self::Closed, Self::Closed) => {
+                Err(StatusTransitionError::AlreadyClosed { current: self })
+            }
+            (Self::Closed, _) => Ok(()),
+            (current, Self::Open) => Err(StatusTransitionError::NotClosed { current }),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// A status change rejected by the domain transition rules.
+///
+/// Display output is the full user-facing message (no adapter prefix), so
+/// CLI and MCP surface the identical observable rejection (rivets-rb3h).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum StatusTransitionError {
+    /// Closing an Issue that is already closed.
+    #[error("Issue is already closed (status: {current})")]
+    AlreadyClosed {
+        /// The Issue's status when the close was rejected.
+        current: IssueStatus,
+    },
+    /// Reopening an Issue that is not closed.
+    #[error("Issue is not closed (status: {current})")]
+    NotClosed {
+        /// The Issue's status when the reopen was rejected.
+        current: IssueStatus,
+    },
 }
 
 /// A failure to parse an [`IssueStatus`] from a string.
@@ -2069,6 +2115,71 @@ mod tests {
             );
             let ids: Vec<_> = issue.resources().iter().map(|r| r.id().as_str()).collect();
             assert_eq!(ids, ["r1", "r3", "r4"]);
+        }
+    }
+
+    mod status_transition_tests {
+        use super::*;
+        use rstest::rstest;
+
+        #[rstest]
+        #[case::open_to_closed(IssueStatus::Open, IssueStatus::Closed, true)]
+        #[case::in_progress_to_closed(IssueStatus::InProgress, IssueStatus::Closed, true)]
+        #[case::blocked_to_closed(IssueStatus::Blocked, IssueStatus::Closed, true)]
+        #[case::closed_to_closed(IssueStatus::Closed, IssueStatus::Closed, false)]
+        #[case::closed_to_open(IssueStatus::Closed, IssueStatus::Open, true)]
+        #[case::closed_to_in_progress(IssueStatus::Closed, IssueStatus::InProgress, true)]
+        #[case::closed_to_blocked(IssueStatus::Closed, IssueStatus::Blocked, true)]
+        #[case::open_to_open(IssueStatus::Open, IssueStatus::Open, false)]
+        #[case::in_progress_to_open(IssueStatus::InProgress, IssueStatus::Open, false)]
+        #[case::blocked_to_open(IssueStatus::Blocked, IssueStatus::Open, false)]
+        #[case::open_to_in_progress(IssueStatus::Open, IssueStatus::InProgress, true)]
+        #[case::open_to_blocked(IssueStatus::Open, IssueStatus::Blocked, true)]
+        #[case::in_progress_to_blocked(IssueStatus::InProgress, IssueStatus::Blocked, true)]
+        #[case::blocked_to_in_progress(IssueStatus::Blocked, IssueStatus::InProgress, true)]
+        fn transition_matrix(
+            #[case] current: IssueStatus,
+            #[case] target: IssueStatus,
+            #[case] should_succeed: bool,
+        ) {
+            let result = current.validate_transition(target);
+            assert_eq!(
+                result.is_ok(),
+                should_succeed,
+                "Transition {current:?} -> {target:?} expected success={should_succeed}, got {result:?}"
+            );
+        }
+
+        #[test]
+        fn closing_a_closed_issue_yields_already_closed() {
+            let error = IssueStatus::Closed
+                .validate_transition(IssueStatus::Closed)
+                .expect_err("Closed -> Closed must be rejected");
+            assert_eq!(
+                error,
+                StatusTransitionError::AlreadyClosed {
+                    current: IssueStatus::Closed
+                }
+            );
+            assert_eq!(
+                error.to_string(),
+                "Issue is already closed (status: closed)"
+            );
+        }
+
+        #[rstest]
+        #[case::open(IssueStatus::Open)]
+        #[case::in_progress(IssueStatus::InProgress)]
+        #[case::blocked(IssueStatus::Blocked)]
+        fn reopening_a_non_closed_issue_yields_not_closed(#[case] current: IssueStatus) {
+            let error = current
+                .validate_transition(IssueStatus::Open)
+                .expect_err("non-Closed -> Open must be rejected");
+            assert_eq!(error, StatusTransitionError::NotClosed { current });
+            assert_eq!(
+                error.to_string(),
+                format!("Issue is not closed (status: {current})")
+            );
         }
     }
 }
