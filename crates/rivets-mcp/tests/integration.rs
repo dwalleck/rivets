@@ -7,12 +7,10 @@
 //! - Error response verification
 //! - Real storage persistence
 
+use rivets::domain::{Issue, IssueKind, IssueStatus, ResourceTarget, WorkspacePath};
 use rivets_mcp::context::Context;
 use rivets_mcp::error::Error;
-use rivets_mcp::models::{
-    CreateParams, IssueKindInput, ListParams, McpIssue, McpResourceTarget, ReadyParams,
-    UpdateParams,
-};
+use rivets_mcp::models::{CreateParams, IssueKindInput, ListParams, ReadyParams, UpdateParams};
 use rivets_mcp::tools::Tools;
 use rstest::rstest;
 use std::sync::Arc;
@@ -156,7 +154,7 @@ storage:
     }
 
     /// Create an issue and return it.
-    pub async fn create_issue(tools: &Tools, title: &str) -> McpIssue {
+    pub async fn create_issue(tools: &Tools, title: &str) -> Issue {
         tools
             .create(create_params(
                 title.to_string(),
@@ -292,7 +290,7 @@ storage:
     }
 
     /// Create an issue with full customization.
-    pub async fn create_custom_issue(tools: &Tools, setup: &IssueSetup) -> McpIssue {
+    pub async fn create_custom_issue(tools: &Tools, setup: &IssueSetup) -> Issue {
         let labels = setup
             .labels
             .as_ref()
@@ -315,12 +313,12 @@ storage:
 
         if setup.close_after_create {
             tools
-                .close(&issue.id, None, None)
+                .close(issue.id.as_str(), None, None)
                 .await
                 .expect("Failed to close issue during setup");
             // Fetch updated issue after closing
             tools
-                .show(&issue.id, None)
+                .show(issue.id.as_str(), None)
                 .await
                 .expect("Failed to fetch closed issue")
         } else {
@@ -346,12 +344,12 @@ async fn test_issue_lifecycle_create_update_close() {
 
     // Create issue
     let created = create_issue(&tools, "Lifecycle Test Issue").await;
-    assert_eq!(created.status, "open");
+    assert_eq!(created.status, IssueStatus::Open);
 
     // Update to in_progress
     let updated = tools
         .update(update_params(
-            &created.id,
+            created.id.as_str(),
             None,
             None,
             Some("in_progress"),
@@ -366,28 +364,28 @@ async fn test_issue_lifecycle_create_update_close() {
         .await
         .expect("update should succeed");
 
-    assert_eq!(updated.status, "in_progress");
+    assert_eq!(updated.status, IssueStatus::InProgress);
     assert_eq!(updated.priority, 1);
     assert_eq!(updated.assignee, Some("alice".to_string()));
 
     // Close the issue
     let closed = tools
         .close(
-            &created.id,
+            created.id.as_str(),
             Some("Completed successfully".to_string()),
             None,
         )
         .await
         .expect("close should succeed");
 
-    assert_eq!(closed.status, "closed");
+    assert_eq!(closed.status, IssueStatus::Closed);
 
     // Verify via show
     let shown = tools
-        .show(&created.id, None)
+        .show(created.id.as_str(), None)
         .await
         .expect("show should succeed");
-    assert_eq!(shown.status, "closed");
+    assert_eq!(shown.status, IssueStatus::Closed);
 }
 
 #[tokio::test]
@@ -411,57 +409,63 @@ async fn test_notes_create_append_validate_and_survive_context_restart() {
         })
         .await
         .expect("create with an initial Note should succeed");
-    assert_eq!(created.notes.len(), 1);
-    assert_eq!(created.notes[0].content, "Initial context");
-    assert_eq!(created.notes[0].created_at, created.updated_at);
+    assert_eq!(created.notes().len(), 1);
+    assert_eq!(created.notes()[0].content(), "Initial context");
+    assert_eq!(*created.notes()[0].created_at(), created.updated_at);
 
     let appended = tools
-        .add_note(&created.id, "Second finding".to_string(), None)
+        .add_note(created.id.as_str(), "Second finding".to_string(), None)
         .await
         .expect("add_note should append");
-    assert_eq!(appended.notes.len(), 2);
-    assert_eq!(appended.notes[0], created.notes[0]);
-    assert_eq!(appended.notes[1].content, "Second finding");
-    assert_eq!(appended.notes[1].created_at, appended.updated_at);
+    assert_eq!(appended.notes().len(), 2);
+    assert_eq!(appended.notes()[0], created.notes()[0]);
+    assert_eq!(appended.notes()[1].content(), "Second finding");
+    assert_eq!(*appended.notes()[1].created_at(), appended.updated_at);
 
-    let empty = tools.add_note(&created.id, " \n ".to_string(), None).await;
+    let empty = tools
+        .add_note(created.id.as_str(), " \n ".to_string(), None)
+        .await;
     assert!(matches!(empty, Err(Error::InvalidNote(_))));
 
     let empty_close = tools
-        .close(&created.id, Some(" \n ".to_string()), None)
+        .close(created.id.as_str(), Some(" \n ".to_string()), None)
         .await;
     assert!(matches!(empty_close, Err(Error::InvalidNote(_))));
     let unchanged = tools
-        .show(&created.id, None)
+        .show(created.id.as_str(), None)
         .await
         .expect("rejected close reason must leave the Issue unchanged");
-    assert_eq!(unchanged.status, "open");
-    assert_eq!(unchanged.notes, appended.notes);
+    assert_eq!(unchanged.status, IssueStatus::Open);
+    assert_eq!(unchanged.notes(), appended.notes());
 
     let closed = tools
-        .close(&created.id, Some("Completed".to_string()), None)
+        .close(created.id.as_str(), Some("Completed".to_string()), None)
         .await
         .expect("close reason should append a Note");
-    assert_eq!(closed.notes.len(), 3);
-    assert_eq!(closed.notes[2].content, "Closed: Completed");
-    assert_eq!(closed.notes[2].created_at, closed.updated_at);
-    assert_eq!(closed.notes[2].created_at, closed.closed_at.unwrap());
+    assert_eq!(closed.notes().len(), 3);
+    assert_eq!(closed.notes()[2].content(), "Closed: Completed");
+    assert_eq!(*closed.notes()[2].created_at(), closed.updated_at);
+    assert_eq!(*closed.notes()[2].created_at(), closed.closed_at.unwrap());
 
     let reopened = tools
-        .reopen(&created.id, Some("Needs more work".to_string()), None)
+        .reopen(
+            created.id.as_str(),
+            Some("Needs more work".to_string()),
+            None,
+        )
         .await
         .expect("reopen reason should append a Note");
-    assert_eq!(reopened.notes.len(), 4);
-    assert_eq!(reopened.notes[3].content, "Reopened: Needs more work");
-    assert_eq!(reopened.notes[3].created_at, reopened.updated_at);
+    assert_eq!(reopened.notes().len(), 4);
+    assert_eq!(reopened.notes()[3].content(), "Reopened: Needs more work");
+    assert_eq!(*reopened.notes()[3].created_at(), reopened.updated_at);
 
     let restarted = create_tools();
     set_context(&restarted, workspace.path()).await;
     let shown = restarted
-        .show(&created.id, None)
+        .show(created.id.as_str(), None)
         .await
         .expect("restarted context should load Notes");
-    assert_eq!(shown.notes, reopened.notes);
+    assert_eq!(shown.notes(), reopened.notes());
 }
 
 /// Test issue creation with all optional fields.
@@ -489,7 +493,7 @@ async fn test_create_issue_with_all_fields() {
     assert_eq!(issue.title, "Full Issue");
     assert_eq!(issue.description, "Detailed description");
     assert_eq!(issue.priority, 0);
-    assert_eq!(issue.issue_kind, "feature");
+    assert_eq!(issue.issue_kind, IssueKind::Feature);
     assert_eq!(issue.assignee, Some("bob".to_string()));
     assert_eq!(issue.design, Some("Technical design notes".to_string()));
     assert_eq!(
@@ -523,7 +527,8 @@ async fn test_create_all_issue_kinds() {
             .await
             .expect("create should succeed");
 
-        assert_eq!(issue.issue_kind, issue_kind);
+        let expected_kind: IssueKind = issue_kind.parse().expect("valid Issue Kind");
+        assert_eq!(issue.issue_kind, expected_kind);
         let response = serde_json::to_value(&issue).expect("MCP Issue should serialize");
         assert_eq!(response["issue_kind"], issue_kind);
         assert!(response.get("issue_type").is_none());
@@ -541,7 +546,7 @@ async fn test_create_all_issue_kinds() {
             .await
             .expect("kind filter should succeed");
         assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].issue_kind, issue_kind);
+        assert_eq!(filtered[0].issue_kind, expected_kind);
     }
 
     drop(tools);
@@ -553,7 +558,8 @@ async fn test_create_all_issue_kinds() {
         .expect("list after restart should succeed");
     assert_eq!(list.len(), 5);
     for issue_kind in kinds {
-        assert!(list.iter().any(|issue| issue.issue_kind == issue_kind));
+        let expected_kind: IssueKind = issue_kind.parse().expect("valid Issue Kind");
+        assert!(list.iter().any(|issue| issue.issue_kind == expected_kind));
     }
 }
 
@@ -575,7 +581,7 @@ async fn test_update_reclassifies_only_kind_and_persists_across_context_restart(
 
     let updated = tools
         .update(update_params(
-            &created.id,
+            created.id.as_str(),
             None,
             None,
             None,
@@ -590,7 +596,7 @@ async fn test_update_reclassifies_only_kind_and_persists_across_context_restart(
         .await
         .expect("kind update should succeed");
 
-    assert_eq!(updated.issue_kind, "bug");
+    assert_eq!(updated.issue_kind, IssueKind::Bug);
     assert_ne!(created.updated_at, updated.updated_at);
     let mut before = serde_json::to_value(&created)
         .expect("MCP Issue should serialize")
@@ -613,7 +619,7 @@ async fn test_update_reclassifies_only_kind_and_persists_across_context_restart(
     let record: serde_json::Value = persisted
         .lines()
         .map(|line| serde_json::from_str(line).expect("persisted record should be JSON"))
-        .find(|record: &serde_json::Value| record["id"] == created.id)
+        .find(|record: &serde_json::Value| record["id"] == created.id.as_str())
         .expect("updated issue should remain persisted");
     assert_eq!(record["issue_kind"], "bug");
     assert!(record.get("issue_type").is_none());
@@ -622,10 +628,10 @@ async fn test_update_reclassifies_only_kind_and_persists_across_context_restart(
     let restarted = create_tools();
     set_context(&restarted, workspace.path()).await;
     let reloaded = restarted
-        .show(&created.id, None)
+        .show(created.id.as_str(), None)
         .await
         .expect("reclassified issue should survive context restart");
-    assert_eq!(reloaded.issue_kind, "bug");
+    assert_eq!(reloaded.issue_kind, IssueKind::Bug);
 }
 
 // ============================================================================
@@ -791,7 +797,12 @@ async fn test_error_invalid_dep_type() {
     let issue2 = create_issue(&tools, "Issue 2").await;
 
     let result = tools
-        .dep(&issue1.id, &issue2.id, Some("invalid_dep"), None)
+        .dep(
+            issue1.id.as_str(),
+            issue2.id.as_str(),
+            Some("invalid_dep"),
+            None,
+        )
         .await;
 
     assert!(result.is_err());
@@ -1023,14 +1034,19 @@ async fn test_dependency_management() {
 
     // Add dependency
     let result = tools
-        .dep(&dependent.id, &blocker.id, Some("blocks"), None)
+        .dep(
+            dependent.id.as_str(),
+            blocker.id.as_str(),
+            Some("blocks"),
+            None,
+        )
         .await
         .expect("dep should succeed");
 
     // Verify dependency was added
     assert!(result.contains("Added dependency"));
-    assert!(result.contains(&dependent.id));
-    assert!(result.contains(&blocker.id));
+    assert!(result.contains(dependent.id.as_str()));
+    assert!(result.contains(blocker.id.as_str()));
 
     // Check blocked issues
     let blocked_issues = tools.blocked(None).await.expect("blocked should succeed");
@@ -1054,7 +1070,7 @@ async fn test_all_dependency_types() {
         let issue2 = create_issue(&tools, &format!("Issue for {dep_type} 2")).await;
 
         let result = tools
-            .dep(&issue1.id, &issue2.id, Some(dep_type), None)
+            .dep(issue1.id.as_str(), issue2.id.as_str(), Some(dep_type), None)
             .await
             .expect("dep should succeed");
 
@@ -1075,7 +1091,12 @@ async fn test_ready_excludes_blocked() {
 
     // Add blocking dependency
     tools
-        .dep(&dependent.id, &blocker.id, Some("blocks"), None)
+        .dep(
+            dependent.id.as_str(),
+            blocker.id.as_str(),
+            Some("blocks"),
+            None,
+        )
         .await
         .unwrap();
 
@@ -1549,7 +1570,7 @@ async fn test_assignee_clearing() {
     // Empty string clears the assignee at the MCP parameter boundary.
     let updated = tools
         .update(update_params(
-            &created.id,
+            created.id.as_str(),
             None,
             None,
             None,
@@ -1592,7 +1613,7 @@ async fn test_assignee_update_vs_noop() {
     // Update with None (no change)
     let unchanged = tools
         .update(update_params(
-            &created.id,
+            created.id.as_str(),
             None,
             None,
             None,
@@ -1611,7 +1632,7 @@ async fn test_assignee_update_vs_noop() {
     // Update the assignee.
     let changed = tools
         .update(update_params(
-            &created.id,
+            created.id.as_str(),
             None,
             None,
             None,
@@ -1693,7 +1714,7 @@ async fn test_update_persistence() {
         let tools = create_tools();
         set_context(&tools, workspace.path()).await;
         let issue = create_issue(&tools, "To Update").await;
-        issue_id = issue.id.clone();
+        issue_id = issue.id.as_str().to_string();
 
         tools
             .update(update_params(
@@ -1720,7 +1741,7 @@ async fn test_update_persistence() {
 
         let issue = tools.show(&issue_id, None).await.unwrap();
         assert_eq!(issue.title, "Updated Title");
-        assert_eq!(issue.status, "in_progress");
+        assert_eq!(issue.status, IssueStatus::InProgress);
     }
 }
 
@@ -2299,7 +2320,7 @@ async fn test_unicode_support() {
 
     // Verify we can retrieve it
     let shown = tools
-        .show(&japanese_issue.id, None)
+        .show(japanese_issue.id.as_str(), None)
         .await
         .expect("show should work with unicode issue");
     assert_eq!(shown.title, "バグ修正");
@@ -2573,7 +2594,12 @@ async fn test_invalid_dep_type_values(#[case] invalid_value: &str, #[case] expec
     let issue2 = create_issue(&tools, "Issue 2").await;
 
     let result = tools
-        .dep(&issue1.id, &issue2.id, Some(invalid_value), None)
+        .dep(
+            issue1.id.as_str(),
+            issue2.id.as_str(),
+            Some(invalid_value),
+            None,
+        )
         .await;
 
     assert!(
@@ -2624,7 +2650,7 @@ async fn test_invalid_status_in_update(#[case] invalid_value: &str) {
 
     let result = tools
         .update(update_params(
-            &issue.id,
+            issue.id.as_str(),
             None,
             None,
             Some(invalid_value),
@@ -2716,13 +2742,13 @@ async fn test_complete_issue_lifecycle_all_states() {
         .await
         .expect("create should succeed");
 
-    assert_eq!(created.status, "open");
+    assert_eq!(created.status, IssueStatus::Open);
     assert!(created.closed_at.is_none());
 
     // Transition to in_progress
     let in_progress = tools
         .update(update_params(
-            &created.id,
+            created.id.as_str(),
             None,
             None,
             Some("in_progress"),
@@ -2737,12 +2763,12 @@ async fn test_complete_issue_lifecycle_all_states() {
         .await
         .expect("update to in_progress should succeed");
 
-    assert_eq!(in_progress.status, "in_progress");
+    assert_eq!(in_progress.status, IssueStatus::InProgress);
 
     // Transition to blocked
     let blocked = tools
         .update(update_params(
-            &created.id,
+            created.id.as_str(),
             None,
             None,
             Some("blocked"),
@@ -2757,7 +2783,7 @@ async fn test_complete_issue_lifecycle_all_states() {
         .await
         .expect("update to blocked should succeed");
 
-    assert_eq!(blocked.status, "blocked");
+    assert_eq!(blocked.status, IssueStatus::Blocked);
 
     // Verify it appears in blocked list
     let _blocked_issues = tools.blocked(None).await.expect("blocked should succeed");
@@ -2767,7 +2793,7 @@ async fn test_complete_issue_lifecycle_all_states() {
     // Back to in_progress
     let resumed = tools
         .update(update_params(
-            &created.id,
+            created.id.as_str(),
             None,
             None,
             Some("in_progress"),
@@ -2782,28 +2808,28 @@ async fn test_complete_issue_lifecycle_all_states() {
         .await
         .expect("update back to in_progress should succeed");
 
-    assert_eq!(resumed.status, "in_progress");
+    assert_eq!(resumed.status, IssueStatus::InProgress);
 
     // Close the issue
     let closed = tools
         .close(
-            &created.id,
+            created.id.as_str(),
             Some("Completed successfully".to_string()),
             None,
         )
         .await
         .expect("close should succeed");
 
-    assert_eq!(closed.status, "closed");
+    assert_eq!(closed.status, IssueStatus::Closed);
     assert!(closed.closed_at.is_some());
 
     // Verify final state via show
     let final_state = tools
-        .show(&created.id, None)
+        .show(created.id.as_str(), None)
         .await
         .expect("show should succeed");
 
-    assert_eq!(final_state.status, "closed");
+    assert_eq!(final_state.status, IssueStatus::Closed);
     assert_eq!(final_state.title, "Lifecycle Issue");
     assert_eq!(final_state.description, "Testing full lifecycle");
     assert!(final_state.closed_at.is_some());
@@ -2835,7 +2861,7 @@ async fn test_update_preserves_unmodified_fields() {
     // Update only the title
     let updated = tools
         .update(update_params(
-            &created.id,
+            created.id.as_str(),
             Some("New Title".to_string()),
             None, // Don't update description
             None, // Don't update status
@@ -2855,7 +2881,7 @@ async fn test_update_preserves_unmodified_fields() {
 
     // Verify all other fields preserved
     assert_eq!(updated.description, "Original Description");
-    assert_eq!(updated.status, "open");
+    assert_eq!(updated.status, IssueStatus::Open);
     assert_eq!(updated.priority, 1);
     assert_eq!(updated.assignee, Some("alice".to_string()));
     assert_eq!(updated.design, Some("Original Design".to_string()));
@@ -2979,11 +3005,11 @@ async fn test_all_tools_with_storage_backend() {
         ))
         .await
         .expect("create should succeed");
-    assert!(!created.id.is_empty());
+    assert!(!created.id.as_str().is_empty());
 
     // 4. show
     let shown = tools
-        .show(&created.id, None)
+        .show(created.id.as_str(), None)
         .await
         .expect("show should succeed");
     assert_eq!(shown.id, created.id);
@@ -3006,7 +3032,7 @@ async fn test_all_tools_with_storage_backend() {
     // 7. update
     let updated = tools
         .update(update_params(
-            &created.id,
+            created.id.as_str(),
             Some("Updated Title".to_string()),
             None,
             Some("in_progress"),
@@ -3021,7 +3047,7 @@ async fn test_all_tools_with_storage_backend() {
         .await
         .expect("update should succeed");
     assert_eq!(updated.title, "Updated Title");
-    assert_eq!(updated.status, "in_progress");
+    assert_eq!(updated.status, IssueStatus::InProgress);
 
     // 8. Create another issue for dependency testing
     let blocker = tools
@@ -3041,7 +3067,12 @@ async fn test_all_tools_with_storage_backend() {
 
     // 9. dep
     let dep_result = tools
-        .dep(&created.id, &blocker.id, Some("blocks"), None)
+        .dep(
+            created.id.as_str(),
+            blocker.id.as_str(),
+            Some("blocks"),
+            None,
+        )
         .await
         .expect("dep should succeed");
     assert!(dep_result.contains("Added dependency"));
@@ -3053,10 +3084,14 @@ async fn test_all_tools_with_storage_backend() {
 
     // 11. close
     let closed = tools
-        .close(&created.id, Some("Test completed".to_string()), None)
+        .close(
+            created.id.as_str(),
+            Some("Test completed".to_string()),
+            None,
+        )
         .await
         .expect("close should succeed");
-    assert_eq!(closed.status, "closed");
+    assert_eq!(closed.status, IssueStatus::Closed);
 }
 
 /// Test dependency chains don't cause issues.
@@ -3073,13 +3108,23 @@ async fn test_dependency_chain() {
 
     // B depends on C
     tools
-        .dep(&issue_b.id, &issue_c.id, Some("blocks"), None)
+        .dep(
+            issue_b.id.as_str(),
+            issue_c.id.as_str(),
+            Some("blocks"),
+            None,
+        )
         .await
         .expect("B->C dep should succeed");
 
     // A depends on B
     tools
-        .dep(&issue_a.id, &issue_b.id, Some("blocks"), None)
+        .dep(
+            issue_a.id.as_str(),
+            issue_b.id.as_str(),
+            Some("blocks"),
+            None,
+        )
         .await
         .expect("A->B dep should succeed");
 
@@ -3131,7 +3176,12 @@ async fn test_closing_blocker_unblocks_dependent() {
 
     // Add dependency
     tools
-        .dep(&dependent.id, &blocker.id, Some("blocks"), None)
+        .dep(
+            dependent.id.as_str(),
+            blocker.id.as_str(),
+            Some("blocks"),
+            None,
+        )
         .await
         .expect("dep should succeed");
 
@@ -3144,7 +3194,7 @@ async fn test_closing_blocker_unblocks_dependent() {
 
     // Close the blocker
     tools
-        .close(&blocker.id, Some("Done".to_string()), None)
+        .close(blocker.id.as_str(), Some("Done".to_string()), None)
         .await
         .expect("close should succeed");
 
@@ -3180,7 +3230,7 @@ async fn test_issue_counts_accurate() {
 
     tools
         .update(update_params(
-            &issue2.id,
+            issue2.id.as_str(),
             None,
             None,
             Some("in_progress"),
@@ -3196,7 +3246,7 @@ async fn test_issue_counts_accurate() {
         .unwrap();
 
     tools
-        .close(&issue3.id, Some("Done".to_string()), None)
+        .close(issue3.id.as_str(), Some("Done".to_string()), None)
         .await
         .unwrap();
 
@@ -3266,7 +3316,7 @@ async fn resource_add_list_and_context_recreation_use_real_storage() {
 
     let first = tools
         .resource_add(
-            &issue.id,
+            issue.id.as_str(),
             Some("https://example.com/pr/123".to_string()),
             None,
             "implementation",
@@ -3275,12 +3325,12 @@ async fn resource_add_list_and_context_recreation_use_real_storage() {
         )
         .await
         .expect("first resource should be added");
-    assert_eq!(first.resources.len(), 1);
-    assert_eq!(first.resources[0].id, "r1");
+    assert_eq!(first.resources().len(), 1);
+    assert_eq!(first.resources()[0].id().as_str(), "r1");
 
     let second = tools
         .resource_add(
-            &issue.id,
+            issue.id.as_str(),
             Some("https://example.com/pr/123".to_string()),
             None,
             "documentation",
@@ -3289,46 +3339,51 @@ async fn resource_add_list_and_context_recreation_use_real_storage() {
         )
         .await
         .expect("same target with distinct role should be added");
-    assert_eq!(second.resources.len(), 2);
-    assert_eq!(second.resources[0].role, "implementation");
-    assert_eq!(second.resources[1].role, "documentation");
+    assert_eq!(second.resources().len(), 2);
+    assert_eq!(second.resources()[0].role().to_string(), "implementation");
+    assert_eq!(second.resources()[1].role().to_string(), "documentation");
 
     let resources = tools
-        .resource_list(&issue.id, None)
+        .resource_list(issue.id.as_str(), None)
         .await
         .expect("resource list should succeed");
     assert_eq!(resources.len(), 2);
-    assert_eq!(resources[0].id, "r1");
-    assert_eq!(resources[0].label.as_deref(), Some("Implementation PR"));
-    assert_eq!(resources[1].id, "r2");
-    assert!(resources[1].label.is_none());
-    match &resources[0].target {
-        McpResourceTarget::Web { url } => {
-            assert_eq!(url, "https://example.com/pr/123");
+    assert_eq!(resources[0].id().as_str(), "r1");
+    assert_eq!(
+        resources[0]
+            .label()
+            .map(rivets::domain::ResourceLabel::as_str),
+        Some("Implementation PR")
+    );
+    assert_eq!(resources[1].id().as_str(), "r2");
+    assert!(resources[1].label().is_none());
+    match resources[0].target() {
+        ResourceTarget::Web { url } => {
+            assert_eq!(url.as_str(), "https://example.com/pr/123");
         }
-        McpResourceTarget::Path { .. } => panic!("web add must not produce a path target"),
+        ResourceTarget::Path { .. } => panic!("web add must not produce a path target"),
     }
 
     let restarted = create_tools();
     set_context(&restarted, workspace.path()).await;
     let persisted = restarted
-        .resource_list(&issue.id, None)
+        .resource_list(issue.id.as_str(), None)
         .await
         .expect("resources should survive context recreation");
     assert_eq!(persisted, resources);
 
     let shown = restarted
-        .show(&issue.id, None)
+        .show(issue.id.as_str(), None)
         .await
         .expect("full Issue response should include resources");
-    assert_eq!(shown.resources, persisted);
+    assert_eq!(shown.resources(), persisted.as_slice());
 
     let data = std::fs::read_to_string(workspace.path().join(".rivets/issues.jsonl"))
         .expect("issues file should be readable");
     let record: serde_json::Value = data
         .lines()
         .map(|line| serde_json::from_str(line).expect("record should be JSON"))
-        .find(|record: &serde_json::Value| record["id"] == issue.id)
+        .find(|record: &serde_json::Value| record["id"] == issue.id.as_str())
         .expect("Issue should be persisted");
     assert!(record.get("external_ref").is_none());
     assert_eq!(record["resources"].as_array().unwrap().len(), 2);
@@ -3344,7 +3399,7 @@ async fn resource_add_rejects_invalid_inputs_without_mutation() {
 
     tools
         .resource_add(
-            &issue.id,
+            issue.id.as_str(),
             Some("https://example.com/pr/123".to_string()),
             None,
             "implementation",
@@ -3356,7 +3411,7 @@ async fn resource_add_rejects_invalid_inputs_without_mutation() {
 
     let duplicate = tools
         .resource_add(
-            &issue.id,
+            issue.id.as_str(),
             Some("https://example.com/pr/123".to_string()),
             None,
             "implementation",
@@ -3370,7 +3425,7 @@ async fn resource_add_rejects_invalid_inputs_without_mutation() {
     assert!(matches!(
         tools
             .resource_add(
-                &issue.id,
+                issue.id.as_str(),
                 Some("docs/adr/0003-associated-resources.md".to_string()),
                 None,
                 "reference",
@@ -3383,7 +3438,7 @@ async fn resource_add_rejects_invalid_inputs_without_mutation() {
     assert!(matches!(
         tools
             .resource_add(
-                &issue.id,
+                issue.id.as_str(),
                 Some("https://example.com/evidence".to_string()),
                 None,
                 "evidence",
@@ -3396,7 +3451,7 @@ async fn resource_add_rejects_invalid_inputs_without_mutation() {
     assert!(matches!(
         tools
             .resource_add(
-                &issue.id,
+                issue.id.as_str(),
                 Some("https://example.com/evidence".to_string()),
                 None,
                 "Evidence",
@@ -3417,11 +3472,11 @@ async fn resource_add_rejects_invalid_inputs_without_mutation() {
                 None,
             )
             .await,
-        Err(Error::IssueNotFound(issue_id)) if issue_id == "test-missing"
+        Err(Error::IssueNotFound(issue_id)) if issue_id.as_str() == "test-missing"
     ));
     assert_eq!(
         tools
-            .resource_list(&issue.id, None)
+            .resource_list(issue.id.as_str(), None)
             .await
             .expect("failures must not mutate storage")
             .len(),
@@ -3443,8 +3498,8 @@ async fn legacy_web_external_ref_migrates_through_mcp_and_persists() {
         .await
         .expect("legacy resource should be visible");
     assert_eq!(migrated.len(), 1);
-    assert_eq!(migrated[0].id, "r1");
-    assert_eq!(migrated[0].role, "reference");
+    assert_eq!(migrated[0].id().as_str(), "r1");
+    assert_eq!(migrated[0].role().to_string(), "reference");
 
     let updated = tools
         .resource_add(
@@ -3457,7 +3512,7 @@ async fn legacy_web_external_ref_migrates_through_mcp_and_persists() {
         )
         .await
         .expect("mutation should canonicalize and persist");
-    assert_eq!(updated.resources.len(), 2);
+    assert_eq!(updated.resources().len(), 2);
 
     let restarted = create_tools();
     set_context(&restarted, workspace.path()).await;
@@ -3466,8 +3521,8 @@ async fn legacy_web_external_ref_migrates_through_mcp_and_persists() {
         .await
         .expect("migrated resources should survive context recreation");
     assert_eq!(persisted.len(), 2);
-    assert_eq!(persisted[0].id, "r1");
-    assert_eq!(persisted[1].id, "r2");
+    assert_eq!(persisted[0].id().as_str(), "r1");
+    assert_eq!(persisted[1].id().as_str(), "r2");
 
     let canonical =
         std::fs::read_to_string(issues_path).expect("canonical record should be readable");
@@ -3522,26 +3577,21 @@ async fn resource_add_accepts_path_targets_and_normalizes() {
     let tools = create_tools();
     set_context(&tools, workspace.path()).await;
     let issue = create_issue(&tools, "Path owner").await;
-    add_three_resources(&tools, &issue.id).await;
+    add_three_resources(&tools, issue.id.as_str()).await;
 
     let resources = tools
-        .resource_list(&issue.id, None)
+        .resource_list(issue.id.as_str(), None)
         .await
         .expect("list should succeed");
-    assert_eq!(resources.len(), 3);
     assert_eq!(
-        resources[1].target,
-        McpResourceTarget::Path {
-            path: "\u{e9}/\u{6587}\u{4ef6}.md".to_string()
-        },
+        *resources[1].target(),
+        ResourceTarget::path(WorkspacePath::new("\u{e9}/\u{6587}\u{4ef6}.md").unwrap()),
         "unicode path must be preserved"
     );
     assert_eq!(
-        resources[2].target,
-        McpResourceTarget::Path {
-            path: "docs/adr/0003.md".to_string()
-        },
-        "persisted target must be the normalized path"
+        *resources[2].target(),
+        ResourceTarget::path(WorkspacePath::new("docs/adr/0003.md").unwrap()),
+        "persisted path target must be normalized"
     );
 }
 
@@ -3551,12 +3601,12 @@ async fn resource_update_remove_keep_identity_and_position() {
     let tools = create_tools();
     set_context(&tools, workspace.path()).await;
     let issue = create_issue(&tools, "Update owner").await;
-    add_three_resources(&tools, &issue.id).await;
+    add_three_resources(&tools, issue.id.as_str()).await;
 
     // Update middle resource: role + label, id and position preserved.
     let updated = tools
         .resource_update(rivets_mcp::models::ResourceUpdateParams {
-            issue_id: issue.id.clone(),
+            issue_id: issue.id.as_str().to_string(),
             resource_id: "r2".to_string(),
             url: None,
             path: None,
@@ -3567,15 +3617,20 @@ async fn resource_update_remove_keep_identity_and_position() {
         })
         .await
         .expect("update should succeed");
-    assert_eq!(updated.resources.len(), 3);
-    assert_eq!(updated.resources[1].id, "r2");
-    assert_eq!(updated.resources[1].role, "reference");
-    assert_eq!(updated.resources[1].label.as_deref(), Some("evidence note"));
+    assert_eq!(updated.resources().len(), 3);
+    assert_eq!(updated.resources()[1].id().as_str(), "r2");
+    assert_eq!(updated.resources()[1].role().to_string(), "reference");
+    assert_eq!(
+        updated.resources()[1]
+            .label()
+            .map(rivets::domain::ResourceLabel::as_str),
+        Some("evidence note")
+    );
 
     // Update target web -> path, then clear the label.
     let retargeted = tools
         .resource_update(rivets_mcp::models::ResourceUpdateParams {
-            issue_id: issue.id.clone(),
+            issue_id: issue.id.as_str().to_string(),
             resource_id: "r1".to_string(),
             url: None,
             path: Some("crates/rivets/src/main.rs".to_string()),
@@ -3587,26 +3642,24 @@ async fn resource_update_remove_keep_identity_and_position() {
         .await
         .expect("target change should succeed");
     assert_eq!(
-        retargeted.resources[0].target,
-        McpResourceTarget::Path {
-            path: "crates/rivets/src/main.rs".to_string()
-        }
+        *retargeted.resources()[0].target(),
+        ResourceTarget::path(WorkspacePath::new("crates/rivets/src/main.rs").unwrap())
     );
     assert!(
-        retargeted.resources[0].label.is_none(),
+        retargeted.resources()[0].label().is_none(),
         "label must be cleared"
     );
 
     // Remove middle resource; remaining keep ids/positions.
     let removed = tools
-        .resource_remove(&issue.id, "r2", None)
+        .resource_remove(issue.id.as_str(), "r2", None)
         .await
         .expect("remove should succeed");
     assert_eq!(
         removed
-            .resources
+            .resources()
             .iter()
-            .map(|r| r.id.as_str())
+            .map(|resource| resource.id().as_str())
             .collect::<Vec<_>>(),
         ["r1", "r3"]
     );
@@ -3620,7 +3673,7 @@ async fn resource_update_remove_errors_are_typed_without_mutation() {
     let issue = create_issue(&tools, "Error owner").await;
     tools
         .resource_add(
-            &issue.id,
+            issue.id.as_str(),
             None,
             Some("docs/adr/0003.md".to_string()),
             "documentation",
@@ -3633,7 +3686,7 @@ async fn resource_update_remove_errors_are_typed_without_mutation() {
     // Duplicate target-role is a typed InvalidResource error.
     let duplicate = tools
         .resource_add(
-            &issue.id,
+            issue.id.as_str(),
             None,
             Some("docs/adr/0003.md".to_string()),
             "documentation",
@@ -3644,13 +3697,13 @@ async fn resource_update_remove_errors_are_typed_without_mutation() {
     assert!(matches!(duplicate, Err(Error::InvalidResource(_))));
 
     // Unknown resource id is a typed InvalidResource error.
-    let unknown = tools.resource_remove(&issue.id, "r99", None).await;
+    let unknown = tools.resource_remove(issue.id.as_str(), "r99", None).await;
     assert!(matches!(unknown, Err(Error::InvalidResource(_))));
 
     // An escaping path is a typed InvalidResource error.
     let escaping = tools
         .resource_add(
-            &issue.id,
+            issue.id.as_str(),
             None,
             Some("../outside.md".to_string()),
             "reference",
@@ -3663,7 +3716,7 @@ async fn resource_update_remove_errors_are_typed_without_mutation() {
     // Conflicting or missing target arguments are typed InvalidArgument errors.
     let both_targets = tools
         .resource_add(
-            &issue.id,
+            issue.id.as_str(),
             Some("https://example.com/x".to_string()),
             Some("src/y.rs".to_string()),
             "reference",
@@ -3679,7 +3732,7 @@ async fn resource_update_remove_errors_are_typed_without_mutation() {
         })
     ));
     let neither = tools
-        .resource_add(&issue.id, None, None, "reference", None, None)
+        .resource_add(issue.id.as_str(), None, None, "reference", None, None)
         .await;
     assert!(matches!(
         neither,
@@ -3691,7 +3744,7 @@ async fn resource_update_remove_errors_are_typed_without_mutation() {
 
     assert_eq!(
         tools
-            .resource_list(&issue.id, None)
+            .resource_list(issue.id.as_str(), None)
             .await
             .expect("list should succeed")
             .len(),
@@ -3711,7 +3764,7 @@ async fn resource_mutations_persist_across_context_restart() {
         let tools = create_tools();
         set_context(&tools, workspace.path()).await;
         let issue = create_issue(&tools, "Restart owner").await;
-        issue_id = issue.id.clone();
+        issue_id = issue.id.as_str().to_string();
         add_three_resources(&tools, &issue_id).await;
         tools
             .resource_update(rivets_mcp::models::ResourceUpdateParams {
@@ -3741,17 +3794,18 @@ async fn resource_mutations_persist_across_context_restart() {
             .await
             .expect("resources should survive context recreation");
         assert_eq!(
-            persisted.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            persisted
+                .iter()
+                .map(|resource| resource.id().as_str())
+                .collect::<Vec<_>>(),
             ["r1", "r3"],
             "removal keeps remaining ids and positions"
         );
-        assert_eq!(persisted[0].role, "successor");
-        assert!(persisted[0].label.is_none(), "label clear must persist");
+        assert_eq!(persisted[0].role().to_string(), "successor");
+        assert!(persisted[0].label().is_none(), "label clear must persist");
         assert_eq!(
-            persisted[1].target,
-            McpResourceTarget::Path {
-                path: "docs/adr/0003.md".to_string()
-            },
+            *persisted[1].target(),
+            ResourceTarget::path(WorkspacePath::new("docs/adr/0003.md").unwrap()),
             "normalized path target must persist"
         );
     }

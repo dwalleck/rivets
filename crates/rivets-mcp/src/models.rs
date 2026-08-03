@@ -3,7 +3,7 @@
 //! This module contains types for MCP tool inputs and outputs.
 //! They wrap or transform rivets domain types for MCP compatibility.
 
-use rivets::domain::{AssociatedResource, Dependency, Issue, IssueKind, Note, ResourceTarget};
+use rivets::domain::{Issue, IssueKind};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -451,179 +451,14 @@ pub struct WhereAmIResponse {
     pub issue_prefix: Option<String>,
 }
 
-/// Immutable Note representation for MCP responses.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct McpNote {
-    /// Note content preserved exactly as recorded.
-    pub content: String,
-
-    /// System-assigned creation timestamp (ISO 8601).
-    pub created_at: String,
-}
-
-impl From<&Note> for McpNote {
-    fn from(note: &Note) -> Self {
-        Self {
-            content: note.content().to_string(),
-            created_at: note.created_at().to_rfc3339(),
-        }
-    }
-}
-
-/// Discriminated Resource Target representation for MCP responses.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum McpResourceTarget {
-    /// Absolute HTTP or HTTPS URL.
-    Web {
-        /// Normalized URL.
-        url: String,
-    },
-    /// Normalized path relative to the Workspace root.
-    Path {
-        /// Normalized workspace-relative path.
-        path: String,
-    },
-}
-
-/// Associated Resource representation for MCP responses.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct McpResource {
-    /// Stable, opaque identifier within the Issue.
-    pub id: String,
-    /// Typed resource target.
-    pub target: McpResourceTarget,
-    /// Why the resource matters.
-    pub role: String,
-    /// Optional human-readable label.
-    pub label: Option<String>,
-}
-
-impl From<&AssociatedResource> for McpResource {
-    fn from(resource: &AssociatedResource) -> Self {
-        let target = match resource.target() {
-            ResourceTarget::Web { url } => McpResourceTarget::Web {
-                url: url.as_str().to_string(),
-            },
-            ResourceTarget::Path { path } => McpResourceTarget::Path {
-                path: path.as_str().to_string(),
-            },
-        };
-        Self {
-            id: resource.id().to_string(),
-            target,
-            role: resource.role().to_string(),
-            label: resource.label().map(|label| label.as_str().to_string()),
-        }
-    }
-}
-
-/// Issue representation for MCP responses.
-///
-/// This is a simplified view of an issue optimized for MCP transport.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct McpIssue {
-    /// Unique identifier.
-    pub id: String,
-
-    /// Issue title.
-    pub title: String,
-
-    /// Issue description.
-    pub description: String,
-
-    /// Current status.
-    pub status: String,
-
-    /// Priority level (0-4).
-    pub priority: u8,
-
-    /// Issue kind.
-    pub issue_kind: String,
-
-    /// Assignee, if any.
-    pub assignee: Option<String>,
-
-    /// Labels.
-    pub labels: Vec<String>,
-
-    /// Design notes.
-    pub design: Option<String>,
-
-    /// Acceptance criteria.
-    pub acceptance_criteria: Option<String>,
-
-    /// Immutable Notes in chronological order.
-    pub notes: Vec<McpNote>,
-
-    /// Associated Resources in insertion order.
-    pub resources: Vec<McpResource>,
-
-    /// Dependencies.
-    pub dependencies: Vec<McpDependency>,
-
-    /// Creation timestamp (ISO 8601).
-    pub created_at: String,
-
-    /// Last update timestamp (ISO 8601).
-    pub updated_at: String,
-
-    /// Closed timestamp (ISO 8601), if closed.
-    pub closed_at: Option<String>,
-}
-
-impl From<Issue> for McpIssue {
-    fn from(issue: Issue) -> Self {
-        let notes = issue.notes().iter().map(Into::into).collect();
-        let resources = issue.resources().iter().map(Into::into).collect();
-        Self {
-            id: issue.id.to_string(),
-            title: issue.title,
-            description: issue.description,
-            status: issue.status.to_string(),
-            priority: issue.priority,
-            issue_kind: issue.issue_kind.to_string(),
-            assignee: issue.assignee,
-            labels: issue.labels,
-            design: issue.design,
-            acceptance_criteria: issue.acceptance_criteria,
-            notes,
-            resources,
-            dependencies: issue.dependencies.into_iter().map(Into::into).collect(),
-            created_at: issue.created_at.to_rfc3339(),
-            updated_at: issue.updated_at.to_rfc3339(),
-            closed_at: issue.closed_at.map(|t| t.to_rfc3339()),
-        }
-    }
-}
-
-/// Dependency representation for MCP responses.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct McpDependency {
-    /// ID of the issue this depends on.
-    pub depends_on_id: String,
-
-    /// Type of dependency.
-    pub dep_type: String,
-}
-
-impl From<Dependency> for McpDependency {
-    fn from(dep: Dependency) -> Self {
-        Self {
-            depends_on_id: dep.depends_on_id.to_string(),
-            dep_type: dep.dep_type.to_string(),
-        }
-    }
-}
-
 /// Blocked issue response.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize)]
 pub struct BlockedIssueResponse {
     /// The blocked issue.
-    pub issue: McpIssue,
+    pub issue: Issue,
 
     /// Issues blocking this one.
-    pub blockers: Vec<McpIssue>,
+    pub blockers: Vec<Issue>,
 }
 
 /// Statistics response.

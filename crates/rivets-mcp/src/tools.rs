@@ -18,13 +18,13 @@
 use crate::context::Context;
 use crate::error::{Error, Result};
 use crate::models::{
-    BlockedIssueResponse, CreateParams, ListParams, McpIssue, McpResource, ReadyParams,
-    ResourceUpdateParams, SetContextResponse, UpdateParams, WhereAmIResponse,
+    BlockedIssueResponse, CreateParams, ListParams, ReadyParams, ResourceUpdateParams,
+    SetContextResponse, UpdateParams, WhereAmIResponse,
 };
 use rivets::domain::{
-    DependencyType, IssueFilter, IssueId, IssueKind, IssueStatus, IssueUpdate, NewIssue,
-    NewResource, NoteContent, ResourceId, ResourceLabel, ResourceRole, ResourceTarget,
-    ResourceUpdate, WebUrl, WorkspacePath,
+    AssociatedResource, DependencyType, Issue, IssueFilter, IssueId, IssueKind, IssueStatus,
+    IssueUpdate, NewIssue, NewResource, NoteContent, ResourceId, ResourceLabel, ResourceRole,
+    ResourceTarget, ResourceUpdate, WebUrl, WorkspacePath,
 };
 use rivets::storage::IssueStorage;
 use std::path::Path;
@@ -207,7 +207,7 @@ impl Tools {
     ///
     /// Returns an error if no context is set or storage operations fail.
     #[instrument(skip(self, params), fields(limit = params.limit, priority = params.priority))]
-    pub async fn ready(&self, params: ReadyParams) -> Result<Vec<McpIssue>> {
+    pub async fn ready(&self, params: ReadyParams) -> Result<Vec<Issue>> {
         debug!("Finding ready issues");
         let issue_kind = params.kind.resolve("ready");
 
@@ -226,7 +226,7 @@ impl Tools {
 
         let issues = storage.ready_to_work(Some(&filter), None).await?;
         debug!(count = issues.len(), "Found ready issues");
-        Ok(issues.into_iter().map(Into::into).collect())
+        Ok(issues)
     }
 
     /// List issues with optional filters.
@@ -238,7 +238,7 @@ impl Tools {
     ///
     /// Returns an error if no context is set, status is invalid, or storage operations fail.
     #[instrument(skip(self, params), fields(limit = params.limit, priority = params.priority))]
-    pub async fn list(&self, params: ListParams) -> Result<Vec<McpIssue>> {
+    pub async fn list(&self, params: ListParams) -> Result<Vec<Issue>> {
         debug!("Listing issues");
         let status = params.status.as_deref().map(validate_status).transpose()?;
         let issue_kind = params.kind.resolve("list");
@@ -257,7 +257,7 @@ impl Tools {
 
         let issues = storage.list(&filter).await?;
         debug!(count = issues.len(), "Listed issues");
-        Ok(issues.into_iter().map(Into::into).collect())
+        Ok(issues)
     }
 
     /// Show details for a specific issue.
@@ -266,7 +266,7 @@ impl Tools {
     ///
     /// Returns an error if no context is set, issue not found, or storage operations fail.
     #[instrument(skip(self), fields(%issue_id))]
-    pub async fn show(&self, issue_id: &str, workspace_root: Option<&str>) -> Result<McpIssue> {
+    pub async fn show(&self, issue_id: &str, workspace_root: Option<&str>) -> Result<Issue> {
         let storage = self.storage_for(workspace_root).await?;
         let storage = storage.read().await;
 
@@ -275,7 +275,7 @@ impl Tools {
             .get(&id)
             .await?
             .ok_or_else(|| Error::IssueNotFound(issue_id.to_string()))?;
-        Ok(issue.into())
+        Ok(issue)
     }
 
     /// Get blocked issues.
@@ -291,10 +291,7 @@ impl Tools {
         let blocked = storage.blocked_issues().await?;
         Ok(blocked
             .into_iter()
-            .map(|(issue, blockers)| BlockedIssueResponse {
-                issue: issue.into(),
-                blockers: blockers.into_iter().map(Into::into).collect(),
-            })
+            .map(|(issue, blockers)| BlockedIssueResponse { issue, blockers })
             .collect())
     }
 
@@ -304,7 +301,7 @@ impl Tools {
     ///
     /// Returns an error if no context is set or storage operations fail.
     #[instrument(skip(self, params), fields(title = %params.title))]
-    pub async fn create(&self, params: CreateParams) -> Result<McpIssue> {
+    pub async fn create(&self, params: CreateParams) -> Result<Issue> {
         debug!("Creating issue");
         let issue_kind = params.kind.resolve("create").unwrap_or(IssueKind::Task);
         let initial_note = params.initial_note.map(NoteContent::new).transpose()?;
@@ -328,7 +325,7 @@ impl Tools {
         let issue = storage.create(new_issue).await?;
         save_or_reload(storage.as_mut()).await?;
         debug!(issue_id = %issue.id, "Created issue");
-        Ok(issue.into())
+        Ok(issue)
     }
 
     /// Update an existing issue.
@@ -336,7 +333,7 @@ impl Tools {
     ///
     /// Returns an error if no context is set, status is invalid, the issue is missing, or storage fails.
     #[instrument(skip(self, params), fields(issue_id = %params.issue_id))]
-    pub async fn update(&self, params: UpdateParams) -> Result<McpIssue> {
+    pub async fn update(&self, params: UpdateParams) -> Result<Issue> {
         debug!("Updating issue");
         let status = params.status.as_deref().map(validate_status).transpose()?;
         let issue_kind = params.kind.resolve("update");
@@ -364,7 +361,7 @@ impl Tools {
         let issue = storage.update(&id, updates).await?;
         save_or_reload(storage.as_mut()).await?;
         debug!("Updated issue");
-        Ok(issue.into())
+        Ok(issue)
     }
 
     /// Append an immutable Note to an Issue.
@@ -379,7 +376,7 @@ impl Tools {
         issue_id: &str,
         content: String,
         workspace_root: Option<&str>,
-    ) -> Result<McpIssue> {
+    ) -> Result<Issue> {
         let note = NoteContent::new(content)?;
         let storage = self.storage_for(workspace_root).await?;
         let mut storage = storage.write().await;
@@ -394,7 +391,7 @@ impl Tools {
             )
             .await?;
         save_or_reload(storage.as_mut()).await?;
-        Ok(issue.into())
+        Ok(issue)
     }
 
     /// Associate a Web URL or Workspace Path target with an Issue.
@@ -413,7 +410,7 @@ impl Tools {
         role: &str,
         label: Option<String>,
         workspace_root: Option<&str>,
-    ) -> Result<McpIssue> {
+    ) -> Result<Issue> {
         let target = parse_resource_target(url, path)?;
         let resource = NewResource {
             target,
@@ -427,7 +424,7 @@ impl Tools {
             .add_resource(&IssueId::new(issue_id), resource)
             .await?;
         save_or_reload(storage.as_mut()).await?;
-        Ok(issue.into())
+        Ok(issue)
     }
 
     /// Update an Issue's Associated Resource by its stable identifier.
@@ -441,7 +438,7 @@ impl Tools {
     /// Issue or resource identifier, a duplicate post-update target-and-role
     /// association, an update with no fields, or a persistence failure.
     #[instrument(skip(self, params), fields(%params.issue_id, %params.resource_id))]
-    pub async fn resource_update(&self, params: ResourceUpdateParams) -> Result<McpIssue> {
+    pub async fn resource_update(&self, params: ResourceUpdateParams) -> Result<Issue> {
         let ResourceUpdateParams {
             issue_id,
             resource_id,
@@ -481,7 +478,7 @@ impl Tools {
             )
             .await?;
         save_or_reload(storage.as_mut()).await?;
-        Ok(issue.into())
+        Ok(issue)
     }
 
     /// Remove an Issue's Associated Resource by its stable identifier.
@@ -498,7 +495,7 @@ impl Tools {
         issue_id: &str,
         resource_id: &str,
         workspace_root: Option<&str>,
-    ) -> Result<McpIssue> {
+    ) -> Result<Issue> {
         let storage = self.storage_for(workspace_root).await?;
         let mut storage = storage.write().await;
 
@@ -506,7 +503,7 @@ impl Tools {
             .remove_resource(&IssueId::new(issue_id), &ResourceId::new(resource_id)?)
             .await?;
         save_or_reload(storage.as_mut()).await?;
-        Ok(issue.into())
+        Ok(issue)
     }
 
     /// List an Issue's Associated Resources in insertion order.
@@ -519,14 +516,14 @@ impl Tools {
         &self,
         issue_id: &str,
         workspace_root: Option<&str>,
-    ) -> Result<Vec<McpResource>> {
+    ) -> Result<Vec<AssociatedResource>> {
         let storage = self.storage_for(workspace_root).await?;
         let storage = storage.read().await;
         let issue = storage
             .get(&IssueId::new(issue_id))
             .await?
             .ok_or_else(|| Error::IssueNotFound(issue_id.to_string()))?;
-        Ok(issue.resources().iter().map(Into::into).collect())
+        Ok(issue.resources().to_vec())
     }
 
     /// Close an issue.
@@ -541,7 +538,7 @@ impl Tools {
         issue_id: &str,
         reason: Option<String>,
         workspace_root: Option<&str>,
-    ) -> Result<McpIssue> {
+    ) -> Result<Issue> {
         debug!("Closing issue");
         let note = reason.map(NoteContent::closing_reason).transpose()?;
         let storage = self.storage_for(workspace_root).await?;
@@ -557,7 +554,7 @@ impl Tools {
         let issue = storage.update(&id, updates).await?;
         save_or_reload(storage.as_mut()).await?;
         debug!("Closed issue");
-        Ok(issue.into())
+        Ok(issue)
     }
 
     /// Add a dependency between issues.
@@ -609,7 +606,7 @@ impl Tools {
         issue_id: &str,
         reason: Option<String>,
         workspace_root: Option<&str>,
-    ) -> Result<McpIssue> {
+    ) -> Result<Issue> {
         debug!("Reopening issue");
         let note = reason.map(NoteContent::reopening_reason).transpose()?;
         let storage = self.storage_for(workspace_root).await?;
@@ -625,7 +622,7 @@ impl Tools {
         let issue = storage.update(&id, updates).await?;
         save_or_reload(storage.as_mut()).await?;
         debug!("Reopened issue");
-        Ok(issue.into())
+        Ok(issue)
     }
 
     /// Find stale issues that haven't been updated recently.
@@ -646,7 +643,7 @@ impl Tools {
         status: Option<&str>,
         limit: Option<usize>,
         workspace_root: Option<&str>,
-    ) -> Result<Vec<McpIssue>> {
+    ) -> Result<Vec<Issue>> {
         debug!("Finding stale issues");
         let status = status.map(validate_status).transpose()?;
         let days = days.unwrap_or(30);
@@ -665,11 +662,10 @@ impl Tools {
         let issues = storage.list(&filter).await?;
 
         // Filter by updated_at timestamp and apply limit
-        let stale_issues: Vec<McpIssue> = issues
+        let stale_issues: Vec<Issue> = issues
             .into_iter()
             .filter(|issue| issue.updated_at < cutoff)
             .take(limit)
-            .map(Into::into)
             .collect();
 
         debug!(count = stale_issues.len(), "Found stale issues");
@@ -687,7 +683,7 @@ impl Tools {
         issue_id: &str,
         label: &str,
         workspace_root: Option<&str>,
-    ) -> Result<McpIssue> {
+    ) -> Result<Issue> {
         debug!("Adding label to issue");
         let storage = self.storage_for(workspace_root).await?;
         let mut storage = storage.write().await;
@@ -696,7 +692,7 @@ impl Tools {
         let issue = storage.add_label(&id, label).await?;
         save_or_reload(storage.as_mut()).await?;
         debug!("Added label");
-        Ok(issue.into())
+        Ok(issue)
     }
 
     /// Remove a label from an issue.
@@ -710,7 +706,7 @@ impl Tools {
         issue_id: &str,
         label: &str,
         workspace_root: Option<&str>,
-    ) -> Result<McpIssue> {
+    ) -> Result<Issue> {
         debug!("Removing label from issue");
         let storage = self.storage_for(workspace_root).await?;
         let mut storage = storage.write().await;
@@ -719,7 +715,7 @@ impl Tools {
         let issue = storage.remove_label(&id, label).await?;
         save_or_reload(storage.as_mut()).await?;
         debug!("Removed label");
-        Ok(issue.into())
+        Ok(issue)
     }
 
     /// List labels for a specific issue.
@@ -964,7 +960,7 @@ mod tests {
     }
 
     /// Helper to create a simple issue with just a title.
-    async fn create_issue(tools: &Tools, title: &str) -> McpIssue {
+    async fn create_issue(tools: &Tools, title: &str) -> Issue {
         tools
             .create(create_params(
                 title.to_string(),
@@ -1023,11 +1019,11 @@ mod tests {
         assert_eq!(issue.title, "Test Issue");
         assert_eq!(issue.description, "Test description");
         assert_eq!(issue.priority, 1);
-        assert_eq!(issue.issue_kind, "task");
+        assert_eq!(issue.issue_kind, IssueKind::Task);
         assert_eq!(issue.assignee, Some("alice".to_string()));
 
         // Show the issue
-        let shown = tools.show(&issue.id, None).await.unwrap();
+        let shown = tools.show(issue.id.as_str(), None).await.unwrap();
         assert_eq!(shown.title, "Test Issue");
     }
 
@@ -1055,7 +1051,7 @@ mod tests {
 
         let updated = tools
             .update(update_params(
-                &issue.id,
+                issue.id.as_str(),
                 Some("Updated Title".to_string()),
                 None,
                 Some("in_progress"),
@@ -1071,7 +1067,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(updated.title, "Updated Title");
-        assert_eq!(updated.status, "in_progress");
+        assert_eq!(updated.status, IssueStatus::InProgress);
         assert_eq!(updated.priority, 0);
     }
 
@@ -1083,11 +1079,11 @@ mod tests {
         let issue = create_issue(&tools, "To Close").await;
 
         let closed = tools
-            .close(&issue.id, Some("Completed".to_string()), None)
+            .close(issue.id.as_str(), Some("Completed".to_string()), None)
             .await
             .unwrap();
 
-        assert_eq!(closed.status, "closed");
+        assert_eq!(closed.status, IssueStatus::Closed);
     }
 
     #[rstest]
@@ -1114,7 +1110,7 @@ mod tests {
 
         // Add dependency
         let result = tools
-            .dep(&issue1.id, &issue2.id, Some("blocks"), None)
+            .dep(issue1.id.as_str(), issue2.id.as_str(), Some("blocks"), None)
             .await
             .unwrap();
 
@@ -1133,8 +1129,8 @@ mod tests {
 
         tools
             .dep(
-                &dependent_issue.id,
-                &blocking_issue.id,
+                dependent_issue.id.as_str(),
+                blocking_issue.id.as_str(),
                 Some("blocks"),
                 None,
             )
@@ -1281,17 +1277,17 @@ mod tests {
         // Create and close an issue
         let issue = create_issue(&tools, "To Reopen").await;
         let closed = tools
-            .close(&issue.id, Some("Completed".to_string()), None)
+            .close(issue.id.as_str(), Some("Completed".to_string()), None)
             .await
             .unwrap();
-        assert_eq!(closed.status, "closed");
+        assert_eq!(closed.status, IssueStatus::Closed);
 
         // Reopen the issue
         let reopened = tools
-            .reopen(&issue.id, Some("Work not done".to_string()), None)
+            .reopen(issue.id.as_str(), Some("Work not done".to_string()), None)
             .await
             .unwrap();
-        assert_eq!(reopened.status, "open");
+        assert_eq!(reopened.status, IssueStatus::Open);
     }
 
     #[rstest]
@@ -1302,11 +1298,14 @@ mod tests {
         let issue = create_issue(&tools, "Labeled Issue").await;
 
         // Add a label
-        let updated = tools.label_add(&issue.id, "feature", None).await.unwrap();
+        let updated = tools
+            .label_add(issue.id.as_str(), "feature", None)
+            .await
+            .unwrap();
         assert!(updated.labels.contains(&"feature".to_string()));
 
         // List labels
-        let labels = tools.label_list(&issue.id, None).await.unwrap();
+        let labels = tools.label_list(issue.id.as_str(), None).await.unwrap();
         assert!(labels.contains(&"feature".to_string()));
     }
 
@@ -1333,7 +1332,10 @@ mod tests {
         assert!(issue.labels.contains(&"bug".to_string()));
 
         // Remove the label
-        let updated = tools.label_remove(&issue.id, "bug", None).await.unwrap();
+        let updated = tools
+            .label_remove(issue.id.as_str(), "bug", None)
+            .await
+            .unwrap();
         assert!(!updated.labels.contains(&"bug".to_string()));
     }
 
@@ -1420,7 +1422,7 @@ mod tests {
         // Create and close another issue
         let closed_issue = create_issue(&tools, "Closed Issue").await;
         tools
-            .close(&closed_issue.id, Some("Done".to_string()), None)
+            .close(closed_issue.id.as_str(), Some("Done".to_string()), None)
             .await
             .unwrap();
 
