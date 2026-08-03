@@ -1023,7 +1023,10 @@ mod tests {
         assert_eq!(issue.assignee, Some("alice".to_string()));
 
         // Show the issue
-        let shown = tools.show(issue.id.as_str(), None).await.unwrap();
+        let shown = tools
+            .show(issue.id.as_str(), None)
+            .await
+            .expect("show should find the created issue");
         assert_eq!(shown.title, "Test Issue");
     }
 
@@ -1064,7 +1067,7 @@ mod tests {
                 None,
             ))
             .await
-            .unwrap();
+            .expect("update should succeed");
 
         assert_eq!(updated.title, "Updated Title");
         assert_eq!(updated.status, IssueStatus::InProgress);
@@ -1081,7 +1084,7 @@ mod tests {
         let closed = tools
             .close(issue.id.as_str(), Some("Completed".to_string()), None)
             .await
-            .unwrap();
+            .expect("close should succeed");
 
         assert_eq!(closed.status, IssueStatus::Closed);
     }
@@ -1112,7 +1115,7 @@ mod tests {
         let result = tools
             .dep(issue1.id.as_str(), issue2.id.as_str(), Some("blocks"), None)
             .await
-            .unwrap();
+            .expect("dep should succeed");
 
         assert!(result.contains("Added dependency"));
         assert!(result.contains("blocks"));
@@ -1135,7 +1138,7 @@ mod tests {
                 None,
             )
             .await
-            .unwrap();
+            .expect("dep should succeed");
 
         // Get blocked issues
         let result = tools.blocked(None).await.unwrap();
@@ -1279,14 +1282,14 @@ mod tests {
         let closed = tools
             .close(issue.id.as_str(), Some("Completed".to_string()), None)
             .await
-            .unwrap();
+            .expect("close should succeed");
         assert_eq!(closed.status, IssueStatus::Closed);
 
         // Reopen the issue
         let reopened = tools
             .reopen(issue.id.as_str(), Some("Work not done".to_string()), None)
             .await
-            .unwrap();
+            .expect("reopen should succeed");
         assert_eq!(reopened.status, IssueStatus::Open);
     }
 
@@ -1301,11 +1304,14 @@ mod tests {
         let updated = tools
             .label_add(issue.id.as_str(), "feature", None)
             .await
-            .unwrap();
+            .expect("label_add should succeed");
         assert!(updated.labels.contains(&"feature".to_string()));
 
         // List labels
-        let labels = tools.label_list(issue.id.as_str(), None).await.unwrap();
+        let labels = tools
+            .label_list(issue.id.as_str(), None)
+            .await
+            .expect("label_list should succeed");
         assert!(labels.contains(&"feature".to_string()));
     }
 
@@ -1335,7 +1341,7 @@ mod tests {
         let updated = tools
             .label_remove(issue.id.as_str(), "bug", None)
             .await
-            .unwrap();
+            .expect("label_remove should succeed");
         assert!(!updated.labels.contains(&"bug".to_string()));
     }
 
@@ -1424,7 +1430,7 @@ mod tests {
         tools
             .close(closed_issue.id.as_str(), Some("Done".to_string()), None)
             .await
-            .unwrap();
+            .expect("close should succeed");
 
         // Find stale open issues with 0-day threshold
         let stale_open = tools

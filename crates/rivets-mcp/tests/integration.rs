@@ -9,6 +9,7 @@
 
 use chrono::{DateTime, Utc};
 use rivets::domain::{Issue, IssueKind, IssueStatus, ResourceTarget, WorkspacePath};
+use rivets::error::{Error as RivetsError, StorageError};
 use rivets_mcp::context::Context;
 use rivets_mcp::error::Error;
 use rivets_mcp::models::{CreateParams, IssueKindInput, ListParams, ReadyParams, UpdateParams};
@@ -331,6 +332,12 @@ storage:
 }
 
 use helpers::*;
+
+/// Wire fields that carry RFC 3339 timestamps in the canonical Issue shape.
+fn is_timestamp_key(key: &str) -> bool {
+    matches!(key, "created_at" | "updated_at" | "closed_at")
+}
+
 fn normalize_wire_timestamps(value: &mut Value) {
     match value {
         Value::Array(values) => {
@@ -340,9 +347,7 @@ fn normalize_wire_timestamps(value: &mut Value) {
         }
         Value::Object(fields) => {
             for (key, value) in fields {
-                if matches!(key.as_str(), "created_at" | "updated_at" | "closed_at")
-                    && value.is_string()
-                {
+                if is_timestamp_key(key) && value.is_string() {
                     *value = Value::String("<timestamp>".to_string());
                 } else {
                     normalize_wire_timestamps(value);
@@ -371,13 +376,13 @@ fn mcp_content_json<T: serde::Serialize>(value: &T) -> Value {
     serde_json::from_str(&text.text).expect("MCP JSON content should parse")
 }
 
-fn assert_utc_timestamp_strings(value: &Value) -> usize {
+fn assert_and_count_utc_timestamps(value: &Value) -> usize {
     match value {
-        Value::Array(values) => values.iter().map(assert_utc_timestamp_strings).sum(),
+        Value::Array(values) => values.iter().map(assert_and_count_utc_timestamps).sum(),
         Value::Object(fields) => fields
             .iter()
             .map(|(key, value)| {
-                if matches!(key.as_str(), "created_at" | "updated_at" | "closed_at") {
+                if is_timestamp_key(key) {
                     match value {
                         Value::Null => 0,
                         Value::String(_) => {
@@ -387,7 +392,7 @@ fn assert_utc_timestamp_strings(value: &Value) -> usize {
                         _ => panic!("{key} must serialize as a string or null"),
                     }
                 } else {
-                    assert_utc_timestamp_strings(value)
+                    assert_and_count_utc_timestamps(value)
                 }
             })
             .sum(),
@@ -602,7 +607,7 @@ async fn mcp_timestamps_use_z_suffix() {
     let issue = reload_golden_issue(&workspace, created.id.as_str()).await;
     let wire = mcp_content_json(&issue);
 
-    assert_eq!(assert_utc_timestamp_strings(&wire), 7);
+    assert_eq!(assert_and_count_utc_timestamps(&wire), 7);
     assert_eq!(
         timestamp_as_utc(&wire["created_at"], "Issue.created_at"),
         issue.created_at
@@ -761,7 +766,12 @@ async fn test_notes_create_append_validate_and_survive_context_restart() {
     assert_eq!(closed.notes().len(), 3);
     assert_eq!(closed.notes()[2].content(), "Closed: Completed");
     assert_eq!(*closed.notes()[2].created_at(), closed.updated_at);
-    assert_eq!(*closed.notes()[2].created_at(), closed.closed_at.unwrap());
+    assert_eq!(
+        *closed.notes()[2].created_at(),
+        closed
+            .closed_at
+            .expect("closed Issue should have closed_at")
+    );
 
     let reopened = tools
         .reopen(
@@ -1395,8 +1405,13 @@ async fn test_all_dependency_types() {
             .dep(issue1.id.as_str(), issue2.id.as_str(), Some("blocks"), None)
             .await;
         assert!(
-            duplicate.is_err(),
-            "repeated dependency endpoints must be rejected"
+            matches!(
+                duplicate,
+                Err(Error::Storage(RivetsError::Storage(
+                    StorageError::DuplicateDependency { .. }
+                )))
+            ),
+            "repeated dependency endpoints must be rejected as duplicates"
         );
     }
 }
@@ -3795,7 +3810,7 @@ async fn resource_add_rejects_invalid_inputs_without_mutation() {
                 None,
             )
             .await,
-        Err(Error::IssueNotFound(issue_id)) if issue_id.as_str() == "test-missing"
+        Err(Error::IssueNotFound(issue_id)) if issue_id == "test-missing"
     ));
     assert_eq!(
         tools
@@ -3908,12 +3923,16 @@ async fn resource_add_accepts_path_targets_and_normalizes() {
         .expect("list should succeed");
     assert_eq!(
         *resources[1].target(),
-        ResourceTarget::path(WorkspacePath::new("\u{e9}/\u{6587}\u{4ef6}.md").unwrap()),
+        ResourceTarget::path(
+            WorkspacePath::new("\u{e9}/\u{6587}\u{4ef6}.md").expect("unicode path should be valid")
+        ),
         "unicode path must be preserved"
     );
     assert_eq!(
         *resources[2].target(),
-        ResourceTarget::path(WorkspacePath::new("docs/adr/0003.md").unwrap()),
+        ResourceTarget::path(
+            WorkspacePath::new("docs/adr/0003.md").expect("normalized path should be valid")
+        ),
         "persisted path target must be normalized"
     );
 }
@@ -3966,7 +3985,9 @@ async fn resource_update_remove_keep_identity_and_position() {
         .expect("target change should succeed");
     assert_eq!(
         *retargeted.resources()[0].target(),
-        ResourceTarget::path(WorkspacePath::new("crates/rivets/src/main.rs").unwrap())
+        ResourceTarget::path(
+            WorkspacePath::new("crates/rivets/src/main.rs").expect("retarget path should be valid")
+        )
     );
     assert!(
         retargeted.resources()[0].label().is_none(),
@@ -4128,7 +4149,9 @@ async fn resource_mutations_persist_across_context_restart() {
         assert!(persisted[0].label().is_none(), "label clear must persist");
         assert_eq!(
             *persisted[1].target(),
-            ResourceTarget::path(WorkspacePath::new("docs/adr/0003.md").unwrap()),
+            ResourceTarget::path(
+                WorkspacePath::new("docs/adr/0003.md").expect("persisted path should be valid")
+            ),
             "normalized path target must persist"
         );
     }

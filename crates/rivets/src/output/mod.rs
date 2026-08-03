@@ -584,6 +584,38 @@ mod tests {
     }
 
     #[test]
+    fn print_issues_to_json_matches_domain_serialization() {
+        let issue = test_issue();
+        let mut buffer = Vec::new();
+        print_issues_to(&mut buffer, std::slice::from_ref(&issue), OutputMode::Json)
+            .expect("JSON output should write to an in-memory buffer");
+
+        let printed: serde_json::Value =
+            serde_json::from_slice(&buffer).expect("printed JSON should parse");
+        let expected = serde_json::to_value(std::slice::from_ref(&issue))
+            .expect("Issue should serialize to a Value");
+        assert_eq!(printed, expected);
+    }
+
+    #[test]
+    fn print_issues_to_text_includes_id_and_title() {
+        let issue = test_issue();
+        let mut buffer = Vec::new();
+        print_issues_to(&mut buffer, std::slice::from_ref(&issue), OutputMode::Text)
+            .expect("text output should write to an in-memory buffer");
+
+        let text = String::from_utf8(buffer).expect("text output should be UTF-8");
+        assert!(
+            text.contains("test-abc"),
+            "text output should include the id: {text}"
+        );
+        assert!(
+            text.contains("Test Issue"),
+            "text output should include the title: {text}"
+        );
+    }
+
+    #[test]
     fn test_wrap_text() {
         let text = "This is a test of text wrapping functionality";
         let wrapped = wrap_text(text, 20);

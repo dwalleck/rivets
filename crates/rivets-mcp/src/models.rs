@@ -1,7 +1,10 @@
 //! MCP models.
 //!
-//! This module contains types for MCP tool inputs and outputs.
-//! They wrap or transform rivets domain types for MCP compatibility.
+//! This module contains tool input parameter types and the few response
+//! envelopes that have no domain counterpart (context, stats, blocked
+//! groupings). Domain records (Issue, Note, Resource, Dependency) serialize
+//! directly through their own serde derives per ADR-0004; nothing here
+//! mirrors them.
 
 use rivets::domain::{Issue, IssueKind};
 use schemars::JsonSchema;
