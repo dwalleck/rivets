@@ -90,12 +90,14 @@ The approved design is in `.rivets-habf/design.md`; the probe/oracle is `.rivets
 **Impact analysis:** New tests have no existing callers; they consume the public `Tools` methods and existing integration helpers.
 
 **Verification:**
-- [ ] `cargo nextest run -p rivets-mcp --test integration mcp_full_issue_json_golden cli_and_mcp_issue_json_shapes_match mcp_timestamps_use_z_suffix`
-- [ ] Golden stress fixture matches exact normalized JSON
-- [ ] `.rivets-habf/probe.py` agrees with the assembled binary without timestamp normalization
-- [ ] All design falsifiers and regression fences pass
-- [ ] Loop budget holds at fixture scale
-- [ ] `cargo fmt --check` for the test file
+- [x] `cargo nextest run -p rivets-mcp --test integration mcp_full_issue_json_golden cli_and_mcp_issue_json_shapes_match mcp_timestamps_use_z_suffix` — 3 passed
+- [x] Golden stress fixture matches exact normalized JSON
+- [x] `.rivets-habf/probe.py` agrees with the assembled binary without timestamp normalization
+- [x] All design falsifiers and regression fences pass
+- [x] Loop budget holds at fixture scale
+- [x] `cargo fmt -- --check` for the test file
+- [x] `cargo clippy -p rivets-mcp --all-targets --all-features -- -D warnings`
+- [x] `cargo nextest run -p rivets-mcp` — 192 tests passed
 
 ## Plan self-review
 

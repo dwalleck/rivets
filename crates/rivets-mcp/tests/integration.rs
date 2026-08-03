@@ -7,12 +7,16 @@
 //! - Error response verification
 //! - Real storage persistence
 
+use chrono::{DateTime, Utc};
 use rivets::domain::{Issue, IssueKind, IssueStatus, ResourceTarget, WorkspacePath};
 use rivets_mcp::context::Context;
 use rivets_mcp::error::Error;
 use rivets_mcp::models::{CreateParams, IssueKindInput, ListParams, ReadyParams, UpdateParams};
 use rivets_mcp::tools::Tools;
 use rstest::rstest;
+use serde_json::{Value, json};
+use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::RwLock;
@@ -328,6 +332,333 @@ storage:
 }
 
 use helpers::*;
+fn normalize_wire_timestamps(value: &mut Value) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                normalize_wire_timestamps(value);
+            }
+        }
+        Value::Object(fields) => {
+            for (key, value) in fields {
+                if matches!(key.as_str(), "created_at" | "updated_at" | "closed_at")
+                    && value.is_string()
+                {
+                    *value = Value::String("<timestamp>".to_string());
+                } else {
+                    normalize_wire_timestamps(value);
+                }
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+fn timestamp_as_utc(value: &Value, field: &str) -> DateTime<Utc> {
+    let raw = value
+        .as_str()
+        .unwrap_or_else(|| panic!("{field} must serialize as an RFC 3339 string"));
+    assert!(
+        raw.ends_with('Z'),
+        "{field} must use the canonical UTC Z suffix: {raw}"
+    );
+    DateTime::parse_from_rfc3339(raw)
+        .unwrap_or_else(|error| panic!("{field} must parse as RFC 3339: {error}"))
+        .with_timezone(&Utc)
+}
+
+fn assert_utc_timestamp_strings(value: &Value) -> usize {
+    match value {
+        Value::Array(values) => values.iter().map(assert_utc_timestamp_strings).sum(),
+        Value::Object(fields) => fields
+            .iter()
+            .map(|(key, value)| {
+                if matches!(key.as_str(), "created_at" | "updated_at" | "closed_at") {
+                    match value {
+                        Value::Null => 0,
+                        Value::String(_) => {
+                            timestamp_as_utc(value, key);
+                            1
+                        }
+                        _ => panic!("{key} must serialize as a string or null"),
+                    }
+                } else {
+                    assert_utc_timestamp_strings(value)
+                }
+            })
+            .sum(),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => 0,
+    }
+}
+
+async fn create_golden_issue(tools: &Tools) -> (Issue, Vec<(String, String)>) {
+    let mut issue = tools
+        .create(CreateParams {
+            title: "Golden wire Issue".to_string(),
+            description: Some("Every serializable field is populated.".to_string()),
+            priority: Some(1),
+            kind: kind_input(Some("feature")),
+            assignee: Some("golden-owner".to_string()),
+            labels: Some(vec!["golden".to_string(), "wire".to_string()]),
+            design: Some("Pin the canonical Issue wire shape.".to_string()),
+            acceptance: Some("- [x] Exact fields\n- [x] Stable nested arrays".to_string()),
+            initial_note: Some("Initial context".to_string()),
+            workspace_root: None,
+        })
+        .await
+        .expect("golden Issue should be created");
+
+    for note in ["Second finding", "Third finding", "Fourth finding"] {
+        issue = tools
+            .add_note(issue.id.as_str(), note.to_string(), None)
+            .await
+            .expect("golden Note should append");
+    }
+
+    for (url, path, role, label) in [
+        (
+            Some("https://example.com/implementation"),
+            None,
+            "implementation",
+            Some("Implementation source"),
+        ),
+        (
+            None,
+            Some("docs/space path.md"),
+            "documentation",
+            Some("Documentation path"),
+        ),
+        (
+            Some("https://example.com/evidence"),
+            None,
+            "evidence",
+            Some("Evidence source"),
+        ),
+        (None, Some("docs/successor.md"), "successor", None),
+        (
+            Some("https://example.com/reference"),
+            None,
+            "reference",
+            Some("Reference source"),
+        ),
+    ] {
+        issue = tools
+            .resource_add(
+                issue.id.as_str(),
+                url.map(str::to_string),
+                path.map(str::to_string),
+                role,
+                label.map(str::to_string),
+                None,
+            )
+            .await
+            .expect("golden resource should be added");
+    }
+
+    let mut dependency_ids = Vec::new();
+    for (title, dep_type) in [
+        ("Golden blocker", "blocks"),
+        ("Golden related", "related"),
+        ("Golden parent", "parent-child"),
+        ("Golden discovery", "discovered-from"),
+    ] {
+        let prerequisite = create_issue(tools, title).await;
+        dependency_ids.push((prerequisite.id.as_str().to_string(), dep_type.to_string()));
+        tools
+            .dep(
+                issue.id.as_str(),
+                prerequisite.id.as_str(),
+                Some(dep_type),
+                None,
+            )
+            .await
+            .expect("golden dependency should be added");
+    }
+
+    issue = tools
+        .show(issue.id.as_str(), None)
+        .await
+        .expect("golden Issue should reload with dependencies");
+    let closed = tools
+        .close(issue.id.as_str(), None, None)
+        .await
+        .expect("golden Issue should close without an extra Note");
+    (closed, dependency_ids)
+}
+async fn reload_golden_issue(workspace: &TempDir, issue_id: &str) -> Issue {
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+    tools
+        .show(issue_id, None)
+        .await
+        .expect("reloaded golden Issue should exist")
+}
+
+fn run_cli_golden_list(workspace: &TempDir) -> Value {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
+    let output = Command::new("cargo")
+        .args([
+            "run",
+            "--quiet",
+            "--manifest-path",
+            manifest.to_str().expect("workspace manifest path is UTF-8"),
+            "-p",
+            "rivets",
+            "--",
+            "list",
+            "--json",
+            "--assignee",
+            "golden-owner",
+            "--sort",
+            "oldest",
+        ])
+        .current_dir(workspace.path())
+        .output()
+        .expect("CLI list should launch");
+    assert!(
+        output.status.success(),
+        "CLI list should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("CLI list should emit JSON")
+}
+
+#[tokio::test]
+async fn mcp_full_issue_json_golden() {
+    let workspace = create_temp_workspace();
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+    let (created, dependencies) = create_golden_issue(&tools).await;
+    let issue = reload_golden_issue(&workspace, created.id.as_str()).await;
+
+    let mut actual = serde_json::to_value(&issue).expect("Issue should serialize");
+    normalize_wire_timestamps(&mut actual);
+
+    let mut expected_dependencies: Vec<Value> = dependencies
+        .into_iter()
+        .map(|(depends_on_id, dep_type)| {
+            json!({
+                "depends_on_id": depends_on_id,
+                "dep_type": dep_type,
+            })
+        })
+        .collect();
+    expected_dependencies.sort_by(|left, right| {
+        left["depends_on_id"]
+            .as_str()
+            .cmp(&right["depends_on_id"].as_str())
+    });
+
+    let expected = json!({
+        "id": issue.id,
+        "title": "Golden wire Issue",
+        "description": "Every serializable field is populated.",
+        "status": "closed",
+        "priority": 1,
+        "issue_kind": "feature",
+        "assignee": "golden-owner",
+        "labels": ["golden", "wire"],
+        "design": "Pin the canonical Issue wire shape.",
+        "acceptance_criteria": "- [x] Exact fields\n- [x] Stable nested arrays",
+        "notes": [
+            {"content": "Initial context", "created_at": "<timestamp>"},
+            {"content": "Second finding", "created_at": "<timestamp>"},
+            {"content": "Third finding", "created_at": "<timestamp>"},
+            {"content": "Fourth finding", "created_at": "<timestamp>"},
+        ],
+        "resources": [
+            {
+                "id": "r1",
+                "target": {"type": "web", "url": "https://example.com/implementation"},
+                "role": "implementation",
+                "label": "Implementation source",
+            },
+            {
+                "id": "r2",
+                "target": {"type": "path", "path": "docs/space path.md"},
+                "role": "documentation",
+                "label": "Documentation path",
+            },
+            {
+                "id": "r3",
+                "target": {"type": "web", "url": "https://example.com/evidence"},
+                "role": "evidence",
+                "label": "Evidence source",
+            },
+            {
+                "id": "r4",
+                "target": {"type": "path", "path": "docs/successor.md"},
+                "role": "successor",
+                "label": null,
+            },
+            {
+                "id": "r5",
+                "target": {"type": "web", "url": "https://example.com/reference"},
+                "role": "reference",
+                "label": "Reference source",
+            },
+        ],
+        "dependencies": expected_dependencies,
+        "created_at": "<timestamp>",
+        "updated_at": "<timestamp>",
+        "closed_at": "<timestamp>",
+    });
+
+    assert_eq!(actual, expected);
+    assert!(actual.get("next_resource_id").is_none());
+}
+
+#[tokio::test]
+async fn mcp_timestamps_use_z_suffix() {
+    let workspace = create_temp_workspace();
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+    let (created, _) = create_golden_issue(&tools).await;
+    let issue = reload_golden_issue(&workspace, created.id.as_str()).await;
+    let wire = serde_json::to_value(&issue).expect("Issue should serialize");
+
+    assert_eq!(assert_utc_timestamp_strings(&wire), 7);
+    assert_eq!(
+        timestamp_as_utc(&wire["created_at"], "Issue.created_at"),
+        issue.created_at
+    );
+    assert_eq!(
+        timestamp_as_utc(&wire["updated_at"], "Issue.updated_at"),
+        issue.updated_at
+    );
+    assert_eq!(
+        timestamp_as_utc(&wire["closed_at"], "Issue.closed_at"),
+        issue.closed_at.expect("golden Issue should be closed")
+    );
+    for (wire_note, note) in wire["notes"]
+        .as_array()
+        .expect("notes should be an array")
+        .iter()
+        .zip(issue.notes())
+    {
+        assert_eq!(
+            timestamp_as_utc(&wire_note["created_at"], "Note.created_at"),
+            *note.created_at()
+        );
+    }
+}
+
+#[tokio::test]
+async fn cli_and_mcp_issue_json_shapes_match() {
+    let workspace = create_temp_workspace();
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+    let (created, _) = create_golden_issue(&tools).await;
+    let mcp = reload_golden_issue(&workspace, created.id.as_str()).await;
+    let mcp_json = serde_json::to_value(mcp).expect("MCP Issue should serialize");
+    let cli_json = run_cli_golden_list(&workspace);
+    let cli_issues = cli_json
+        .as_array()
+        .expect("CLI list JSON should be an array");
+
+    assert_eq!(cli_issues.len(), 1);
+    assert_eq!(&cli_issues[0], &mcp_json);
+}
 
 // ============================================================================
 // Issue Lifecycle Tests
