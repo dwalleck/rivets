@@ -12,7 +12,7 @@ Rivets stores issues as JSONL files alongside your code—no external services, 
 ## Features
 
 - **Git-native** — Issues live in your repo, branch with your code, merge with your PRs
-- **Fast** — Built in Rust for instant responses, even with thousands of issues
+- **Fast** — Built in Rust with an in-memory query engine over Git-friendly persistence
 - **Dependency tracking** — Model blockers and relationships between issues
 - **Associated Resources** — Attach typed Web links and Workspace Paths with stable IDs and semantic roles
 - **AI-ready** — MCP server for seamless integration with AI coding assistants
@@ -28,48 +28,84 @@ cargo install rivets
 ## Quick Start
 
 ```bash
-# Initialize in your project
-rivets init
+# Initialize in your project (issue IDs use this prefix)
+rivets init --prefix demo
 
-# Create an issue
-rivets create --title "Add user authentication" --kind feature
+# Create an issue and capture its generated ID
+ID=$(rivets create --title "Add user authentication" --kind feature | sed 's/^Created issue: //')
 
 # See what's ready to work on
 rivets ready
 
-# Start working on an issue
-rivets update RIVETS-1 --status in_progress
+# Start working on the issue
+rivets update "$ID" --status in_progress
 
 # Mark it done
-rivets close RIVETS-1
+rivets close "$ID"
 ```
 
+## Command Overview
+
+| Command | Purpose |
+|---------|---------|
+| `init` | Initialize a repository (`.rivets/` and `config.yaml`); `--prefix <name>` sets the ID prefix |
+| `info` | Repository info: database path, prefix, and summary counts |
+| `create` | Create an issue (`--title`, `--kind`, `--priority`, `--assignee`, `--labels`, `--deps`, `--design`, `--acceptance`, `--notes`) |
+| `list` | List issues; filter with `--status`, `--priority`, `--kind`, `--assignee`, `--label`; `--sort` and `--limit` |
+| `show` | Show one or more issues with their dependencies and resources |
+| `update` | Update status, Kind, assignment, design, acceptance criteria, or append a Note; labels use the `label` command |
+| `close` | Close one or more issues, optionally `--reason` |
+| `reopen` | Reopen a closed issue, optionally `--reason` |
+| `delete` | Delete an issue permanently (`--force` skips the confirmation prompt) |
+| `ready` | Issues with no blockers, hybrid-sorted by priority |
+| `blocked` | Issues blocked by dependencies, along with their blockers |
+| `dep` | Dependencies: `add <dependent> <prerequisite> [--type blocks\|related\|parent-child\|discovered-from]`, `remove`, `list [--reverse]`, `tree [--depth N]` |
+| `label` | Labels: `add <label> [<issue-id>]`, `remove`, `list <issue-id>`, `list-all`; use `--ids` for batches |
+| `resource` | Associated Resources: `add`, `list`, `update`, `remove` (see below) |
+| `stale` | Issues not updated in N days (`--days`, default 30) |
+| `stats` | Project statistics (`--detailed` for a breakdown) |
+
+Global flags include `--json` for data-command output and `-y`/`--yes` to skip confirmation prompts.
+
 ## Usage
+
+The IDs below (`demo-a3f8`, `demo-b2c9`) are illustrative generated IDs.
+Replace them with IDs printed by `rivets create` in your repository.
 
 ### Managing Issues
 
 ```bash
 rivets create --title "Fix login bug" --kind bug --priority 1
-rivets list                          # List all open issues
-rivets list --status in_progress     # Filter by status
-rivets show RIVETS-1                 # View issue details
-rivets update RIVETS-1 --priority 2  # Update fields
-rivets close RIVETS-1 --reason "Fixed in commit abc123"
+rivets list                              # All issues, open and closed (priority-sorted, max 50)
+rivets list --status open                # Filter to open issues
+rivets list --status in_progress         # Filter by status
+rivets show demo-a3f8                    # View issue details
+rivets update demo-a3f8 --priority 2     # Update fields
+rivets close demo-a3f8 --reason "Fixed in commit abc123"
 ```
 
 ### Dependencies
 
 ```bash
-rivets dep RIVETS-2 --blocks RIVETS-1    # RIVETS-2 blocks RIVETS-1
-rivets blocked                            # Show all blocked issues
-rivets ready                              # Show issues with no blockers
+rivets dep add demo-a3f8 demo-b2c9 --type blocks  # demo-a3f8 depends on demo-b2c9, which blocks it
+rivets dep remove demo-a3f8 demo-b2c9             # Remove the dependency
+rivets dep list demo-a3f8 --reverse               # List dependents; omit --reverse for dependencies
+rivets blocked                                    # Issues blocked by dependencies, with their blockers
+rivets ready                                      # Issues with no blockers
 ```
+
+Dependency type defaults to `blocks` (`related`, `parent-child`, and
+`discovered-from` are also available). `ready` and `blocked` are derived
+from the dependency graph; adding or removing a dependency does not change
+an issue's stored status.
 
 ### Labels
 
 ```bash
-rivets label add RIVETS-1 urgent backend
-rivets label remove RIVETS-1 urgent
+rivets label add urgent demo-a3f8         # Syntax: label add <label> <issue-id>
+rivets label remove urgent demo-a3f8
+rivets label list demo-a3f8               # Labels on one issue
+rivets label list-all                     # Every label in the repository
 rivets list --label backend
 ```
 
@@ -83,14 +119,14 @@ available through the MCP server as `resource_add`, `resource_list`,
 `resource_update`, and `resource_remove`.
 
 ```bash
-rivets resource add RIVETS-1 \
+rivets resource add demo-a3f8 \
   --url https://example.com/pull/123 \
   --role implementation \
   --label "Implementation PR"
-rivets resource add RIVETS-1 --path docs/design/feature.md --role documentation
-rivets resource list RIVETS-1
-rivets resource update RIVETS-1 --resource r1 --role evidence --no-label
-rivets resource remove RIVETS-1 --resource r2
+rivets resource add demo-a3f8 --path docs/design/feature.md --role documentation
+rivets resource list demo-a3f8
+rivets resource update demo-a3f8 --resource r1 --role evidence --no-label
+rivets resource remove demo-a3f8 --resource r2
 ```
 
 Roles are `implementation`, `documentation`, `evidence`, `successor`, and
@@ -102,10 +138,11 @@ are fine.
 
 ### JSON Output
 
-All commands support `--json` for scripting:
+Data commands accept `--json` for scripting (init always prints text):
 
 ```bash
 rivets list --json | jq '.[] | select(.priority == 1)'
+ID=$(rivets create --title "Fix login bug" --json | jq -r '.id')
 ```
 
 ## Project Structure
@@ -122,7 +159,7 @@ This workspace contains three crates:
 
 ### Prerequisites
 
-- Rust 1.70+
+- Rust 1.94+ (edition 2024)
 
 ### Building and Testing
 
@@ -164,8 +201,10 @@ Contributions are welcome! Please:
 
 For maintainers, see [Publishing](#publishing) for release procedures.
 
+### Publishing
+
 <details>
-<summary><h3>Publishing</h3></summary>
+<summary>Release procedure</summary>
 
 Publish crates in dependency order:
 

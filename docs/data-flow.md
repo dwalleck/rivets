@@ -12,6 +12,7 @@ sequenceDiagram
     participant App
     participant Command
     participant Storage Trait
+    participant Factory
     participant InMemoryStorage
     participant Graph
     participant JSONL
@@ -19,115 +20,157 @@ sequenceDiagram
     User->>Shell: rivets create --title "Fix bug"
     Shell->>main.rs: Execute binary
     main.rs->>main.rs: #[tokio::main(flavor = "current_thread")]
-    main.rs->>CLI Parser: Cli::parse()
-    CLI Parser->>CLI Parser: Validate arguments
+    main.rs->>CLI Parser: Cli::parse_args()
     CLI Parser-->>main.rs: Commands::Create(args)
 
-    main.rs->>App: Config::load().await
-    App->>App: Merge config sources
-    App-->>main.rs: Config
-
-    main.rs->>App: App::new(config).await
-    App->>App: create_storage(&config.storage).await
-    App->>InMemoryStorage: load_from_jsonl(path).await
-    InMemoryStorage->>JSONL: Open file, stream read
-    loop For each line
-        JSONL-->>InMemoryStorage: JSON string
-        InMemoryStorage->>InMemoryStorage: Parse Issue
-        InMemoryStorage->>Graph: Add node
-    end
-    InMemoryStorage-->>App: (Storage, warnings)
-    App-->>main.rs: App
+    main.rs->>App: App::from_directory(current_dir)
+    App->>App: find_rivets_root (walk up, max 256 levels)
+    App->>App: RivetsConfig::load(.rivets/config.yaml)
+    App->>Factory: create_storage(config.storage.to_backend(root), prefix)
+    Factory->>InMemoryStorage: load_from_jsonl(path).await
+    InMemoryStorage->>JSONL: Open file, read lines
+    Note over InMemoryStorage,JSONL: Pass 1: parse compatibility records<br/>Pass 2: import Issues + graph nodes<br/>Pass 3: rebuild dependency edges
+    InMemoryStorage-->>Factory: (Storage, warnings)
+    Factory->>Factory: Log warnings + wrap in JsonlBackedStorage
+    Factory-->>App: Box&lt;dyn IssueStorage&gt;
 
     main.rs->>Command: command.execute(&mut app).await
-    Command->>Command: Gather missing args (interactive)
+    Command->>Command: Prompt for title if missing
     Command->>Command: Build NewIssue
     Command->>Storage Trait: storage.create(new_issue).await
     Storage Trait->>InMemoryStorage: (via trait dispatch)
 
-    InMemoryStorage->>InMemoryStorage: Lock mutex
-    InMemoryStorage->>InMemoryStorage: generate_hash_id()
-    InMemoryStorage->>Graph: Add node
+    InMemoryStorage->>InMemoryStorage: Validate, generate ID (prefix + adaptive hash)
+    InMemoryStorage->>Graph: Add node, check cycles
     InMemoryStorage->>Graph: Add edges for dependencies
     InMemoryStorage->>InMemoryStorage: Insert to HashMap
     InMemoryStorage-->>Storage Trait: Issue
 
     Storage Trait-->>Command: Issue
 
-    Command->>Storage Trait: storage.save().await
+    Command->>Storage Trait: app.save().await
     Storage Trait->>InMemoryStorage: (via trait dispatch)
     InMemoryStorage->>JSONL: Atomic write (temp file)
-    loop For each issue
+    loop For each issue (sorted by id)
         InMemoryStorage->>JSONL: Write JSON + \n
     end
     InMemoryStorage->>JSONL: Rename temp → issues.jsonl
     InMemoryStorage-->>Storage Trait: Ok(())
 
     Storage Trait-->>Command: Ok(())
-    Command-->>User: Created: rivets-a3f8
+    Command-->>User: Created issue: rivets-a3f8
 ```
 
-## Initialization Flow (rivets init)
+## Configuration Loading (single source)
+
+Rivets has exactly **one** configuration source: `.rivets/config.yaml`, found by
+walking up the directory tree from the working directory (up to 256 levels).
+There is no environment-variable merging, no user-level config under
+`~/.config/rivets/`, and no config-related CLI flags.
 
 ```mermaid
 flowchart TD
-    Start[User: rivets init --prefix myproj] --> CheckExists{.rivets/<br/>exists?}
+    Start[App::from_directory cwd] --> FindRoot{Walk up tree<br/>find .rivets/?}
+    FindRoot -->|Not found| Error[Error: Not initialized<br/>suggest rivets init]
+    FindRoot -->|Found| Load[Load .rivets/config.yaml]
+    Load --> Parse{Parse YAML}
+    Parse -->|Invalid| ConfigError[Error: Invalid configuration]
+    Parse -->|OK| Validate{Validate}
+    Validate -->|Bad prefix| ConfigError
+    Validate -->|backend = postgresql| Unsupported[Error: Unsupported backend<br/>PostgreSQL is a placeholder]
+    Validate -->|Unknown backend| ConfigError
+    Validate -->|OK| Resolve[Resolve data_file<br/>relative to root, no parent traversal]
+    Resolve --> Return[Return Config]
+```
+
+Example `.rivets/config.yaml` (as written by `rivets init`):
+
+```yaml
+issue-prefix: rivets
+storage:
+  backend: jsonl
+  data_file: .rivets/issues.jsonl
+```
+
+- `issue-prefix` is validated (2–20 alphanumeric characters).
+- `storage.backend` accepts `jsonl`; `postgresql` is a recognized but
+  unsupported placeholder that fails with `Unsupported backend`.
+- `storage.data_file` must be a relative path with no parent traversal; it is
+  resolved against the repository root (the directory containing `.rivets/`).
+
+## Initialization Flow (rivets init)
+
+`rivets init --prefix myproj` creates the repository skeleton. If no prefix is
+given (and `--quiet` is not set), the user is prompted; an empty answer uses the
+default prefix `proj`.
+
+```mermaid
+flowchart TD
+    Start[User: rivets init --prefix myproj] --> Prefix{--prefix given?}
+    Prefix -->|No| Prompt[Prompt: Issue ID prefix<br/>empty = default 'proj']
+    Prompt --> CheckExists
+    Prefix -->|Yes| CheckExists{.rivets/<br/>exists?}
     CheckExists -->|Yes| Error[Error: Already initialized]
-    CheckExists -->|No| CreateDir[Create .rivets/ directory]
+    CheckExists -->|No| CreateDir[Create .rivets/ directory<br/>atomically]
 
-    CreateDir --> CreateConfig[Create config.yaml<br/>backend: memory<br/>data_file: .rivets/issues.jsonl]
+    CreateDir --> CreateConfig[Write config.yaml<br/>issue-prefix: myproj<br/>backend: jsonl<br/>data_file: .rivets/issues.jsonl]
     CreateConfig --> CreateJSONL[Create empty issues.jsonl]
-    CreateJSONL --> CreateGitignore[Create .rivets/.gitignore<br/>Ignore metadata files]
+    CreateJSONL --> CreateGitignore[Create .rivets/.gitignore<br/>comment noting issues.jsonl<br/>should be tracked]
 
-    CreateGitignore --> CheckGit{Git repo<br/>detected?}
-    CheckGit -->|Yes| UpdateRootIgnore[Add .rivets to root .gitignore]
-    CheckGit -->|No| Skip
+    CreateGitignore --> Print[Print: Initialized rivets in ...<br/>Config: ...<br/>Issues: ...<br/>Issue prefix: ...]
 
-    UpdateRootIgnore --> Success[✓ Initialized rivets]
-    Skip --> Success
-
-    Success --> Suggest[Suggest: git add .rivets/config.yaml<br/>git commit -m 'Initialize rivets']
-
-    style Success fill:#90EE90
+    style Print fill:#90EE90
     style Error fill:#FFB6C1
 ```
+
+Notes on what `init` does **not** do:
+
+- It does not modify the repository's root `.gitignore` and does not detect git.
+- It does not create any other config source; the only config file is
+  `.rivets/config.yaml`.
 
 ## Create Issue Flow
 
 ```mermaid
 flowchart TD
     Start[rivets create<br/>--title 'Fix bug'<br/>--priority 1] --> ParseArgs[Parse CLI args]
-    ParseArgs --> GatherMissing{All required<br/>fields present?}
-
-    GatherMissing -->|No| Interactive[Interactive prompts<br/>for missing fields]
+    ParseArgs --> GatherMissing{Title<br/>provided?}
+    GatherMissing -->|No| Interactive[Prompt: Title]
     Interactive --> BuildIssue
     GatherMissing -->|Yes| BuildIssue[Build NewIssue struct]
 
-    BuildIssue --> Generate[Generate hash-based ID<br/>SHA256 + Base36]
+    BuildIssue --> Validate{Validate fields<br/>+ dep targets exist?}
+    Validate -->|No| ValidationError[Error: validation failure]
+    Validate -->|Yes| Generate[Generate ID: prefix + adaptive hash<br/>SHA256(title|description|creator|timestamp|nonce)<br/>→ base36, length 4-6 by db size]
+
     Generate --> CheckCollision{ID collision?}
-    CheckCollision -->|Yes, try nonce| Generate
-    CheckCollision -->|No| AddToGraph
+    CheckCollision -->|Yes, retry with nonce| Generate
+    CheckCollision -->|No| CheckCycle{Would create<br/>cycle?}
+    CheckCycle -->|Yes| CycleError[Error: Circular dependency<br/>rollback temp node]
+    CheckCycle -->|No| Insert[Insert Issue<br/>status: open<br/>add node + edges to graph]
 
-    AddToGraph[Add to HashMap<br/>Add node to DiGraph] --> AddDeps{Has<br/>dependencies?}
-
-    AddDeps -->|Yes| CheckCycle{Would create<br/>cycle?}
-    CheckCycle -->|Yes| CycleError[Error: Circular dependency]
-    CheckCycle -->|No| AddEdges[Add edges to graph]
-    AddEdges --> Save
-    AddDeps -->|No| Save
-
-    Save[Auto-save to JSONL] --> AtomicWrite[Write to temp file<br/>Rename atomically]
-    AtomicWrite --> Display[Display: Created rivets-a3f8]
+    Insert --> Save[Auto-save to JSONL]
+    Save --> AtomicWrite[Write temp file<br/>Rename atomically]
+    AtomicWrite --> Display[Display: Created issue: rivets-a3f8]
 
     style Display fill:#90EE90
     style CycleError fill:#FFB6C1
+    style ValidationError fill:#FFB6C1
 ```
+
+ID generation is **not** purely content-addressed: the SHA256 input includes the
+current timestamp and a nonce, so the hash does not identify the content. The
+hash length adapts to database size (4 chars up to 500 issues, 5 up to 1,500,
+6 beyond), with nonce retries and a length bump on collision.
+
+Dependencies passed to `create --deps` use the form `issue-id` (defaults to
+`blocks`) or `type:issue-id` (e.g. `blocks:rivets-x9k2`).
 
 ## List/Query Flow
 
 ```mermaid
 flowchart TD
-    Start[rivets list<br/>--status open<br/>--priority 0-2] --> ParseFilter[Parse filter args]
+    Start[rivets list<br/>--status open<br/>--priority 2] --> ParseFilter[Parse filter args]
     ParseFilter --> BuildFilter[Build IssueFilter struct]
 
     BuildFilter --> IterateIssues[Iterate all issues<br/>in HashMap]
@@ -137,7 +180,7 @@ flowchart TD
     CheckStatus -->|No| Skip[Skip issue]
     CheckStatus -->|Yes| CheckPriority
 
-    CheckPriority{priority<br/>in 0-2?} -->|No| Skip
+    CheckPriority{priority<br/>== 2?} -->|No| Skip
     CheckPriority -->|Yes| Include[Include in results]
 
     ApplyFilters -->|All filters pass| Include
@@ -146,28 +189,34 @@ flowchart TD
     MoreIssues -->|Yes| IterateIssues
     MoreIssues -->|No| Sort
 
-    Sort[Sort by created_at desc] --> Limit{Limit<br/>specified?}
-    Limit -->|Yes| TakeN[Take first N]
-    Limit -->|No| All[Return all]
+    Sort[Sort: priority asc,<br/>then created_at desc<br/>--sort newest/oldest/updated] --> Limit{Limit<br/>specified?}
+    Limit -->|Default 50| TakeN[Truncate to first N]
+    Limit -->|--limit N| TakeN
 
     TakeN --> Display[Display results<br/>as table or JSON]
-    All --> Display
 
     style Display fill:#90EE90
 ```
 
+`--priority` takes a single value 0–4 (not a range); `--status` accepts the
+status vocabulary `open`, `in_progress`, `blocked`, `closed`; `--kind` accepts
+`bug`, `feature`, `task`, `epic`, `chore`.
+
 ## Ready Work Algorithm Flow
+
+`ready` is a **graph-derived query**: it computes blocked issues from the
+dependency graph and never consults or writes the `blocked` status value.
 
 ```mermaid
 flowchart TD
     Start[rivets ready<br/>--assignee alice] --> InitBlocked[blocked = empty set]
 
     InitBlocked --> Phase1[Phase 1: Direct Blocks]
-    Phase1 --> Iterate1{For each issue}
+    Phase1 --> Iterate1{For each non-closed issue}
 
-    Iterate1 --> CheckDeps{Has dependencies?}
-    CheckDeps -->|Yes| FilterBlocking{Filter type == 'blocks'?}
-    FilterBlocking -->|Yes| CheckBlockerStatus{Blocker is<br/>open/in_progress?}
+    Iterate1 --> CheckDeps{Has outgoing<br/>dependency edges?}
+    CheckDeps -->|Yes| FilterBlocking{Edge type == 'blocks'?}
+    FilterBlocking -->|Yes| CheckBlockerStatus{Blocker is<br/>not closed?}
     CheckBlockerStatus -->|Yes| AddBlocked[blocked.insert issue]
     CheckBlockerStatus -->|No| Iterate1
     FilterBlocking -->|No| Iterate1
@@ -194,34 +243,77 @@ flowchart TD
     FilterAssignee -->|No| Skip[Skip]
     ApplyUserFilter -->|No| Include
 
-    Include --> SortResults[Sort by policy<br/>hybrid/priority/oldest]
-    SortResults --> Display[Display ready work]
+    Include --> SortResults[Sort by policy<br/>--sort hybrid/priority/oldest]
+    SortResults --> Limit[Truncate to --limit<br/>default 10]
+    Limit --> Display[Display: Ready to work (N issue(s))]
 
     style Display fill:#90EE90
 ```
 
-## Dependency Add Flow with Cycle Detection
+Edge direction reminder: edges point from **dependent → dependency**. For
+`blocks`, the target of the edge is the blocker. Only `blocks` edges block
+directly; `parent-child` edges propagate a blocked parent's result to its children.
+
+## Blocked Query Flow
+
+`rivets blocked` reports issues that are blocked **by the graph**, pairing each
+blocked issue with its direct blockers:
 
 ```mermaid
 flowchart TD
-    Start[rivets dep add<br/>rivets-a3f8 blocks rivets-x9k2] --> Parse[Parse IDs and type]
+    Start[rivets blocked] --> Iterate{For each<br/>non-closed issue}
+
+    Iterate --> Outgoing[Inspect outgoing edges]
+    Outgoing --> Blocks{Edge type<br/>== 'blocks'?}
+    Blocks -->|Yes| BlockerUnclosed{Blocker<br/>not closed?}
+    BlockerUnclosed -->|Yes| AddPair[Add (issue, blocker) pair]
+    AddPair --> Iterate
+    BlockerUnclosed -->|No| Iterate
+    Blocks -->|No| Iterate
+
+    Iterate -->|Done| Print[Print: Found N blocked issue(s)<br/>each with Blocked by: list]
+
+    style Print fill:#90EE90
+```
+
+This is a read-only query; it does not change any issue's status field.
+
+## Dependency Add Flow with Cycle Detection
+
+The dependency CLI is `dep` with subcommands `add`, `remove`, `list`, and
+`tree`. `add` takes the **dependent first, prerequisite second**, with the type
+as a flag:
+
+```bash
+rivets dep add rivets-a3f8 rivets-x9k2 --type blocks
+#              dependent   prerequisite     default: blocks
+```
+
+```mermaid
+flowchart TD
+    Start[rivets dep add<br/>rivets-a3f8 rivets-x9k2<br/>--type blocks] --> Parse[Parse IDs and type]
     Parse --> ValidateIDs{Both IDs<br/>exist?}
     ValidateIDs -->|No| ErrorNotFound[Error: Issue not found]
-    ValidateIDs -->|Yes| CheckCycle
+    ValidateIDs -->|Yes| CheckDuplicate{Edge<br/>already exists?}
+    CheckDuplicate -->|Yes| ErrorDuplicate[Error: Dependency already exists<br/>a3f8 -&gt; x9k2]
+    CheckDuplicate -->|No| CheckCycle
 
     CheckCycle[has_path_connecting<br/>graph, to=x9k2, from=a3f8] --> PathExists{Path<br/>exists?}
 
-    PathExists -->|Yes| ErrorCycle[Error: Circular dependency<br/>Would create: x9k2 → ... → a3f8 → x9k2]
-    PathExists -->|No| AddEdge[Add edge to DiGraph<br/>a3f8 --blocks--> x9k2]
+    PathExists -->|Yes| ErrorCycle[Error: Circular dependency detected]
+    PathExists -->|No| AddEdge[Add edge a3f8 --blocks--&gt; x9k2<br/>+ push to issue.dependencies]
 
-    AddEdge --> UpdateIssue[Update issue.dependencies<br/>in HashMap]
-    UpdateIssue --> Save[Auto-save to JSONL]
-    Save --> Success[✓ Dependency added]
+    AddEdge --> Save[Auto-save to JSONL]
+    Save --> Success[Print: Added dependency:<br/>a3f8 --[blocks]--&gt; x9k2]
 
     style Success fill:#90EE90
     style ErrorCycle fill:#FFB6C1
     style ErrorNotFound fill:#FFB6C1
+    style ErrorDuplicate fill:#FFB6C1
 ```
+
+Adding or removing a dependency **never mutates issue status**. Blocked-ness is
+derived from the graph at query time (`ready`, `blocked`, `stats`).
 
 ### Example Cycle Detection
 
@@ -234,27 +326,35 @@ graph LR
     style C fill:#FFB6C1
 ```
 
-**Detection**: When trying to add `C blocks A`, check `has_path_connecting(graph, A, C)`.
-Result: **Yes** (path exists: A → B → C), so reject the edge.
+**Detection**: Trying `rivets dep add rivets-p4m1 rivets-a3f8 --type blocks`
+(p4m1 depends on a3f8). The check is `has_path_connecting(graph, a3f8, p4m1)`.
+Result: **Yes** (path exists: a3f8 → x9k2 → p4m1), so the edge is rejected.
+
+Other `dep` subcommands:
+
+```bash
+rivets dep remove rivets-a3f8 rivets-x9k2   # remove the edge
+rivets dep list rivets-a3f8                 # dependencies of a3f8
+rivets dep list rivets-a3f8 --reverse       # issues that depend on a3f8
+rivets dep tree rivets-a3f8 --depth 3       # transitive tree (0 = unlimited)
+```
 
 ## Delete with Safety Checks Flow
 
 ```mermaid
 flowchart TD
-    Start[rivets delete rivets-a3f8] --> GetDependents[Query: get_dependents a3f8]
+    Start[rivets delete rivets-a3f8] --> Confirm{Confirmed?<br/>--force or -y skips}
+    Confirm -->|No| Abort[Abort]
+    Confirm -->|Yes| GetDependents[Query incoming edges<br/>get_dependents a3f8]
 
     GetDependents --> HasDependents{Dependents<br/>exist?}
-    HasDependents -->|Yes| ErrorDependent[Error: Cannot delete rivets-a3f8<br/>2 issues depend on it:<br/>- rivets-x9k2<br/>- rivets-p4m1]
+    HasDependents -->|Yes| ErrorDependent[Error: Cannot delete rivets-a3f8:<br/>N other issue(s) depend on it.<br/>Dependents: ...]
 
-    HasDependents -->|No| GetDependencies[Query: get_dependencies a3f8]
-    GetDependencies --> RemoveDeps[Remove outgoing edges<br/>from graph]
-
-    RemoveDeps --> RemoveNode[Remove node from graph]
+    HasDependents -->|No| RemoveNode[Remove node from graph]
     RemoveNode --> RemoveHashMap[Remove from issues HashMap]
-    RemoveHashMap --> RemoveNodeMap[Remove from node_map]
 
-    RemoveNodeMap --> Save[Auto-save to JSONL]
-    Save --> Success[✓ Deleted rivets-a3f8]
+    RemoveHashMap --> Save[Auto-save to JSONL]
+    Save --> Success[Print: Deleted issue: rivets-a3f8]
 
     style Success fill:#90EE90
     style ErrorDependent fill:#FFB6C1
@@ -262,23 +362,40 @@ flowchart TD
 
 ## JSONL Load with Error Recovery
 
+Loading is a three-stage process:
+
+1. **Parse compatibility records** — resiliently parse each line as a
+   persistence DTO (`IssueRecord`), collecting `MalformedJson`/`SkippedLine`
+   warnings without aborting.
+2. **Import Issues** — convert records to domain Issues at the compatibility
+   boundary (reporting `MigrationConflict` for legacy fields, and skipping
+   issues with `InvalidIssueData`/`InvalidResourceData` warnings), then add
+   graph nodes, populate the issues map, and register all IDs with the ID
+   generator.
+3. **Rebuild relationships** — add dependency edges with cycle detection:
+   missing targets produce `OrphanedDependency` warnings (edge skipped),
+   cycles produce `CircularDependency` warnings (edge skipped).
+
 ```mermaid
 flowchart TD
     Start[Load .rivets/issues.jsonl] --> OpenFile[Open file for reading]
-    OpenFile --> Pass1[Pass 1: Import Issues]
+    OpenFile --> Pass1[Pass 1: Parse compatibility records]
 
     Pass1 --> ReadLine1{Read line}
-    ReadLine1 -->|EOF| Pass2
+    ReadLine1 -->|EOF| Convert[Convert records to Issues<br/>at compatibility boundary]
     ReadLine1 -->|Line| ParseJSON{Valid JSON?}
 
-    ParseJSON -->|Yes| DeserializeIssue[Deserialize to Issue]
-    DeserializeIssue --> AddToStorage[Add to HashMap<br/>Add node to graph]
-    AddToStorage --> ReadLine1
+    ParseJSON -->|Yes| KeepRecord[Keep IssueRecord]
+    KeepRecord --> ReadLine1
 
     ParseJSON -->|No| LogWarning1[warnings.push MalformedJson<br/>log::warn Skipping line N]
     LogWarning1 --> ReadLine1
 
-    Pass2[Pass 2: Add Dependency Edges] --> IterateIssues{For each issue}
+    Convert --> ImportIssues[Pass 2: Import Issues<br/>add node + node_map entry + issue<br/>register ID with generator]
+
+    ImportIssues --> Pass3[Pass 3: Rebuild Dependency Edges]
+    Pass3 --> IterateIssues{For each issue}
+
     IterateIssues --> IterateDeps{For each dependency}
 
     IterateDeps --> CheckTarget{Target<br/>exists?}
@@ -293,126 +410,56 @@ flowchart TD
     AddEdge --> IterateDeps
 
     IterateDeps -->|Done| IterateIssues
-    IterateIssues -->|Done| CheckWarnings{Warnings<br/>present?}
-
-    CheckWarnings -->|Yes| DisplayWarnings[eprintln: Loaded with N warnings<br/>M issues imported]
-    CheckWarnings -->|No| Success
-
-    DisplayWarnings --> Success[Return storage + warnings]
-
-    style Success fill:#90EE90
-```
-
-## Configuration Loading and Merging
-
-```mermaid
-flowchart TD
-    Start[Config::load] --> LoadDefaults[Layer 1: Defaults<br/>backend = memory<br/>prefix = 'proj']
-
-    LoadDefaults --> FindConfig{Walk up tree<br/>find .rivets/<br/>config.yaml?}
-    FindConfig -->|Not found| CheckHome
-    FindConfig -->|Found| LoadProjectYAML[Layer 2: Project config<br/>Parse YAML]
-
-    LoadProjectYAML --> CheckHome{~/.config/<br/>rivets/config.yaml<br/>exists?}
-    CheckHome -->|No| LoadEnv
-    CheckHome -->|Yes| LoadHomeYAML[Layer 3: User config<br/>Parse YAML]
-
-    LoadHomeYAML --> LoadEnv[Layer 4: Environment<br/>RIVETS_PREFIX<br/>RIVETS_JSON]
-
-    LoadEnv --> LoadCLI[Layer 5: CLI flags<br/>--prefix<br/>--json]
-
-    LoadCLI --> Merge[Merge all layers<br/>Higher layers override lower]
-
-    Merge --> Validate{Valid config?}
-    Validate -->|No| ConfigError[Error: Invalid configuration<br/>Show helpful message]
-    Validate -->|Yes| Return[Return Config]
+    IterateIssues -->|Done| Return[Return storage + warnings]
 
     style Return fill:#90EE90
-    style ConfigError fill:#FFB6C1
 ```
 
-### Configuration Precedence
-
-```
-CLI flags          (highest priority)
-    ↓
-Environment vars
-    ↓
-~/.config/rivets/config.yaml
-    ↓
-.rivets/config.yaml
-    ↓
-Built-in defaults  (lowest priority)
-```
-
-## Multi-Command Session (Typical Workflow)
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant rivets
-
-    Note over User,rivets: Session 1: Initialize
-    User->>rivets: rivets init --prefix myproj
-    rivets-->>User: ✓ Initialized
-
-    Note over User,rivets: Session 2: Create issues
-    User->>rivets: rivets create --title "Feature A"
-    rivets-->>User: Created: myproj-a3f8
-
-    User->>rivets: rivets create --title "Feature B"
-    rivets-->>User: Created: myproj-x9k2
-
-    User->>rivets: rivets create --title "Bug fix"
-    rivets-->>User: Created: myproj-p4m1
-
-    Note over User,rivets: Session 3: Add dependency
-    User->>rivets: rivets dep add myproj-a3f8 blocks myproj-p4m1
-    rivets-->>User: ✓ Dependency added
-
-    Note over User,rivets: Session 4: Check ready work
-    User->>rivets: rivets ready
-    rivets-->>User: myproj-a3f8 Feature A (P2)<br/>myproj-x9k2 Feature B (P2)
-    Note over User,rivets: p4m1 not shown (blocked)
-
-    Note over User,rivets: Session 5: Update and complete
-    User->>rivets: rivets update myproj-a3f8 --status in_progress
-    rivets-->>User: ✓ Updated
-
-    User->>rivets: rivets close myproj-a3f8
-    rivets-->>User: ✓ Closed
-
-    Note over User,rivets: Session 6: Check ready again
-    User->>rivets: rivets ready
-    rivets-->>User: myproj-p4m1 Bug fix (P2)<br/>myproj-x9k2 Feature B (P2)
-    Note over User,rivets: p4m1 now ready (blocker closed)
-```
+Saving is atomic: issues are written (sorted by ID for deterministic,
+reviewable diffs) to a `.tmp` file, flushed, then renamed over `issues.jsonl`.
 
 ## State Transitions
+
+Status changes are **explicit only** — via `update --status`, `close`, or
+`reopen`. Dependency operations never change status, and nothing in the system
+auto-transitions an issue to `blocked`.
+
+The transition rules are owned by the domain (`IssueStatus::validate_transition`,
+ADR-0005) and enforced at the single storage update site. Only two transitions
+are rejected:
+
+- `closed → closed` (an issue cannot be closed twice)
+- anything non-closed → `open` (only a closed issue can be reopened)
+
+Every other transition is allowed, including setting the status explicitly.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Open: create
     Open --> InProgress: update --status in_progress
-    Open --> Blocked: dependency added (blocking)
-    InProgress --> Blocked: dependency added (blocking)
-    Blocked --> Open: blocker completed
-    Blocked --> InProgress: blocker completed
-    InProgress --> Closed: close
+    Open --> Blocked: update --status blocked (explicit)
+    InProgress --> Blocked: update --status blocked (explicit)
     Open --> Closed: close
-    Closed --> [*]: delete
+    InProgress --> Closed: close
+    Blocked --> Closed: close
+    Closed --> Open: reopen
 
     note right of Blocked
-        Issue enters blocked state when:
-        - Direct 'blocks' dependency added to open/in_progress issue
-        - Parent epic is blocked (transitive)
+        'blocked' is a legacy status value that can
+        still be set explicitly, but nothing sets it
+        automatically. Blocked-ness for queries is
+        derived from the dependency graph instead.
     end note
 
     note right of Closed
-        Issue can be closed from any state
-        Blocked issues can be closed if work abandoned
+        Any status can be closed via 'close';
+        only Closed can be reopened.
     end note
 ```
+
+The `ready` and `blocked` queries are graph-derived. In `stats`, the `ready` and
+`blocked_by_dependencies` fields use those queries, while `by_status.blocked`
+counts the separately stored legacy status value.
 
 ## Data Persistence Points
 
@@ -443,18 +490,34 @@ flowchart LR
     style Graph fill:#ADD8E6
 ```
 
-**Auto-save triggers**:
+**Auto-save triggers** (`app.save()` → atomic JSONL write after the mutation):
 - After `create`
 - After `update`
 - After `close`
+- After `reopen`
 - After `delete`
-- After `add_dependency`
-- After `remove_dependency`
+- After `dep add`
+- After `dep remove`
+- After `label add` / `label remove`
+- After `resource add` / `resource update` / `resource remove`
 
 **NOT triggered** by read-only operations:
-- `list`
-- `show`
-- `ready`
-- `blocked`
+- `list`, `show`, `ready`, `blocked`, `stats`, `stale`, `info`
+- `dep list`, `dep tree`
+- `label list`, `label list-all`
+- `resource list`
 
 This ensures durability while minimizing I/O overhead.
+
+## Storage as a Library: import/export
+
+`import_issues` and `export_all` are methods on the `IssueStorage` trait.
+`export_all` is used by the JSONL saver. `import_issues` is a lower-level public
+storage API; the production JSONL loader inserts Issues and graph nodes directly
+rather than calling it. MCP reaches `export_all` indirectly when its JSONL-backed
+storage saves. There are no dedicated MCP import/export tools.
+
+These are **library storage operations, not CLI commands** — there is no
+`rivets import` or `rivets export` subcommand. Bulk data movement uses the
+library API or copies/version-controls the canonical `.rivets/issues.jsonl`
+store.

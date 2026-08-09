@@ -1,5 +1,7 @@
 # Storage Layer Architecture
 
+Rivets persists issues to a JSONL file (`.rivets/issues.jsonl` by default) and serves all reads and mutations from an in-memory engine that holds the full dataset plus a dependency graph. The JSONL file is the single persisted source of truth; `jsonl` is the default (and only implemented) persisted backend. PostgreSQL exists only as a config/enum placeholder that returns "unsupported" — there is no `PostgresStorage` implementation.
+
 ## Storage Trait Hierarchy
 
 ```mermaid
@@ -10,46 +12,58 @@ classDiagram
         +get(IssueId) Future~Option~Issue~~
         +update(IssueId, IssueUpdate) Future~Issue~
         +delete(IssueId) Future~void~
-        +add_dependency(from, to, type) Future~void~
-        +remove_dependency(from, to) Future~void~
+        +add_dependency(IssueId, IssueId, DependencyType) Future~void~
+        +remove_dependency(IssueId, IssueId) Future~void~
         +get_dependencies(IssueId) Future~Vec~Dependency~~
         +get_dependents(IssueId) Future~Vec~Dependency~~
-        +has_cycle(from, to) Future~bool~
+        +has_cycle(IssueId, IssueId) Future~bool~
+        +get_dependency_tree(IssueId, Option~usize~) Future~Vec~(Dependency, usize)~~
         +list(IssueFilter) Future~Vec~Issue~~
-        +ready_to_work(filter) Future~Vec~Issue~~
-        +blocked_issues() Future~Vec~Tuple~~
+        +ready_to_work(Option~IssueFilter~, Option~SortPolicy~) Future~Vec~Issue~~
+        +blocked_issues() Future~Vec~(Issue, Vec~Issue~)~~
+        +add_label(IssueId, str) Future~Issue~
+        +remove_label(IssueId, str) Future~Issue~
+        +add_resource(IssueId, NewResource) Future~Issue~
+        +update_resource(IssueId, ResourceId, ResourceUpdate) Future~Issue~
+        +remove_resource(IssueId, ResourceId) Future~Issue~
         +import_issues(Vec~Issue~) Future~void~
         +export_all() Future~Vec~Issue~~
         +save() Future~void~
+        +reload() Future~void~
     }
 
     class InMemoryStorage {
+        <<private type alias>>
         Arc~Mutex~InMemoryStorageInner~~
-        +new() Self
-        +load_from_jsonl(Path) Future~(Self, Vec~Warning~)~
-        +save_to_jsonl(Path) Future~void~
     }
 
     class InMemoryStorageInner {
+        <<private>>
         -HashMap~IssueId, Issue~ issues
         -DiGraph~IssueId, DependencyType~ graph
         -HashMap~IssueId, NodeIndex~ node_map
-        +create_internal(NewIssue) Issue
-        +has_cycle_internal(from, to) bool
-        +add_dependency_edge_internal(Dependency) void
+        -IdGenerator id_generator
     }
 
-    class PostgresStorage {
-        <<future>>
-        Pool~Postgres~ pool
-        +new(connection_string) Future~Self~
-        +execute_cte(query) Future~Vec~Issue~~
+    class JsonlBackedStorage {
+        <<private wrapper>>
+        -inner: Box~dyn IssueStorage~
+        -path: PathBuf
+        -prefix: String
+        -load_warnings: Vec~LoadWarning~
+        -ensure_writable() Result
     }
 
     IssueStorage <|.. InMemoryStorage : implements
-    IssueStorage <|.. PostgresStorage : implements
     InMemoryStorage --> InMemoryStorageInner : wraps
+    JsonlBackedStorage o-- IssueStorage : delegates + guards save()
 ```
+
+### Public and private seams
+
+- **Public API** (`rivets::storage`): the `IssueStorage` trait, the `StorageBackend` enum, the `create_storage(backend, prefix)` factory, and the `in_memory` module's free functions `new_in_memory_storage(prefix)`, `load_from_jsonl(path, prefix)`, `save_to_jsonl(storage, path)`, plus `LoadWarning` and `MigrationField`. `MockStorage` (a stateless test double returning hardcoded data for `test-1`) is available under `cfg(test)` or the `test-util` feature.
+- **Private implementation**: `InMemoryStorage` is a `pub(crate)` type alias (`Arc<Mutex<InMemoryStorageInner>>`), not a public struct; there is no public `InMemoryStorage::new()` / `load_from_jsonl()` / `save_to_jsonl()` method pair. The persistence guard `JsonlBackedStorage`, the inner storage struct, the `IssueRecord`/`CanonicalIssueRecord` DTOs, and the graph helpers (`has_cycle_impl`, `find_blocked_issues`) are all private.
+- **No `PostgresStorage`**: the `StorageBackend::PostgreSQL(String)` enum variant is a placeholder (`#[allow(dead_code)]`); both config resolution (`StorageConfig::to_backend`) and `create_storage` reject it with `ConfigError::UnsupportedBackend("PostgreSQL")`.
 
 ## InMemoryStorage Structure
 
@@ -63,6 +77,7 @@ graph TB
         HashMap[HashMap&lt;IssueId, Issue&gt;<br/>Fast O(1) lookups]
         DiGraph[DiGraph&lt;IssueId, DependencyType&gt;<br/>Directed graph for dependencies]
         NodeMap[HashMap&lt;IssueId, NodeIndex&gt;<br/>ID to graph node mapping]
+        IdGen[IdGenerator<br/>collision-resistant ID set]
     end
 
     subgraph "Graph Structure"
@@ -77,6 +92,7 @@ graph TB
     Arc --> HashMap
     Arc --> DiGraph
     Arc --> NodeMap
+    Arc --> IdGen
     DiGraph -.represents.-> Node1
     DiGraph -.represents.-> Node2
     DiGraph -.represents.-> Node3
@@ -85,19 +101,23 @@ graph TB
     style HashMap fill:#90EE90
     style DiGraph fill:#ADD8E6
     style NodeMap fill:#FFB6C1
+    style IdGen fill:#DDA0DD
 ```
+
+The in-memory engine is the runtime engine for every backend, including the persisted JSONL backend. It is also what tests and library callers get from `create_storage(StorageBackend::InMemory, prefix)` — ephemeral, lost on process exit, with `save()`/`reload()` as no-ops. There is no `memory` value in the config vocabulary: `.rivets/config.yaml` selects the persisted backend (`jsonl` or the unsupported placeholder `postgresql`), not the in-memory runtime.
 
 ### Data Structure Details
 
 #### HashMap<IssueId, Issue>
 - **Purpose**: Fast O(1) lookup by ID
-- **Contains**: Full issue data (title, description, status, dependencies, etc.)
-- **Memory**: ~1KB per issue average
+- **Contains**: Full issue data (title, description, status, priority, issue kind, labels, notes, associated resources, dependencies, timestamps)
+- **Note**: The graph is the source of truth for runtime relationship queries. Runtime add/remove operations keep `issue.dependencies` synchronized with it. During resilient loading, however, orphaned or cycle-forming persisted dependencies remain in `issue.dependencies` while their graph edges are skipped; subsequent saves serialize those retained entries.
 
 #### DiGraph<IssueId, DependencyType>
 - **Purpose**: Efficient graph algorithms (cycle detection, traversal)
 - **Nodes**: Issue IDs
 - **Edges**: Dependency type (blocks, related, parent-child, discovered-from)
+- **Direction convention**: dependent -> dependency (e.g. a blocked issue points at its blocker; a child points at its parent)
 - **Library**: petgraph 0.6
 - **Algorithms**: `has_path_connecting`, `edges_directed`
 
@@ -108,97 +128,155 @@ graph TB
 
 ## JSONL Persistence Layer
 
+The persisted backend is `StorageBackend::Jsonl(path)`: the factory loads the file into the in-memory engine and wraps it in the private `JsonlBackedStorage`, which delegates every trait call to the inner storage and additionally gates mutations and saves on the partial-load guard (see Error Recovery below).
+
 ```mermaid
 sequenceDiagram
     participant App
     participant Storage as JsonlBackedStorage
-    participant Inner as InMemoryStorage
+    participant Inner as InMemoryStorage (inner)
     participant FS as tokio::fs
 
     Note over App,FS: SAVE Operation
 
     App->>Storage: save()
     Storage->>Storage: ensure_writable()
-    alt Issue records were skipped during load
-        Storage-->>App: Err(UnsafePartialLoad)
+    alt Any Issue record was omitted during load
+        Storage-->>App: Err(StorageError::UnsafePartialLoad) - no write attempted
     else Complete load
         Storage->>Inner: export_all()
         Inner-->>Storage: issues
-        Storage->>FS: create(temp.jsonl)
-        loop For each issue
+        Storage->>Storage: sort issues by id (deterministic line order)
+        Storage->>FS: create(path.with_extension("tmp")) e.g. issues.tmp
+        loop For each issue (dependencies sorted)
+            Storage->>Storage: serialize CanonicalIssueRecord
             Storage->>FS: write_all(json + \n)
         end
         Storage->>FS: flush()
-        Storage->>FS: rename(temp → issues.jsonl)
+        Storage->>FS: rename(.tmp → issues.jsonl)
         Storage-->>App: Ok(())
     end
-
-    Note over App,FS: LOAD Operation
-
-    App->>Storage: create_storage(Jsonl(path))
-    Storage->>FS: open(issues.jsonl)
-    loop Pass 1: Import issues
-        FS->>Storage: read_line()
-        Storage->>Storage: parse JSON
-        alt Valid JSON
-            Storage->>Inner: insert issue (no deps)
-            Storage->>Inner: add graph node
-        else Invalid JSON
-            Storage->>Storage: warnings.push(MalformedJson)
-        end
-    end
-    loop Pass 2: Add dependencies
-        Storage->>Storage: for each issue.dependencies
-        alt Target exists
-            Storage->>Storage: has_cycle_internal()
-            alt No cycle
-                Storage->>Inner: add_edge()
-            else Cycle detected
-                Storage->>Storage: warnings.push(CircularDep)
-            end
-        else Target missing
-            Storage->>Storage: warnings.push(OrphanedDep)
-        end
-    end
-    Storage-->>App: Ok(JsonlBackedStorage with cached warnings)
 ```
+
+The write is atomic on POSIX: content goes to a temporary sibling whose extension is replaced with `.tmp` (`issues.jsonl` becomes `issues.tmp`), which is then renamed over the target. A crash or interruption leaves the original file untouched. Issues are sorted by ID (and each issue's dependencies sorted) before serialization so unchanged data produces byte-identical, reviewable diffs in git.
+
+```mermaid
+sequenceDiagram
+    participant App
+    participant Factory as create_storage(Jsonl(path))
+    participant Parser as resilient JSONL reader
+    participant Record as IssueRecord conversion
+    participant Inner as InMemoryStorageInner
+
+    Note over App,Inner: LOAD Operation (load_from_jsonl)
+
+    App->>Factory: create_storage(StorageBackend::Jsonl(path))
+    Factory->>Parser: read lines of issues.jsonl
+
+    rect rgb(240,248,255)
+    Note over Parser,Record: Stage 1 - Parse compatibility records
+    loop Each line
+        Parser->>Parser: decode persisted IssueRecord DTO (not a domain Issue)
+        alt Malformed JSON / unparseable line
+            Parser->>Parser: LoadWarning::MalformedJson - line skipped
+        else Valid record
+            Parser-->>Record: IssueRecord
+            Record->>Record: into_domain(): convert + validate + migrate
+            alt canonical issue_kind vs legacy issue_type conflict
+                Record->>Record: LoadWarning::MigrationConflict - canonical wins, issue loads
+            else Invalid issue data
+                Record->>Record: LoadWarning::InvalidIssueData - record omitted
+            else Invalid Associated Resource
+                Record->>Record: LoadWarning::InvalidResourceData - record omitted
+            else Valid
+                Record-->>Inner: domain Issue (with dependencies attached)
+            end
+        end
+    end
+    end
+
+    rect rgb(240,248,255)
+    Note over Factory,Inner: Stage 2 - Import issues
+    loop Each converted Issue
+        Inner->>Inner: graph.add_node(id)
+        Inner->>Inner: node_map.insert(id)
+        Inner->>Inner: issues.insert(id)
+        Inner->>Inner: id_generator.register_id(id)
+    end
+    end
+
+    rect rgb(240,248,255)
+    Note over Factory,Inner: Stage 3 - Rebuild relationships
+    loop Each issue's dependencies
+        alt Target not in node_map
+            Inner->>Inner: LoadWarning::OrphanedDependency - edge skipped
+        else has_cycle_impl detects a cycle
+            Inner->>Inner: LoadWarning::CircularDependency - edge skipped
+        else
+            Inner->>Inner: graph.add_edge(from, to, dep_type)
+        end
+    end
+    end
+
+    Inner-->>Factory: (Box&lt;dyn IssueStorage&gt;, warnings)
+    Factory->>Factory: log warnings and wrap storage in JsonlBackedStorage
+    Factory-->>App: Ok(Box&lt;dyn IssueStorage&gt;)
+```
+
+The three stages never interleave: parsing and validation complete for every line before any issue is inserted, and all issues are inserted before any dependency edge is rebuilt. This guarantees that a dependency whose target appears later in the file still resolves, and that cycle checks run against the complete node set.
 
 ### JSONL Format Example
 
+Each line is a canonical record written by `CanonicalIssueRecord` (the persisted DTO, distinct from the domain `Issue`):
+
 ```json
-{"id":"rivets-a3f8","title":"Implement feature X","description":"...","status":"open","priority":2,"issue_kind":"feature","created_at":"2025-11-17T10:00:00Z","updated_at":"2025-11-17T10:00:00Z","dependencies":[{"depends_on_id":"rivets-x9k2","dep_type":"blocks"}],"labels":["backend","api"]}
-{"id":"rivets-x9k2","title":"Fix bug Y","description":"...","status":"in_progress","priority":1,"issue_kind":"bug","created_at":"2025-11-17T09:00:00Z","updated_at":"2025-11-17T11:00:00Z","dependencies":[],"labels":["urgent"]}
+{"id":"rivets-014n","title":"Implement feature X","description":"...","status":"open","priority":2,"issue_kind":"feature","assignee":null,"labels":["backend","api"],"design":null,"acceptance_criteria":null,"notes":[],"resources":[],"dependencies":[{"depends_on_id":"rivets-x9k2","dep_type":"blocks"}],"created_at":"2025-11-17T10:00:00Z","updated_at":"2025-11-17T10:00:00Z","closed_at":null}
+{"id":"rivets-x9k2","title":"Fix bug Y","description":"...","status":"in_progress","priority":1,"issue_kind":"bug","assignee":"alice","labels":["urgent"],"design":null,"acceptance_criteria":null,"notes":[],"resources":[],"dependencies":[],"created_at":"2025-11-17T09:00:00Z","updated_at":"2025-11-17T11:00:00Z","closed_at":null}
 ```
 
+- `notes` and `resources` are ordered collections. `next_resource_id` is omitted while its value is the default `1`; after any resource ID is allocated it remains serialized even if all resources are later removed.
+- On read, two legacy fields are accepted and never written back: `issue_type` (migration alias for `issue_kind`) and `external_ref` (migrated to a Reference resource or a migration Note).
+- Issue IDs are `{prefix}-{adaptive base36 hash}`; the hash inputs include content plus timestamp/nonce material, so IDs are not purely content-addressed.
+
 ### Error Recovery Strategies
+
+The loader is resilient: a bad line never aborts the whole load. Every problem becomes a typed `LoadWarning` and the affected record or edge is skipped. Reads are served from the successfully loaded issues; the warnings are returned alongside the storage.
 
 #### Skipped Issue Record
 ```
 Line 42: Invalid JSON, skipping: expected ',' at line 1 column 234
 Warning: Loaded with 1 errors. 99 issues available for read-only access.
 ```
-- **Trigger**: Malformed JSON, a schema-incompatible record, invalid Issue data, or conflicting migration fields
-- **Action**: Load unaffected Issues for reads; reject every mutation and save with `UnsafePartialLoad`
+- **Trigger**: Malformed JSON, an unparseable line, Issue data that fails domain validation (`InvalidIssueData`), or an invalid Associated Resource (`InvalidResourceData`). These omit an entire Issue record.
+- **Action**: The JSONL-backed wrapper (`JsonlBackedStorage`) keeps reads available, but `ensure_writable()` rejects every mutation and `save()` with `StorageError::UnsafePartialLoad` before any state change — an incomplete in-memory representation can never replace the source file.
 - **Result**: The original JSONL bytes remain unchanged rather than replacing the skipped record
-- **Recovery**: Manually repair the JSONL file, then restart or reload; there is no implicit force-repair path
+- **Recovery**: Manually repair the JSONL file, then restart or call `reload()`; there is no implicit force-repair path
+
+#### Migration Conflict (warning-only)
+```
+Line 12: Issue rivets-a3f8 has legacy field issue_type conflicting with canonical issue_kind
+```
+- **Trigger**: A record carries both `issue_kind` and legacy `issue_type`, and they disagree.
+- **Action**: The canonical field wins; the issue loads normally with a `LoadWarning::MigrationConflict`.
+- **Note**: Unlike record-omitting warnings, migration conflicts never trigger `UnsafePartialLoad`.
 
 #### Orphaned Dependency
 ```
 Issue rivets-a3f8 depends on rivets-MISSING (not found in file)
 Warning: 1 orphaned dependencies skipped
 ```
-- **Action**: Skip dependency edge, import issue without that dep
-- **Result**: Issue exists but missing one dependency
-- **Recovery**: Resilient to partial exports/imports
+- **Action**: Skip the runtime graph edge; retain the dependency entry in the loaded Issue's persistence vector.
+- **Result**: Runtime relationship queries omit the dependency, but a later save serializes the retained entry, so the warning recurs on reload.
+- **Recovery**: Repair or remove the orphaned entry in the JSONL source.
 
 #### Circular Dependency
 ```
 Cycle detected: rivets-a3f8 → rivets-x9k2 → rivets-a3f8
 Warning: 1 circular dependencies skipped
 ```
-- **Action**: Skip edge that would create cycle
-- **Result**: Breaks cycle, maintains graph integrity
-- **Prevention**: Runtime operations prevent cycle creation
+- **Action**: Skip the cycle-forming runtime graph edge; retain the dependency entry in the loaded Issue's persistence vector.
+- **Result**: The runtime graph remains acyclic, but a later save serializes the retained entry, so the warning recurs on reload.
+- **Prevention**: Runtime dependency operations reject cycle creation before mutation.
 
 ## Cycle Detection Algorithm
 
@@ -249,11 +327,9 @@ graph TD
     Start[ready_to_work filter] --> Init[blocked = empty set]
 
     Init --> Phase1[Phase 1: Direct Blocks]
-    Phase1 --> Loop1{For each issue}
-    Loop1 --> Check1{Has blocking<br/>dependency?}
-    Check1 -->|Yes| CheckStatus{Blocker is<br/>open/in_progress?}
-    CheckStatus -->|Yes| AddBlocked[blocked.insert issue]
-    CheckStatus -->|No| Loop1
+    Phase1 --> Loop1{For each non-closed issue}
+    Loop1 --> Check1{Has Blocks edge to<br/>an unclosed issue?}
+    Check1 -->|Yes| AddBlocked[blocked.insert issue]
     Check1 -->|No| Loop1
     Loop1 -->|Done| Phase2
 
@@ -261,29 +337,31 @@ graph TD
     BFS --> Loop2{Queue not empty?}
     Loop2 -->|Yes| Pop[pop issue, depth]
     Pop --> DepthCheck{depth < 50?}
-    DepthCheck -->|Yes| Children[Find child issues<br/>via parent-child edges]
+    DepthCheck -->|Yes| Children[Find child issues<br/>via incoming parent-child edges]
     Children --> AddChildren[blocked.insert children<br/>queue.push children, depth+1]
     AddChildren --> Loop2
     DepthCheck -->|No| Loop2
     Loop2 -->|No| Filter
 
     Filter[Filter: status ≠ closed<br/>AND id ∉ blocked] --> ApplyFilter[Apply additional filters]
-    ApplyFilter --> Sort[Sort by policy]
+    ApplyFilter --> Sort[Sort by policy: Hybrid default, Priority, Oldest]
     Sort --> Result[Return ready issues]
 
     style AddBlocked fill:#FFB6C1
     style Result fill:#90EE90
 ```
 
+Blocking is entirely graph-derived: Phase 1 collects issues with a `Blocks` edge to any unclosed issue, and Phase 2 propagates through parent-child edges (children of a blocked parent are blocked) up to a BFS depth of 50. The legacy `blocked` status value still exists in the domain for compatibility, but `ready_to_work` and `blocked_issues` never consult it — only graph edges decide blocking.
+
 ### Blocking Propagation Example
 
 ```mermaid
 graph TD
-    Epic[Epic: rivets-epic1<br/>BLOCKED by feature1] -->|parent-child| Task1[Task: rivets-task1<br/>TRANSITIVELY BLOCKED]
-    Epic -->|parent-child| Task2[Task: rivets-task2<br/>TRANSITIVELY BLOCKED]
-    Task1 -->|parent-child| Subtask1[Subtask: rivets-sub1<br/>TRANSITIVELY BLOCKED]
+    Task1[Task: rivets-task1<br/>TRANSITIVELY BLOCKED] -->|parent-child| Epic[Epic: rivets-epic1<br/>BLOCKED by feature1]
+    Task2[Task: rivets-task2<br/>TRANSITIVELY BLOCKED] -->|parent-child| Epic
+    Subtask1[Subtask: rivets-sub1<br/>TRANSITIVELY BLOCKED] -->|parent-child| Task1
 
-    Feature1[Feature: rivets-feat1<br/>Status: in_progress] -->|blocks| Epic
+    Epic -->|blocks| Feature1[Feature: rivets-feat1<br/>Status: in_progress]
 
     style Epic fill:#FFB6C1
     style Task1 fill:#FFB6C1
@@ -303,20 +381,15 @@ sequenceDiagram
     participant Graph
 
     User->>Storage: delete(rivets-a3f8)
-    Storage->>Graph: get_dependents(rivets-a3f8)
+    Storage->>Graph: incoming edges of rivets-a3f8 (dependents)
     Graph-->>Storage: [rivets-x9k2, rivets-p4m1]
 
     alt Has dependents
-        Storage-->>User: Error: Cannot delete rivets-a3f8<br/>2 issues depend on it:<br/>rivets-x9k2, rivets-p4m1
+        Storage-->>User: Error::HasDependents: Cannot delete rivets-a3f8<br/>2 issues depend on it:<br/>rivets-x9k2, rivets-p4m1
     else No dependents
-        Storage->>Graph: get_dependencies(rivets-a3f8)
-        Graph-->>Storage: [rivets-old1 blocks, rivets-old2 related]
-        loop For each dependency
-            Storage->>Graph: remove_edge(rivets-a3f8 → dep)
-        end
-        Storage->>Storage: issues.remove(rivets-a3f8)
-        Storage->>Graph: remove_node(rivets-a3f8)
+        Storage->>Graph: remove_node(rivets-a3f8) (drops all incident edges)
         Storage->>Storage: node_map.remove(rivets-a3f8)
+        Storage->>Storage: issues.remove(rivets-a3f8)
         Storage-->>User: Ok: Deleted rivets-a3f8
     end
 ```
@@ -324,29 +397,37 @@ sequenceDiagram
 ### Safety Guarantees
 
 1. **No orphaned dependents**: Cannot delete if other issues depend on it
-2. **Clean outgoing deps**: Automatically removes all outgoing dependency edges
+2. **Clean outgoing deps**: petgraph's `remove_node` removes all incident edges, so outgoing dependencies disappear with the node
 3. **Graph consistency**: Maintains sync between HashMap, DiGraph, and node_map
 4. **Clear errors**: Lists all dependent issues preventing deletion
 
 ## Backend Factory Pattern
 
+`.rivets/config.yaml` is the single configuration source — there is no layering or environment merge. `App::from_directory(working_dir)` resolves it through `StorageConfig::to_backend(root_dir)`, which validates that `data_file` is a relative path without parent traversal, then hands the resulting `StorageBackend` to `create_storage`.
+
 ```mermaid
 graph TD
-    Config[config.yaml] --> Factory{create_storage}
+    Config[.rivets/config.yaml] --> Parse[StorageConfig.to_backend]
 
-    Factory -->|backend: memory| InMem[InMemoryStorage::new]
-    Factory -->|backend: memory<br/>+ data_file exists| Load[InMemoryStorage::load_from_jsonl]
-    Factory -->|backend: postgres| PG[PostgresStorage::new]
+    Parse -->|backend: jsonl| Jsonl[StorageBackend::Jsonl data_path]
 
-    InMem --> Box[Box&lt;dyn IssueStorage&gt;]
-    Load --> Box
-    PG --> Box
+    Jsonl --> Exists{data_file exists?}
+    Exists -->|Yes| Load[load_from_jsonl path, prefix]
+    Exists -->|No| Empty[new_in_memory_storage prefix]
+    Load --> Warnings[log warnings, keep reads usable]
+    Load --> Wrap
+    Empty --> Wrap
+    Warnings --> Wrap[JsonlBackedStorage - private wrapper]
+    Wrap --> Box[Box&lt;dyn IssueStorage&gt;]
+
+    Parse -->|backend: postgresql| Unsupported[ConfigError::UnsupportedBackend - no PostgresStorage implementation]
+    Parse -->|anything else, incl. memory| Unknown[ConfigError::UnknownBackend]
 
     Box --> App[App uses trait methods]
 
-    style InMem fill:#90EE90
-    style Load fill:#90EE90
-    style PG fill:#FFE4B5
+    style Wrap fill:#90EE90
+    style Unsupported fill:#FFB6C1
+    style Unknown fill:#FFB6C1
     style Box fill:#ADD8E6
 ```
 
@@ -354,20 +435,22 @@ graph TD
 
 ```yaml
 # .rivets/config.yaml
-issue-prefix: "rivets"
+issue-prefix: rivets
 
 storage:
-  backend: "memory"
-  data_file: ".rivets/issues.jsonl"
-
-  # Future Phase 3
-  # backend: "postgres"
-  # postgres:
-  #   host: "localhost"
-  #   port: 5432
-  #   database: "rivets"
-  #   user: "rivets"
+  backend: jsonl
+  data_file: .rivets/issues.jsonl
 ```
+
+### Backend Availability
+
+| Config value | Enum variant | Availability |
+|--------------|--------------|--------------|
+| `jsonl` | `StorageBackend::Jsonl(PathBuf)` | **Implemented** (default; `DEFAULT_BACKEND = "jsonl"`). In-memory engine wrapped in the private `JsonlBackedStorage` guard. |
+| `postgresql` | `StorageBackend::PostgreSQL(String)` | **Placeholder only.** Recognized but rejected with `ConfigError::UnsupportedBackend("PostgreSQL")` at both config resolution and `create_storage`. No `PostgresStorage` type exists. |
+| anything else (e.g. `memory`) | — | `ConfigError::UnknownBackend`. There is no `memory` config value. |
+
+The `StorageBackend::InMemory` variant exists for library/test use (`create_storage(StorageBackend::InMemory, prefix)`); it has no config string and no persistence.
 
 ## Performance Characteristics
 
@@ -376,13 +459,14 @@ storage:
 | create | O(1) | O(1) | HashMap insert + graph node |
 | get | O(1) | O(1) | HashMap lookup |
 | update | O(1) | O(1) | HashMap update |
-| delete | O(D) | O(D) | D = number of dependencies |
+| delete | O(D) | O(D) | D = number of dependents checked |
 | add_dependency | O(V + E) | O(V) | Cycle detection via path search |
 | has_cycle | O(V + E) | O(V) | DFS/BFS traversal |
 | list (no filter) | O(N) | O(N) | Iterate all issues |
 | ready_to_work | O(V + E) | O(V) | BFS for transitive blocks |
-| save_to_jsonl | O(N) | O(1) | Streaming write |
-| load_from_jsonl | O(N * E) | O(N) | N issues, E edges per issue |
+| blocked_issues | O(V + E) | O(V) | Edge scan for direct blockers |
+| save_to_jsonl | O(N log N) | O(N) | Export, sort, streaming write, atomic rename |
+| load_from_jsonl | O(N + E·(V+E)) worst case | O(N) | Parse all lines, import, per-edge cycle checks |
 
 Where:
 - V = number of vertices (issues)
@@ -390,26 +474,24 @@ Where:
 - N = total issues
 - D = dependencies per issue
 
-## Memory Layout (1000 Issues)
+These are asymptotic analyses of the algorithms, not benchmark measurements.
+
+## Memory Layout
+
+The in-memory engine holds the entire dataset:
 
 ```
-Total: ~2-3 MB
+- HashMap<IssueId, Issue>: dominates memory
+  └─ Issue struct per record
+     ├─ Strings: title, description, Note content, resource targets
+     ├─ Enums: status, issue kind, dependency types
+     ├─ Timestamps: created_at, updated_at, closed_at, per-Note timestamps
+     └─ Collections: Vec<Note>, Vec<AssociatedResource>, Vec<Dependency>
 
-- HashMap<IssueId, Issue>: ~1 MB
-  └─ Issue struct: ~1 KB each
-     ├─ Strings: title (50), description (200), Note content (100 each)
-     ├─ Enums: 1 byte each
-     ├─ Timestamps: Issue timestamps plus one per Note
-     └─ Collections: Vec<Note> and Vec<Dependency>
-
-- DiGraph: ~200 KB
-  ├─ Nodes: 1000 × 8 bytes (NodeIndex)
-  └─ Edges: ~500 × 24 bytes (from, to, weight)
-
-- HashMap<IssueId, NodeIndex>: ~64 KB
-  └─ 1000 entries × 64 bytes (String + u64)
-
-- Arc + Mutex overhead: ~100 bytes
+- DiGraph: nodes (one per issue) plus edges (one per dependency) with DependencyType weight
+- HashMap<IssueId, NodeIndex>: one entry per issue (String key + u64 value)
+- IdGenerator: hash set of registered IDs
+- Arc + Mutex: fixed overhead per storage instance
 ```
 
-**Scales linearly** with number of issues and dependencies.
+Memory scales linearly with the number of issues and dependencies.

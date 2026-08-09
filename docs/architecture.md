@@ -7,83 +7,90 @@ This document provides a comprehensive overview of the Rivets architecture. For 
 - **[data-flow.md](data-flow.md)**: Detailed sequence diagrams for all command flows
 - **[storage-architecture.md](storage-architecture.md)**: Deep dive into storage layer implementation
 - **[module-structure.md](module-structure.md)**: Crate organization and module dependencies
-- **[rivets-jsonl-research.md](rivets-jsonl-research.md)**: JSONL library research and API design (from rivets-fk9)
+- **[rivets-jsonl-research.md](rivets-jsonl-research.md)**: JSONL library research and API design
 - **[terminology.md](terminology.md)**: Consistent terminology reference
 
 ## Research Foundation
 
-This architecture is built on research from:
-- **rivets-fk9**: JSONL library design and performance analysis (see rivets-jsonl-research.md)
-- **rivets-kr3**: Two-crate workspace structure design (implemented in module-structure.md)
+The current implementation is a three-crate Cargo workspace:
+
+- **`rivets`**: CLI application, domain model, and storage layer (the `crates/rivets` crate)
+- **`rivets-jsonl`**: Generic JSON Lines (JSONL) library providing resilient, line-numbered parsing and atomic writes (the `crates/rivets-jsonl` crate)
+- **`rivets-mcp`**: MCP (Model Context Protocol) server exposing the tracker as 21 tools (the `crates/rivets-mcp` crate)
+
+Earlier design research (rivets-fk9 for JSONL library design, rivets-kr3 for workspace structure) informed the original two-crate layout; the workspace has since grown to three crates with the addition of `rivets-mcp`.
 
 ## System Architecture
 
 ```mermaid
 graph TB
-    subgraph "CLI Layer"
+    subgraph "CLI Layer (rivets)"
         CLI[CLI Entry Point<br/>main.rs]
         Args[Argument Parser<br/>clap]
-        Commands[Command Handlers<br/>create, list, show, etc.]
+        Commands[Command Handlers<br/>16 top-level commands]
     end
 
-    subgraph "Application Layer"
-        App[App Struct<br/>Async Runtime]
-        Config[Configuration<br/>YAML + Env]
+    subgraph "MCP Layer (rivets-mcp)"
+        Mcp[rivets-mcp server<br/>21 tools]
     end
 
-    subgraph "Storage Abstraction"
+    subgraph "Application Layer (rivets)"
+        App[App Struct]
+        Config[Configuration<br/>.rivets/config.yaml<br/>single source]
+    end
+
+    subgraph "Storage Abstraction (rivets)"
         Trait[IssueStorage Trait<br/>async-trait]
         Factory[Backend Factory<br/>create_storage]
     end
 
-    subgraph "Domain Layer"
-        Types[Domain Types<br/>Issue, Dependency, Filter]
-        IDs[Hash-based IDs<br/>SHA256 + Base36]
+    subgraph "Domain Layer (rivets)"
+        Types[Domain Types<br/>Issue, Dependency, Note,<br/>AssociatedResource, Filter]
+        IDs[Hash-based IDs<br/>SHA256 over content +<br/>timestamp + nonce]
     end
 
-    subgraph "Storage Backends - Phase 1 MVP"
-        Memory[InMemoryStorage<br/>Arc&lt;Mutex&lt;Inner&gt;&gt;]
-        Graph[petgraph DiGraph<br/>Dependency Management]
-        JSONL[JSONL Persistence<br/>tokio::fs]
-    end
-
-    subgraph "Storage Backends - Phase 3 Future"
-        Postgres[PostgresStorage<br/>sqlx + CTEs]
+    subgraph "Storage Backends (rivets)"
+        Memory[InMemoryStorageInner<br/>HashMap + petgraph DiGraph]
+        Jsonl[JsonlBackedStorage<br/>default: JSONL persistence]
+        Postgres[PostgreSQL<br/>placeholder: unsupported]
     end
 
     CLI --> Args --> Commands
     Commands --> App
     App --> Config
     App --> Factory
+    Mcp --> Config
+    Mcp --> Factory
     Factory --> Trait
     Trait -.implements.-> Memory
-    Trait -.implements.-> Postgres
-    Memory --> Graph
-    Memory --> JSONL
+    Memory -.wrapped by.-> Jsonl
+    Trait -.placeholder.-> Postgres
     Commands --> Types
     Types --> IDs
 
+    style Jsonl fill:#90EE90
     style Memory fill:#90EE90
-    style Graph fill:#90EE90
-    style JSONL fill:#90EE90
     style Postgres fill:#FFE4B5
 ```
 
 ## Core Components
 
-### 1. CLI Layer (rivets-ceg, rivets-bsp)
+### 1. CLI Layer (`rivets`)
+
 - **Entry Point**: `main.rs` with `#[tokio::main(flavor = "current_thread")]`
 - **Argument Parsing**: Clap derive API for type-safe CLI arguments
-- **Commands**: create, list, show, update, close, delete, init, ready
-- **Validation**: Priority 0-4, enum types, ID format validation
+- **Commands** (16 top-level): init, info, create, list, show, update, close, reopen, delete, ready, dep, label, resource, stale, blocked, stats
+- **Validation**: Priority 0-4, enum types (status, kind, dependency type), ID format validation, prefix validation (2-20 alphanumeric characters)
 
-### 2. Application Layer (rivets-cgl)
-- **App Struct**: Manages storage lifecycle and command execution
+### 2. Application Layer (`rivets`)
+
+- **App Struct**: Manages storage lifecycle and command execution; `App::from_directory` searches upward (max depth 256) for the `.rivets/` directory, loads configuration, and creates storage from it
+- **Configuration**: `.rivets/config.yaml` is the **single** configuration source: `issue-prefix` plus a `storage` section (`backend` and `data_file`). There is no config layering, no environment-variable merge, and no user-level config. Defaults (prefix `proj`, backend `jsonl`, data file `.rivets/issues.jsonl`) are baked into `init`
+- **Auto-save**: Mutating commands persist after execution. Batch `update`/`close`/`reopen` and label mutations reload storage after a failed save; `create`, `delete`, dependency mutations, and resource mutations return the save error without reloading that process's in-memory state
 - **Async Runtime**: Tokio current-thread for sequential CLI operations
-- **Auto-save**: Persist after every mutating command (create/update/delete/close)
-- **Configuration**: Hierarchical config merging (CLI flags → env → YAML → defaults)
 
-### 3. Storage Abstraction (rivets-0gc)
+### 3. Storage Abstraction (`rivets`)
+
 ```rust
 #[async_trait]
 pub trait IssueStorage: Send + Sync {
@@ -95,55 +102,77 @@ pub trait IssueStorage: Send + Sync {
 
     // Dependencies
     async fn add_dependency(&mut self, from: &IssueId, to: &IssueId, dep_type: DependencyType) -> Result<()>;
+    async fn remove_dependency(&mut self, from: &IssueId, to: &IssueId) -> Result<()>;
+    async fn get_dependencies(&self, id: &IssueId) -> Result<Vec<Dependency>>;
+    async fn get_dependents(&self, id: &IssueId) -> Result<Vec<Dependency>>;
     async fn has_cycle(&self, from: &IssueId, to: &IssueId) -> Result<bool>;
+    async fn get_dependency_tree(&self, id: &IssueId, max_depth: Option<usize>) -> Result<Vec<(Dependency, usize)>>;
 
     // Queries
     async fn list(&self, filter: &IssueFilter) -> Result<Vec<Issue>>;
-    async fn ready_to_work(&self, filter: Option<&IssueFilter>) -> Result<Vec<Issue>>;
+    async fn ready_to_work(&self, filter: Option<&IssueFilter>, sort_policy: Option<SortPolicy>) -> Result<Vec<Issue>>;
+    async fn blocked_issues(&self) -> Result<Vec<(Issue, Vec<Issue>)>>;
 
-    // Persistence
+    // Atomic label operations
+    async fn add_label(&mut self, id: &IssueId, label: &str) -> Result<Issue>;
+    async fn remove_label(&mut self, id: &IssueId, label: &str) -> Result<Issue>;
+
+    // Associated Resource operations
+    async fn add_resource(&mut self, id: &IssueId, resource: NewResource) -> Result<Issue>;
+    async fn update_resource(&mut self, id: &IssueId, resource_id: &ResourceId, update: ResourceUpdate) -> Result<Issue>;
+    async fn remove_resource(&mut self, id: &IssueId, resource_id: &ResourceId) -> Result<Issue>;
+
+    // Batch + persistence
+    async fn import_issues(&mut self, issues: Vec<Issue>) -> Result<()>;
+    async fn export_all(&self) -> Result<Vec<Issue>>;
     async fn save(&self) -> Result<()>;
+    async fn reload(&mut self) -> Result<()>;
 }
 ```
 
-### 4. Domain Layer (rivets-06w, rivets-x1e)
-- **Core Types**: Issue, Dependency, IssueFilter, NewIssue, IssueUpdate
-- **Enums**: Status, Priority, IssueKind, DependencyType
-- **Hash-based IDs**: SHA256 → Base36 encoding with adaptive length (4-6 chars)
-- **ID Format**: `{prefix}-{hash}` (e.g., "rivets-a3f8")
+### 4. Domain Layer (`rivets`)
+
+- **Core Types**: Issue, NewIssue, IssueUpdate, IssueFilter, Dependency, Note, AssociatedResource, ResourceId
+- **Issue fields**: id, title, description, status, priority (0-4), issue_kind, assignee, labels, design notes, acceptance criteria, ordered append-only Notes, ordered Associated Resources, dependencies, and creation/update/close timestamps
+- **Enums**:
+  - `IssueStatus`: `open`, `in_progress`, `blocked` (legacy), `closed`. The stored `blocked` status is a legacy field: the `ready`/`blocked` queries are **graph-derived** and do not read it. Status transitions are validated by the domain (e.g., only closed issues can be reopened)
+  - `IssueKind`: `bug`, `feature`, `task`, `epic`, `chore` — mutable via `update`
+  - `DependencyType`: `blocks`, `related`, `parent-child`, `discovered-from`
+  - `ResourceRole`: `implementation`, `documentation`, `evidence`, `successor`, `reference` — resources are URL or path targets with a stable, never-reused identifier
+- **Hash-based IDs**: `{prefix}-{hash}` (e.g., `proj-a3f8`). The hash is SHA256 over `title|description|creator|timestamp|nonce`, base36-encoded with adaptive length (4 chars up to 500 issues, 5 up to 1,500, 6 beyond). IDs are **not** content-addressed: the timestamp and nonce inputs mean identical content produces different IDs. Collisions retry with increasing nonces, then by growing the hash length.
+  The public `IdGenerator` can produce dot-suffixed child IDs when given a parent, but `IssueStorage::create` currently passes no parent and creates only top-level hash IDs.
 
 ### 5. Storage Backends
 
-#### Phase 1: InMemoryStorage (rivets-bz5, rivets-l66)
+#### JSONL (default) — `JsonlBackedStorage`
+
 ```mermaid
 graph LR
-    Inner[InMemoryStorageInner<br/>HashMap + DiGraph]
-    Wrapper[Arc&lt;Mutex&lt;Inner&gt;&gt;<br/>Thread-safe wrapper]
-    JSONL[JSONL Files<br/>.rivets/issues.jsonl]
+    Inner[InMemoryStorageInner<br/>HashMap + petgraph DiGraph]
+    Wrapper[JsonlBackedStorage<br/>guarded persistence wrapper]
+    JSONL[issues.jsonl<br/>.rivets/issues.jsonl]
 
     Wrapper --> Inner
-    Inner -->|save| JSONL
-    JSONL -->|load| Inner
+    Wrapper -->|save: atomic temp + rename| JSONL
+    JSONL -->|load: three-stage resilient parse| Wrapper
 ```
 
 **Structure**:
-- `InMemoryStorageInner`: HashMap for issues, petgraph DiGraph for dependencies
-- `Arc<Mutex<>>`: Thread-safe wrapper for concurrent access
-- **Operations**: All blocking operations wrapped in async methods
+- `InMemoryStorageInner`: HashMap for issues, petgraph DiGraph for dependencies, ID generator state
+- `Arc<tokio::sync::Mutex<>>`: async-compatible exclusive access
+- **Load** (three stages): (1) resiliently parse compatibility records line-by-line with line numbers, converting them into domain Issues at the compatibility boundary; (2) import all Issues and create graph nodes, registering IDs with the generator; (3) rebuild dependency relationships with orphan and cycle detection
+- **Save**: atomic writes (temp file + rename); rejected when loading omitted any Issue record, preserving the source file byte-for-byte
+- **Reload**: re-reads the file and rebuilds in-memory state, used after a failed save
 
-**JSONL Persistence**:
-- Async file I/O with tokio::fs
-- Atomic writes (temp file + rename)
-- Graceful corruption recovery (skip invalid lines, detect orphans/cycles)
-- Two-pass loading (issues first, then dependencies with validation)
+#### InMemory (ephemeral)
 
-#### Phase 3: PostgresStorage (Future)
-- sqlx for async database access
-- Recursive CTEs for complex graph queries
-- Connection pooling
-- True async I/O (non-blocking)
+`new_in_memory_storage()` provides the same HashMap + petgraph backend without file persistence. `save()` is a no-op. Used for tests and short-lived sessions; the CLI itself always operates through the JSONL backend.
 
-## Dependency System (rivets-6op)
+#### PostgreSQL (placeholder)
+
+`StorageBackend::PostgreSQL` exists and `config.yaml` accepts `backend: postgresql`, but `create_storage` returns `ConfigError::UnsupportedBackend("PostgreSQL")`. There is no database implementation; this is a placeholder, not a working backend.
+
+## Dependency System
 
 ```mermaid
 graph TD
@@ -159,30 +188,42 @@ graph TD
 ```
 
 ### Dependency Types
-1. **blocks**: Hard blocker (prevents work on dependent issue)
+
+1. **blocks**: Hard blocker (prevents work on the dependent issue)
 2. **related**: Soft link (informational only)
 3. **parent-child**: Hierarchical relationship (epics → tasks)
-4. **discovered-from**: Found during implementation
+4. **discovered-from**: Provenance only
 
-### Cycle Detection
-- **Phase 1**: petgraph `has_path_connecting(graph, to, from)`
-- **Phase 3**: Recursive CTEs with depth limit (100)
+Edges point from **dependent → dependency** (a `blocks` edge runs `blocked_issue → blocker`; a `parent-child` edge runs `child → parent`).
 
-## Ready Work Algorithm (rivets-qeb)
+### CLI
+
+`rivets dep add <dependent> <prerequisite> --type blocks` (type defaults to `blocks`), plus `dep remove`, `dep list` (with `--reverse` for dependents), and `dep tree` (recursive depth-first traversal with `--depth`). The lower-level `IssueStorage::get_dependency_tree` method performs a separate breadth-first traversal.
+
+### Semantics
+
+- **Cycle detection**: petgraph `has_path_connecting` pre-check before any edge is added; `CircularDependency` error on violation
+- **Dependency changes do not mutate Issue status**: adding or removing a `blocks` edge never writes the stored status; `ready`/`blocked` results are always computed from the graph
+- **Queries**: `get_dependencies`, `get_dependents`, and `get_dependency_tree` (breadth-first with per-issue depth)
+
+## Ready Work Algorithm
 
 ```mermaid
 graph TD
-    Start[All Open/InProgress Issues] --> Direct[Find Directly Blocked<br/>blocks → open/in_progress]
-    Direct --> Transitive[Propagate via parent-child<br/>BFS with depth 50]
-    Transitive --> Filter[Exclude all blocked]
+    Start[All non-closed Issues] --> Direct[Directly blocked?<br/>unclosed blocks edge to blocker]
+    Direct --> Transitive[Propagate blocked down<br/>parent-child chains<br/>BFS with depth limit 50]
+    Transitive --> Filter[Exclude blocked issues]
     Filter --> Sort[Sort by policy<br/>hybrid/priority/oldest]
     Sort --> Result[Ready Issues]
 ```
 
-### Sort Policies
-- **hybrid** (default): Recent issues (<48h) by priority, older by age
-- **priority**: Strict P0→P1→P2→P3→P4
-- **oldest**: Creation date ascending
+`ready_to_work` semantics:
+
+1. **Directly blocked**: an issue with a `blocks` edge to an unclosed issue
+2. **Transitively blocked**: children of a blocked parent (via `parent-child`) are blocked, propagated breadth-first with a depth limit of 50
+3. **Ready** = not closed and not blocked
+4. Optional filter by status, priority, kind, assignee, or label; optional limit
+5. Sort policies: **hybrid** (default; issues created within 48h sorted by priority, older issues by age), **priority** (strict P0→P1→P2→P3→P4), **oldest** (creation date ascending)
 
 ## Data Flow
 
@@ -197,95 +238,102 @@ sequenceDiagram
     User->>CLI: rivets create --title "Fix bug"
     CLI->>App: execute(CreateCommand)
     App->>Storage: create(NewIssue)
-    Storage->>Storage: generate_hash_id()
-    Storage->>Storage: add to HashMap
-    Storage->>Storage: add node to graph
+    Storage->>Storage: generate_hash_id()<br/>(content + timestamp + nonce)
+    Storage->>Storage: add to HashMap + graph node
     App->>Storage: save()
-    Storage->>JSONL: save_to_jsonl()
-    JSONL-->>User: Created: rivets-a3f8
+    Storage->>JSONL: atomic JSONL write
+    CLI-->>User: Created: proj-a3f8
 ```
 
-## Phase Roadmap
+## Implementation Status
 
-### Phase 1 (MVP) - Current Focus
-- ✅ In-memory storage with petgraph
-- ✅ JSONL persistence
-- ✅ Async trait architecture
-- ✅ CLI commands (create, list, show, update, close, delete)
-- ✅ Dependency system with cycle detection
-- ✅ Ready work algorithm
-- ✅ Hash-based IDs
+### Current State
 
-### Phase 2 (Configuration)
-- Storage backend selection
-- Configuration system (YAML + env)
-- Backend factory pattern
+- ✅ JSONL persistence as the default backend with atomic writes
+- ✅ Three-stage resilient JSONL load (parse compatibility records → import Issues → rebuild relationships)
+- ✅ 16-command CLI surface
+- ✅ Dependency system with cycle detection, removal, and dependency/dependent/tree queries
+- ✅ Graph-derived `ready` and `blocked` queries
+- ✅ Hash-based IDs (prefix + adaptive-length hash over content, timestamp, and nonce)
+- ✅ Single-source YAML configuration (`.rivets/config.yaml`)
+- ✅ Labels (add/remove, atomic), immutable Notes, Associated Resources (add/update/remove with typed roles), mutable Issue Kind
+- ✅ `stats`, `stale`, `info` commands
+- ✅ MCP server (`rivets-mcp`) with 21 tools and per-call `workspace_root` overrides / `set_context` default workspace
+- ✅ Auto-save after mutations with reload-on-save-failure recovery
 
-### Phase 3 (Production)
-- PostgreSQL backend
-- Recursive CTEs for queries
-- Migration tools
-- Multi-user support
+### Not Implemented
+
+- **PostgreSQL backend**: the config value and enum variant exist, but the factory returns `UnsupportedBackend`; there is no database code, connection pooling, or migration tooling
+- **Configuration layering / environment merging**: explicitly absent by design; `.rivets/config.yaml` is the single source
+- **RPC / network layer for the CLI**: none; commands call storage in-process. The MCP server is an external interface to the same storage, not an internal RPC layer
+- **TUI / web / server / distributed sync**: not built
 
 ## Technology Stack
 
 ### Core Dependencies
+
 - **async-trait** (0.1): Async trait support
-- **tokio** (1.x): Async runtime (current_thread flavor)
-- **petgraph** (0.6): Graph data structures and algorithms
-- **serde** (1.x): Serialization/deserialization
-- **serde_json** (1.x): JSON support
+- **tokio** (1.x): Async runtime (current_thread flavor; `rt`, `macros`, `io-util`, `fs`, `sync`)
+- **petgraph** (0.6): Dependency graph data structures and algorithms
+- **serde** (1.x) / **serde_json** (1.x): Serialization
+- **serde_yaml** (0.9): Configuration parsing
 - **clap** (4.x): CLI argument parsing
 - **sha2** (0.10): Hash generation for IDs
+- **chrono** (0.4): Timestamps
+- **thiserror** (2.0) / **anyhow** (1.0): Error handling
+- **futures** (0.3): Async streams
+- **tracing** (0.1) / **tracing-subscriber** (0.3): Logging
+- **colored**, **terminal_size**, **textwrap**: Terminal output
+- **schemars** (1.1): JSON Schema for MCP tool inputs
+- **url** (2.5): Resource target validation
 
 ### Development Dependencies
-- **criterion**: Benchmarking (1000 issues <10ms target)
+
+- **tokio-test** (0.4): Async runtime testing utilities (`rivets`, `rivets-mcp`)
 - **tempfile**: Test fixtures
-- **tokio-test**: Async testing utilities
+- **rstest**: Test fixtures and parametrized tests
 
-## Performance Targets
+### Workspace
 
-| Operation | Target | Implementation |
-|-----------|--------|----------------|
-| Create issue | <1ms | HashMap insert + graph node |
-| Cycle detection | <10ms (1000 issues) | petgraph path finding |
-| Ready work query | <10ms (1000 issues) | BFS traversal |
-| JSONL save | <100ms (1000 issues) | Async streaming write |
-| JSONL load | <200ms (1000 issues) | Async streaming read |
-| Storage overhead | 1000 issues <10ms | In-memory operations |
+- Rust 1.94.0, edition 2024 (workspace-wide)
+- `unsafe_code = "forbid"` workspace lint
+- No benchmark suite: there is no criterion dependency and no `benches/`; this document intentionally asserts no performance numbers
 
 ## Error Handling Strategy
 
 ### Graceful Degradation
-- **JSONL corruption**: Load unaffected Issues for reads, report skipped records, and block mutations and saves until repair
-- **Orphaned dependencies**: Skip edges to non-existent issues during import
-- **Circular dependencies**: Detect and skip cycles during JSONL load
+
+- **JSONL corruption**: load skips malformed or invalid records with line-numbered warnings; reads serve the unaffected Issues; mutations and saves are rejected with `UnsafePartialLoad` so the source file is preserved byte-for-byte until repaired
+- **Orphaned dependencies**: edges to non-existent issues are skipped during import with a warning
+- **Circular dependencies**: edges that would create a cycle are skipped during import with a warning
 
 ### Safe Operations
-- **Delete with dependents**: Fail with clear error listing dependent issues
-- **Cycle creation**: Pre-check before adding dependency
-- **Concurrent access**: Arc<Mutex<>> prevents data races
-- **Partial-load writes**: Reject before in-memory mutation and preserve the JSONL source byte-for-byte
+
+- **Delete with dependents**: fails with a clear error listing the dependent issues
+- **Cycle creation**: pre-checked before adding a dependency
+- **Concurrent access**: `Arc<Mutex<>>` prevents data races
+- **Failed saves**: storage `reload()`s from disk so in-memory state never drifts from the on-disk truth
 
 ## Thread Safety
 
 ```mermaid
 graph TD
-    CLI1[CLI Command 1] --> Lock[Arc&lt;Mutex&lt;Storage&gt;&gt;]
+    CLI1[CLI Command 1] --> Lock[Arc&lt;tokio::sync::Mutex&lt;Storage&gt;&gt;]
     CLI2[CLI Command 2] --> Lock
     Lock --> Inner[InMemoryStorageInner<br/>Single-threaded access]
 ```
 
-- **Pattern**: Arc<Mutex<InMemoryStorageInner>>
+- **Pattern**: `Arc<tokio::sync::Mutex<InMemoryStorageInner>>`
 - **Guarantee**: Only one operation at a time modifies storage
-- **Async**: tokio::sync::Mutex for async-compatible locking
-- **Rationale**: Simple, correct, sufficient for CLI use case
+- **Async**: `tokio::sync::Mutex` for async-compatible locking
+- **MCP server**: workspace context guarded by `tokio::sync::RwLock`
+- **Rationale**: Simple, correct, sufficient for the CLI and MCP use cases
 
 ## Design Decisions and Rationale
 
-### 1. Two-Crate Workspace Architecture
+### 1. Three-Crate Workspace Architecture
 
-**Decision**: Split into `rivets-jsonl` (library) and `rivets` (CLI application)
+**Decision**: Split into `rivets` (CLI + domain + storage), `rivets-jsonl` (generic JSONL library), and `rivets-mcp` (MCP server)
 
 **Rationale**:
 - **Reusability**: rivets-jsonl is a general-purpose library usable by other projects
@@ -297,69 +345,58 @@ graph TD
 **Alternative considered**: Monolithic crate
 **Why rejected**: Poor separation of concerns, library logic mixed with CLI code
 
-**Source**: Research from rivets-kr3
+### 2. Hash-Based IDs (SHA256 + adaptive base36, with timestamp/nonce)
 
-### 2. Hash-Based IDs (SHA256 + Base36)
-
-**Decision**: Generate IDs from content hash rather than sequential integers
+**Decision**: Generate IDs from a SHA256 hash of issue content plus a timestamp and nonce, base36-encoded, rather than sequential integers
 
 **Rationale**:
-- **Collision resistance**: Cryptographic hash ensures uniqueness
+- **Collision resistance**: Hash plus nonce retry (up to 100 nonces, then longer hashes) prevents collisions without a central authority
 - **Distributed generation**: No central ID authority needed (future distributed sync)
-- **Content-addressable**: Same content = same ID (deduplication)
 - **Compact representation**: Base36 encoding keeps IDs short (4-6 chars)
 - **No database auto-increment**: Works with JSONL and any storage backend
 
+**Not content-addressed**: The timestamp and nonce are hashed inputs, so identical content does not reproduce an identical ID. This is deliberate: it avoids collisions when two issues legitimately share content.
+
 **Alternative considered**: UUID
-**Why rejected**: Too verbose (36 chars), not content-addressable
+**Why rejected**: Too verbose (36 chars)
 
 **Alternative considered**: Sequential integers
 **Why rejected**: Requires central authority, merge conflicts in distributed scenarios
 
-### 3. In-Memory Storage with JSONL Persistence (Phase 1)
+### 3. JSONL Persistence as the Default Backend
 
-**Decision**: Use HashMap + petgraph in memory, persist to JSONL files
+**Decision**: JSONL files are the default persistence; the in-memory HashMap + petgraph structure is the runtime representation behind a guarded persistence wrapper
 
 **Rationale**:
 - **Simplicity**: No database setup required
-- **Performance**: All operations are in-memory fast
 - **Portability**: JSONL files work everywhere, no DB dependencies
 - **Resilience**: Load unaffected Issues for reads; block writes after skipped records
 - **Git-friendly**: JSONL can be diffed and merged
-- **Low overhead**: <3MB memory for 1000 issues
+- **Atomicity**: Temp-file + rename writes prevent corruption
 
 **Alternative considered**: PostgreSQL from day 1
-**Why rejected**: Overkill for MVP, adds complexity and deployment requirements
-
-**Trade-off**: Single-user only (Phase 1), but sufficient for CLI use case
+**Why rejected**: Not implemented; the placeholder exists only to keep the config surface honest. PostgreSQL is future work
 
 ### 4. Async-First Design with Tokio
 
-**Decision**: All I/O operations use async/await with tokio runtime
+**Decision**: All I/O operations use async/await with a current-thread tokio runtime
 
 **Rationale**:
-- **Future-proof**: Enables network operations, concurrent queries (Phase 3)
-- **Non-blocking I/O**: JSONL saves don't block CLI responsiveness
-- **Ecosystem alignment**: Tokio is Rust standard for async
+- **Future-proof**: Enables network operations, concurrent queries
+- **Ecosystem alignment**: Tokio is the Rust standard for async
 - **Minimal overhead**: `current_thread` flavor for simple CLI has minimal runtime cost
 
 **Alternative considered**: Synchronous I/O
 **Why rejected**: Hard to add async later, blocks future extensibility
 
-**Trade-off**: Slight complexity increase, but Rust async is now mature
-
 ### 5. Trait-Based Storage Abstraction
 
-**Decision**: Define `IssueStorage` trait with async methods
+**Decision**: Define an object-safe `IssueStorage` trait with async methods, instantiated through `create_storage`
 
 **Rationale**:
-- **Backend agnostic**: CLI code doesn't know if using memory or PostgreSQL
-- **Testing**: Easy to mock storage in tests
-- **Progressive enhancement**: Add PostgreSQL (Phase 3) without changing CLI
-- **Dependency injection**: Factory pattern selects backend via config
-
-**Alternative considered**: Direct coupling to InMemoryStorage
-**Why rejected**: Hard-coded to one backend, can't evolve
+- **Backend agnostic**: CLI code doesn't know which backend it uses
+- **Testing**: Easy to mock storage in tests (`MockStorage` behind the `test-util` feature)
+- **Progressive enhancement**: A real PostgreSQL backend could be added without changing CLI code
 
 ### 6. Dependency Graph with petgraph
 
@@ -367,36 +404,26 @@ graph TD
 
 **Rationale**:
 - **Battle-tested**: Mature library with proven algorithms
-- **Correct cycle detection**: `has_path_connecting` is O(V+E) DFS
-- **Rich API**: Ready for complex queries (transitive closure, shortest path)
-- **Memory efficient**: Adjacency list representation
+- **Correct cycle detection**: `has_path_connecting`
+- **Rich API**: Transitive traversal, dependency trees
 - **Type-safe**: Compile-time checked graph operations
-
-**Alternative considered**: Manual adjacency lists
-**Why rejected**: Reinventing the wheel, error-prone cycle detection
-
-**Alternative considered**: SQL WITH RECURSIVE (Phase 3)
-**Why**: Will use for PostgreSQL backend, but petgraph sufficient for MVP
 
 ### 7. Four Dependency Types
 
 **Decision**: Support `blocks`, `related`, `parent-child`, `discovered-from`
 
 **Rationale**:
-- **blocks**: Essential for "ready work" algorithm (hard blocker)
+- **blocks**: Essential for the graph-derived "ready work" algorithm
 - **related**: Informational links (soft, doesn't block)
-- **parent-child**: Hierarchical organization (epics → tasks)
+- **parent-child**: Hierarchical organization (epics → tasks); children of blocked parents are blocked transitively
 - **discovered-from**: Captures work discovery process
 
 **Alternative considered**: Only "blocks"
 **Why rejected**: Insufficient expressiveness for real-world workflows
 
-**Alternative considered**: Arbitrary labels (tags)
-**Why rejected**: Too flexible, can't enforce "ready work" semantics
+### 8. Resilient Three-Stage JSONL Loading
 
-### 8. Resilient JSONL Loading
-
-**Decision**: Continue loading unaffected Issues for reads, collect warnings, and reject writes when any Issue record was omitted
+**Decision**: Parse compatibility records resiliently (stage 1), import Issues (stage 2), rebuild relationships (stage 3). Continue loading unaffected Issues for reads, collect warnings, and reject writes when any Issue record was omitted
 
 **Rationale**:
 - **Graceful degradation**: One bad line does not prevent inspection of unaffected Issues
@@ -409,7 +436,7 @@ graph TD
 
 ### 9. Auto-Save After Mutations
 
-**Decision**: Automatically persist to JSONL after create/update/delete
+**Decision**: Automatically persist to JSONL after every mutating CLI command. Batch `update`/`close`/`reopen` and label mutations reload from disk after a failed save; other CLI mutation paths return the save error without reloading.
 
 **Rationale**:
 - **Data safety**: No manual save command needed
@@ -417,11 +444,10 @@ graph TD
 - **Crash resistance**: Latest state always on disk
 - **Atomic writes**: Temp file + rename prevents corruption
 - **Partial-load guard**: Auto-save is disabled when resilient loading omitted an Issue record
+- **Consistency**: The reload-enabled batch and label paths restore on-disk state after a save failure. Other CLI paths terminate with the save error; a library caller that keeps the storage alive must call `reload()` before reuse.
 
 **Alternative considered**: Manual save command
 **Why rejected**: Easy to forget, data loss risk
-
-**Trade-off**: More disk I/O, but acceptable for CLI workload (<100ms for 1000 issues)
 
 ### 10. Current-Thread Tokio Flavor
 
@@ -436,83 +462,60 @@ graph TD
 **Alternative considered**: Multi-threaded runtime
 **Why rejected**: Unnecessary overhead for sequential CLI operations
 
-### 11. No RPC Protocol (Current Architecture)
+### 11. Single Configuration Source
 
-**Decision**: Direct in-process function calls, no network/RPC layer
+**Decision**: `.rivets/config.yaml` is the only configuration input; there is no hierarchical merging (defaults → project → user → env → CLI) and no configuration environment variables
 
 **Rationale**:
-- **Phase 1 scope**: Single-user CLI doesn't need RPC
+- **Predictability**: One file fully describes a repository's configuration
+- **Repository-scoped**: Configuration travels with the project, like the issues themselves
+- **Simplicity**: No precedence rules to reason about
+
+### 12. No RPC Protocol (Current Architecture)
+
+**Decision**: Direct in-process function calls between CLI and storage; no network/RPC layer
+
+**Rationale**:
+- **Scope**: Single-user CLI doesn't need RPC
 - **Simplicity**: Avoid network serialization, error handling, versioning
-- **Performance**: In-process calls are orders of magnitude faster
 - **YAGNI**: Don't build what isn't needed yet
 
-**Future consideration**: Phase 3+ may add RPC for:
-- Multi-user server mode
-- Remote storage backends
-- Web UI / TUI communication
+**Current data flow**: CLI → Commands → App → Storage Trait → JSONL-backed storage
+**NOT**: CLI → RPC → Storage (this doesn't exist)
 
-**Current data flow**: CLI → Commands → App → Storage Trait → InMemoryStorage → JSONL
-**NOT**: CLI → RPC → Storage (this doesn't exist yet)
+Note: the `rivets-mcp` server exposes the same domain to MCP clients out-of-process; it is an external interface, not an internal storage protocol.
 
 ## Future Extensibility
 
-### Phase 2: Configuration & Backend Selection
+All items in this section are **future work**, explicitly not implemented today.
 
-**Planned features**:
-- YAML configuration system (`.rivets/config.yaml`)
-- Environment variable overrides (`RIVETS_PREFIX`, `RIVETS_BACKEND`)
-- Backend factory pattern (select memory vs postgres via config)
-- User-level config (`~/.config/rivets/config.yaml`)
-- Hierarchical config merging (defaults → project → user → env → CLI)
+### PostgreSQL Backend
 
-**Extensibility points**:
-- New storage backends: Implement `IssueStorage` trait
-- Custom output formats: JSON, YAML, table, CSV
-- Plugin system: Load custom commands at runtime
-
-### Phase 3: Production Multi-User
-
-**PostgreSQL backend**:
+- Real implementation replacing the current `UnsupportedBackend` placeholder
 - Recursive CTEs for complex graph queries
 - Connection pooling (sqlx)
 - True async I/O (non-blocking database access)
 - Multi-user concurrency with transactions
-- Optimistic locking or row-level locks
+- Import/export between JSONL and PostgreSQL
 
-**Migration system**:
-- Import from JSONL to PostgreSQL
-- Export from PostgreSQL to JSONL (backup, portability)
-- Schema versioning and automatic migrations
+### Advanced Features
 
-**Performance targets**:
-- 1M issues in database
-- <100ms for ready work query (indexed)
-- Concurrent user support (10-100 users)
-
-### Phase 4+: Advanced Features
-
-**Potential enhancements**:
+Potential enhancements:
 - **rivets-tui**: Terminal UI with interactive workflows
 - **rivets-server**: HTTP API for web/mobile clients
-- **rivets-web**: Browser-based UI (WASM or server-side)
+- **rivets-web**: Browser-based UI
 - **rivets-sync**: Distributed sync protocol (CRDT-based)
 - **Git integration**: Auto-commit on issue changes
 - **Webhook system**: Notify external services on issue events
 - **Query language**: SQL-like DSL for complex filters
 - **Scripting**: Lua/Rhai for custom automations
 
-**Extensibility by design**:
-- Workspace structure supports multiple crates
-- Storage trait enables backend experimentation
-- Async foundation enables network operations
-- JSONL format is human-readable and git-friendly
-- Hash IDs support distributed generation
-
 ### Crate Ecosystem Growth
 
 ```mermaid
 graph TB
-    JSONL[rivets-jsonl<br/>Library] --> CLI[rivets<br/>CLI]
+    JSONL[rivets-jsonl<br/>Library] --> CLI[rivets<br/>CLI application]
+    JSONL --> MCP[rivets-mcp<br/>MCP server]
     JSONL --> TUI[rivets-tui<br/>Terminal UI]
     JSONL --> Server[rivets-server<br/>HTTP API]
 
@@ -524,7 +527,8 @@ graph TB
     Server --> Mobile[rivets-mobile<br/>Mobile App]
 
     style JSONL fill:#90EE90
-    style CLI fill:#ADD8E6
+    style CLI fill:#90EE90
+    style MCP fill:#90EE90
     style TUI fill:#FFE4B5
     style Server fill:#FFE4B5
     style Sync fill:#FFE4B5
@@ -532,9 +536,10 @@ graph TB
     style Mobile fill:#FFB6C1
 ```
 
+Green nodes exist today; dashed-outline nodes are future work.
+
 **Design principles for extensibility**:
 1. **Core library first**: rivets-jsonl is reusable by all other crates
 2. **Clear separation**: Each crate has single responsibility
 3. **Trait-based abstractions**: Easy to add implementations
-4. **Config-driven behavior**: Change behavior without code changes
-5. **Backward compatibility**: Maintain JSONL format stability
+4. **Backward compatibility**: Maintain JSONL format stability

@@ -2,325 +2,61 @@
 
 ## Overview
 
-Rivets is a high-performance, Rust-based issue tracking system using in-memory storage with JSONL persistence for the MVP, designed to scale to PostgreSQL for production multi-user scenarios.
+Rivets is a Rust issue tracker (edition 2024, MSRV 1.94.0) that stores Issues as Git-friendly JSONL. The Cargo workspace has three crates:
 
-## Architecture Documents
+- `rivets` — CLI application and core issue-tracking domain
+- `rivets-jsonl` — JSONL reading/writing library
+- `rivets-mcp` — MCP server for AI assistants (21 tools)
 
-### 🏗️ [Architecture Overview](./architecture.md)
-**Start here for system-level understanding**
+The CLI exposes 16 top-level commands: `init`, `info`, `create`, `list`, `show`, `update`, `close`, `reopen`, `delete`, `ready`, `dep`, `label`, `resource`, `stale`, `blocked`, and `stats`.
 
-Complete system architecture including:
-- Component diagram with all layers (CLI, App, Storage, Domain)
-- Technology stack and dependencies
-- Phase roadmap (MVP → Configuration → Production)
-- Performance targets and benchmarks
-- Error handling strategy
-- Thread safety model
+**Current behavior:**
 
-**Key Highlights**:
-- Async-first architecture with tokio current-thread runtime
-- Storage abstraction via async-trait
-- In-memory + petgraph for MVP, PostgreSQL for Phase 3
-- Auto-save after every mutating command
+- `.rivets/config.yaml` is the single configuration source; there is no config layering or environment merge.
+- JSONL is the default persisted backend. PostgreSQL is a placeholder that returns "unsupported".
+- JSONL loading has three stages: parse compatibility records, import Issues, then rebuild relationships.
+- Issue IDs combine a prefix with an adaptive hash whose inputs include a timestamp and nonce; they are not content-addressed.
+- `dep add <dependent> <prerequisite> --type blocks` creates a dependency. Dependency changes never auto-mutate Issue status. The CLI still exposes a legacy `blocked` status while readiness and blocked queries are graph-derived.
+- Implemented surfaces include Associated Resources, immutable Notes, mutable Issue Kind, labels, dependency queries, `stats`/`stale`/`info`, and MCP multi-workspace support. Most MCP issue operations accept an optional `workspace_root`; otherwise they use the context selected by `set_context`.
 
-### 💾 [Storage Architecture](./storage-architecture.md)
-**Deep dive into storage layer**
+This index separates **current reference documentation** (describes the implemented system) from **accepted decisions** (ADRs, some of which the implementation intentionally lags) and **historical artifacts** (pre-implementation plans and research, not the work frontier).
 
-Detailed storage design including:
-- Storage trait hierarchy and method signatures
-- InMemoryStorage internal structure (HashMap + DiGraph + node_map)
-- JSONL persistence with error recovery
-- Cycle detection algorithm
-- Ready work algorithm with BFS blocking propagation
-- Delete operation with referential integrity
-- Performance characteristics and memory layout
+## Current Reference Documentation
 
-**Key Highlights**:
-- Arc<Mutex<InMemoryStorageInner>> for thread safety
-- Two-pass JSONL loading (issues → dependencies)
-- Graceful read recovery; writes stop when Issue records were skipped, while invalid dependency edges remain warnings
-- O(V+E) cycle detection via petgraph
+- [Architecture Overview](./architecture.md) — system architecture: CLI/App/Storage/Domain layers, storage backends, dependency handling, and readiness computation.
+- [Module Structure](./module-structure.md) — workspace organization, per-crate module breakdown, public API surfaces, and testing structure.
+- [Storage Architecture](./storage-architecture.md) — storage trait hierarchy, in-memory representation, JSONL persistence and error recovery, cycle detection, and readiness queries.
+- [Data Flow](./data-flow.md) — end-to-end flows: command lifecycle, init, CRUD, dependency add, JSONL load, and state transitions.
+- [Terminology Reference](./terminology.md) — implementation vocabulary for storage layers, data structures, and operations.
+- [CONTEXT.md](../CONTEXT.md) — canonical domain glossary (Workspace, Issue, Workflow State, Ready, Blocked, Issue Relationships, Associated Resources). Authoritative for domain meaning; ADRs record why load-bearing decisions were made.
+- [AGENTS.md](../AGENTS.md) — current engineering and navigation rules for AI assistants working in the repo.
+- [README.md](../README.md) — user-facing overview of the CLI.
+- [CHANGELOG.md](../CHANGELOG.md) — release history.
 
-### 📦 [Module Structure](./module-structure.md)
-**Code organization and dependencies**
+## Accepted Decisions (ADRs)
 
-Module-by-module breakdown:
-- Workspace organization (rivets-jsonl library + rivets CLI)
-- Dependency graph between modules
-- Public API surfaces
-- File structure and naming conventions
-- Testing structure and examples
+- [ADR-0001: Notes as Chronological Log](./adr/0001-multiple-notes.md) — immutable, append-only Notes replace the legacy singular Note string.
+- [ADR-0002: Separate workflow, readiness, and issue relationships](./adr/0002-issue-relationships-and-readiness.md) — Workflow State is Open, In Progress, or Closed; Blocked is derived only from explicit Blocking Dependencies; Ready means Open and unblocked. Parentage does not affect readiness; Related Association is symmetric; Discovery Origin is directed provenance.
+- [ADR-0003: Model related material as Associated Resources](./adr/0003-associated-resources.md) — typed resources with explicit targets (Web URL or Workspace Path) and standard roles replace the singular untyped External Reference.
+- [ADR-0004: One wire vocabulary for Issue records](./adr/0004-one-wire-vocabulary.md) — MCP tool responses and CLI `--json` serialize the domain `Issue` directly; timestamps normalize to RFC-3339 `Z` form.
+- [ADR-0005: The domain owns status-transition rules](./adr/0005-domain-owned-status-transitions.md) — close/reopen rules live in the domain and fire at the single update site; "status" is the code-and-wire name for Workflow State.
 
-**Key Highlights**:
-- Standalone rivets-jsonl library (reusable)
-- Domain layer at core (no external dependencies)
-- Commands use storage trait (not concrete types)
-- No circular dependencies (DAG structure)
+**Implementation lags some accepted decisions.** The current code still exposes the legacy generic dependency model (`DependencyType`, the `dep` commands, parent-blocking graph behavior) and a legacy `blocked` status vocabulary, while readiness and blocked queries are graph-derived. Dependency changes do not automatically mutate Issue status. Issue Kind is mutable (Bug, Feature, Task, Epic, Chore); "Issue type" is legacy vocabulary. Legacy singular Notes and External References are accepted only by the JSONL compatibility loader. These legacy details are governed by ADR-0002/ADR-0003; do not document them as canonical.
 
-### 🔄 [Data Flow](./data-flow.md)
-**How data moves through the system**
+## Agent Documentation
 
-End-to-end flows including:
-- Complete command lifecycle (user → CLI → storage → JSONL)
-- Initialization flow (rivets init)
-- Create, list, query, delete flows
-- Dependency add with cycle detection
-- Ready work algorithm execution
-- JSONL load with error recovery
-- Configuration loading and merging
-- State transitions diagram
+- [Domain Docs](./agents/domain.md) — how engineering skills should consume this repo's domain documentation.
+- [Issue Tracker: Rivets](./agents/issue-tracker.md) — the checked-in `.rivets/issues.jsonl` is the source of truth; use the Rivets MCP tools or the CLI, never hand-edit the store.
+- [Triage Labels](./agents/triage-labels.md) — mapping of canonical triage roles to actual label strings.
 
-**Key Highlights**:
-- Async all the way down (tokio runtime)
-- Auto-save triggers after mutations
-- Atomic JSONL writes (temp file + rename)
-- Multi-layer config precedence (CLI → env → YAML → defaults)
+## Historical Artifacts (not the work frontier)
 
-### 🗺️ [Task Dependency Graph](./task-dependency-graph.md)
-**Implementation roadmap and task order**
+These documents describe pre-implementation plans, proposals, and research from before the current system was built. They are kept for context only; do not treat them as descriptions of the current system or as a source of tasks.
 
-Implementation planning:
-- Critical path for MVP completion
-- Task dependency visualization
-- 4-week iteration plan
-- Parallel work opportunities
-- Risk mitigation strategies
-- Success metrics and checkpoints
+- [Task Dependency Graph](./task-dependency-graph.md) — historical implementation roadmap for the original MVP: task ordering and planning decisions that predate the implemented system. Superseded and no longer maintained; the live tracker is authoritative.
+- [plans/](./plans/2026-04-06-tethys-overview-command.md) — dated implementation plans and archives from prior work efforts (see also the plans directory).
+- [design/](./design/rest-api.md) — design proposals and roadmaps (rest API, event sourcing, daemon architecture, automerge, implementation roadmap, rivets roadmap). Accepted decisions now live in the [ADR files](./adr/0001-multiple-notes.md) listed above.
+- [research/](./research/automerge-research.md) — research notes (automerge, jsonl-to-sqlite).
+- [rivets-jsonl-research.md](./rivets-jsonl-research.md) — early JSONL library research that predates the current `rivets-jsonl` crate.
 
-**Key Highlights**:
-- 14 P1 tasks for MVP completion
-- 4 tasks clarified with architectural decisions
-- Week-by-week breakdown
-- Parallel tracks for efficient development
-
-### 📖 [Terminology Reference](./terminology.md)
-**Consistent language across project**
-
-Standard terminology for:
-- Storage layers (in-memory, JSONL, PostgreSQL)
-- Data structures (Issue, Dependency, IssueId, IssueFilter)
-- Operations (CRUD, ready work, blocked issues, cycle detection)
-- Dependency types (blocks, related, parent-child, discovered-from)
-- Development phases
-
-## Quick Start for Developers
-
-### Understanding the System
-
-1. **New to the project?** Start with [Architecture Overview](./architecture.md)
-2. **Working on storage?** Read [Storage Architecture](./storage-architecture.md)
-3. **Adding a command?** Check [Module Structure](./module-structure.md) → commands/
-4. **Debugging a flow?** Reference [Data Flow](./data-flow.md)
-5. **Planning work?** See [Task Dependency Graph](./task-dependency-graph.md)
-
-### Key Architectural Decisions (Already Made)
-
-#### ✅ Async Architecture
-- **Decision**: Use async-trait for storage, tokio current-thread runtime
-- **Rationale**: Future-proof for PostgreSQL, simpler for CLI
-- **Tasks**: rivets-0gc, rivets-bz5, rivets-l66, rivets-cgl
-
-#### ✅ Thread Safety
-- **Decision**: Arc<Mutex<InMemoryStorageInner>>
-- **Rationale**: Simple, correct, sufficient for CLI use case
-- **Tasks**: rivets-0gc, rivets-bz5
-
-#### ✅ Persistence Strategy
-- **Decision**: Auto-save after every mutating command
-- **Rationale**: Resilient to crashes, simple to reason about
-- **Tasks**: rivets-cgl, rivets-l66
-
-#### ✅ Error Recovery
-- **Decision**: Recover readable JSONL data without allowing partial state to overwrite its source
-- **Rationale**: Partial read access is better than total failure; write refusal prevents recovered subsets from becoming destructive rewrites
-- **Tasks**: rivets-l66, rivets-0gc, rivets-u7ba
-- **Behavior**:
-  - Load unaffected Issues and report malformed or schema-incompatible records
-  - Reject mutations and saves when any Issue record was omitted
-  - Leave the JSONL file byte-for-byte unchanged on refusal
-  - Skip orphaned or circular dependency edges with warnings
-  - Return `(Storage, Vec<Warning>)` for user awareness
-
-#### ✅ Referential Integrity
-- **Decision**: Safe deletion with dependent check
-- **Rationale**: Prevent orphaned references, clear errors
-- **Tasks**: rivets-0gc
-- **Behavior**:
-  - Check for dependents before delete
-  - Fail with list of dependent issues if found
-  - Auto-remove outgoing dependencies on successful delete
-
-## Implementation Status
-
-### ✅ Completed (1)
-- **rivets-p7v**: CLI skeleton with basic command structure
-
-### ✓ Clarified (4)
-Architecture defined, ready for implementation:
-- **rivets-0gc**: Storage trait abstraction (5 clarifications)
-- **rivets-bz5**: InMemoryStorage implementation (2 clarifications)
-- **rivets-l66**: JSONL persistence (3 clarifications)
-- **rivets-cgl**: CLI integration with storage (3 clarifications)
-
-### ⏳ Ready to Implement (10)
-Clear specifications, no blockers:
-- **rivets-fk9**: JSONL library research
-- **rivets-zp3**: JSONL library skeleton
-- **rivets-06w**: Core domain types
-- **rivets-x1e**: Hash-based ID generation
-- **rivets-6op**: Dependency system
-- **rivets-qeb**: Ready work algorithm
-- **rivets-ceg**: CLI argument parsing
-- **rivets-bsp**: Core CLI commands
-- **rivets-4l2**: Init command
-- **rivets-yis**: Storage backend selection
-
-## Critical Paths
-
-### Shortest Path to Working MVP
-```
-rivets-fk9 → rivets-zp3 → rivets-06w → rivets-x1e
-    ↓
-rivets-0gc → rivets-bz5 → rivets-l66
-    ↓
-rivets-cgl → rivets-ceg → rivets-bsp
-```
-
-**Estimated**: 2-3 weeks for end-to-end create/list/show
-
-### Complete MVP (All P1 Tasks)
-```
-Foundation (Week 1)
-    rivets-fk9, rivets-zp3, rivets-06w, rivets-x1e
-
-Storage Layer (Week 2)
-    rivets-0gc, rivets-bz5, rivets-6op, rivets-qeb, rivets-l66
-
-CLI Integration (Week 3)
-    rivets-ceg, rivets-cgl, rivets-bsp, rivets-4l2
-
-Configuration (Week 4)
-    rivets-yis
-```
-
-**Estimated**: 4 weeks for full MVP with all features
-
-## Key Design Patterns
-
-### Storage Trait Pattern
-```rust
-#[async_trait]
-pub trait IssueStorage: Send + Sync {
-    async fn create(&mut self, issue: NewIssue) -> Result<Issue>;
-    async fn save(&self) -> Result<()>;
-    // ... other methods
-}
-
-// Usage (commands never know concrete type)
-pub async fn execute(args: &Args, app: &mut App) -> Result<()> {
-    let issue = app.storage().create(new_issue).await?;
-    app.storage().save().await?;
-    Ok(())
-}
-```
-
-### Builder Pattern (Filters)
-```rust
-let filter = IssueFilter::builder()
-    .status(vec![Status::Open, Status::InProgress])
-    .priority_range(0, 2)?
-    .labels_all(vec!["bug", "urgent"])
-    .limit(10)
-    .build();
-```
-
-### Error Recovery Pattern (JSONL)
-```rust
-pub async fn load_from_jsonl(path: &Path)
-    -> Result<(Self, Vec<LoadWarning>)>
-{
-    // Two-pass: issues first, then dependencies
-    // Skip invalid lines, collect warnings
-    // Return both storage and warnings
-}
-```
-
-### Atomic Write Pattern (Persistence)
-```rust
-let temp = path.with_extension("tmp");
-write_to(&temp).await?;
-tokio::fs::rename(&temp, path).await?;  // Atomic on POSIX
-```
-
-## Performance Targets
-
-| Operation | Target | Implementation |
-|-----------|--------|----------------|
-| Create issue | <1ms | HashMap insert + graph node |
-| Cycle detection | <10ms (1000 issues) | petgraph path finding |
-| Ready work | <10ms (1000 issues) | BFS traversal |
-| JSONL save | <100ms (1000 issues) | Async streaming write |
-| JSONL load | <200ms (1000 issues) | Async streaming read |
-
-## Testing Strategy
-
-### Unit Tests
-- All domain types with serde round-trip
-- ID generation with collision handling
-- Cycle detection with complex graphs
-- Filter builder with all combinations
-- JSONL corruption recovery
-
-### Integration Tests
-- End-to-end command workflows
-- Multi-issue dependency scenarios
-- JSONL save/load round-trips
-- Configuration merging
-- Error handling paths
-
-### Benchmarks (criterion)
-- Storage operations at scale (100, 1000, 10000 issues)
-- Graph algorithms (cycle detection, ready work)
-- JSONL I/O throughput
-- Memory usage tracking
-
-## Common Questions
-
-### Q: Why async for a CLI application?
-**A**: Future-proofs for PostgreSQL (requires async I/O), enables non-blocking file operations for large JSONL files, and allows concurrent operations if needed later. The current-thread runtime keeps complexity low for MVP.
-
-### Q: Why Arc<Mutex<>> instead of message passing?
-**A**: Simpler mental model for CLI use case, easier to debug, sufficient performance (no contention in single-threaded runtime), and standard Rust pattern for shared mutable state.
-
-### Q: Why auto-save after every command?
-**A**: On a complete load, auto-save maximizes durability, keeps the model simple, and makes successful command completion mean persisted state. If resilient loading omitted an Issue record, mutations and auto-save are rejected until the JSONL source is repaired and reloaded.
-
-### Q: Why petgraph instead of custom graph?
-**A**: Battle-tested algorithms (cycle detection, traversal), well-documented API, good performance characteristics, and maintained by community. Trade-off: extra dependency vs. correctness guarantee.
-
-### Q: Why two-pass JSONL loading?
-**A**: Prevents orphaned dependencies (all issues must exist before adding edges), enables cycle detection (full graph needed), and allows graceful recovery (skip invalid edges, continue loading).
-
-## Next Steps
-
-1. **For implementers**: Pick a task from "Ready to Implement", read relevant architecture docs, follow TDD approach
-2. **For reviewers**: Check code against architecture decisions in this documentation
-3. **For planners**: Update task-dependency-graph.md with actuals vs. estimates
-
-## Documentation Maintenance
-
-When making architectural changes:
-- [ ] Update affected diagrams in architecture.md
-- [ ] Update module structure if modules added/renamed
-- [ ] Update data flow if new flows introduced
-- [ ] Add decision to this README
-- [ ] Update terminology.md if new terms introduced
-- [ ] Keep task-dependency-graph.md in sync with beads
-
-## Related Resources
-
-- [Rust Book](https://doc.rust-lang.org/book/) - Rust fundamentals
-- [async-trait docs](https://docs.rs/async-trait/) - Async trait patterns
-- [petgraph docs](https://docs.rs/petgraph/) - Graph algorithms
-- [tokio docs](https://docs.rs/tokio/) - Async runtime
-- [clap docs](https://docs.rs/clap/) - CLI parsing
+The current work frontier is the repo's live issue tracker (`.rivets/issues.jsonl`), not these documents — see [Agent Documentation](#agent-documentation) and [AGENTS.md](../AGENTS.md).
