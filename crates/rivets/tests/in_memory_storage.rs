@@ -5,14 +5,15 @@
 //! semantics, and sort policies.
 
 use rivets::domain::{
-    DependencyType, IssueFilter, IssueId, IssueKind, IssueStatus, IssueUpdate, MAX_PRIORITY,
-    NewIssue, NewResource, NoteContent, ResourceId, ResourceLabel, ResourceRole, ResourceTarget,
-    ResourceUpdate, SortPolicy, WebUrl, WorkspacePath,
+    BlockingDependency, DependencyType, IssueFilter, IssueId, IssueKind, IssueStatus, IssueUpdate,
+    MAX_PRIORITY, NewIssue, NewResource, NoteContent, ResourceId, ResourceLabel, ResourceRole,
+    ResourceTarget, ResourceUpdate, SortPolicy, WebUrl, WorkspacePath,
 };
 use rivets::error::Error;
 use rivets::storage::IssueStorage;
 use rivets::storage::in_memory::{load_from_jsonl, new_in_memory_storage, save_to_jsonl};
 use rstest::rstest;
+use std::collections::HashSet;
 use tempfile::tempdir;
 
 fn create_test_issue(title: &str) -> NewIssue {
@@ -43,6 +44,23 @@ fn create_test_issue_with_priority(title: &str, priority: u8) -> NewIssue {
         initial_note: None,
         dependencies: vec![],
     }
+}
+fn literal_path_exists<'a>(edges: &[(&'a str, &'a str)], start: &'a str, target: &'a str) -> bool {
+    let mut stack = vec![start];
+    let mut visited = HashSet::new();
+    while let Some(node) = stack.pop() {
+        if node == target {
+            return true;
+        }
+        if visited.insert(node) {
+            stack.extend(
+                edges
+                    .iter()
+                    .filter_map(|(from, to)| (*from == node).then_some(*to)),
+            );
+        }
+    }
+    false
 }
 
 // ========== Basic CRUD Tests ==========
@@ -181,6 +199,271 @@ async fn test_delete_with_dependents() {
 }
 
 // ========== Dependency Tests ==========
+#[tokio::test]
+async fn blocking_dependency_coexists_with_legacy_kind() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let prerequisite = storage
+        .create(create_test_issue("Prerequisite"))
+        .await
+        .unwrap();
+    let dependent = storage
+        .create(create_test_issue("Dependent"))
+        .await
+        .unwrap();
+    storage
+        .add_dependency(&dependent.id, &prerequisite.id, DependencyType::Related)
+        .await
+        .unwrap();
+    let blocking = BlockingDependency::new(dependent.id.clone(), prerequisite.id.clone()).unwrap();
+
+    storage
+        .add_blocking_dependency(blocking.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.blocking_prerequisites(&dependent.id).await.unwrap(),
+        vec![blocking.clone()]
+    );
+    assert_eq!(
+        storage.blocking_dependents(&prerequisite.id).await.unwrap(),
+        vec![blocking.clone()]
+    );
+    assert_eq!(
+        storage.get_dependencies(&dependent.id).await.unwrap().len(),
+        2
+    );
+
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("issues.jsonl");
+    save_to_jsonl(storage.as_ref(), &path).await.unwrap();
+    let (mut reloaded, warnings) = load_from_jsonl(&path, "test".to_string()).await.unwrap();
+    assert!(warnings.is_empty());
+    assert_eq!(
+        reloaded
+            .blocking_prerequisites(&dependent.id)
+            .await
+            .unwrap(),
+        vec![blocking.clone()]
+    );
+
+    reloaded
+        .remove_blocking_dependency(&blocking)
+        .await
+        .unwrap();
+    let remaining = reloaded.get_dependencies(&dependent.id).await.unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].dep_type, DependencyType::Related);
+    assert_eq!(remaining[0].depends_on_id, prerequisite.id);
+}
+
+#[tokio::test]
+async fn blocking_dependency_duplicate_missing_and_absent_errors_do_not_mutate() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let prerequisite = storage
+        .create(create_test_issue("Prerequisite"))
+        .await
+        .unwrap();
+    let dependent = storage
+        .create(create_test_issue("Dependent"))
+        .await
+        .unwrap();
+    let blocking = BlockingDependency::new(dependent.id.clone(), prerequisite.id.clone()).unwrap();
+    storage
+        .add_blocking_dependency(blocking.clone())
+        .await
+        .unwrap();
+
+    assert!(
+        storage
+            .add_blocking_dependency(blocking.clone())
+            .await
+            .is_err()
+    );
+    let missing = BlockingDependency::new(
+        dependent.id.clone(),
+        IssueId::new("test-missing-prerequisite"),
+    )
+    .unwrap();
+    assert!(storage.add_blocking_dependency(missing).await.is_err());
+    assert_eq!(
+        storage.blocking_prerequisites(&dependent.id).await.unwrap(),
+        vec![blocking.clone()]
+    );
+
+    storage.remove_blocking_dependency(&blocking).await.unwrap();
+    assert!(storage.remove_blocking_dependency(&blocking).await.is_err());
+    assert!(
+        storage
+            .blocking_prerequisites(&dependent.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn blocking_cycles_ignore_other_relationship_kinds() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let issue_a = storage.create(create_test_issue("A")).await.unwrap();
+    let issue_b = storage.create(create_test_issue("B")).await.unwrap();
+    let issue_c = storage.create(create_test_issue("C")).await.unwrap();
+
+    storage
+        .add_dependency(&issue_b.id, &issue_a.id, DependencyType::Related)
+        .await
+        .unwrap();
+    storage
+        .add_blocking_dependency(
+            BlockingDependency::new(issue_a.id.clone(), issue_b.id.clone()).unwrap(),
+        )
+        .await
+        .expect("a non-blocking reverse path must not create a Blocking cycle");
+    storage
+        .add_blocking_dependency(
+            BlockingDependency::new(issue_b.id.clone(), issue_c.id.clone()).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let cycle = BlockingDependency::new(issue_c.id.clone(), issue_a.id.clone()).unwrap();
+    assert!(
+        literal_path_exists(
+            &[
+                (issue_a.id.as_str(), issue_b.id.as_str()),
+                (issue_b.id.as_str(), issue_c.id.as_str()),
+            ],
+            issue_a.id.as_str(),
+            issue_c.id.as_str(),
+        ),
+        "the independent Blocking-only oracle should identify the cycle-closing path"
+    );
+
+    assert!(storage.add_blocking_dependency(cycle).await.is_err());
+    assert!(
+        storage
+            .blocking_prerequisites(&issue_c.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn blocking_tree_preserves_direction_and_depth() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let issue_a = storage.create(create_test_issue("A")).await.unwrap();
+    let issue_b = storage.create(create_test_issue("B")).await.unwrap();
+    let issue_c = storage.create(create_test_issue("C")).await.unwrap();
+    let issue_d = storage.create(create_test_issue("D")).await.unwrap();
+    let issue_e = storage.create(create_test_issue("E")).await.unwrap();
+
+    for dependency in [
+        BlockingDependency::new(issue_a.id.clone(), issue_c.id.clone()).unwrap(),
+        BlockingDependency::new(issue_a.id.clone(), issue_b.id.clone()).unwrap(),
+        BlockingDependency::new(issue_b.id.clone(), issue_d.id.clone()).unwrap(),
+    ] {
+        storage.add_blocking_dependency(dependency).await.unwrap();
+    }
+    storage
+        .add_dependency(&issue_a.id, &issue_e.id, DependencyType::Related)
+        .await
+        .unwrap();
+
+    let tree = storage
+        .blocking_dependency_tree(&issue_a.id, None)
+        .await
+        .unwrap();
+    let actual = tree
+        .iter()
+        .map(|(dependency, depth)| {
+            (
+                dependency.dependent_id().as_str(),
+                dependency.prerequisite_id().as_str(),
+                *depth,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut direct_prerequisites = [issue_b.id.as_str(), issue_c.id.as_str()];
+    direct_prerequisites.sort_unstable();
+    assert_eq!(
+        actual,
+        vec![
+            (issue_a.id.as_str(), direct_prerequisites[0], 1),
+            (issue_a.id.as_str(), direct_prerequisites[1], 1),
+            (issue_b.id.as_str(), issue_d.id.as_str(), 2),
+        ]
+    );
+    assert_eq!(
+        storage
+            .blocking_dependency_tree(&issue_a.id, Some(1))
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn closed_prerequisite_stays_recorded_without_blocking() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let prerequisite = storage
+        .create(create_test_issue("Prerequisite"))
+        .await
+        .unwrap();
+    let dependent = storage
+        .create(create_test_issue("Dependent"))
+        .await
+        .unwrap();
+    let blocking = BlockingDependency::new(dependent.id.clone(), prerequisite.id.clone()).unwrap();
+    storage
+        .add_blocking_dependency(blocking.clone())
+        .await
+        .unwrap();
+    let prerequisite_state = storage.get(&prerequisite.id).await.unwrap().unwrap();
+    let expected_blocked = prerequisite_state.status != IssueStatus::Closed;
+    assert_eq!(
+        !storage.blocked_issues().await.unwrap().is_empty(),
+        expected_blocked
+    );
+    assert!(
+        !storage
+            .ready_to_work(None, None)
+            .await
+            .unwrap()
+            .iter()
+            .any(|issue| issue.id == dependent.id)
+    );
+
+    storage
+        .update(
+            &prerequisite.id,
+            IssueUpdate {
+                status: Some(IssueStatus::Closed),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let prerequisite_state = storage.get(&prerequisite.id).await.unwrap().unwrap();
+    let expected_blocked = prerequisite_state.status != IssueStatus::Closed;
+    assert_eq!(
+        !storage.blocked_issues().await.unwrap().is_empty(),
+        expected_blocked
+    );
+    assert!(
+        storage
+            .ready_to_work(None, None)
+            .await
+            .unwrap()
+            .iter()
+            .any(|issue| issue.id == dependent.id)
+    );
+    assert_eq!(
+        storage.blocking_prerequisites(&dependent.id).await.unwrap(),
+        vec![blocking]
+    );
+}
 
 #[tokio::test]
 async fn test_add_dependency() {

@@ -13,7 +13,8 @@
 
 use chrono::Utc;
 use rivets::domain::{
-    DependencyType, IssueId, IssueKind, IssueStatus, NewIssue, ResourceError, ResourceRole,
+    BlockingDependency, DependencyType, IssueId, IssueKind, IssueStatus, NewIssue, ResourceError,
+    ResourceRole,
 };
 use rivets::storage::in_memory::{
     LoadWarning, MigrationField, load_from_jsonl, new_in_memory_storage, save_to_jsonl,
@@ -21,6 +22,14 @@ use rivets::storage::in_memory::{
 use rivets::storage::{StorageBackend, create_storage};
 use std::io::Write;
 use tempfile::NamedTempFile;
+
+#[path = "common/mixed_legacy.rs"]
+mod mixed_legacy;
+
+use mixed_legacy::{
+    CONFLICT_ID, LEGACY_NOTE_ID, LEGACY_OPAQUE_ID, LEGACY_URL_ID, MIXED_ISSUE_COUNT,
+    MIXED_LEGACY_JSONL, assert_canonical_records, fixture_records, read_records, record,
+};
 
 // =============================================================================
 // Test Helpers
@@ -1488,4 +1497,260 @@ mod large_dataset_tests {
 
         println!("Loaded {} issues in {:?}", ISSUE_COUNT, duration);
     }
+}
+#[tokio::test]
+async fn mixed_legacy_fixture_round_trips_to_stable_canonical_jsonl() {
+    let file = create_temp_jsonl_file(MIXED_LEGACY_JSONL);
+    let (storage, warnings) = load_from_jsonl(file.path(), "test".to_string())
+        .await
+        .expect("mixed legacy fixture should load");
+
+    let issues = storage
+        .export_all()
+        .await
+        .expect("all loaded Issues should be exportable");
+    assert_eq!(issues.len(), MIXED_ISSUE_COUNT);
+
+    assert_eq!(warnings.len(), 1);
+    match &warnings[0] {
+        LoadWarning::MigrationConflict {
+            issue_id,
+            line_number,
+            field,
+        } => {
+            assert_eq!(issue_id.as_str(), CONFLICT_ID);
+            assert_eq!(*line_number, 8);
+            assert_eq!(*field, MigrationField::IssueKind);
+        }
+        warning => panic!("Expected MigrationConflict warning, got {warning:?}"),
+    }
+
+    for (id, expected_kind) in [
+        ("test-missing", IssueKind::Bug),
+        ("test-null", IssueKind::Feature),
+        ("test-note", IssueKind::Task),
+        ("test-url", IssueKind::Epic),
+        ("test-opaque", IssueKind::Chore),
+    ] {
+        let issue = storage
+            .get(&IssueId::new(id))
+            .await
+            .expect("Issue lookup should succeed")
+            .expect("fixture Issue should be loaded");
+        assert_eq!(issue.issue_kind, expected_kind);
+    }
+
+    let conflict = storage
+        .get(&IssueId::new(CONFLICT_ID))
+        .await
+        .expect("conflict Issue lookup should succeed")
+        .expect("conflict Issue should be loaded");
+    assert_eq!(conflict.issue_kind, IssueKind::Feature);
+
+    let fixture = fixture_records();
+    let expected_note = record(&fixture, LEGACY_NOTE_ID)["notes"]
+        .as_str()
+        .expect("legacy Note fixture should be a string");
+    let legacy_note = storage
+        .get(&IssueId::new(LEGACY_NOTE_ID))
+        .await
+        .expect("legacy Note Issue lookup should succeed")
+        .expect("legacy Note Issue should be loaded");
+    assert_eq!(
+        legacy_note.notes()[0].content().as_bytes(),
+        expected_note.as_bytes()
+    );
+    assert_eq!(legacy_note.notes()[0].created_at(), &legacy_note.updated_at);
+
+    let legacy_url = storage
+        .get(&IssueId::new(LEGACY_URL_ID))
+        .await
+        .expect("legacy URL Issue lookup should succeed")
+        .expect("legacy URL Issue should be loaded");
+    assert!(legacy_url.notes().is_empty());
+    assert_eq!(legacy_url.resources().len(), 1);
+    assert_eq!(legacy_url.resources()[0].id().as_str(), "r1");
+    assert_eq!(
+        legacy_url.resources()[0].target().to_string(),
+        "https://example.com/legacy/pr/7"
+    );
+    assert_eq!(legacy_url.resources()[0].role(), ResourceRole::Reference);
+    assert!(legacy_url.resources()[0].label().is_none());
+
+    let opaque = storage
+        .get(&IssueId::new(LEGACY_OPAQUE_ID))
+        .await
+        .expect("opaque reference Issue lookup should succeed")
+        .expect("opaque reference Issue should be loaded");
+    assert!(opaque.resources().is_empty());
+    assert_eq!(opaque.notes().len(), 1);
+    assert_eq!(
+        opaque.notes()[0].content(),
+        "Migrated legacy external reference:   GH-opaque-42  "
+    );
+    assert_eq!(opaque.notes()[0].created_at(), &opaque.updated_at);
+
+    let canonical_issue = storage
+        .get(&IssueId::new("test-canonical"))
+        .await
+        .expect("canonical Issue lookup should succeed")
+        .expect("canonical Issue should be loaded");
+    assert_eq!(
+        canonical_issue
+            .notes()
+            .iter()
+            .map(|note| note.content())
+            .collect::<Vec<_>>(),
+        ["Canonical first Note", "Canonical second Note"]
+    );
+    assert_eq!(canonical_issue.resources().len(), 2);
+    assert_eq!(canonical_issue.resources()[0].id().as_str(), "r1");
+    assert_eq!(
+        canonical_issue.resources()[0].target().to_string(),
+        "https://example.com/canonical"
+    );
+    assert_eq!(
+        canonical_issue.resources()[0].role(),
+        ResourceRole::Evidence
+    );
+    assert_eq!(canonical_issue.resources()[1].id().as_str(), "r2");
+    assert_eq!(
+        canonical_issue.resources()[1].target().to_string(),
+        "docs/adr/0001-multiple-notes.md"
+    );
+    assert_eq!(
+        canonical_issue.resources()[1].role(),
+        ResourceRole::Documentation
+    );
+
+    save_to_jsonl(storage.as_ref(), file.path())
+        .await
+        .expect("canonical save should succeed");
+    let canonical_bytes = std::fs::read(file.path()).expect("canonical file should be readable");
+    let canonical_records = read_records(file.path());
+    assert_canonical_records(&canonical_records);
+
+    for (id, expected_kind) in [
+        ("test-missing", "bug"),
+        ("test-null", "feature"),
+        (LEGACY_NOTE_ID, "task"),
+        (LEGACY_URL_ID, "epic"),
+        (LEGACY_OPAQUE_ID, "chore"),
+    ] {
+        assert_eq!(record(&canonical_records, id)["issue_kind"], expected_kind);
+    }
+    assert_eq!(
+        record(&canonical_records, CONFLICT_ID)["issue_kind"],
+        "feature"
+    );
+    assert_eq!(
+        record(&canonical_records, LEGACY_NOTE_ID)["notes"][0]["content"],
+        expected_note
+    );
+    assert_eq!(
+        record(&canonical_records, LEGACY_NOTE_ID)["notes"][0]["created_at"],
+        record(&canonical_records, LEGACY_NOTE_ID)["updated_at"]
+    );
+    let canonical_url = record(&canonical_records, LEGACY_URL_ID);
+    assert!(canonical_url.get("external_ref").is_none());
+    assert_eq!(canonical_url["resources"][0]["id"], "r1");
+    assert_eq!(
+        canonical_url["resources"][0]["target"]["url"],
+        "https://example.com/legacy/pr/7"
+    );
+    assert_eq!(canonical_url["resources"][0]["role"], "reference");
+    let canonical_opaque = record(&canonical_records, LEGACY_OPAQUE_ID);
+    assert!(canonical_opaque.get("external_ref").is_none());
+    assert_eq!(
+        canonical_opaque["notes"][0]["content"],
+        "Migrated legacy external reference:   GH-opaque-42  "
+    );
+    assert_eq!(
+        canonical_opaque["notes"][0]["created_at"],
+        canonical_opaque["updated_at"]
+    );
+    let canonical_history = record(&canonical_records, "test-canonical");
+    assert_eq!(
+        canonical_history["notes"][0]["content"],
+        "Canonical first Note"
+    );
+    assert_eq!(
+        canonical_history["notes"][1]["content"],
+        "Canonical second Note"
+    );
+    assert_eq!(canonical_history["resources"][0]["id"], "r1");
+    assert_eq!(canonical_history["resources"][1]["id"], "r2");
+
+    let (reloaded, reload_warnings) = load_from_jsonl(file.path(), "test".to_string())
+        .await
+        .expect("canonical records should reload");
+    assert!(reload_warnings.is_empty());
+    save_to_jsonl(reloaded.as_ref(), file.path())
+        .await
+        .expect("repeat canonical save should succeed");
+    assert_eq!(
+        std::fs::read(file.path()).expect("repeat saved file should be readable"),
+        canonical_bytes
+    );
+}
+
+#[tokio::test]
+async fn legacy_relationships_survive_blocking_mutations() {
+    let content = concat!(
+        r#"{"id":"test-dependent","title":"Dependent","description":"Test","status":"open","priority":2,"issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":null,"dependencies":[{"depends_on_id":"test-prerequisite","dep_type":"related"}],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#,
+        "\n",
+        r#"{"id":"test-prerequisite","title":"Prerequisite","description":"Test","status":"open","priority":2,"issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":null,"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#,
+        "\n",
+    );
+    let file = create_temp_jsonl_file(content);
+    let (mut storage, warnings) = load_from_jsonl(file.path(), "test".to_string())
+        .await
+        .expect("legacy relationship fixture should load");
+    assert!(warnings.is_empty());
+    let dependency = BlockingDependency::new(
+        IssueId::new("test-dependent"),
+        IssueId::new("test-prerequisite"),
+    )
+    .unwrap();
+
+    storage
+        .add_blocking_dependency(dependency.clone())
+        .await
+        .expect("Blocking and Related should coexist");
+    save_to_jsonl(storage.as_ref(), file.path()).await.unwrap();
+    let records = std::fs::read_to_string(file.path()).unwrap();
+    let dependent: serde_json::Value = records
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .find(|record: &serde_json::Value| record["id"] == "test-dependent")
+        .unwrap();
+    assert_eq!(
+        dependent["dependencies"],
+        serde_json::json!([
+            {"depends_on_id": "test-prerequisite", "dep_type": "blocks"},
+            {"depends_on_id": "test-prerequisite", "dep_type": "related"}
+        ])
+    );
+
+    let (mut reloaded, warnings) = load_from_jsonl(file.path(), "test".to_string())
+        .await
+        .expect("mixed relationship record should reload");
+    assert!(warnings.is_empty());
+    reloaded
+        .remove_blocking_dependency(&dependency)
+        .await
+        .expect("typed removal should find only Blocking");
+    save_to_jsonl(reloaded.as_ref(), file.path()).await.unwrap();
+    let records = std::fs::read_to_string(file.path()).unwrap();
+    let dependent: serde_json::Value = records
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .find(|record: &serde_json::Value| record["id"] == "test-dependent")
+        .unwrap();
+    assert_eq!(
+        dependent["dependencies"],
+        serde_json::json!([
+            {"depends_on_id": "test-prerequisite", "dep_type": "related"}
+        ])
+    );
 }

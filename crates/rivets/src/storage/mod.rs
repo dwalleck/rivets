@@ -70,8 +70,8 @@
 //! ```
 
 use crate::domain::{
-    Dependency, DependencyType, Issue, IssueFilter, IssueId, IssueUpdate, NewIssue, NewResource,
-    ResourceId, ResourceUpdate, SortPolicy,
+    BlockingDependency, Dependency, DependencyType, Issue, IssueFilter, IssueId, IssueUpdate,
+    NewIssue, NewResource, ResourceId, ResourceUpdate, SortPolicy,
 };
 use crate::error::{PartialLoadError, Result, SkippedIssueRecordCause, StorageError};
 use async_trait::async_trait;
@@ -150,6 +150,37 @@ pub trait IssueStorage: Send + Sync {
     /// - `Error::IssueNotFound` if the issue doesn't exist
     /// - `Error::HasDependents` if other issues depend on this issue
     async fn delete(&mut self, id: &IssueId) -> Result<()>;
+    // ========== Blocking Dependency Management ==========
+
+    /// Add a directed Blocking Dependency.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either endpoint is missing, the relationship
+    /// already exists, or the Blocking-only graph would become cyclic.
+    async fn add_blocking_dependency(&mut self, dependency: BlockingDependency) -> Result<()>;
+
+    /// Remove one directed Blocking Dependency without affecting other kinds.
+    async fn remove_blocking_dependency(&mut self, dependency: &BlockingDependency) -> Result<()>;
+
+    /// Return Blocking Dependencies whose dependent is `dependent_id`.
+    async fn blocking_prerequisites(
+        &self,
+        dependent_id: &IssueId,
+    ) -> Result<Vec<BlockingDependency>>;
+
+    /// Return Blocking Dependencies whose prerequisite is `prerequisite_id`.
+    async fn blocking_dependents(
+        &self,
+        prerequisite_id: &IssueId,
+    ) -> Result<Vec<BlockingDependency>>;
+
+    /// Return the transitive Blocking prerequisite tree in breadth-first order.
+    async fn blocking_dependency_tree(
+        &self,
+        dependent_id: &IssueId,
+        max_depth: Option<usize>,
+    ) -> Result<Vec<(BlockingDependency, usize)>>;
 
     // ========== Dependency Management ==========
 
@@ -501,6 +532,39 @@ impl IssueStorage for JsonlBackedStorage {
         self.ensure_writable()?;
         self.inner.delete(id).await
     }
+    async fn add_blocking_dependency(&mut self, dependency: BlockingDependency) -> Result<()> {
+        self.ensure_writable()?;
+        self.inner.add_blocking_dependency(dependency).await
+    }
+
+    async fn remove_blocking_dependency(&mut self, dependency: &BlockingDependency) -> Result<()> {
+        self.ensure_writable()?;
+        self.inner.remove_blocking_dependency(dependency).await
+    }
+
+    async fn blocking_prerequisites(
+        &self,
+        dependent_id: &IssueId,
+    ) -> Result<Vec<BlockingDependency>> {
+        self.inner.blocking_prerequisites(dependent_id).await
+    }
+
+    async fn blocking_dependents(
+        &self,
+        prerequisite_id: &IssueId,
+    ) -> Result<Vec<BlockingDependency>> {
+        self.inner.blocking_dependents(prerequisite_id).await
+    }
+
+    async fn blocking_dependency_tree(
+        &self,
+        dependent_id: &IssueId,
+        max_depth: Option<usize>,
+    ) -> Result<Vec<(BlockingDependency, usize)>> {
+        self.inner
+            .blocking_dependency_tree(dependent_id, max_depth)
+            .await
+    }
 
     async fn add_dependency(
         &mut self,
@@ -834,6 +898,39 @@ impl IssueStorage for MockStorage {
         unimplemented!(
             "MockStorage::delete() is not implemented. Use in_memory::new_in_memory_storage() for full CRUD."
         )
+    }
+    async fn add_blocking_dependency(&mut self, _dependency: BlockingDependency) -> Result<()> {
+        unimplemented!(
+            "MockStorage::add_blocking_dependency() is not implemented. Use in_memory::new_in_memory_storage() for full CRUD."
+        )
+    }
+
+    async fn remove_blocking_dependency(&mut self, _dependency: &BlockingDependency) -> Result<()> {
+        unimplemented!(
+            "MockStorage::remove_blocking_dependency() is not implemented. Use in_memory::new_in_memory_storage() for full CRUD."
+        )
+    }
+
+    async fn blocking_prerequisites(
+        &self,
+        _dependent_id: &IssueId,
+    ) -> Result<Vec<BlockingDependency>> {
+        Ok(vec![])
+    }
+
+    async fn blocking_dependents(
+        &self,
+        _prerequisite_id: &IssueId,
+    ) -> Result<Vec<BlockingDependency>> {
+        Ok(vec![])
+    }
+
+    async fn blocking_dependency_tree(
+        &self,
+        _dependent_id: &IssueId,
+        _max_depth: Option<usize>,
+    ) -> Result<Vec<(BlockingDependency, usize)>> {
+        Ok(vec![])
     }
 
     async fn add_dependency(
