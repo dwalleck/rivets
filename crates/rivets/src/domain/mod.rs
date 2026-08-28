@@ -210,6 +210,7 @@ pub struct Issue {
     /// **Ordering**: Dependencies are sorted lexicographically by `depends_on_id` and then
     /// by `dep_type` before serialization to ensure deterministic JSONL output. This prevents
     /// spurious diffs in version control when dependencies are added/removed in different orders.
+    #[serde(skip)]
     pub dependencies: Vec<Dependency>,
 
     /// Creation timestamp
@@ -853,8 +854,8 @@ pub struct NewIssue {
     /// Initial Note recorded with the Issue creation timestamp
     pub initial_note: Option<NoteContent>,
 
-    /// Dependencies
-    pub dependencies: Vec<(IssueId, DependencyType)>,
+    /// Blocking prerequisite Issues to attach atomically at creation.
+    pub prerequisites: Vec<IssueId>,
 }
 
 impl NewIssue {
@@ -898,7 +899,7 @@ impl Default for NewIssue {
             design: None,
             acceptance_criteria: None,
             initial_note: None,
-            dependencies: vec![],
+            prerequisites: vec![],
         }
     }
 }
@@ -1178,7 +1179,7 @@ mod tests {
         assert_eq!(issue.issue_kind, IssueKind::Task);
         assert!(issue.assignee.is_none());
         assert!(issue.labels.is_empty());
-        assert!(issue.dependencies.is_empty());
+        assert!(issue.prerequisites.is_empty());
     }
 
     #[test]

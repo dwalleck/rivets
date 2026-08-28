@@ -520,26 +520,11 @@ async fn mcp_full_issue_json_golden() {
     let workspace = create_temp_workspace();
     let tools = create_tools();
     set_context(&tools, workspace.path()).await;
-    let (created, dependencies) = create_golden_issue(&tools).await;
+    let (created, _) = create_golden_issue(&tools).await;
     let issue = reload_golden_issue(&workspace, created.id.as_str()).await;
 
     let mut actual = mcp_content_json(&issue);
     normalize_wire_timestamps(&mut actual);
-
-    let mut expected_dependencies: Vec<Value> = dependencies
-        .into_iter()
-        .map(|(depends_on_id, dep_type)| {
-            json!({
-                "depends_on_id": depends_on_id,
-                "dep_type": dep_type,
-            })
-        })
-        .collect();
-    expected_dependencies.sort_by(|left, right| {
-        left["depends_on_id"]
-            .as_str()
-            .cmp(&right["depends_on_id"].as_str())
-    });
 
     let expected = json!({
         "id": issue.id,
@@ -590,7 +575,6 @@ async fn mcp_full_issue_json_golden() {
                 "label": "Reference source",
             },
         ],
-        "dependencies": expected_dependencies,
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "closed_at": "<timestamp>",

@@ -7,9 +7,10 @@ use std::io::Write;
 use anyhow::{Context, Result};
 
 use super::args::{
-    BlockedArgs, CloseArgs, CreateArgs, DeleteArgs, DepAction, DepArgs, InfoArgs, InitArgs,
-    LabelAction, LabelArgs, ListArgs, ReadyArgs, ReopenArgs, ResourceAction, ResourceArgs,
-    ShowArgs, StaleArgs, StatsArgs, UpdateArgs,
+    BlockedArgs, BlockingDependencyAction, BlockingDependencyArgs, CloseArgs, CreateArgs,
+    DeleteArgs, DepAction, DepArgs, InfoArgs, InitArgs, LabelAction, LabelArgs, ListArgs,
+    ReadyArgs, ReopenArgs, ResourceAction, ResourceArgs, ShowArgs, StaleArgs, StatsArgs,
+    UpdateArgs,
 };
 use super::types::{SortOrderArg, SortPolicyArg};
 use crate::domain::DependencyType;
@@ -126,7 +127,7 @@ pub async fn execute_create(
     args: &CreateArgs,
     output_mode: OutputMode,
 ) -> Result<()> {
-    use crate::domain::{DependencyType as DomainDepType, IssueId, NewIssue, NoteContent};
+    use crate::domain::{IssueId, NewIssue, NoteContent};
     use crate::output;
 
     // Get title (interactive prompt if not provided)
@@ -152,27 +153,12 @@ pub async fn execute_create(
         }
     };
 
-    // Parse dependencies from args
-    let mut dependencies: Vec<(IssueId, DomainDepType)> = Vec::new();
-    for dep_str in &args.deps {
-        // Format: "issue-id" or "type:issue-id"
-        if let Some((dep_type_str, issue_id)) = dep_str.split_once(':') {
-            let dep_type = match dep_type_str.parse::<DomainDepType>() {
-                Ok(dep_type) => dep_type,
-                Err(_) => {
-                    anyhow::bail!(
-                        "Invalid dependency type '{}'. Valid types: {}",
-                        dep_type_str,
-                        DomainDepType::valid_values()
-                    );
-                }
-            };
-            dependencies.push((IssueId::new(issue_id), dep_type));
-        } else {
-            // Default to Blocks dependency
-            dependencies.push((IssueId::new(dep_str), DomainDepType::Blocks));
-        }
-    }
+    let prerequisites = args
+        .prerequisites
+        .iter()
+        .cloned()
+        .map(IssueId::new)
+        .collect();
 
     let new_issue = NewIssue {
         title,
@@ -184,7 +170,7 @@ pub async fn execute_create(
         design: args.design.clone(),
         acceptance_criteria: args.acceptance.clone(),
         initial_note: args.notes.clone().map(NoteContent::new).transpose()?,
-        dependencies,
+        prerequisites,
     };
 
     let issue = app.storage_mut().create(new_issue).await?;
@@ -271,10 +257,10 @@ pub async fn execute_show(
             .await?
             .ok_or_else(|| crate::error::Error::IssueNotFound(issue_id.clone()))?;
 
-        let deps = app.storage().get_dependencies(&issue_id).await?;
-        let dependents = app.storage().get_dependents(&issue_id).await?;
+        let prerequisites = app.storage().blocking_prerequisites(&issue_id).await?;
+        let dependents = app.storage().blocking_dependents(&issue_id).await?;
 
-        results.push((issue, deps, dependents));
+        results.push((issue, prerequisites, dependents));
     }
 
     // Output all results
@@ -283,7 +269,7 @@ pub async fn execute_show(
             // Always return array for consistency in programmatic usage
             let json_results: Vec<_> = results
                 .iter()
-                .map(|(issue, deps, dependents)| {
+                .map(|(issue, prerequisites, dependents)| {
                     serde_json::json!({
                         "id": issue.id.to_string(),
                         "title": issue.title,
@@ -300,23 +286,21 @@ pub async fn execute_show(
                         "created_at": issue.created_at,
                         "updated_at": issue.updated_at,
                         "closed_at": issue.closed_at,
-                        // Dependencies this issue has (issues it depends on)
-                        "dependencies": deps,
-                        // Issues that depend on this issue
-                        "dependents": dependents,
+                        "blocking_prerequisites": prerequisites,
+                        "blocking_dependents": dependents,
                     })
                 })
                 .collect();
             output::print_json(&json_results)?;
         }
         output::OutputMode::Text => {
-            for (i, (issue, deps, dependents)) in results.iter().enumerate() {
+            for (i, (issue, prerequisites, dependents)) in results.iter().enumerate() {
                 if i > 0 {
                     println!();
                     println!("---");
                     println!();
                 }
-                output::print_issue_details(issue, deps, dependents, output_mode)?;
+                output::print_issue_details(issue, prerequisites, dependents, output_mode)?;
             }
         }
     }
@@ -747,6 +731,142 @@ pub async fn execute_ready(
                 println!();
                 for issue in &issues {
                     output::print_issue(issue, output_mode)?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Execute one canonical Blocking Dependency operation.
+pub async fn execute_blocking_dependency(
+    app: &mut crate::app::App,
+    args: &BlockingDependencyArgs,
+    output_mode: OutputMode,
+) -> Result<()> {
+    use crate::domain::{BlockingDependency, IssueId};
+    use crate::output;
+
+    match &args.action {
+        BlockingDependencyAction::Add {
+            dependent,
+            prerequisite,
+        } => {
+            let dependency =
+                BlockingDependency::new(IssueId::new(dependent), IssueId::new(prerequisite))?;
+            app.storage_mut()
+                .add_blocking_dependency(dependency.clone())
+                .await?;
+            app.save().await?;
+            match output_mode {
+                OutputMode::Json => output::print_json(&serde_json::json!({
+                    "action": "add",
+                    "relationship": "blocking_dependency",
+                    "dependent_id": dependency.dependent_id(),
+                    "prerequisite_id": dependency.prerequisite_id(),
+                    "status": "success"
+                }))?,
+                OutputMode::Text => println!(
+                    "{} depends on {}",
+                    dependency.dependent_id(),
+                    dependency.prerequisite_id()
+                ),
+            }
+        }
+        BlockingDependencyAction::Remove {
+            dependent,
+            prerequisite,
+        } => {
+            let dependency =
+                BlockingDependency::new(IssueId::new(dependent), IssueId::new(prerequisite))?;
+            app.storage_mut()
+                .remove_blocking_dependency(&dependency)
+                .await?;
+            app.save().await?;
+            match output_mode {
+                OutputMode::Json => output::print_json(&serde_json::json!({
+                    "action": "remove",
+                    "relationship": "blocking_dependency",
+                    "dependent_id": dependency.dependent_id(),
+                    "prerequisite_id": dependency.prerequisite_id(),
+                    "status": "success"
+                }))?,
+                OutputMode::Text => println!(
+                    "Removed: {} no longer depends on {}",
+                    dependency.dependent_id(),
+                    dependency.prerequisite_id()
+                ),
+            }
+        }
+        BlockingDependencyAction::List(query) => {
+            let dependencies = match (&query.dependent, &query.prerequisite) {
+                (Some(dependent), None) => {
+                    app.storage()
+                        .blocking_prerequisites(&IssueId::new(dependent))
+                        .await?
+                }
+                (None, Some(prerequisite)) => {
+                    app.storage()
+                        .blocking_dependents(&IssueId::new(prerequisite))
+                        .await?
+                }
+                (Some(_), Some(_)) | (None, None) => {
+                    anyhow::bail!("provide exactly one of --dependent or --prerequisite")
+                }
+            };
+            match output_mode {
+                OutputMode::Json => output::print_json(&dependencies)?,
+                OutputMode::Text if dependencies.is_empty() => {
+                    println!("No Blocking Dependencies found");
+                }
+                OutputMode::Text => {
+                    for dependency in dependencies {
+                        println!(
+                            "{} depends on {}",
+                            dependency.dependent_id(),
+                            dependency.prerequisite_id()
+                        );
+                    }
+                }
+            }
+        }
+        BlockingDependencyAction::Tree { dependent, depth } => {
+            let max_depth = (*depth != 0).then_some(*depth);
+            let tree = app
+                .storage()
+                .blocking_dependency_tree(&IssueId::new(dependent), max_depth)
+                .await?;
+            match output_mode {
+                OutputMode::Json => {
+                    let rows = tree
+                        .iter()
+                        .map(|(dependency, depth)| {
+                            serde_json::json!({
+                                "dependent_id": dependency.dependent_id(),
+                                "prerequisite_id": dependency.prerequisite_id(),
+                                "depth": depth
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    output::print_json(&serde_json::json!({
+                        "root_dependent_id": dependent,
+                        "prerequisites": rows
+                    }))?;
+                }
+                OutputMode::Text if tree.is_empty() => {
+                    println!("{dependent} has no Blocking prerequisites");
+                }
+                OutputMode::Text => {
+                    println!("Blocking prerequisites of {dependent}:");
+                    for (dependency, depth) in tree {
+                        println!(
+                            "{}{} depends on {}",
+                            "  ".repeat(depth),
+                            dependency.dependent_id(),
+                            dependency.prerequisite_id()
+                        );
+                    }
                 }
             }
         }

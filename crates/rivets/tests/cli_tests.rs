@@ -8,7 +8,14 @@ use std::process::Command;
 use tempfile::TempDir;
 
 mod common;
+#[path = "common/mixed_legacy.rs"]
+mod mixed_legacy;
+
 use common::{create_issue, get_rivets_binary, run_rivets_in_dir};
+use mixed_legacy::{
+    CONFLICT_ID, LEGACY_NOTE_ID, LEGACY_OPAQUE_ID, LEGACY_URL_ID, MIXED_ISSUE_COUNT,
+    assert_canonical_records, fixture_records, read_records, record, seed_mixed_workspace,
+};
 
 // ============================================================================
 // Test Fixtures
@@ -985,6 +992,211 @@ fn test_cli_ready_filters_by_kind_and_label(initialized_dir: TempDir) {
 // ============================================================================
 // Dependency Command Tests
 // ============================================================================
+#[rstest]
+fn blocking_dependency_cli_direction_and_restart(initialized_dir: TempDir) {
+    let prerequisite_a = create_issue(initialized_dir.path(), "Prerequisite A", &[]);
+    let prerequisite_b = create_issue(initialized_dir.path(), "Prerequisite B", &[]);
+    let dependent = create_issue(
+        initialized_dir.path(),
+        "Dependent",
+        &[
+            "--prerequisite",
+            &prerequisite_b,
+            "--prerequisite",
+            &prerequisite_a,
+        ],
+    );
+
+    let list = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "--json",
+            "blocking-dependency",
+            "list",
+            "--dependent",
+            &dependent,
+        ],
+    );
+    assert!(
+        list.status.success(),
+        "canonical list failed: {}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+    let listed: Vec<serde_json::Value> =
+        serde_json::from_slice(&list.stdout).expect("list should be JSON");
+    let mut actual_prerequisites = listed
+        .iter()
+        .map(|relationship| {
+            assert_eq!(relationship["dependent_id"], dependent);
+            relationship["prerequisite_id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    actual_prerequisites.sort();
+    let mut expected_prerequisites = vec![prerequisite_a.clone(), prerequisite_b.clone()];
+    expected_prerequisites.sort();
+    assert_eq!(actual_prerequisites, expected_prerequisites);
+
+    let shown = run_rivets_in_dir(initialized_dir.path(), &["--json", "show", &dependent]);
+    let shown: Vec<serde_json::Value> =
+        serde_json::from_slice(&shown.stdout).expect("show should be JSON");
+    assert!(shown[0].get("dependencies").is_none());
+    assert_eq!(
+        shown[0]["blocking_prerequisites"].as_array().unwrap().len(),
+        2
+    );
+
+    let tree = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "--json",
+            "blocking-dependency",
+            "tree",
+            "--dependent",
+            &dependent,
+            "--depth",
+            "1",
+        ],
+    );
+    let tree: serde_json::Value =
+        serde_json::from_slice(&tree.stdout).expect("tree should be JSON");
+    assert_eq!(tree["root_dependent_id"], dependent);
+    assert_eq!(tree["prerequisites"].as_array().unwrap().len(), 2);
+    assert!(
+        tree["prerequisites"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["depth"] == 1 && row["dependent_id"] == dependent)
+    );
+
+    let second_dependent = create_issue(initialized_dir.path(), "Second dependent", &[]);
+    let related = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "dep",
+            "add",
+            &second_dependent,
+            &prerequisite_a,
+            "--type",
+            "related",
+        ],
+    );
+    assert!(related.status.success());
+    let add = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "blocking-dependency",
+            "add",
+            "--dependent",
+            &second_dependent,
+            "--prerequisite",
+            &prerequisite_a,
+        ],
+    );
+    assert!(add.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&add.stdout).trim(),
+        format!("{second_dependent} depends on {prerequisite_a}")
+    );
+
+    let reverse = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "--json",
+            "blocking-dependency",
+            "list",
+            "--prerequisite",
+            &prerequisite_a,
+        ],
+    );
+    let reverse: Vec<serde_json::Value> =
+        serde_json::from_slice(&reverse.stdout).expect("reverse list should be JSON");
+    assert!(reverse.iter().any(|edge| {
+        edge["dependent_id"] == dependent && edge["prerequisite_id"] == prerequisite_a
+    }));
+    assert!(reverse.iter().any(|edge| {
+        edge["dependent_id"] == second_dependent && edge["prerequisite_id"] == prerequisite_a
+    }));
+
+    let remove = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "blocking-dependency",
+            "remove",
+            "--dependent",
+            &second_dependent,
+            "--prerequisite",
+            &prerequisite_a,
+        ],
+    );
+    assert!(remove.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&remove.stdout).trim(),
+        format!("Removed: {second_dependent} no longer depends on {prerequisite_a}")
+    );
+
+    let records = std::fs::read_to_string(initialized_dir.path().join(".rivets/issues.jsonl"))
+        .expect("Issue records should be readable");
+    let second_record: serde_json::Value = records
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .find(|record: &serde_json::Value| record["id"] == second_dependent)
+        .unwrap();
+    assert_eq!(
+        second_record["dependencies"],
+        serde_json::json!([
+            {"depends_on_id": prerequisite_a, "dep_type": "related"}
+        ])
+    );
+}
+
+#[rstest]
+fn create_with_prerequisites_is_atomic(initialized_dir: TempDir) {
+    let prerequisite = create_issue(initialized_dir.path(), "Prerequisite", &[]);
+    let issues_path = initialized_dir.path().join(".rivets/issues.jsonl");
+    let before = std::fs::read(&issues_path).unwrap();
+
+    let missing = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "create",
+            "--title",
+            "Must not leak",
+            "--prerequisite",
+            "test-missing",
+        ],
+    );
+    assert!(!missing.status.success());
+    assert_eq!(std::fs::read(&issues_path).unwrap(), before);
+
+    let duplicate = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "create",
+            "--title",
+            "Duplicate must not leak",
+            "--prerequisite",
+            &prerequisite,
+            "--prerequisite",
+            &prerequisite,
+        ],
+    );
+    assert!(!duplicate.status.success());
+    assert_eq!(std::fs::read(&issues_path).unwrap(), before);
+
+    let legacy = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["create", "--title", "Legacy", "--deps", &prerequisite],
+    );
+    assert!(!legacy.status.success());
+    let help = run_rivets_in_dir(initialized_dir.path(), &["create", "--help"]);
+    let help = String::from_utf8_lossy(&help.stdout);
+    assert!(help.contains("--prerequisite"));
+    assert!(!help.contains("--deps"));
+}
 
 #[rstest]
 fn test_cli_dep_add_and_list(initialized_dir: TempDir) {
@@ -2512,9 +2724,159 @@ fn list_resources(dir: &Path, issue_id: &str) -> Vec<serde_json::Value> {
         "resource list failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+
     serde_json::from_slice::<serde_json::Value>(&output.stdout)
         .expect("resource list should be JSON")
         .as_array()
         .expect("resource list should be an array")
         .clone()
+}
+#[rstest]
+fn mixed_legacy_fixture_loads_migrates_and_persists_via_cli(initialized_dir: TempDir) {
+    seed_mixed_workspace(initialized_dir.path());
+
+    let fixture = fixture_records();
+    let fixture_ids: Vec<&str> = fixture
+        .iter()
+        .map(|issue| {
+            issue["id"]
+                .as_str()
+                .expect("fixture Issue id should be a string")
+        })
+        .collect();
+
+    let parse_json_output = |stdout: &[u8]| -> serde_json::Value {
+        serde_json::from_slice(stdout).expect("CLI stdout should contain only valid JSON")
+    };
+
+    let initial = run_rivets_in_dir(initialized_dir.path(), &["--json", "list"]);
+    assert!(
+        initial.status.success(),
+        "initial mixed fixture read failed: {}",
+        String::from_utf8_lossy(&initial.stderr)
+    );
+    let initial_issues = parse_json_output(&initial.stdout);
+    let initial_issues = initial_issues
+        .as_array()
+        .expect("JSON list output should be an array");
+    assert_eq!(initial_issues.len(), MIXED_ISSUE_COUNT);
+    for issue_id in &fixture_ids {
+        assert!(
+            initial_issues.iter().any(|issue| issue["id"] == *issue_id),
+            "initial JSON list should include Issue {issue_id}"
+        );
+    }
+
+    let stderr = String::from_utf8_lossy(&initial.stderr);
+    assert!(
+        stderr.contains("MigrationConflict"),
+        "stderr should visibly name the migration conflict warning: {stderr}"
+    );
+    assert!(
+        stderr.contains(CONFLICT_ID),
+        "stderr should name the conflicting Issue: {stderr}"
+    );
+
+    let update = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["update", LEGACY_NOTE_ID, "--priority", "1"],
+    );
+    assert!(
+        update.status.success(),
+        "mixed fixture mutation failed: {}",
+        String::from_utf8_lossy(&update.stderr)
+    );
+
+    let issues_path = initialized_dir.path().join(".rivets/issues.jsonl");
+    let temp_path = issues_path.with_extension("tmp");
+    assert!(
+        !temp_path.exists(),
+        "atomic temporary path should be absent after a successful save"
+    );
+
+    let canonical = read_records(&issues_path);
+    assert_canonical_records(&canonical);
+    assert_eq!(record(&canonical, LEGACY_NOTE_ID)["priority"], 1);
+
+    let legacy_note = record(&fixture, LEGACY_NOTE_ID)["notes"]
+        .as_str()
+        .expect("legacy Note content should be a string");
+    assert!(
+        legacy_note.contains("\n\n"),
+        "fixture should exercise multiline legacy Note content"
+    );
+    assert_eq!(
+        record(&canonical, LEGACY_NOTE_ID)["notes"][0]["content"],
+        legacy_note
+    );
+
+    let legacy_url = record(&canonical, LEGACY_URL_ID);
+    assert_eq!(legacy_url["resources"].as_array().map(Vec::len), Some(1));
+    assert_eq!(legacy_url["resources"][0]["id"], "r1");
+    assert_eq!(legacy_url["resources"][0]["target"]["type"], "web");
+    assert_eq!(
+        legacy_url["resources"][0]["target"]["url"],
+        "https://example.com/legacy/pr/7"
+    );
+
+    let opaque_reference = record(&fixture, LEGACY_OPAQUE_ID)["external_ref"]
+        .as_str()
+        .expect("opaque legacy reference should be a string");
+    let expected_opaque_note = format!("Migrated legacy external reference: {opaque_reference}");
+    assert_eq!(
+        record(&canonical, LEGACY_OPAQUE_ID)["notes"][0]["content"],
+        expected_opaque_note
+    );
+
+    let canonical_fixture = record(&fixture, "test-canonical");
+    let canonical_issue = record(&canonical, "test-canonical");
+    assert_eq!(canonical_issue["notes"], canonical_fixture["notes"]);
+    assert_eq!(canonical_issue["resources"], canonical_fixture["resources"]);
+    assert_eq!(canonical_issue["resources"][0]["id"], "r1");
+    assert_eq!(canonical_issue["resources"][1]["id"], "r2");
+
+    for (issue_id, expected_kind) in [
+        ("test-missing", "bug"),
+        ("test-null", "feature"),
+        (LEGACY_NOTE_ID, "task"),
+        (LEGACY_URL_ID, "epic"),
+        (LEGACY_OPAQUE_ID, "chore"),
+        ("test-canonical", "bug"),
+        ("test-equal-kind", "task"),
+        (CONFLICT_ID, "feature"),
+    ] {
+        assert_eq!(
+            record(&canonical, issue_id)["issue_kind"],
+            expected_kind,
+            "Issue {issue_id} should preserve its migrated/canonical Kind"
+        );
+    }
+
+    let mut show_args = vec!["--json", "show"];
+    show_args.extend(fixture_ids.iter().copied());
+    let restarted = run_rivets_in_dir(initialized_dir.path(), &show_args);
+    assert!(
+        restarted.status.success(),
+        "restarted mixed fixture read failed: {}",
+        String::from_utf8_lossy(&restarted.stderr)
+    );
+    let restarted = parse_json_output(&restarted.stdout);
+    let restarted = restarted
+        .as_array()
+        .expect("restarted JSON show output should be an array");
+    assert_eq!(restarted.len(), MIXED_ISSUE_COUNT);
+    assert_canonical_records(restarted);
+    assert_eq!(record(restarted, LEGACY_NOTE_ID)["priority"], 1);
+    assert_eq!(
+        record(restarted, LEGACY_NOTE_ID)["notes"][0]["content"],
+        legacy_note
+    );
+    assert_eq!(
+        record(restarted, LEGACY_URL_ID)["resources"][0]["target"]["url"],
+        "https://example.com/legacy/pr/7"
+    );
+    assert_eq!(
+        record(restarted, LEGACY_OPAQUE_ID)["notes"][0]["content"],
+        expected_opaque_note
+    );
 }

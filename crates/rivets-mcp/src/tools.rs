@@ -319,7 +319,7 @@ impl Tools {
             design: params.design,
             acceptance_criteria: params.acceptance,
             initial_note,
-            dependencies: vec![],
+            prerequisites: vec![],
         };
 
         let issue = storage.create(new_issue).await?;
