@@ -530,11 +530,10 @@ async fn closed_prerequisite_stays_recorded_without_blocking() {
         .await
         .unwrap();
     let prerequisite_state = storage.get(&prerequisite.id).await.unwrap().unwrap();
-    let expected_blocked = prerequisite_state.status != IssueStatus::Closed;
-    assert_eq!(
-        !storage.blocked_issues().await.unwrap().is_empty(),
-        expected_blocked
-    );
+    assert_eq!(prerequisite_state.status, IssueStatus::Open);
+    let blocked = storage.blocked_issues().await.unwrap();
+    assert_eq!(blocked.len(), 1);
+    assert_eq!(blocked[0].0.id, dependent.id);
     assert!(
         !storage
             .ready_to_work(None, None)
@@ -556,11 +555,8 @@ async fn closed_prerequisite_stays_recorded_without_blocking() {
         .unwrap();
 
     let prerequisite_state = storage.get(&prerequisite.id).await.unwrap().unwrap();
-    let expected_blocked = prerequisite_state.status != IssueStatus::Closed;
-    assert_eq!(
-        !storage.blocked_issues().await.unwrap().is_empty(),
-        expected_blocked
-    );
+    assert_eq!(prerequisite_state.status, IssueStatus::Closed);
+    assert!(storage.blocked_issues().await.unwrap().is_empty());
     assert!(
         storage
             .ready_to_work(None, None)
