@@ -54,7 +54,7 @@ fn create_test_issue(title: &str) -> NewIssue {
         design: None,
         acceptance_criteria: None,
         initial_note: None,
-        dependencies: vec![],
+        prerequisites: vec![],
     }
 }
 
@@ -1099,7 +1099,7 @@ mod load_from_jsonl_tests {
                 design: None,
                 acceptance_criteria: None,
                 initial_note: None,
-                dependencies: Vec::new(),
+                prerequisites: Vec::new(),
             })
             .await
             .expect("create should succeed after a MigrationConflict warning");
