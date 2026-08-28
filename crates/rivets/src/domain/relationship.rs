@@ -5,9 +5,24 @@ use serde::{Deserialize, Serialize};
 
 /// A directed relationship from an Issue that depends on work to its prerequisite.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "RawBlockingDependency")]
 pub struct BlockingDependency {
     dependent_id: IssueId,
     prerequisite_id: IssueId,
+}
+
+#[derive(Deserialize)]
+struct RawBlockingDependency {
+    dependent_id: IssueId,
+    prerequisite_id: IssueId,
+}
+
+impl TryFrom<RawBlockingDependency> for BlockingDependency {
+    type Error = BlockingDependencyError;
+
+    fn try_from(raw: RawBlockingDependency) -> Result<Self, Self::Error> {
+        Self::new(raw.dependent_id, raw.prerequisite_id)
+    }
 }
 
 impl BlockingDependency {
@@ -88,6 +103,18 @@ mod tests {
             Err(BlockingDependencyError::SelfReference {
                 issue_id: IssueId::new("test-a")
             })
+        );
+
+        let deserialization_error =
+            serde_json::from_value::<BlockingDependency>(serde_json::json!({
+                "dependent_id": "test-self",
+                "prerequisite_id": "test-self"
+            }))
+            .expect_err("deserialization must enforce the self-reference invariant");
+        assert!(
+            deserialization_error
+                .to_string()
+                .contains("cannot depend on itself")
         );
     }
 }
