@@ -575,6 +575,34 @@ async fn closed_prerequisite_stays_recorded_without_blocking() {
     );
 }
 
+#[tokio::test]
+async fn legacy_parentage_propagation_remains_fenced_until_readiness_cutover() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let blocker = storage.create(create_test_issue("Blocker")).await.unwrap();
+    let parent = storage.create(create_test_issue("Parent")).await.unwrap();
+    let child = storage.create(create_test_issue("Child")).await.unwrap();
+    storage
+        .add_blocking_dependency(
+            BlockingDependency::new(parent.id.clone(), blocker.id.clone()).unwrap(),
+        )
+        .await
+        .unwrap();
+    seed_legacy_relationship(
+        &mut storage,
+        &child.id,
+        &parent.id,
+        DependencyType::ParentChild,
+    )
+    .await;
+
+    let ready = storage.ready_to_work(None, None).await.unwrap();
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].id, blocker.id);
+    let blocked = storage.blocked_issues().await.unwrap();
+    assert_eq!(blocked.len(), 1);
+    assert_eq!(blocked[0].0.id, parent.id);
+}
+
 // ========== Ready to Work Tests ==========
 
 #[tokio::test]
@@ -875,7 +903,7 @@ async fn test_dependency_on_nonexistent_issue() {
 
     let result = storage
         .add_blocking_dependency(
-            BlockingDependency::new(issue.id.clone(), IssueId::new("nonexistent").clone()).unwrap(),
+            BlockingDependency::new(issue.id.clone(), IssueId::new("nonexistent")).unwrap(),
         )
         .await;
 
