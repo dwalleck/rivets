@@ -18,13 +18,14 @@
 use crate::context::Context;
 use crate::error::{Error, Result};
 use crate::models::{
-    BlockedIssueResponse, CreateParams, ListParams, ReadyParams, ResourceUpdateParams,
+    BlockedIssueResponse, BlockingDependencyListQuery, BlockingDependencyTreeEntry,
+    BlockingDependencyTreeResponse, CreateParams, ListParams, ReadyParams, ResourceUpdateParams,
     SetContextResponse, UpdateParams, WhereAmIResponse,
 };
 use rivets::domain::{
-    AssociatedResource, DependencyType, Issue, IssueFilter, IssueId, IssueKind, IssueStatus,
-    IssueUpdate, NewIssue, NewResource, NoteContent, ResourceId, ResourceLabel, ResourceRole,
-    ResourceTarget, ResourceUpdate, WebUrl, WorkspacePath,
+    AssociatedResource, BlockingDependency, DependencyType, Issue, IssueFilter, IssueId, IssueKind,
+    IssueStatus, IssueUpdate, NewIssue, NewResource, NoteContent, ResourceId, ResourceLabel,
+    ResourceRole, ResourceTarget, ResourceUpdate, WebUrl, WorkspacePath,
 };
 use rivets::storage::IssueStorage;
 use std::path::Path;
@@ -555,6 +556,104 @@ impl Tools {
         save_or_reload(storage.as_mut()).await?;
         debug!("Closed issue");
         Ok(issue)
+    }
+
+    /// Add one role-safe Blocking Dependency.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for self-reference, missing endpoints, duplicates,
+    /// Blocking cycles, missing context, or persistence failure.
+    #[instrument(skip(self), fields(%dependent_id, %prerequisite_id))]
+    pub async fn blocking_dependency_add(
+        &self,
+        dependent_id: &str,
+        prerequisite_id: &str,
+        workspace_root: Option<&str>,
+    ) -> Result<BlockingDependency> {
+        let dependency =
+            BlockingDependency::new(IssueId::new(dependent_id), IssueId::new(prerequisite_id))?;
+        let storage = self.storage_for(workspace_root).await?;
+        let mut storage = storage.write().await;
+        storage.add_blocking_dependency(dependency.clone()).await?;
+        save_or_reload(storage.as_mut()).await?;
+        Ok(dependency)
+    }
+
+    /// Remove one role-safe Blocking Dependency.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for self-reference, missing endpoints, an absent
+    /// Blocking Dependency, missing context, or persistence failure.
+    #[instrument(skip(self), fields(%dependent_id, %prerequisite_id))]
+    pub async fn blocking_dependency_remove(
+        &self,
+        dependent_id: &str,
+        prerequisite_id: &str,
+        workspace_root: Option<&str>,
+    ) -> Result<BlockingDependency> {
+        let dependency =
+            BlockingDependency::new(IssueId::new(dependent_id), IssueId::new(prerequisite_id))?;
+        let storage = self.storage_for(workspace_root).await?;
+        let mut storage = storage.write().await;
+        storage.remove_blocking_dependency(&dependency).await?;
+        save_or_reload(storage.as_mut()).await?;
+        Ok(dependency)
+    }
+
+    /// List Blocking Dependencies from one explicit endpoint perspective.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the requested endpoint or Workspace is missing,
+    /// or storage cannot be queried.
+    pub async fn blocking_dependency_list(
+        &self,
+        query: &BlockingDependencyListQuery,
+        workspace_root: Option<&str>,
+    ) -> Result<Vec<BlockingDependency>> {
+        let storage = self.storage_for(workspace_root).await?;
+        let storage = storage.read().await;
+        match query {
+            BlockingDependencyListQuery::PrerequisitesOf { dependent_id } => Ok(storage
+                .blocking_prerequisites(&IssueId::new(dependent_id))
+                .await?),
+            BlockingDependencyListQuery::DependentsOf { prerequisite_id } => Ok(storage
+                .blocking_dependents(&IssueId::new(prerequisite_id))
+                .await?),
+        }
+    }
+
+    /// Return the role-named Blocking prerequisite tree.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the root dependent or Workspace is missing, or
+    /// storage cannot be queried.
+    pub async fn blocking_dependency_tree(
+        &self,
+        dependent_id: &str,
+        depth: Option<usize>,
+        workspace_root: Option<&str>,
+    ) -> Result<BlockingDependencyTreeResponse> {
+        let storage = self.storage_for(workspace_root).await?;
+        let storage = storage.read().await;
+        let max_depth = depth.filter(|depth| *depth != 0);
+        let prerequisites = storage
+            .blocking_dependency_tree(&IssueId::new(dependent_id), max_depth)
+            .await?
+            .into_iter()
+            .map(|(dependency, depth)| BlockingDependencyTreeEntry {
+                dependent_id: dependency.dependent_id().to_string(),
+                prerequisite_id: dependency.prerequisite_id().to_string(),
+                depth,
+            })
+            .collect();
+        Ok(BlockingDependencyTreeResponse {
+            root_dependent_id: dependent_id.to_string(),
+            prerequisites,
+        })
     }
 
     /// Add a dependency between issues.
