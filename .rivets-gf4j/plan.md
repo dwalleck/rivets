@@ -25,10 +25,11 @@ increment B also crossed 4,000 changed lines.
 
 | Actual increment | Changed lines |
 |---|---:|
-| A — Slice 1 | 1,432 |
-| B — Slices 2–3 | 1,337 |
-| C — Slice 4 | 2,994 |
-| **Actual total** | **5,763** |
+| A — Slice 1 plus F2 | 1,459 |
+| B — Slices 2–3 plus F3 | 1,338 |
+| C — Slice 4 plus review log | 3,025 |
+| **Summed increment diffs** | **5,822** |
+| **Final cumulative base diff** | **5,136** |
 
 ### PR increment A — Typed Blocking storage foundation
 
@@ -136,7 +137,7 @@ increment B also crossed 4,000 changed lines.
 - [x] Every slice contains all thirteen mandatory fields and every conditional field has an explicit `N/A — reason` where applicable.
 - [x] Every claim’s regression fence and named mutation are created/applied in the owning slice; no fence-less risk was approved.
 - [x] Every new loop records asymptotic complexity, production/stress scale, a maximum accepted cost, and rationale; always-on storage phases have wall budgets.
-- [x] Partition arithmetic includes the original 20% churn margin and the actual 5,763-line total is split into three independently mergeable increments after the final size tripwire.
+- [x] Partition arithmetic includes the original 20% churn margin; the exact 5,136-line cumulative diff is split into three independently mergeable increments after the final size tripwire.
 - [x] Every slice names an increment and each increment has an independent mergeable definition.
 - [x] Tracker taxonomy is applied to every intended later Task.
 - [x] No slice is declared complete; checkpointed-build owns completion.
