@@ -1524,6 +1524,23 @@ async fn assert_blocking_dependency_queries(
     dependents
 }
 
+async fn assert_blocking_input_errors(tools: &Tools, dependent: &Issue) {
+    let self_reference = tools
+        .blocking_dependency_add(dependent.id.as_str(), dependent.id.as_str(), None)
+        .await;
+    assert!(matches!(
+        self_reference,
+        Err(Error::InvalidBlockingDependency(_))
+    ));
+    let missing = tools
+        .blocking_dependency_add(dependent.id.as_str(), "test-missing", None)
+        .await;
+    assert!(matches!(
+        missing,
+        Err(Error::IssueNotFound(issue_id)) if issue_id == "test-missing"
+    ));
+}
+
 /// Test adding dependencies between issues.
 #[tokio::test]
 async fn blocking_dependency_mcp_direction_and_context_recreation() {
@@ -1622,13 +1639,7 @@ async fn blocking_dependency_mcp_direction_and_context_recreation() {
         ])
     );
 
-    let self_reference = restarted
-        .blocking_dependency_add(dependent.id.as_str(), dependent.id.as_str(), None)
-        .await;
-    assert!(matches!(
-        self_reference,
-        Err(Error::InvalidBlockingDependency(_))
-    ));
+    assert_blocking_input_errors(&restarted, &dependent).await;
 }
 
 /// Test ready-to-work excludes blocked issues.

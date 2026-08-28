@@ -1161,6 +1161,25 @@ fn blocking_dependency_cli_direction_and_restart(initialized_dir: TempDir) {
             {"depends_on_id": prerequisite_a, "dep_type": "related"}
         ])
     );
+    let before_missing =
+        std::fs::read(initialized_dir.path().join(".rivets/issues.jsonl")).unwrap();
+    let missing = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "blocking-dependency",
+            "add",
+            "--dependent",
+            &dependent,
+            "--prerequisite",
+            "test-missing",
+        ],
+    );
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("test-missing"));
+    assert_eq!(
+        std::fs::read(initialized_dir.path().join(".rivets/issues.jsonl")).unwrap(),
+        before_missing
+    );
 }
 
 #[rstest]

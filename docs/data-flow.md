@@ -163,8 +163,9 @@ current timestamp and a nonce, so the hash does not identify the content. The
 hash length adapts to database size (4 chars up to 500 issues, 5 up to 1,500,
 6 beyond), with nonce retries and a length bump on collision.
 
-Dependencies passed to `create --deps` use the form `issue-id` (defaults to
-`blocks`) or `type:issue-id` (e.g. `blocks:rivets-x9k2`).
+Blocking prerequisites passed at creation use repeatable
+`--prerequisite <issue-id>` flags. Creation validates every prerequisite and
+writes either the Issue plus all Blocking edges or nothing.
 
 ## List/Query Flow
 
