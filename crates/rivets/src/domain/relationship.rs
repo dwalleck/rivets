@@ -73,7 +73,10 @@ impl BlockingDependency {
 pub enum BlockingDependencyError {
     /// A Blocking Dependency cannot point from an Issue to itself.
     #[error("Issue {issue_id} cannot depend on itself")]
-    SelfReference { issue_id: IssueId },
+    SelfReference {
+        /// The Issue that cannot depend on itself.
+        issue_id: IssueId,
+    },
 }
 
 #[cfg(test)]
