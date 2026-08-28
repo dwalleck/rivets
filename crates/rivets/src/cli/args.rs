@@ -9,9 +9,7 @@ use super::types::{SortOrderArg, SortPolicyArg};
 use super::validators::{
     validate_description, validate_issue_id, validate_label, validate_prefix, validate_title,
 };
-use crate::domain::{
-    DependencyType, IssueKind, IssueStatus, MAX_PRIORITY, MIN_PRIORITY, ResourceRole,
-};
+use crate::domain::{IssueKind, IssueStatus, MAX_PRIORITY, MIN_PRIORITY, ResourceRole};
 
 /// Arguments for the `init` command
 #[derive(Parser, Debug, Clone)]
@@ -341,66 +339,6 @@ pub struct BlockingDependencyListArgs {
     /// List Issues that depend on this prerequisite.
     #[arg(long, value_parser = validate_issue_id)]
     pub prerequisite: Option<String>,
-}
-
-/// Arguments for the `dep` command
-#[derive(Parser, Debug, Clone)]
-pub struct DepArgs {
-    /// Dependency subcommand
-    #[command(subcommand)]
-    pub action: DepAction,
-}
-
-/// Dependency management actions
-#[derive(Subcommand, Debug, Clone)]
-pub enum DepAction {
-    /// Add a dependency
-    Add {
-        /// Issue that depends on another
-        #[arg(value_parser = validate_issue_id)]
-        from: String,
-
-        /// Issue being depended on
-        #[arg(value_parser = validate_issue_id)]
-        to: String,
-
-        /// Dependency type
-        #[arg(short = 't', long = "type", value_enum, default_value = "blocks")]
-        dep_type: DependencyType,
-    },
-
-    /// Remove a dependency
-    Remove {
-        /// Issue that depends on another
-        #[arg(value_parser = validate_issue_id)]
-        from: String,
-
-        /// Issue being depended on
-        #[arg(value_parser = validate_issue_id)]
-        to: String,
-    },
-
-    /// List dependencies for an issue
-    List {
-        /// Issue ID
-        #[arg(value_parser = validate_issue_id)]
-        issue_id: String,
-
-        /// Show reverse dependencies (issues that depend on this one)
-        #[arg(short, long)]
-        reverse: bool,
-    },
-
-    /// Display dependency tree for an issue
-    Tree {
-        /// Issue ID
-        #[arg(value_parser = validate_issue_id)]
-        issue_id: String,
-
-        /// Maximum depth to traverse (use 0 for unlimited)
-        #[arg(short, long, default_value = "5")]
-        depth: usize,
-    },
 }
 
 /// Arguments for the `blocked` command

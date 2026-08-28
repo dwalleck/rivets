@@ -70,8 +70,8 @@
 //! ```
 
 use crate::domain::{
-    BlockingDependency, Dependency, DependencyType, Issue, IssueFilter, IssueId, IssueUpdate,
-    NewIssue, NewResource, ResourceId, ResourceUpdate, SortPolicy,
+    BlockingDependency, Issue, IssueFilter, IssueId, IssueUpdate, NewIssue, NewResource,
+    ResourceId, ResourceUpdate, SortPolicy,
 };
 use crate::error::{PartialLoadError, Result, SkippedIssueRecordCause, StorageError};
 use async_trait::async_trait;
@@ -88,7 +88,7 @@ pub mod in_memory;
 /// # Method Categories
 ///
 /// - **CRUD**: `create`, `get`, `update`, `delete`
-/// - **Dependencies**: `add_dependency`, `remove_dependency`, `get_dependencies`, `get_dependents`, `has_cycle`
+/// - **Blocking Dependencies**: role-safe add/remove/prerequisite/dependent/tree operations
 /// - **Queries**: `list`, `ready_to_work`, `blocked_issues`
 /// - **Batch Operations**: `import_issues`, `export_all`
 /// - **Persistence**: `save`
@@ -181,78 +181,6 @@ pub trait IssueStorage: Send + Sync {
         dependent_id: &IssueId,
         max_depth: Option<usize>,
     ) -> Result<Vec<(BlockingDependency, usize)>>;
-
-    // ========== Dependency Management ==========
-
-    /// Add a dependency between two issues.
-    ///
-    /// Checks for cycles before adding. The dependency is directional:
-    /// `from` depends on `to`.
-    ///
-    /// # Errors
-    ///
-    /// - `Error::IssueNotFound` if either issue doesn't exist
-    /// - `Error::CircularDependency` if this would create a cycle
-    async fn add_dependency(
-        &mut self,
-        from: &IssueId,
-        to: &IssueId,
-        dep_type: DependencyType,
-    ) -> Result<()>;
-
-    /// Remove a dependency between two issues.
-    ///
-    /// # Errors
-    ///
-    /// - `Error::DependencyNotFound` if the dependency doesn't exist
-    async fn remove_dependency(&mut self, from: &IssueId, to: &IssueId) -> Result<()>;
-
-    /// Get all dependencies for an issue.
-    ///
-    /// Returns issues that this issue depends on.
-    async fn get_dependencies(&self, id: &IssueId) -> Result<Vec<Dependency>>;
-
-    /// Get all dependents of an issue.
-    ///
-    /// Returns issues that depend on this issue.
-    async fn get_dependents(&self, id: &IssueId) -> Result<Vec<Dependency>>;
-
-    /// Check if adding a dependency would create a cycle.
-    ///
-    /// Returns `true` if adding `from -> to` would create a circular dependency.
-    async fn has_cycle(&self, from: &IssueId, to: &IssueId) -> Result<bool>;
-
-    /// Get the full dependency tree for an issue.
-    ///
-    /// Performs a breadth-first traversal of the dependency graph starting from
-    /// the given issue, returning all transitive dependencies with their depth
-    /// in the tree. The result is ordered by traversal order (BFS).
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - The root issue ID to start traversal from
-    /// * `max_depth` - Optional maximum depth to traverse (None for unlimited)
-    ///
-    /// # Returns
-    ///
-    /// A vector of tuples containing:
-    /// - The dependency relationship
-    /// - The depth in the tree (1 for direct dependencies, 2 for their dependencies, etc.)
-    ///
-    /// # Example
-    ///
-    /// For a dependency chain A -> B -> C, calling `get_dependency_tree(&A, None)` returns:
-    /// - (B, 1) - direct dependency
-    /// - (C, 2) - transitive dependency
-    ///
-    /// # Errors
-    ///
-    /// - `Error::IssueNotFound` if the issue doesn't exist
-    async fn get_dependency_tree(
-        &self,
-        id: &IssueId,
-        max_depth: Option<usize>,
-    ) -> Result<Vec<(Dependency, usize)>>;
 
     // ========== Queries ==========
 
@@ -566,41 +494,6 @@ impl IssueStorage for JsonlBackedStorage {
             .await
     }
 
-    async fn add_dependency(
-        &mut self,
-        from: &IssueId,
-        to: &IssueId,
-        dep_type: DependencyType,
-    ) -> Result<()> {
-        self.ensure_writable()?;
-        self.inner.add_dependency(from, to, dep_type).await
-    }
-
-    async fn remove_dependency(&mut self, from: &IssueId, to: &IssueId) -> Result<()> {
-        self.ensure_writable()?;
-        self.inner.remove_dependency(from, to).await
-    }
-
-    async fn get_dependencies(&self, id: &IssueId) -> Result<Vec<Dependency>> {
-        self.inner.get_dependencies(id).await
-    }
-
-    async fn get_dependents(&self, id: &IssueId) -> Result<Vec<Dependency>> {
-        self.inner.get_dependents(id).await
-    }
-
-    async fn has_cycle(&self, from: &IssueId, to: &IssueId) -> Result<bool> {
-        self.inner.has_cycle(from, to).await
-    }
-
-    async fn get_dependency_tree(
-        &self,
-        id: &IssueId,
-        max_depth: Option<usize>,
-    ) -> Result<Vec<(Dependency, usize)>> {
-        self.inner.get_dependency_tree(id, max_depth).await
-    }
-
     async fn list(&self, filter: &IssueFilter) -> Result<Vec<Issue>> {
         self.inner.list(filter).await
     }
@@ -785,8 +678,7 @@ pub const MOCK_ISSUE_ID: &str = "test-1";
 /// - `create`: Always returns a new issue with ID "test-1"
 /// - `get`: Returns `Some` only for ID "test-1", `None` otherwise
 /// - `list`, `ready_to_work`, `blocked_issues`: Return empty vectors
-/// - `get_dependencies`, `get_dependents`: Return empty vectors
-/// - `has_cycle`: Always returns `false`
+/// - Blocking prerequisite/dependent/tree queries: Return empty vectors
 /// - Other methods: Unimplemented (will panic if called)
 ///
 /// # When to Use MockStorage vs In-Memory Storage
@@ -933,43 +825,6 @@ impl IssueStorage for MockStorage {
         Ok(vec![])
     }
 
-    async fn add_dependency(
-        &mut self,
-        _from: &IssueId,
-        _to: &IssueId,
-        _dep_type: DependencyType,
-    ) -> Result<()> {
-        unimplemented!(
-            "MockStorage::add_dependency() is not implemented. Use in_memory::new_in_memory_storage() for full CRUD."
-        )
-    }
-
-    async fn remove_dependency(&mut self, _from: &IssueId, _to: &IssueId) -> Result<()> {
-        unimplemented!(
-            "MockStorage::remove_dependency() is not implemented. Use in_memory::new_in_memory_storage() for full CRUD."
-        )
-    }
-
-    async fn get_dependencies(&self, _id: &IssueId) -> Result<Vec<Dependency>> {
-        Ok(vec![])
-    }
-
-    async fn get_dependents(&self, _id: &IssueId) -> Result<Vec<Dependency>> {
-        Ok(vec![])
-    }
-
-    async fn has_cycle(&self, _from: &IssueId, _to: &IssueId) -> Result<bool> {
-        Ok(false)
-    }
-
-    async fn get_dependency_tree(
-        &self,
-        _id: &IssueId,
-        _max_depth: Option<usize>,
-    ) -> Result<Vec<(Dependency, usize)>> {
-        Ok(vec![])
-    }
-
     async fn list(&self, _filter: &IssueFilter) -> Result<Vec<Issue>> {
         Ok(vec![])
     }
@@ -1090,21 +945,6 @@ mod tests {
         assert!(storage.list(&filter).await.unwrap().is_empty());
         assert!(storage.ready_to_work(None, None).await.unwrap().is_empty());
         assert!(storage.blocked_issues().await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_dependencies() {
-        let storage: Box<dyn IssueStorage> = Box::new(MockStorage::new());
-
-        let id = IssueId::new(MOCK_ISSUE_ID);
-        assert!(storage.get_dependencies(&id).await.unwrap().is_empty());
-        assert!(storage.get_dependents(&id).await.unwrap().is_empty());
-        assert!(
-            !storage
-                .has_cycle(&id, &IssueId::new("test-2"))
-                .await
-                .unwrap()
-        );
     }
 
     #[tokio::test]

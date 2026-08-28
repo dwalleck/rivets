@@ -182,16 +182,19 @@ Currently holds `init.rs` (workspace creation).
 
 ```mermaid
 graph TD
-    ModRS[domain/mod.rs<br/>Issue, Note, filters, shared types] --> Resource[resource.rs<br/>AssociatedResource, targets, roles, identifiers]
+    ModRS[domain/mod.rs<br/>Issue, Note, filters, shared types] --> Relationship[relationship.rs<br/>BlockingDependency, role invariant]
+    ModRS --> Resource[resource.rs<br/>AssociatedResource, targets, roles, identifiers]
 
     style ModRS fill:#ADD8E6
+    style Relationship fill:#90EE90
     style Resource fill:#90EE90
 ```
 
 #### domain/mod.rs
 
-Central domain types: `IssueId`, `IssueStatus`, `IssueKind`, `Dependency`,
-`DependencyType`, `IssueFilter`, Notes, and the Issue aggregate:
+Central domain types include `IssueId`, `IssueStatus`, `IssueKind`,
+`BlockingDependency`, `IssueFilter`, Notes, and the Issue aggregate.
+`Dependency` / `DependencyType` remain compatibility record types only:
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -219,7 +222,8 @@ pub struct Issue {
     pub(crate) resources: Vec<AssociatedResource>,
     #[serde(skip)]
     pub(crate) next_resource_id: u64,
-    pub dependencies: Vec<Dependency>,
+    #[serde(skip)]
+    pub dependencies: Vec<Dependency>, // JSONL compatibility only
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub closed_at: Option<DateTime<Utc>>,
@@ -236,7 +240,7 @@ pub struct NewIssue {
     pub design: Option<String>,
     pub acceptance_criteria: Option<String>,
     pub initial_note: Option<NoteContent>,
-    pub dependencies: Vec<(IssueId, DependencyType)>,
+    pub prerequisites: Vec<IssueId>,
 }
 
 #[derive(Debug, Clone, Default)]

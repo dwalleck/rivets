@@ -41,9 +41,9 @@ use crate::app::App;
 // Re-export argument structs
 pub use args::{
     BlockedArgs, BlockingDependencyAction, BlockingDependencyArgs, BlockingDependencyListArgs,
-    CloseArgs, CreateArgs, DeleteArgs, DepAction, DepArgs, InfoArgs, InitArgs, LabelAction,
-    LabelArgs, ListArgs, ReadyArgs, ReopenArgs, ResourceAction, ResourceArgs, ShowArgs, StaleArgs,
-    StatsArgs, UpdateArgs,
+    CloseArgs, CreateArgs, DeleteArgs, InfoArgs, InitArgs, LabelAction, LabelArgs, ListArgs,
+    ReadyArgs, ReopenArgs, ResourceAction, ResourceArgs, ShowArgs, StaleArgs, StatsArgs,
+    UpdateArgs,
 };
 
 // Re-export types
@@ -136,11 +136,6 @@ pub enum Commands {
 
     /// Manage directed Blocking Dependencies with explicit endpoint roles.
     BlockingDependency(BlockingDependencyArgs),
-
-    /// Add a dependency between issues
-    ///
-    /// Creates a dependency relationship where one issue depends on another.
-    Dep(DepArgs),
 
     /// Manage issue labels
     ///
@@ -244,10 +239,6 @@ impl Cli {
                 let mut app = load_app_from_cwd().await?;
                 execute::execute_blocking_dependency(&mut app, args, output_mode).await
             }
-            Some(Commands::Dep(args)) => {
-                let mut app = load_app_from_cwd().await?;
-                execute::execute_dep(&mut app, args, output_mode).await
-            }
             Some(Commands::Label(args)) => {
                 let mut app = load_app_from_cwd().await?;
                 execute::execute_label(&mut app, args, output_mode).await
@@ -280,7 +271,7 @@ impl Cli {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{DependencyType, IssueKind, IssueStatus};
+    use crate::domain::{IssueKind, IssueStatus};
 
     // ========== CLI Parsing Tests ==========
 
@@ -710,55 +701,24 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_dep_add() {
-        let cli = Cli::try_parse_from([
-            "rivets", "dep", "add", "proj-abc", "proj-xyz", "-t", "blocks",
+    fn generic_dependency_cli_is_absent() {
+        assert!(Cli::try_parse_from(["rivets", "dep", "add", "proj-abc", "proj-xyz"]).is_err());
+        let parsed = Cli::try_parse_from([
+            "rivets",
+            "blocking-dependency",
+            "add",
+            "--dependent",
+            "proj-abc",
+            "--prerequisite",
+            "proj-xyz",
         ])
         .unwrap();
-
-        match cli.command {
-            Some(Commands::Dep(args)) => match args.action {
-                DepAction::Add { from, to, dep_type } => {
-                    assert_eq!(from, "proj-abc");
-                    assert_eq!(to, "proj-xyz");
-                    assert_eq!(dep_type, DependencyType::Blocks);
-                }
-                _ => panic!("Expected Add action"),
-            },
-            _ => panic!("Expected Dep command"),
-        }
-    }
-
-    #[test]
-    fn test_parse_dep_remove() {
-        let cli = Cli::try_parse_from(["rivets", "dep", "remove", "proj-abc", "proj-xyz"]).unwrap();
-
-        match cli.command {
-            Some(Commands::Dep(args)) => match args.action {
-                DepAction::Remove { from, to } => {
-                    assert_eq!(from, "proj-abc");
-                    assert_eq!(to, "proj-xyz");
-                }
-                _ => panic!("Expected Remove action"),
-            },
-            _ => panic!("Expected Dep command"),
-        }
-    }
-
-    #[test]
-    fn test_parse_dep_list() {
-        let cli = Cli::try_parse_from(["rivets", "dep", "list", "proj-abc", "--reverse"]).unwrap();
-
-        match cli.command {
-            Some(Commands::Dep(args)) => match args.action {
-                DepAction::List { issue_id, reverse } => {
-                    assert_eq!(issue_id, "proj-abc");
-                    assert!(reverse);
-                }
-                _ => panic!("Expected List action"),
-            },
-            _ => panic!("Expected Dep command"),
-        }
+        assert!(matches!(
+            parsed.command,
+            Some(Commands::BlockingDependency(BlockingDependencyArgs {
+                action: BlockingDependencyAction::Add { .. }
+            }))
+        ));
     }
 
     #[test]

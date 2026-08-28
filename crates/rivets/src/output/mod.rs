@@ -6,11 +6,9 @@
 //! Submodules:
 //! - [`color`]: Color and styling helpers (semantic colors, icons)
 //! - [`json`]: JSON serialization for programmatic output
-//! - [`tree`]: Dependency tree rendering with ASCII/Unicode connectors
 
 pub mod color;
 mod json;
-pub mod tree;
 
 use crate::domain::{BlockingDependency, Issue, Note};
 use colored::Colorize;
@@ -18,9 +16,8 @@ use serde::Serialize;
 use std::env;
 use std::io::{self, Write};
 
-// Re-export public items for backwards compatibility
+// Re-export public color helpers.
 pub use color::{error, info, success, warning};
-pub use tree::{DepTreeNode, dep_tree_to_json_public, print_dep_tree, print_dep_tree_dependents};
 
 use color::{
     bold, colored_kind_icon, colored_status_icon, colorize_id, colorize_labels, colorize_priority,

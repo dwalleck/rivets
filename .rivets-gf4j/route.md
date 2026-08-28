@@ -37,3 +37,10 @@ falsifiable-design → budgeted-plan → checkpointed-build
 ## Terminal criterion
 
 Structural — every downstream artifact satisfies its owning stage's completion criterion, ending with no FAIL in checkpointed-build's recorded gate.
+
+Result: 2026-08-28 | Slice 1 checkpoint `47f7e1d` | PASS
+Result: 2026-08-28 | Slice 2 checkpoint `79150f9` | PASS
+Result: 2026-08-28 | Slice 3 checkpoint `642fab0` | PASS
+Result: 2026-08-28 | Slice 4 generic-surface retirement checkpoint | PASS
+Result: 2026-08-28 | `cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test` | PASS — 1,096 tests across 15 suites; 1 ignored
+Result: 2026-08-28 | `python scripts/render-cli-mcp-parity.py --check` | PASS

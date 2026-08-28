@@ -100,13 +100,12 @@ pub trait IssueStorage: Send + Sync {
     async fn update(&mut self, id: &IssueId, updates: IssueUpdate) -> Result<Issue>;
     async fn delete(&mut self, id: &IssueId) -> Result<()>;
 
-    // Dependencies
-    async fn add_dependency(&mut self, from: &IssueId, to: &IssueId, dep_type: DependencyType) -> Result<()>;
-    async fn remove_dependency(&mut self, from: &IssueId, to: &IssueId) -> Result<()>;
-    async fn get_dependencies(&self, id: &IssueId) -> Result<Vec<Dependency>>;
-    async fn get_dependents(&self, id: &IssueId) -> Result<Vec<Dependency>>;
-    async fn has_cycle(&self, from: &IssueId, to: &IssueId) -> Result<bool>;
-    async fn get_dependency_tree(&self, id: &IssueId, max_depth: Option<usize>) -> Result<Vec<(Dependency, usize)>>;
+    // Blocking Dependencies
+    async fn add_blocking_dependency(&mut self, dependency: BlockingDependency) -> Result<()>;
+    async fn remove_blocking_dependency(&mut self, dependency: &BlockingDependency) -> Result<()>;
+    async fn blocking_prerequisites(&self, dependent: &IssueId) -> Result<Vec<BlockingDependency>>;
+    async fn blocking_dependents(&self, prerequisite: &IssueId) -> Result<Vec<BlockingDependency>>;
+    async fn blocking_dependency_tree(&self, dependent: &IssueId, max_depth: Option<usize>) -> Result<Vec<(BlockingDependency, usize)>>;
 
     // Queries
     async fn list(&self, filter: &IssueFilter) -> Result<Vec<Issue>>;
@@ -132,12 +131,12 @@ pub trait IssueStorage: Send + Sync {
 
 ### 4. Domain Layer (`rivets`)
 
-- **Core Types**: Issue, NewIssue, IssueUpdate, IssueFilter, Dependency, Note, AssociatedResource, ResourceId
-- **Issue fields**: id, title, description, status, priority (0-4), issue_kind, assignee, labels, design notes, acceptance criteria, ordered append-only Notes, ordered Associated Resources, dependencies, and creation/update/close timestamps
+- **Core Types**: Issue, NewIssue, IssueUpdate, IssueFilter, BlockingDependency, Note, AssociatedResource, ResourceId
+- **Issue fields**: id, title, description, status, priority (0-4), issue_kind, assignee, labels, design notes, acceptance criteria, ordered append-only Notes, ordered Associated Resources, legacy relationship records for persistence, and creation/update/close timestamps
 - **Enums**:
-  - `IssueStatus`: `open`, `in_progress`, `blocked` (legacy), `closed`. The stored `blocked` status is a legacy field: the `ready`/`blocked` queries are **graph-derived** and do not read it. Status transitions are validated by the domain (e.g., only closed issues can be reopened)
+  - `IssueStatus`: `open`, `in_progress`, `blocked` (legacy), `closed`. The stored `blocked` status is a legacy field: the `ready`/`blocked` queries are **graph-derived** and do not read it. Status transitions are validated by the domain.
   - `IssueKind`: `bug`, `feature`, `task`, `epic`, `chore` — mutable via `update`
-  - `DependencyType`: `blocks`, `related`, `parent-child`, `discovered-from`
+  - `DependencyType`: compatibility-only persisted kinds until canonical relationship migration
   - `ResourceRole`: `implementation`, `documentation`, `evidence`, `successor`, `reference` — resources are URL or path targets with a stable, never-reused identifier
 - **Hash-based IDs**: `{prefix}-{hash}` (e.g., `proj-a3f8`). The hash is SHA256 over `title|description|creator|timestamp|nonce`, base36-encoded with adaptive length (4 chars up to 500 issues, 5 up to 1,500, 6 beyond). IDs are **not** content-addressed: the timestamp and nonce inputs mean identical content produces different IDs. Collisions retry with increasing nonces, then by growing the hash length.
   The public `IdGenerator` can produce dot-suffixed child IDs when given a parent, but `IssueStorage::create` currently passes no parent and creates only top-level hash IDs.
@@ -172,39 +171,35 @@ graph LR
 
 `StorageBackend::PostgreSQL` exists and `config.yaml` accepts `backend: postgresql`, but `create_storage` returns `ConfigError::UnsupportedBackend("PostgreSQL")`. There is no database implementation; this is a placeholder, not a working backend.
 
-## Dependency System
+## Blocking Dependency System
 
-```mermaid
-graph TD
-    A[Issue A] -->|blocks| B[Issue B]
-    C[Epic C] -->|parent-child| D[Task D]
-    E[Issue E] -->|related| F[Issue F]
-    G[Issue G] -->|discovered-from| H[Issue H]
+`BlockingDependency` is a role-safe value with private `dependent_id` and
+`prerequisite_id` fields. It rejects self-reference at construction. Storage
+rejects duplicate Blocking edges and cycles composed only of Blocking
+Dependencies; other legacy relationship kinds may coexist on the same pair and
+do not participate in Blocking tree or cycle queries.
 
-    style A fill:#FFB6C1
-    style C fill:#ADD8E6
-    style E fill:#90EE90
-    style G fill:#FFE4B5
-```
+Edges point from **dependent → prerequisite**. Closing a prerequisite leaves
+the edge recorded but removes its active blocking effect.
 
-### Dependency Types
+### CLI and MCP
 
-1. **blocks**: Hard blocker (prevents work on the dependent issue)
-2. **related**: Soft link (informational only)
-3. **parent-child**: Hierarchical relationship (epics → tasks)
-4. **discovered-from**: Provenance only
+The CLI provides `blocking-dependency add/remove/list/tree`; add/remove require
+explicit `--dependent` and `--prerequisite` roles. Creation accepts repeatable
+`--prerequisite`. MCP exposes equivalent
+`blocking_dependency_add/remove/list/tree` tools with role-named structured
+results.
 
-Edges point from **dependent → dependency** (a `blocks` edge runs `blocked_issue → blocker`; a `parent-child` edge runs `child → parent`).
+### Storage semantics
 
-### CLI
-
-`rivets dep add <dependent> <prerequisite> --type blocks` (type defaults to `blocks`), plus `dep remove`, `dep list` (with `--reverse` for dependents), and `dep tree` (recursive depth-first traversal with `--depth`). The lower-level `IssueStorage::get_dependency_tree` method performs a separate breadth-first traversal.
-
-### Semantics
-
-- **Cycle detection**: petgraph `has_path_connecting` pre-check before any edge is added; `CircularDependency` error on violation
-- **Dependency changes do not mutate Issue status**: adding or removing a `blocks` edge never writes the stored status; `ready`/`blocked` results are always computed from the graph
-- **Queries**: `get_dependencies`, `get_dependents`, and `get_dependency_tree` (breadth-first with per-issue depth)
+- `add_blocking_dependency` and `remove_blocking_dependency` mutate only the
+  `blocks` edge for the exact endpoint pair.
+- `blocking_prerequisites` and `blocking_dependents` return deterministic,
+  role-named relationships.
+- `blocking_dependency_tree` performs deterministic breadth-first traversal
+  over Blocking edges only and honors the caller's depth.
+- JSONL still stores legacy `dependencies` records while
+  `rivets-vio8` owns the all-kind canonical `relationships` migration.
 
 ## Ready Work Algorithm
 

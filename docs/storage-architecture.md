@@ -12,12 +12,11 @@ classDiagram
         +get(IssueId) Future~Option~Issue~~
         +update(IssueId, IssueUpdate) Future~Issue~
         +delete(IssueId) Future~void~
-        +add_dependency(IssueId, IssueId, DependencyType) Future~void~
-        +remove_dependency(IssueId, IssueId) Future~void~
-        +get_dependencies(IssueId) Future~Vec~Dependency~~
-        +get_dependents(IssueId) Future~Vec~Dependency~~
-        +has_cycle(IssueId, IssueId) Future~bool~
-        +get_dependency_tree(IssueId, Option~usize~) Future~Vec~(Dependency, usize)~~
+        +add_blocking_dependency(BlockingDependency) Future~void~
+        +remove_blocking_dependency(BlockingDependency) Future~void~
+        +blocking_prerequisites(IssueId) Future~Vec~BlockingDependency~~
+        +blocking_dependents(IssueId) Future~Vec~BlockingDependency~~
+        +blocking_dependency_tree(IssueId, Option~usize~) Future~Vec~(BlockingDependency, usize)~~
         +list(IssueFilter) Future~Vec~Issue~~
         +ready_to_work(Option~IssueFilter~, Option~SortPolicy~) Future~Vec~Issue~~
         +blocked_issues() Future~Vec~(Issue, Vec~Issue~)~~
@@ -110,16 +109,16 @@ The in-memory engine is the runtime engine for every backend, including the pers
 
 #### HashMap<IssueId, Issue>
 - **Purpose**: Fast O(1) lookup by ID
-- **Contains**: Full issue data (title, description, status, priority, issue kind, labels, notes, associated resources, dependencies, timestamps)
-- **Note**: The graph is the source of truth for runtime relationship queries. Runtime add/remove operations keep `issue.dependencies` synchronized with it. During resilient loading, however, orphaned or cycle-forming persisted dependencies remain in `issue.dependencies` while their graph edges are skipped; subsequent saves serialize those retained entries.
+- **Contains**: Full Issue data plus compatibility-only relationship records used by JSONL persistence.
+- **Note**: The graph is the source of truth for runtime relationship queries. Canonical Blocking operations update only the matching `blocks` record. Orphaned or invalid legacy records remain a compatibility-loader concern until `rivets-vio8`.
 
 #### DiGraph<IssueId, DependencyType>
-- **Purpose**: Efficient graph algorithms (cycle detection, traversal)
+- **Purpose**: Shared compatibility infrastructure while each relationship kind gains a typed interface
 - **Nodes**: Issue IDs
-- **Edges**: Dependency type (blocks, related, parent-child, discovered-from)
-- **Direction convention**: dependent -> dependency (e.g. a blocked issue points at its blocker; a child points at its parent)
+- **Edges**: Legacy persisted kind weights
+- **Direction convention**: Blocking edges are dependent -> prerequisite
+- **Blocking algorithms**: edge-kind-filtered duplicate lookup, reachability, deterministic BFS tree, incoming/outgoing role queries
 - **Library**: petgraph 0.6
-- **Algorithms**: `has_path_connecting`, `edges_directed`
 
 #### HashMap<IssueId, NodeIndex>
 - **Purpose**: Map issue IDs to graph node indices
@@ -278,47 +277,35 @@ Warning: 1 circular dependencies skipped
 - **Result**: The runtime graph remains acyclic, but a later save serializes the retained entry, so the warning recurs on reload.
 - **Prevention**: Runtime dependency operations reject cycle creation before mutation.
 
-## Cycle Detection Algorithm
+## Blocking Cycle Detection
+
+Blocking cycle checks traverse only edges whose persisted kind is `blocks`.
+Starting at the proposed prerequisite, storage performs reachability toward the
+proposed dependent. Reaching the dependent rejects the new edge. Related,
+Parentage, and Discovery records cannot create or suppress a Blocking cycle.
 
 ```mermaid
 graph TD
-    Start[add_dependency from→to] --> Check{has_cycle?}
-    Check -->|Check path| Path[has_path_connecting<br/>graph, to, from]
-    Path -->|Yes| Reject[Err: CircularDependency]
-    Path -->|No| Add[add_edge from→to]
-    Add --> Update[Update issue.dependencies]
-    Update --> Success[Ok]
+    Start[add_blocking_dependency<br/>dependent→prerequisite] --> Self{Same Issue?}
+    Self -->|Yes| RejectSelf[Reject self-reference]
+    Self -->|No| Duplicate{Matching blocks edge?}
+    Duplicate -->|Yes| RejectDuplicate[Reject duplicate]
+    Duplicate -->|No| Reach[Traverse blocks edges<br/>prerequisite→dependent]
+    Reach -->|Reachable| RejectCycle[Reject Blocking cycle]
+    Reach -->|Not reachable| Add[Add blocks edge and record]
 
-    style Reject fill:#FFB6C1
-    style Success fill:#90EE90
+    style RejectSelf fill:#FFB6C1
+    style RejectDuplicate fill:#FFB6C1
+    style RejectCycle fill:#FFB6C1
+    style Add fill:#90EE90
 ```
 
-### Implementation Details
-
-```rust
-async fn has_cycle(&self, from: &IssueId, to: &IssueId) -> Result<bool> {
-    let inner = self.lock().await;
-
-    // Get graph node indices
-    let from_node = inner.node_map.get(from)
-        .ok_or_else(|| Error::IssueNotFound(from.clone()))?;
-    let to_node = inner.node_map.get(to)
-        .ok_or_else(|| Error::IssueNotFound(to.clone()))?;
-
-    // Check if path exists from 'to' back to 'from'
-    // If adding edge from→to creates this path, we have a cycle
-    Ok(petgraph::algo::has_path_connecting(
-        &inner.graph,
-        *to_node,      // Start at 'to'
-        *from_node,    // Try to reach 'from'
-        None           // No edge filter
-    ))
-}
-```
-
-**Time Complexity**: O(V + E) worst case (full graph traversal)
-**Space Complexity**: O(V) for visited set
-**Optimization**: Early termination when path found
+The corresponding tree query is deterministic breadth-first traversal over
+Blocking edges only. Each result carries explicit dependent and prerequisite
+identifiers plus one-based depth.
+**Time Complexity**: O(V + E) over the Blocking-only projection
+**Space Complexity**: O(V) for the visited set
+**Optimization**: Early termination when the dependent is reached
 
 ## Ready Work Algorithm
 
@@ -460,8 +447,8 @@ The `StorageBackend::InMemory` variant exists for library/test use (`create_stor
 | get | O(1) | O(1) | HashMap lookup |
 | update | O(1) | O(1) | HashMap update |
 | delete | O(D) | O(D) | D = number of dependents checked |
-| add_dependency | O(V + E) | O(V) | Cycle detection via path search |
-| has_cycle | O(V + E) | O(V) | DFS/BFS traversal |
+| add/remove Blocking Dependency | O(outdegree) plus O(V + E) cycle validation on add | O(V) | Only Blocking edges participate |
+| Blocking prerequisite tree | O(V + E) | O(V) | Deterministic BFS over Blocking edges |
 | list (no filter) | O(N) | O(N) | Iterate all issues |
 | ready_to_work | O(V + E) | O(V) | BFS for transitive blocks |
 | blocked_issues | O(V + E) | O(V) | Edge scan for direct blockers |

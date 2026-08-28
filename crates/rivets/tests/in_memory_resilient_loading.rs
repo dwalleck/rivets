@@ -13,8 +13,7 @@
 
 use chrono::Utc;
 use rivets::domain::{
-    BlockingDependency, DependencyType, IssueId, IssueKind, IssueStatus, NewIssue, ResourceError,
-    ResourceRole,
+    BlockingDependency, IssueId, IssueKind, IssueStatus, NewIssue, ResourceError, ResourceRole,
 };
 use rivets::storage::in_memory::{
     LoadWarning, MigrationField, load_from_jsonl, new_in_memory_storage, save_to_jsonl,
@@ -356,7 +355,7 @@ mod load_from_jsonl_tests {
 
         // But the dependency should not exist in the graph
         let deps = storage
-            .get_dependencies(&IssueId::new("test-2"))
+            .blocking_prerequisites(&IssueId::new("test-2"))
             .await
             .unwrap();
         assert!(deps.is_empty());
@@ -400,11 +399,11 @@ mod load_from_jsonl_tests {
 
         // Only one dependency should exist (cycle broken)
         let deps1 = storage
-            .get_dependencies(&IssueId::new("test-1"))
+            .blocking_prerequisites(&IssueId::new("test-1"))
             .await
             .unwrap();
         let deps2 = storage
-            .get_dependencies(&IssueId::new("test-2"))
+            .blocking_prerequisites(&IssueId::new("test-2"))
             .await
             .unwrap();
         assert_eq!(deps1.len() + deps2.len(), 1);
@@ -894,12 +893,12 @@ mod load_from_jsonl_tests {
         assert!(warnings.is_empty());
 
         let deps = storage
-            .get_dependencies(&IssueId::new("test-2"))
+            .blocking_prerequisites(&IssueId::new("test-2"))
             .await
             .unwrap();
         assert_eq!(deps.len(), 1);
-        assert_eq!(deps[0].depends_on_id.as_str(), "test-1");
-        assert_eq!(deps[0].dep_type, DependencyType::Blocks);
+        assert_eq!(deps[0].dependent_id().as_str(), "test-2");
+        assert_eq!(deps[0].prerequisite_id().as_str(), "test-1");
     }
 
     #[tokio::test]
@@ -1175,16 +1174,18 @@ mod storage_after_load_tests {
 
         // Add a dependency
         storage
-            .add_dependency(
-                &IssueId::new("test-2"),
-                &IssueId::new("test-1"),
-                DependencyType::Blocks,
+            .add_blocking_dependency(
+                BlockingDependency::new(
+                    IssueId::new("test-2").clone(),
+                    IssueId::new("test-1").clone(),
+                )
+                .unwrap(),
             )
             .await
             .unwrap();
 
         let deps = storage
-            .get_dependencies(&IssueId::new("test-2"))
+            .blocking_prerequisites(&IssueId::new("test-2"))
             .await
             .unwrap();
         assert_eq!(deps.len(), 1);
@@ -1282,7 +1283,9 @@ mod round_trip_tests {
         let issue2 = storage.create(create_test_issue("Blocked")).await.unwrap();
 
         storage
-            .add_dependency(&issue2.id, &issue1.id, DependencyType::Blocks)
+            .add_blocking_dependency(
+                BlockingDependency::new(issue2.id.clone(), issue1.id.clone()).unwrap(),
+            )
             .await
             .unwrap();
 
@@ -1295,10 +1298,10 @@ mod round_trip_tests {
 
         assert!(warnings.is_empty());
 
-        let deps = reloaded.get_dependencies(&issue2.id).await.unwrap();
+        let deps = reloaded.blocking_prerequisites(&issue2.id).await.unwrap();
         assert_eq!(deps.len(), 1);
-        assert_eq!(deps[0].depends_on_id, issue1.id);
-        assert_eq!(deps[0].dep_type, DependencyType::Blocks);
+        assert_eq!(deps[0].dependent_id(), &issue2.id);
+        assert_eq!(deps[0].prerequisite_id(), &issue1.id);
     }
 
     #[tokio::test]
@@ -1352,7 +1355,9 @@ mod round_trip_tests {
         // Add more data
         let issue2 = storage2.create(create_test_issue("Issue 2")).await.unwrap();
         storage2
-            .add_dependency(&issue2.id, &issue1.id, DependencyType::Related)
+            .add_blocking_dependency(
+                BlockingDependency::new(issue2.id.clone(), issue1.id.clone()).unwrap(),
+            )
             .await
             .unwrap();
 
@@ -1371,7 +1376,7 @@ mod round_trip_tests {
         let all_issues = storage3.export_all().await.unwrap();
         assert_eq!(all_issues.len(), 2);
 
-        let deps = storage3.get_dependencies(&issue2.id).await.unwrap();
+        let deps = storage3.blocking_prerequisites(&issue2.id).await.unwrap();
         assert_eq!(deps.len(), 1);
     }
     #[tokio::test]

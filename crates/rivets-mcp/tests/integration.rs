@@ -12,7 +12,6 @@ use rivets::domain::{
     BlockingDependency, Issue, IssueKind, IssueStatus, ResourceTarget, StatusTransitionError,
     WorkspacePath,
 };
-use rivets::error::{Error as RivetsError, StorageError};
 use rivets_mcp::context::Context;
 use rivets_mcp::error::Error;
 use rivets_mcp::models::{
@@ -406,7 +405,7 @@ fn assert_and_count_utc_timestamps(value: &Value) -> usize {
     }
 }
 
-async fn create_golden_issue(tools: &Tools) -> (Issue, Vec<(String, String)>) {
+async fn create_golden_issue(tools: &Tools) -> Issue {
     let mut issue = tools
         .create(CreateParams {
             title: "Golden wire Issue".to_string(),
@@ -470,35 +469,10 @@ async fn create_golden_issue(tools: &Tools) -> (Issue, Vec<(String, String)>) {
             .expect("golden resource should be added");
     }
 
-    let mut dependency_ids = Vec::new();
-    for (title, dep_type) in [
-        ("Golden blocker", "blocks"),
-        ("Golden related", "related"),
-        ("Golden parent", "parent-child"),
-        ("Golden discovery", "discovered-from"),
-    ] {
-        let prerequisite = create_issue(tools, title).await;
-        dependency_ids.push((prerequisite.id.as_str().to_string(), dep_type.to_string()));
-        tools
-            .dep(
-                issue.id.as_str(),
-                prerequisite.id.as_str(),
-                Some(dep_type),
-                None,
-            )
-            .await
-            .expect("golden dependency should be added");
-    }
-
-    issue = tools
-        .show(issue.id.as_str(), None)
-        .await
-        .expect("golden Issue should reload with dependencies");
-    let closed = tools
+    tools
         .close(issue.id.as_str(), None, None)
         .await
-        .expect("golden Issue should close without an extra Note");
-    (closed, dependency_ids)
+        .expect("golden Issue should close without an extra Note")
 }
 async fn reload_golden_issue(workspace: &TempDir, issue_id: &str) -> Issue {
     let tools = create_tools();
@@ -524,7 +498,7 @@ async fn mcp_full_issue_json_golden() {
     let workspace = create_temp_workspace();
     let tools = create_tools();
     set_context(&tools, workspace.path()).await;
-    let (created, _) = create_golden_issue(&tools).await;
+    let created = create_golden_issue(&tools).await;
     let issue = reload_golden_issue(&workspace, created.id.as_str()).await;
 
     let mut actual = mcp_content_json(&issue);
@@ -593,7 +567,7 @@ async fn mcp_timestamps_use_z_suffix() {
     let workspace = create_temp_workspace();
     let tools = create_tools();
     set_context(&tools, workspace.path()).await;
-    let (created, _) = create_golden_issue(&tools).await;
+    let created = create_golden_issue(&tools).await;
     let issue = reload_golden_issue(&workspace, created.id.as_str()).await;
     let wire = mcp_content_json(&issue);
 
@@ -628,7 +602,7 @@ async fn cli_and_mcp_issue_json_shapes_match() {
     let workspace = create_temp_workspace();
     let tools = create_tools();
     set_context(&tools, workspace.path()).await;
-    let (created, _) = create_golden_issue(&tools).await;
+    let created = create_golden_issue(&tools).await;
     let mcp = reload_golden_issue(&workspace, created.id.as_str()).await;
     let mcp_json = mcp_content_json(&mcp);
     let cli_json = cli_json_for_issue(&mcp);
@@ -1214,35 +1188,6 @@ async fn test_error_invalid_status() {
     }
 }
 
-/// Test error response for invalid dependency type.
-#[tokio::test]
-async fn test_error_invalid_dep_type() {
-    let workspace = create_temp_workspace();
-    let tools = create_tools();
-    set_context(&tools, workspace.path()).await;
-
-    let issue1 = create_issue(&tools, "Issue 1").await;
-    let issue2 = create_issue(&tools, "Issue 2").await;
-
-    let result = tools
-        .dep(
-            issue1.id.as_str(),
-            issue2.id.as_str(),
-            Some("invalid_dep"),
-            None,
-        )
-        .await;
-
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        Error::InvalidArgument { field, value, .. } => {
-            assert_eq!(field, "dep_type");
-            assert_eq!(value, "invalid_dep");
-        }
-        e => panic!("Expected InvalidArgument error, got: {e:?}"),
-    }
-}
-
 /// Test error response for issue not found.
 #[tokio::test]
 async fn test_error_issue_not_found() {
@@ -1590,6 +1535,26 @@ async fn blocking_dependency_mcp_direction_and_context_recreation() {
     let prerequisite_b = create_issue(&tools, "Prerequisite B").await;
     let dependent = create_issue(&tools, "Dependent").await;
     let second_dependent = create_issue(&tools, "Second dependent").await;
+    let mut records = std::fs::read_to_string(&issues_path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let second_record = records
+        .iter_mut()
+        .find(|record| record["id"] == second_dependent.id.as_str())
+        .unwrap();
+    second_record["dependencies"] = json!([
+        {"depends_on_id": prerequisite_a.id, "dep_type": "related"}
+    ]);
+    let seeded = records
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&issues_path, format!("{seeded}\n")).unwrap();
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
 
     tools
         .blocking_dependency_add(dependent.id.as_str(), prerequisite_b.id.as_str(), None)
@@ -1600,15 +1565,6 @@ async fn blocking_dependency_mcp_direction_and_context_recreation() {
             dependent.id.as_str(),
             prerequisite_a.id.as_str(),
             Some(workspace.path().to_str().unwrap()),
-        )
-        .await
-        .unwrap();
-    tools
-        .dep(
-            second_dependent.id.as_str(),
-            prerequisite_a.id.as_str(),
-            Some("related"),
-            None,
         )
         .await
         .unwrap();
@@ -1675,74 +1631,6 @@ async fn blocking_dependency_mcp_direction_and_context_recreation() {
     ));
 }
 
-#[tokio::test]
-async fn test_dependency_management() {
-    let workspace = create_temp_workspace();
-    let tools = create_tools();
-    set_context(&tools, workspace.path()).await;
-
-    // Create two issues
-    let blocker = create_issue(&tools, "Blocker Issue").await;
-    let dependent = create_issue(&tools, "Dependent Issue").await;
-
-    // Add dependency
-    let result = tools
-        .dep(
-            dependent.id.as_str(),
-            blocker.id.as_str(),
-            Some("blocks"),
-            None,
-        )
-        .await
-        .expect("dep should succeed");
-
-    // Verify dependency was added
-    assert!(result.contains("Added dependency"));
-    assert!(result.contains(dependent.id.as_str()));
-    assert!(result.contains(blocker.id.as_str()));
-
-    // Check blocked issues
-    let blocked_issues = tools.blocked(None).await.expect("blocked should succeed");
-    assert_eq!(blocked_issues.len(), 1);
-    assert_eq!(blocked_issues[0].issue.id, dependent.id);
-    assert_eq!(blocked_issues[0].blockers.len(), 1);
-    assert_eq!(blocked_issues[0].blockers[0].id, blocker.id);
-}
-
-/// Test all dependency types.
-#[tokio::test]
-async fn test_all_dependency_types() {
-    let workspace = create_temp_workspace();
-    let tools = create_tools();
-    set_context(&tools, workspace.path()).await;
-
-    let dep_types = ["blocks", "related", "parent-child", "discovered-from"];
-
-    for dep_type in dep_types {
-        let issue1 = create_issue(&tools, &format!("Issue for {dep_type} 1")).await;
-        let issue2 = create_issue(&tools, &format!("Issue for {dep_type} 2")).await;
-
-        let result = tools
-            .dep(issue1.id.as_str(), issue2.id.as_str(), Some(dep_type), None)
-            .await
-            .expect("dep should succeed");
-
-        assert!(result.contains(dep_type));
-        let duplicate = tools
-            .dep(issue1.id.as_str(), issue2.id.as_str(), Some("blocks"), None)
-            .await;
-        assert!(
-            matches!(
-                duplicate,
-                Err(Error::Storage(RivetsError::Storage(
-                    StorageError::DuplicateDependency { .. }
-                )))
-            ),
-            "repeated dependency endpoints must be rejected as duplicates"
-        );
-    }
-}
-
 /// Test ready-to-work excludes blocked issues.
 #[tokio::test]
 async fn test_ready_excludes_blocked() {
@@ -1756,12 +1644,7 @@ async fn test_ready_excludes_blocked() {
 
     // Add blocking dependency
     tools
-        .dep(
-            dependent.id.as_str(),
-            blocker.id.as_str(),
-            Some("blocks"),
-            None,
-        )
+        .blocking_dependency_add(dependent.id.as_str(), blocker.id.as_str(), None)
         .await
         .unwrap();
 
@@ -3241,65 +3124,6 @@ fn test_invalid_issue_kind_values(#[case] invalid_value: &str) {
     }
 }
 
-/// Test invalid `dep_type` values return appropriate errors.
-#[rstest]
-#[case::invalid_dep("invalid", "dep_type")]
-#[case::requires_dep("requires", "dep_type")]
-#[case::depends_dep("depends", "dep_type")]
-#[case::blocked_by_dep("blocked-by", "dep_type")]
-#[case::subtask_dep("subtask", "dep_type")]
-#[tokio::test]
-async fn test_invalid_dep_type_values(#[case] invalid_value: &str, #[case] expected_field: &str) {
-    let workspace = create_temp_workspace();
-    let tools = create_tools();
-    set_context(&tools, workspace.path()).await;
-
-    // Create two issues to link
-    let issue1 = create_issue(&tools, "Issue 1").await;
-    let issue2 = create_issue(&tools, "Issue 2").await;
-
-    let result = tools
-        .dep(
-            issue1.id.as_str(),
-            issue2.id.as_str(),
-            Some(invalid_value),
-            None,
-        )
-        .await;
-
-    assert!(
-        result.is_err(),
-        "Expected error for invalid dep_type: {invalid_value}"
-    );
-    match result.unwrap_err() {
-        Error::InvalidArgument {
-            field,
-            value,
-            valid_values,
-        } => {
-            assert_eq!(field, expected_field);
-            assert_eq!(value, invalid_value);
-            assert!(
-                valid_values.contains("blocks"),
-                "Error should mention valid dep_type 'blocks'"
-            );
-            assert!(
-                valid_values.contains("related"),
-                "Error should mention valid dep_type 'related'"
-            );
-            assert!(
-                valid_values.contains("parent-child"),
-                "Error should mention valid dep_type 'parent-child'"
-            );
-            assert!(
-                valid_values.contains("discovered-from"),
-                "Error should mention valid dep_type 'discovered-from'"
-            );
-        }
-        e => panic!("Expected InvalidArgument error, got: {e:?}"),
-    }
-}
-
 /// Test invalid status in update returns appropriate error.
 #[rstest]
 #[case::invalid_update_status("invalid")]
@@ -3730,17 +3554,13 @@ async fn test_all_tools_with_storage_backend() {
         .await
         .expect("create blocker should succeed");
 
-    // 9. dep
+    // 9. add Blocking Dependency
     let dep_result = tools
-        .dep(
-            created.id.as_str(),
-            blocker.id.as_str(),
-            Some("blocks"),
-            None,
-        )
+        .blocking_dependency_add(created.id.as_str(), blocker.id.as_str(), None)
         .await
-        .expect("dep should succeed");
-    assert!(dep_result.contains("Added dependency"));
+        .expect("Blocking Dependency should succeed");
+    assert_eq!(dep_result.dependent_id(), &created.id);
+    assert_eq!(dep_result.prerequisite_id(), &blocker.id);
 
     // 10. blocked
     let blocked_issues = tools.blocked(None).await.expect("blocked should succeed");
@@ -3773,23 +3593,13 @@ async fn test_dependency_chain() {
 
     // B depends on C
     tools
-        .dep(
-            issue_b.id.as_str(),
-            issue_c.id.as_str(),
-            Some("blocks"),
-            None,
-        )
+        .blocking_dependency_add(issue_b.id.as_str(), issue_c.id.as_str(), None)
         .await
         .expect("B->C dep should succeed");
 
     // A depends on B
     tools
-        .dep(
-            issue_a.id.as_str(),
-            issue_b.id.as_str(),
-            Some("blocks"),
-            None,
-        )
+        .blocking_dependency_add(issue_a.id.as_str(), issue_b.id.as_str(), None)
         .await
         .expect("A->B dep should succeed");
 
@@ -3841,12 +3651,7 @@ async fn test_closing_blocker_unblocks_dependent() {
 
     // Add dependency
     tools
-        .dep(
-            dependent.id.as_str(),
-            blocker.id.as_str(),
-            Some("blocks"),
-            None,
-        )
+        .blocking_dependency_add(dependent.id.as_str(), blocker.id.as_str(), None)
         .await
         .expect("dep should succeed");
 

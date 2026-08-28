@@ -152,9 +152,9 @@ impl Note {
 
 /// Represents an issue in the tracking system
 ///
-/// Note: Dependencies are managed by the storage backend and accessed via
-/// `IssueStorage::get_dependencies()` rather than being stored on the Issue
-/// itself. This prevents data duplication and ensures a single source of truth.
+/// Blocking relationships are owned by storage and queried through the
+/// role-named `IssueStorage` interface. The legacy `dependencies` collection
+/// remains only as the JSONL compatibility representation until migration.
 #[derive(Debug, Clone, Serialize)]
 pub struct Issue {
     /// Unique identifier for the issue

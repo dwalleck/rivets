@@ -84,20 +84,23 @@ rivets update demo-a3f8 --priority 2     # Update fields
 rivets close demo-a3f8 --reason "Fixed in commit abc123"
 ```
 
-### Dependencies
+### Blocking Dependencies
 
 ```bash
-rivets dep add demo-a3f8 demo-b2c9 --type blocks  # demo-a3f8 depends on demo-b2c9, which blocks it
-rivets dep remove demo-a3f8 demo-b2c9             # Remove the dependency
-rivets dep list demo-a3f8 --reverse               # List dependents; omit --reverse for dependencies
-rivets blocked                                    # Issues blocked by dependencies, with their blockers
-rivets ready                                      # Issues with no blockers
+rivets blocking-dependency add --dependent demo-a3f8 --prerequisite demo-b2c9
+rivets blocking-dependency remove --dependent demo-a3f8 --prerequisite demo-b2c9
+rivets blocking-dependency list --dependent demo-a3f8       # Its prerequisites
+rivets blocking-dependency list --prerequisite demo-b2c9    # Issues that depend on it
+rivets blocking-dependency tree --dependent demo-a3f8 --depth 3
+rivets blocked
+rivets ready
 ```
 
-Dependency type defaults to `blocks` (`related`, `parent-child`, and
-`discovered-from` are also available). `ready` and `blocked` are derived
-from the dependency graph; adding or removing a dependency does not change
-an issue's stored status.
+A Blocking Dependency always points from the dependent Issue to its
+prerequisite. Self-dependencies and Blocking-only cycles are rejected. Closing
+a prerequisite leaves the relationship recorded but stops it from blocking.
+Legacy non-blocking relationship records remain readable; their dedicated
+interfaces land in separate ADR-0002 slices.
 
 ### Labels
 

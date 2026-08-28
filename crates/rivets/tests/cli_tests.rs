@@ -107,7 +107,10 @@ fn test_cli_help_shows_all_commands() {
         "Help should show 'delete' command"
     );
     assert!(stdout.contains("ready"), "Help should show 'ready' command");
-    assert!(stdout.contains("dep"), "Help should show 'dep' command");
+    assert!(
+        stdout.contains("blocking-dependency"),
+        "Help should show 'blocking-dependency' command"
+    );
     assert!(
         stdout.contains("resource"),
         "Help should show 'resource' command"
@@ -1073,18 +1076,25 @@ fn blocking_dependency_cli_direction_and_restart(initialized_dir: TempDir) {
     );
 
     let second_dependent = create_issue(initialized_dir.path(), "Second dependent", &[]);
-    let related = run_rivets_in_dir(
-        initialized_dir.path(),
-        &[
-            "dep",
-            "add",
-            &second_dependent,
-            &prerequisite_a,
-            "--type",
-            "related",
-        ],
-    );
-    assert!(related.status.success());
+    let issues_path = initialized_dir.path().join(".rivets/issues.jsonl");
+    let mut records = std::fs::read_to_string(&issues_path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let second_record = records
+        .iter_mut()
+        .find(|record| record["id"] == second_dependent)
+        .unwrap();
+    second_record["dependencies"] = serde_json::json!([
+        {"depends_on_id": prerequisite_a, "dep_type": "related"}
+    ]);
+    let seeded = records
+        .iter()
+        .map(serde_json::Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&issues_path, format!("{seeded}\n")).unwrap();
     let add = run_rivets_in_dir(
         initialized_dir.path(),
         &[
@@ -1198,54 +1208,6 @@ fn create_with_prerequisites_is_atomic(initialized_dir: TempDir) {
     assert!(!help.contains("--deps"));
 }
 
-#[rstest]
-fn test_cli_dep_add_and_list(initialized_dir: TempDir) {
-    let id1 = create_issue(initialized_dir.path(), "Dependent issue", &[]);
-    let id2 = create_issue(initialized_dir.path(), "Blocking issue", &[]);
-
-    // Add dependency: id1 depends on (is blocked by) id2
-    let output = run_rivets_in_dir(
-        initialized_dir.path(),
-        &["dep", "add", &id1, &id2, "-t", "blocks"],
-    );
-
-    assert!(
-        output.status.success(),
-        "Dep add failed: {:?}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Added dependency"));
-
-    // List dependencies
-    let list_output = run_rivets_in_dir(initialized_dir.path(), &["dep", "list", &id1]);
-    assert!(list_output.status.success());
-    let list_stdout = String::from_utf8_lossy(&list_output.stdout);
-    assert!(list_stdout.contains(&id2));
-}
-
-#[rstest]
-fn test_cli_dep_remove(initialized_dir: TempDir) {
-    let id1 = create_issue(initialized_dir.path(), "Issue 1", &[]);
-    let id2 = create_issue(initialized_dir.path(), "Issue 2", &[]);
-
-    // Add and then remove dependency
-    run_rivets_in_dir(
-        initialized_dir.path(),
-        &["dep", "add", &id1, &id2, "-t", "blocks"],
-    );
-
-    let output = run_rivets_in_dir(initialized_dir.path(), &["dep", "remove", &id1, &id2]);
-
-    assert!(
-        output.status.success(),
-        "Dep remove failed: {:?}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Removed dependency"));
-}
-
 // ============================================================================
 // Blocked Command Tests
 // ============================================================================
@@ -1264,10 +1226,16 @@ fn test_cli_blocked_with_dependencies(initialized_dir: TempDir) {
     let id1 = create_issue(initialized_dir.path(), "Blocked issue", &[]);
     let id2 = create_issue(initialized_dir.path(), "Blocker", &[]);
 
-    // Add blocking dependency
     run_rivets_in_dir(
         initialized_dir.path(),
-        &["dep", "add", &id1, &id2, "-t", "blocks"],
+        &[
+            "blocking-dependency",
+            "add",
+            "--dependent",
+            &id1,
+            "--prerequisite",
+            &id2,
+        ],
     );
 
     let output = run_rivets_in_dir(initialized_dir.path(), &["blocked"]);
@@ -1769,139 +1737,6 @@ fn test_cli_stale_json_output(initialized_dir: TempDir) {
     let json: serde_json::Value =
         serde_json::from_str(&stdout).expect("Output should be valid JSON");
     assert!(json.is_array());
-}
-
-// ============================================================================
-// Dep Tree Command Tests
-// ============================================================================
-
-#[rstest]
-fn test_cli_dep_tree(initialized_dir: TempDir) {
-    let id1 = create_issue(initialized_dir.path(), "Parent issue", &[]);
-    let id2 = create_issue(initialized_dir.path(), "Child issue", &[]);
-
-    // Create dependency
-    run_rivets_in_dir(
-        initialized_dir.path(),
-        &["dep", "add", &id1, &id2, "-t", "blocks"],
-    );
-
-    let output = run_rivets_in_dir(initialized_dir.path(), &["dep", "tree", &id1]);
-
-    assert!(
-        output.status.success(),
-        "Dep tree failed: {:?}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains(&id1), "should contain root issue ID");
-    assert!(stdout.contains("Parent issue"), "should contain root title");
-    assert!(stdout.contains(&id2), "should contain child issue ID");
-    assert!(stdout.contains("blocks"), "should contain dep type");
-}
-
-#[rstest]
-fn test_cli_dep_tree_shows_dependents(initialized_dir: TempDir) {
-    let id1 = create_issue(initialized_dir.path(), "Dependent issue", &[]);
-    let id2 = create_issue(initialized_dir.path(), "Blocker issue", &[]);
-
-    // id1 depends on id2 (id1 is blocked by id2)
-    run_rivets_in_dir(
-        initialized_dir.path(),
-        &["dep", "add", &id1, &id2, "-t", "blocks"],
-    );
-
-    // Check tree from blocker's perspective
-    let output = run_rivets_in_dir(initialized_dir.path(), &["dep", "tree", &id2]);
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Depended on by"));
-    assert!(stdout.contains(&id1));
-}
-
-#[rstest]
-fn test_cli_dep_tree_with_depth_limit(initialized_dir: TempDir) {
-    let id1 = create_issue(initialized_dir.path(), "Level 1", &[]);
-    let id2 = create_issue(initialized_dir.path(), "Level 2", &[]);
-    let id3 = create_issue(initialized_dir.path(), "Level 3", &[]);
-
-    // Create chain: id1 -> id2 -> id3
-    run_rivets_in_dir(
-        initialized_dir.path(),
-        &["dep", "add", &id1, &id2, "-t", "blocks"],
-    );
-    run_rivets_in_dir(
-        initialized_dir.path(),
-        &["dep", "add", &id2, &id3, "-t", "blocks"],
-    );
-
-    // Tree with depth 1 should only show immediate dependencies
-    let output = run_rivets_in_dir(
-        initialized_dir.path(),
-        &["dep", "tree", &id1, "--depth", "1"],
-    );
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains(&id2));
-    // id3 might not be shown due to depth limit
-}
-
-#[rstest]
-fn test_cli_dep_tree_json_output(initialized_dir: TempDir) {
-    let id1 = create_issue(initialized_dir.path(), "Parent", &[]);
-    let id2 = create_issue(initialized_dir.path(), "Child", &[]);
-
-    run_rivets_in_dir(
-        initialized_dir.path(),
-        &["dep", "add", &id1, &id2, "-t", "blocks"],
-    );
-
-    let output = run_rivets_in_dir(initialized_dir.path(), &["--json", "dep", "tree", &id1]);
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    let json: serde_json::Value =
-        serde_json::from_str(&stdout).expect("Output should be valid JSON");
-    assert!(json["id"].is_string(), "should have 'id' field");
-    assert!(json["title"].is_string(), "should have 'title' field");
-    assert!(
-        json["dependencies"].is_array(),
-        "should have 'dependencies' array"
-    );
-    assert!(
-        json["dependents"].is_array(),
-        "should have 'dependents' array"
-    );
-}
-
-#[rstest]
-fn test_cli_dep_tree_no_dependencies(initialized_dir: TempDir) {
-    let issue_id = create_issue(initialized_dir.path(), "Standalone issue", &[]);
-
-    let output = run_rivets_in_dir(initialized_dir.path(), &["dep", "tree", &issue_id]);
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // Root node is always displayed with ID and title
-    assert!(
-        stdout.contains(&issue_id),
-        "should contain issue ID, got: {}",
-        stdout
-    );
-    assert!(
-        stdout.contains("Standalone issue"),
-        "should contain issue title, got: {}",
-        stdout
-    );
-    // No dependency tree connectors should appear
-    assert!(
-        !stdout.contains("├──") && !stdout.contains("└──"),
-        "should not contain tree connectors for standalone issue, got: {}",
-        stdout
-    );
 }
 
 // ============================================================================
