@@ -5,7 +5,7 @@
 //! - Dependency tree traversal (BFS)
 //! - Blocked issue detection with transitive parent-child propagation
 
-use crate::domain::{BlockingDependency, Dependency, DependencyType, Issue, IssueId, IssueStatus};
+use crate::domain::{BlockingDependency, DependencyType, Issue, IssueId, IssueStatus};
 use crate::error::{Error, Result};
 use petgraph::Direction;
 use petgraph::algo;
@@ -18,67 +18,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 /// This limit prevents infinite loops and handles extremely deep hierarchies gracefully.
 const MAX_BLOCKING_DEPTH: usize = 50;
 
-/// Internal implementation of dependency tree traversal.
-///
-/// Uses BFS to traverse the dependency graph, returning all transitive
-/// dependencies with their depth level.
-pub(super) fn get_dependency_tree_impl(
-    graph: &DiGraph<IssueId, DependencyType>,
-    node_map: &HashMap<IssueId, NodeIndex>,
-    id: &IssueId,
-    max_depth: Option<usize>,
-) -> Result<Vec<(Dependency, usize)>> {
-    let start_node = node_map
-        .get(id)
-        .ok_or_else(|| Error::IssueNotFound(id.clone()))?;
-
-    let mut result = Vec::new();
-    let mut visited = HashSet::new();
-    let mut queue: VecDeque<(NodeIndex, usize)> = VecDeque::new();
-
-    // Start BFS from direct dependencies (depth 1)
-    for edge in graph.edges(*start_node) {
-        let target_node = edge.target();
-        if visited.insert(target_node) {
-            queue.push_back((target_node, 1));
-            result.push((
-                Dependency {
-                    depends_on_id: graph[target_node].clone(),
-                    dep_type: *edge.weight(),
-                },
-                1,
-            ));
-        }
-    }
-
-    // BFS traversal for transitive dependencies
-    while let Some((current_node, depth)) = queue.pop_front() {
-        // Check max depth limit
-        if let Some(max) = max_depth
-            && depth >= max
-        {
-            continue;
-        }
-
-        // Explore dependencies of current node
-        for edge in graph.edges(current_node) {
-            let target_node = edge.target();
-            if visited.insert(target_node) {
-                let next_depth = depth + 1;
-                queue.push_back((target_node, next_depth));
-                result.push((
-                    Dependency {
-                        depends_on_id: graph[target_node].clone(),
-                        dep_type: *edge.weight(),
-                    },
-                    next_depth,
-                ));
-            }
-        }
-    }
-
-    Ok(result)
-}
 /// Find the Blocking edge for one endpoint pair, ignoring parallel other kinds.
 pub(super) fn find_blocking_edge(
     graph: &DiGraph<IssueId, DependencyType>,

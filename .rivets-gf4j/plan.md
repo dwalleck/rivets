@@ -19,19 +19,34 @@
 | Churn margin | 760 lines (20%; broad exported-trait/test callsite migration and generated parity documentation are the main uncertainty) |
 | **Projected total** | **4,560 lines** |
 
-The projected total exceeds the 4,000-line review-size gate, so the plan has two independently mergeable PR increments.
+The projected total exceeded the 4,000-line review-size gate. The initial
+two-increment partition was revised at the final size tripwire because actual
+increment B also crossed 4,000 changed lines.
+
+| Actual increment | Changed lines |
+|---|---:|
+| A — Slice 1 | 1,432 |
+| B — Slices 2–3 | 1,337 |
+| C — Slice 4 | 2,994 |
+| **Actual total** | **5,763** |
 
 ### PR increment A — Typed Blocking storage foundation
 
 - Slices: 1.
 - Mergeable definition: adds the role-safe domain value and dedicated storage queries/mutations alongside the still-working legacy adapter surfaces. Existing CLI and MCP remain green.
-- Independent verification: domain/storage/resilient-loader fences and the full `rivets` crate tests pass without increment B.
+- Independent verification: domain/storage/resilient-loader fences and the full `rivets` crate tests pass without increments B or C.
 
-### PR increment B — Canonical adapter cutover
+### PR increment B — Canonical CLI and MCP adapters
 
-- Slices: 2–4.
-- Mergeable definition: migrates create, CLI, MCP, output, tests, and documentation to the approved Blocking interface, then removes generic adapter/storage mutation surfaces.
-- Independent verification: real CLI process tests, MCP context-recreation tests, registry absence fences, parity rendering, and the full workspace gate pass against increment A.
+- Slices: 2–3.
+- Mergeable definition: migrates create, CLI, MCP, output, and adapter tests to the approved Blocking interface while the generic routes remain available only until increment C.
+- Independent verification: real CLI process tests and MCP context-recreation/schema tests pass against increment A.
+
+### PR increment C — Generic-surface retirement
+
+- Slices: 4.
+- Mergeable definition: removes generic CLI/MCP/storage mutation/query surfaces and synchronizes current-reference documentation.
+- Independent verification: registry absence fences, current-reference documentation audit, parity rendering, and the full workspace gate pass against increment B.
 
 ## Slice 1: Add the typed Blocking value and deep storage interface
 
@@ -103,7 +118,7 @@ The projected total exceeds the 4,000-line review-size gate, so the plan has two
 **Files:** modify remaining generic callers/implementations in `crates/rivets/src/{domain/mod.rs,storage/mod.rs,storage/in_memory/trait_impl.rs,cli/mod.rs,cli/args.rs,cli/execute.rs,output/mod.rs,output/json.rs,output/tree.rs}`; remove MCP `DepParams`/`dep`; update `README.md`, `docs/{README.md,architecture.md,storage-architecture.md,data-flow.md,cli-mcp-parity.md,cli-mcp-parity.json,agents/issue-tracker.md}`, `.agents/summary/{interfaces.md,data_models.md,components.md,workflows.md,architecture.md,review_notes.md}`, and parity-rendering inputs/scripts only where the canonical intent registry requires it. `CONTEXT.md` and ADR-0002 remain unchanged because they already state the target.  
 **Estimate:** 1 engineering day.  
 **Diff estimate:** 850 changed lines including migrated tests and synchronized documentation.  
-**PR increment:** B — Canonical adapter cutover.  
+**PR increment:** C — Generic-surface retirement.  
 **Commands and expected results:**
 - `cargo test -p rivets -p rivets-mcp generic_dependency_mutation_surfaces_are_absent` → every canonical positive control exists; `dep`, `--type`, and `--deps` are absent and rejected; each named reintroduction turns red.
 - `python scripts/render-cli-mcp-parity.py --check` → rendered Markdown and JSON registry agree and Blocking intents no longer report legacy/future adapter gaps covered by this Task.
@@ -121,7 +136,7 @@ The projected total exceeds the 4,000-line review-size gate, so the plan has two
 - [x] Every slice contains all thirteen mandatory fields and every conditional field has an explicit `N/A — reason` where applicable.
 - [x] Every claim’s regression fence and named mutation are created/applied in the owning slice; no fence-less risk was approved.
 - [x] Every new loop records asymptotic complexity, production/stress scale, a maximum accepted cost, and rationale; always-on storage phases have wall budgets.
-- [x] Partition arithmetic includes a 20% churn margin; the 4,560-line total is split into two independently mergeable increments.
+- [x] Partition arithmetic includes the original 20% churn margin and the actual 5,763-line total is split into three independently mergeable increments after the final size tripwire.
 - [x] Every slice names an increment and each increment has an independent mergeable definition.
 - [x] Tracker taxonomy is applied to every intended later Task.
 - [x] No slice is declared complete; checkpointed-build owns completion.

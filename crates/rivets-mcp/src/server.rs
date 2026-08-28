@@ -6,10 +6,10 @@ use crate::context::Context;
 use crate::error::Error;
 use crate::models::{
     AddNoteParams, BlockedParams, BlockingDependencyListParams, BlockingDependencyPairParams,
-    BlockingDependencyTreeParams, CloseParams, CreateParams, DepParams, LabelAddParams,
-    LabelListAllParams, LabelListParams, LabelRemoveParams, ListParams, ReadyParams, ReopenParams,
-    ResourceAddParams, ResourceListParams, ResourceRemoveParams, ResourceUpdateParams,
-    SetContextParams, ShowParams, StaleParams, UpdateParams,
+    BlockingDependencyTreeParams, CloseParams, CreateParams, LabelAddParams, LabelListAllParams,
+    LabelListParams, LabelRemoveParams, ListParams, ReadyParams, ReopenParams, ResourceAddParams,
+    ResourceListParams, ResourceRemoveParams, ResourceUpdateParams, SetContextParams, ShowParams,
+    StaleParams, UpdateParams,
 };
 use crate::tools::Tools;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -374,29 +374,6 @@ impl RivetsMcpServer {
         }
     }
 
-    /// Add a dependency between issues.
-    #[tool(
-        description = "Add a dependency between issues. Types: blocks (hard blocker), related (soft link), parent-child (epic/subtask), discovered-from (found during work). Uses workspace_root if provided, otherwise uses current context."
-    )]
-    async fn dep(
-        &self,
-        Parameters(params): Parameters<DepParams>,
-    ) -> Result<CallToolResult, McpError> {
-        match self
-            .tools
-            .dep(
-                &params.issue_id,
-                &params.depends_on_id,
-                params.dep_type.as_deref(),
-                params.workspace_root.as_deref(),
-            )
-            .await
-        {
-            Ok(message) => Ok(CallToolResult::success(vec![Content::text(message)])),
-            Err(e) => Err(to_mcp_error(&e)),
-        }
-    }
-
     /// Reopen a closed issue.
     #[tool(
         description = "Reopen a previously closed issue. Use when work needs to continue or was not actually complete. Uses workspace_root if provided, otherwise uses current context."
@@ -611,7 +588,6 @@ mod tests {
         assert!(tool_names.contains(&"update"));
         assert!(tool_names.contains(&"add_note"));
         assert!(tool_names.contains(&"close"));
-        assert!(tool_names.contains(&"dep"));
         assert!(tool_names.contains(&"reopen"));
         assert!(tool_names.contains(&"stale"));
         assert!(tool_names.contains(&"label_add"));
@@ -660,7 +636,7 @@ mod tests {
         let list_schema = serde_json::to_string(&list_tool.input_schema).unwrap();
         assert!(list_schema.contains("prerequisites_of"));
         assert!(list_schema.contains("dependents_of"));
-        assert_eq!(tools.len(), 25);
+        assert_eq!(tools.len(), 24);
     }
 
     #[test]
@@ -684,6 +660,25 @@ mod tests {
                 !schema.contains("\"issue_type\""),
                 "{tool_name} schema should hide migration-only issue_type: {schema}"
             );
+        }
+    }
+
+    #[test]
+    fn generic_dependency_mcp_tool_is_absent() {
+        let tool_names = RivetsMcpServer::new()
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(!tool_names.contains("dep"));
+        for canonical in [
+            "blocking_dependency_add",
+            "blocking_dependency_remove",
+            "blocking_dependency_list",
+            "blocking_dependency_tree",
+        ] {
+            assert!(tool_names.contains(canonical));
         }
     }
 

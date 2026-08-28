@@ -12,8 +12,8 @@ Issues and planning artifacts for this repo live in Rivets. The checked-in `.riv
 - **Update an issue**: use `update`, or `rivets update <issue-id>`. Prefer atomic label add/remove operations over replacing the full label set.
 - **Record discussion or resolution**: Rivets has no authored comment history. Use MCP `add_note` or CLI `rivets update <issue-id> --notes "..."`; each operation appends one immutable, system-timestamped Note.
 - **Close or reopen**: use `close` / `reopen`, or the corresponding CLI commands, with a concise reason.
-- **Add a dependency**: the first issue depends on the second. Use `dep`, or `rivets dep add <dependent> <dependency> --type <blocks|related|parent-child|discovered-from>`.
-- **Remove a dependency or delete an issue**: use the CLI when the MCP surface does not expose the required mutation.
+- **Add a Blocking Dependency**: the dependent Issue depends on the prerequisite. Use MCP `blocking_dependency_add`, or `rivets blocking-dependency add --dependent <issue> --prerequisite <issue>`.
+- **Inspect or remove Blocking Dependencies**: use the matching MCP `blocking_dependency_list` / `blocking_dependency_tree` / `blocking_dependency_remove` tools or CLI `blocking-dependency` subcommands. Never reverse dependent and prerequisite wording.
 
 ## When a skill says "publish to the issue tracker"
 

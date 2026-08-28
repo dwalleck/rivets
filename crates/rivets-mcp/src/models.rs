@@ -380,22 +380,6 @@ pub struct BlockingDependencyTreeParams {
     pub workspace_root: Option<String>,
 }
 
-/// Parameters for the `dep` tool.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct DepParams {
-    /// The issue that has the dependency.
-    pub issue_id: String,
-
-    /// The issue that is depended on.
-    pub depends_on_id: String,
-
-    /// Dependency type (blocks, related, parent-child, discovered-from).
-    pub dep_type: Option<String>,
-
-    /// Optional workspace root (uses current context if not specified).
-    pub workspace_root: Option<String>,
-}
-
 /// Parameters for the `reopen` tool.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ReopenParams {

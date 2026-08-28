@@ -278,66 +278,52 @@ flowchart TD
 
 This is a read-only query; it does not change any issue's status field.
 
-## Dependency Add Flow with Cycle Detection
-
-The dependency CLI is `dep` with subcommands `add`, `remove`, `list`, and
-`tree`. `add` takes the **dependent first, prerequisite second**, with the type
-as a flag:
+## Blocking Dependency Add Flow
 
 ```bash
-rivets dep add rivets-a3f8 rivets-x9k2 --type blocks
-#              dependent   prerequisite     default: blocks
+rivets blocking-dependency add \
+  --dependent rivets-a3f8 \
+  --prerequisite rivets-x9k2
 ```
 
 ```mermaid
 flowchart TD
-    Start[rivets dep add<br/>rivets-a3f8 rivets-x9k2<br/>--type blocks] --> Parse[Parse IDs and type]
-    Parse --> ValidateIDs{Both IDs<br/>exist?}
-    ValidateIDs -->|No| ErrorNotFound[Error: Issue not found]
-    ValidateIDs -->|Yes| CheckDuplicate{Edge<br/>already exists?}
-    CheckDuplicate -->|Yes| ErrorDuplicate[Error: Dependency already exists<br/>a3f8 -&gt; x9k2]
-    CheckDuplicate -->|No| CheckCycle
-
-    CheckCycle[has_path_connecting<br/>graph, to=x9k2, from=a3f8] --> PathExists{Path<br/>exists?}
-
-    PathExists -->|Yes| ErrorCycle[Error: Circular dependency detected]
-    PathExists -->|No| AddEdge[Add edge a3f8 --blocks--&gt; x9k2<br/>+ push to issue.dependencies]
-
-    AddEdge --> Save[Auto-save to JSONL]
-    Save --> Success[Print: Added dependency:<br/>a3f8 --[blocks]--&gt; x9k2]
+    Start[blocking-dependency add] --> Parse[Parse explicit dependent and prerequisite]
+    Parse --> Self{Same Issue?}
+    Self -->|Yes| ErrorSelf[Reject self-reference]
+    Self -->|No| ValidateIDs{Both Issues exist?}
+    ValidateIDs -->|No| ErrorNotFound[Issue not found]
+    ValidateIDs -->|Yes| Duplicate{Same blocks edge exists?}
+    Duplicate -->|Yes| ErrorDuplicate[Reject duplicate]
+    Duplicate -->|No| Reach[Traverse only blocks edges<br/>prerequisite toward dependent]
+    Reach -->|Dependent reached| ErrorCycle[Reject Blocking cycle]
+    Reach -->|No path| Add[Add dependent→prerequisite blocks edge]
+    Add --> Save[Atomic JSONL save]
+    Save --> Success[DEPENDENT depends on PREREQUISITE]
 
     style Success fill:#90EE90
+    style ErrorSelf fill:#FFB6C1
     style ErrorCycle fill:#FFB6C1
     style ErrorNotFound fill:#FFB6C1
     style ErrorDuplicate fill:#FFB6C1
 ```
 
-Adding or removing a dependency **never mutates issue status**. Blocked-ness is
-derived from the graph at query time (`ready`, `blocked`, `stats`).
+Blocking mutation never changes stored status. Closing the prerequisite keeps
+the edge but makes it inactive for blockedness. Parallel legacy relationship
+kinds on the same endpoint pair are preserved.
 
-### Example Cycle Detection
-
-```mermaid
-graph LR
-    A[rivets-a3f8] -->|blocks| B[rivets-x9k2]
-    B -->|blocks| C[rivets-p4m1]
-    C -.trying to add.-> A
-
-    style C fill:#FFB6C1
-```
-
-**Detection**: Trying `rivets dep add rivets-p4m1 rivets-a3f8 --type blocks`
-(p4m1 depends on a3f8). The check is `has_path_connecting(graph, a3f8, p4m1)`.
-Result: **Yes** (path exists: a3f8 → x9k2 → p4m1), so the edge is rejected.
-
-Other `dep` subcommands:
+### Query and removal forms
 
 ```bash
-rivets dep remove rivets-a3f8 rivets-x9k2   # remove the edge
-rivets dep list rivets-a3f8                 # dependencies of a3f8
-rivets dep list rivets-a3f8 --reverse       # issues that depend on a3f8
-rivets dep tree rivets-a3f8 --depth 3       # transitive tree (0 = unlimited)
+rivets blocking-dependency remove --dependent rivets-a3f8 --prerequisite rivets-x9k2
+rivets blocking-dependency list --dependent rivets-a3f8
+rivets blocking-dependency list --prerequisite rivets-x9k2
+rivets blocking-dependency tree --dependent rivets-a3f8 --depth 3
 ```
+
+The MCP tools `blocking_dependency_add`, `blocking_dependency_remove`,
+`blocking_dependency_list`, and `blocking_dependency_tree` delegate to the same
+storage operations and return role-named structured values.
 
 ## Delete with Safety Checks Flow
 
@@ -345,7 +331,7 @@ rivets dep tree rivets-a3f8 --depth 3       # transitive tree (0 = unlimited)
 flowchart TD
     Start[rivets delete rivets-a3f8] --> Confirm{Confirmed?<br/>--force or -y skips}
     Confirm -->|No| Abort[Abort]
-    Confirm -->|Yes| GetDependents[Query incoming edges<br/>get_dependents a3f8]
+    Confirm -->|Yes| GetDependents[Query incoming relationship edges]
 
     GetDependents --> HasDependents{Dependents<br/>exist?}
     HasDependents -->|Yes| ErrorDependent[Error: Cannot delete rivets-a3f8:<br/>N other issue(s) depend on it.<br/>Dependents: ...]
@@ -496,14 +482,14 @@ flowchart LR
 - After `close`
 - After `reopen`
 - After `delete`
-- After `dep add`
-- After `dep remove`
+- After `blocking-dependency add`
+- After `blocking-dependency remove`
 - After `label add` / `label remove`
 - After `resource add` / `resource update` / `resource remove`
 
 **NOT triggered** by read-only operations:
 - `list`, `show`, `ready`, `blocked`, `stats`, `stale`, `info`
-- `dep list`, `dep tree`
+- `blocking-dependency list`, `blocking-dependency tree`
 - `label list`, `label list-all`
 - `resource list`
 
