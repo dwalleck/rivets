@@ -1075,6 +1075,30 @@ fn blocking_dependency_cli_direction_and_restart(initialized_dir: TempDir) {
             .all(|row| row["depth"] == 1 && row["dependent_id"] == dependent)
     );
 
+    let text_tree = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["blocking-dependency", "tree", "--dependent", &dependent],
+    );
+    assert!(text_tree.status.success());
+    let text_tree = String::from_utf8_lossy(&text_tree.stdout);
+    assert!(text_tree.contains(&format!("Blocking prerequisites of {dependent}:")));
+    assert!(text_tree.contains(&format!("{dependent} depends on {prerequisite_a}")));
+    assert!(text_tree.contains(&format!("{dependent} depends on {prerequisite_b}")));
+
+    let empty_tree = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "blocking-dependency",
+            "tree",
+            "--dependent",
+            &prerequisite_a,
+        ],
+    );
+    assert!(
+        String::from_utf8_lossy(&empty_tree.stdout)
+            .contains(&format!("{prerequisite_a} has no Blocking prerequisites"))
+    );
+
     let second_dependent = create_issue(initialized_dir.path(), "Second dependent", &[]);
     let issues_path = initialized_dir.path().join(".rivets/issues.jsonl");
     let mut records = std::fs::read_to_string(&issues_path)
