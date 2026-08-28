@@ -5,7 +5,8 @@
 use crate::context::Context;
 use crate::error::Error;
 use crate::models::{
-    AddNoteParams, BlockedParams, CloseParams, CreateParams, DepParams, LabelAddParams,
+    AddNoteParams, BlockedParams, BlockingDependencyListParams, BlockingDependencyPairParams,
+    BlockingDependencyTreeParams, CloseParams, CreateParams, DepParams, LabelAddParams,
     LabelListAllParams, LabelListParams, LabelRemoveParams, ListParams, ReadyParams, ReopenParams,
     ResourceAddParams, ResourceListParams, ResourceRemoveParams, ResourceUpdateParams,
     SetContextParams, ShowParams, StaleParams, UpdateParams,
@@ -33,6 +34,7 @@ fn to_mcp_error(e: &Error) -> McpError {
         | Error::InvalidArgument { .. }
         | Error::InvalidNote(_)
         | Error::InvalidResource(_)
+        | Error::InvalidBlockingDependency(_)
         | Error::InvalidStatusTransition(_)
         | Error::IssueNotFound(_) => McpError::invalid_params(e.to_string(), None),
         _ => McpError::internal_error(e.to_string(), None),
@@ -288,6 +290,90 @@ impl RivetsMcpServer {
         }
     }
 
+    /// Add a directed Blocking Dependency from dependent to prerequisite.
+    #[tool(
+        description = "Add a directed Blocking Dependency. dependent_id is blocked by and depends on prerequisite_id. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn blocking_dependency_add(
+        &self,
+        Parameters(params): Parameters<BlockingDependencyPairParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .tools
+            .blocking_dependency_add(
+                &params.dependent_id,
+                &params.prerequisite_id,
+                params.workspace_root.as_deref(),
+            )
+            .await
+        {
+            Ok(dependency) => Ok(CallToolResult::success(vec![Content::json(dependency)?])),
+            Err(error) => Err(to_mcp_error(&error)),
+        }
+    }
+
+    /// Remove one directed Blocking Dependency.
+    #[tool(
+        description = "Remove one directed Blocking Dependency without changing either Issue's Workflow State. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn blocking_dependency_remove(
+        &self,
+        Parameters(params): Parameters<BlockingDependencyPairParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .tools
+            .blocking_dependency_remove(
+                &params.dependent_id,
+                &params.prerequisite_id,
+                params.workspace_root.as_deref(),
+            )
+            .await
+        {
+            Ok(dependency) => Ok(CallToolResult::success(vec![Content::json(dependency)?])),
+            Err(error) => Err(to_mcp_error(&error)),
+        }
+    }
+
+    /// List Blocking Dependencies from one explicit endpoint perspective.
+    #[tool(
+        description = "List either prerequisites of a dependent or dependents of a prerequisite using the tagged query. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn blocking_dependency_list(
+        &self,
+        Parameters(params): Parameters<BlockingDependencyListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .tools
+            .blocking_dependency_list(&params.query, params.workspace_root.as_deref())
+            .await
+        {
+            Ok(dependencies) => Ok(CallToolResult::success(vec![Content::json(dependencies)?])),
+            Err(error) => Err(to_mcp_error(&error)),
+        }
+    }
+
+    /// Traverse only Blocking prerequisites from one dependent.
+    #[tool(
+        description = "Show a dependent's transitive Blocking prerequisite tree. depth zero means unlimited. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn blocking_dependency_tree(
+        &self,
+        Parameters(params): Parameters<BlockingDependencyTreeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .tools
+            .blocking_dependency_tree(
+                &params.dependent_id,
+                params.depth,
+                params.workspace_root.as_deref(),
+            )
+            .await
+        {
+            Ok(tree) => Ok(CallToolResult::success(vec![Content::json(tree)?])),
+            Err(error) => Err(to_mcp_error(&error)),
+        }
+    }
+
     /// Add a dependency between issues.
     #[tool(
         description = "Add a dependency between issues. Types: blocks (hard blocker), related (soft link), parent-child (epic/subtask), discovered-from (found during work). Uses workspace_root if provided, otherwise uses current context."
@@ -536,6 +622,10 @@ mod tests {
         assert!(tool_names.contains(&"resource_list"));
         assert!(tool_names.contains(&"resource_update"));
         assert!(tool_names.contains(&"resource_remove"));
+        assert!(tool_names.contains(&"blocking_dependency_add"));
+        assert!(tool_names.contains(&"blocking_dependency_remove"));
+        assert!(tool_names.contains(&"blocking_dependency_list"));
+        assert!(tool_names.contains(&"blocking_dependency_tree"));
         let input_properties = |name: &str| {
             tools
                 .iter()
@@ -552,7 +642,25 @@ mod tests {
         assert!(input_properties("resource_add").contains_key("role"));
         assert!(input_properties("resource_update").contains_key("resource_id"));
         assert!(input_properties("resource_remove").contains_key("resource_id"));
-        assert_eq!(tools.len(), 21);
+        for tool_name in ["blocking_dependency_add", "blocking_dependency_remove"] {
+            let properties = input_properties(tool_name);
+            assert!(properties.contains_key("dependent_id"));
+            assert!(properties.contains_key("prerequisite_id"));
+            assert!(!properties.contains_key("issue_id"));
+            assert!(!properties.contains_key("depends_on_id"));
+        }
+        assert!(input_properties("blocking_dependency_list").contains_key("query"));
+        let tree = input_properties("blocking_dependency_tree");
+        assert!(tree.contains_key("dependent_id"));
+        assert!(tree.contains_key("depth"));
+        let list_tool = tools
+            .iter()
+            .find(|tool| tool.name == "blocking_dependency_list")
+            .expect("Blocking list tool should be registered");
+        let list_schema = serde_json::to_string(&list_tool.input_schema).unwrap();
+        assert!(list_schema.contains("prerequisites_of"));
+        assert!(list_schema.contains("dependents_of"));
+        assert_eq!(tools.len(), 25);
     }
 
     #[test]
