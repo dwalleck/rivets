@@ -28,6 +28,7 @@ rivets/
 │   │   │   ├── config.rs          # Configuration management
 │   │   │   ├── error.rs           # Error types
 │   │   │   ├── id_generation.rs   # Hash-based ID generation
+│   │   │   ├── workspace_lock.rs  # Durable Workspace mutation ownership
 │   │   │   ├── cli/
 │   │   │   │   ├── mod.rs         # Argument parsing and command dispatch
 │   │   │   │   ├── args.rs        # Argument structs for all commands
@@ -77,8 +78,10 @@ rivets/
 ├── docs/                          # Architecture, design, and agent docs
 │
 └── .rivets/                       # User workspace (created by init)
-    ├── issues.jsonl
-    └── config.yaml
+    ├── issues.jsonl               # Git-tracked source of truth
+    ├── config.yaml
+    ├── workspace.lock             # Persistent, ignored OS-lock sidecar
+    └── .gitignore
 ```
 
 > **Tethys** (code intelligence engine) has moved to its own repository and is
@@ -171,10 +174,18 @@ Argument parsing and command dispatch, split by responsibility:
 Application context for CLI command execution: locates the workspace, loads
 configuration, and constructs the storage backend commands operate on.
 
+### workspace_lock.rs
+
+Owns canonical Workspace identity and the persistent, nonblocking mutation
+sidecar. `WorkspaceMutationLock::try_acquire` uses Rust's typed standard-library
+file lock, distinguishes retryable contention from causal I/O, and releases on
+guard drop without deleting the sidecar.
+
 ### commands/
 
 Command implementations that do not go through storage-backed dispatch.
-Currently holds `init.rs` (workspace creation).
+Currently holds `init.rs`, which creates the Workspace, empty lock sidecar, and
+metadata ignore entry.
 
 ### domain/
 

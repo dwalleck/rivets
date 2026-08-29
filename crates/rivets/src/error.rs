@@ -292,6 +292,26 @@ pub enum Error {
     #[error("IO error: {0}")]
     Io(#[from] io::Error),
 
+    /// Another writer currently owns the Workspace mutation lock.
+    #[error(
+        "Workspace is busy: '{}'; retry the operation",
+        workspace_root.display()
+    )]
+    WorkspaceBusy {
+        /// Canonical root of the contended Workspace.
+        workspace_root: PathBuf,
+    },
+
+    /// The Workspace lock file could not be opened or locked.
+    #[error("Failed to acquire Workspace lock '{}': {source}", lock_path.display())]
+    WorkspaceLock {
+        /// Lock-file path used for the failed operation.
+        lock_path: PathBuf,
+        /// Underlying filesystem or lock error.
+        #[source]
+        source: io::Error,
+    },
+
     /// Configuration error.
     #[error("{0}")]
     Config(#[from] ConfigError),
@@ -647,6 +667,40 @@ mod tests {
         assert!(
             error.source().is_none(),
             "ConfigError::InvalidPrefix should not have a source"
+        );
+    }
+
+    #[test]
+    fn workspace_busy_is_retryable_and_has_no_source() {
+        let error = Error::WorkspaceBusy {
+            workspace_root: PathBuf::from("/workspace"),
+        };
+        assert_eq!(
+            error.to_string(),
+            "Workspace is busy: '/workspace'; retry the operation"
+        );
+        assert!(error.source().is_none());
+    }
+
+    #[test]
+    fn workspace_lock_error_preserves_path_and_source() {
+        let error = Error::WorkspaceLock {
+            lock_path: PathBuf::from("/workspace/.rivets/workspace.lock"),
+            source: io::Error::new(io::ErrorKind::PermissionDenied, "denied"),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("/workspace/.rivets/workspace.lock")
+        );
+        assert_eq!(
+            error
+                .source()
+                .expect("Workspace lock error should expose its source")
+                .downcast_ref::<io::Error>()
+                .expect("source should remain io::Error")
+                .kind(),
+            io::ErrorKind::PermissionDenied
         );
     }
 

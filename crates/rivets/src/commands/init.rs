@@ -35,15 +35,13 @@
 
 use crate::error::{ConfigError, Result};
 use crate::storage::StorageBackend;
+use crate::workspace_lock::{RIVETS_DIR_NAME, WORKSPACE_LOCK_FILE_NAME};
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 use tokio::fs;
 
 /// Default issue prefix if none specified
 pub const DEFAULT_PREFIX: &str = "proj";
-
-/// Name of the rivets directory
-pub const RIVETS_DIR_NAME: &str = ".rivets";
 
 /// Name of the configuration file
 pub const CONFIG_FILE_NAME: &str = "config.yaml";
@@ -256,12 +254,17 @@ pub async fn init(base_dir: &Path, prefix: Option<&str>) -> Result<InitResult> {
     let issues_file = rivets_dir.join(ISSUES_FILE_NAME);
     fs::write(&issues_file, &[] as &[u8]).await?;
 
+    // Pre-create the persistent sidecar. The OS lock, not file existence,
+    // represents ownership; the file must never be deleted on guard drop.
+    fs::write(rivets_dir.join(WORKSPACE_LOCK_FILE_NAME), &[] as &[u8]).await?;
+
     // Create .gitignore inside .rivets
     let gitignore_file = rivets_dir.join(GITIGNORE_FILE_NAME);
-    let gitignore_content = "\
-# Rivets metadata files that should not be tracked
-# The issues.jsonl file should be tracked for collaboration
-";
+    let gitignore_content = format!(
+        "# Rivets metadata files that should not be tracked\n\
+         # The issues.jsonl file should be tracked for collaboration\n\
+         {WORKSPACE_LOCK_FILE_NAME}\n"
+    );
     fs::write(&gitignore_file, gitignore_content).await?;
 
     Ok(InitResult {

@@ -100,6 +100,8 @@ impl From<RivetsError> for Error {
                 },
             },
             error @ (RivetsError::Io(_)
+            | RivetsError::WorkspaceBusy { .. }
+            | RivetsError::WorkspaceLock { .. }
             | RivetsError::Config(_)
             | RivetsError::Validation { .. }
             | RivetsError::HasDependents { .. }

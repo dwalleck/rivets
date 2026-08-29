@@ -238,8 +238,12 @@ fn test_init_complete_directory_structure(temp_dir: TempDir) {
         rivets_dir.join(".gitignore").exists(),
         ".gitignore should exist"
     );
+    assert!(
+        rivets_dir.join("workspace.lock").exists(),
+        "workspace.lock should exist"
+    );
 
-    // Verify no extra files were created (no database files)
+    // Verify no extra files were created beyond canonical Workspace metadata.
     let entries: Vec<_> = std::fs::read_dir(&rivets_dir)
         .unwrap()
         .filter_map(|e| e.ok())
@@ -247,8 +251,8 @@ fn test_init_complete_directory_structure(temp_dir: TempDir) {
 
     assert_eq!(
         entries.len(),
-        3,
-        "Should have exactly 3 files: config.yaml, issues.jsonl, .gitignore. Found: {:?}",
+        4,
+        "Should have exactly 4 files: config.yaml, issues.jsonl, workspace.lock, .gitignore. Found: {:?}",
         entries.iter().map(|e| e.file_name()).collect::<Vec<_>>()
     );
 }
