@@ -160,8 +160,9 @@ graph LR
 - `InMemoryStorageInner`: HashMap for issues, petgraph DiGraph for dependencies, ID generator state
 - `Arc<tokio::sync::Mutex<>>`: async-compatible exclusive access
 - **Load** (three stages): (1) resiliently parse compatibility records line-by-line with line numbers, converting them into domain Issues at the compatibility boundary; (2) import all Issues and create graph nodes, registering IDs with the generator; (3) rebuild dependency relationships with orphan and cycle detection
-- **Save**: atomic writes (temp file + rename); rejected when loading omitted any Issue record, preserving the source file byte-for-byte
-- **Reload**: re-reads the file and rebuilds in-memory state, used after a failed save
+- **Mutation freshness**: SHA-256 tracks the loaded source revision. A completed external change is reloaded before mutation; a change after mutation returns typed `StorageError::ExternalChange` before any write.
+- **Save**: atomic writes (temp file + rename); rejected when loading omitted any Issue record or when the persisted revision changed after mutation, preserving the source file byte-for-byte
+- **Reload**: re-reads the file, rebuilds in-memory state, and advances the tracked source revision
 
 #### InMemory (ephemeral)
 

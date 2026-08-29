@@ -295,10 +295,13 @@ operations, labels, resources, queries, import/export, `save`, `reload`), the `S
 `create_storage` factory.
 
 It also contains `JsonlBackedStorage`, a wrapper that adds guarded file
-persistence to the in-memory backend: after a resilient partial load, reads
-remain available but every mutation and save fails with
-`StorageError::UnsafePartialLoad` (a typed `PartialLoadError` carrying one
-`SkippedIssueRecordCause` per omitted record) until the file is repaired.
+persistence to the in-memory backend. It tracks the raw JSONL source with a
+SHA-256 revision, reloads a completed external change before mutation, and
+returns `StorageError::ExternalChange` if the source changes after mutation but
+before save. After a resilient partial load, reads remain available but every
+mutation and save fails with `StorageError::UnsafePartialLoad` (a typed
+`PartialLoadError` carrying one `SkippedIssueRecordCause` per omitted record)
+until the file is repaired.
 
 #### storage/in_memory/
 

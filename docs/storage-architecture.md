@@ -50,7 +50,10 @@ classDiagram
         -path: PathBuf
         -prefix: String
         -load_warnings: Vec~LoadWarning~
+        -source_revision: RwLock~SourceRevision~
+        -prepare_mutation() Result
         -ensure_writable() Result
+        -ensure_source_unchanged() Result
     }
 
     IssueStorage <|.. InMemoryStorage : implements
@@ -127,7 +130,7 @@ The in-memory engine is the runtime engine for every backend, including the pers
 
 ## JSONL Persistence Layer
 
-The persisted backend is `StorageBackend::Jsonl(path)`: the factory loads the file into the in-memory engine and wraps it in the private `JsonlBackedStorage`, which delegates every trait call to the inner storage and additionally gates mutations and saves on the partial-load guard (see Error Recovery below).
+The persisted backend is `StorageBackend::Jsonl(path)`: the factory loads the file into the in-memory engine and wraps it in the private `JsonlBackedStorage`. The wrapper tracks the raw source revision with SHA-256, reloads a completed external change before mutation, rejects a post-mutation external change before save, and retains the partial-load guard (see Error Recovery below).
 
 ```mermaid
 sequenceDiagram
@@ -143,17 +146,23 @@ sequenceDiagram
     alt Any Issue record was omitted during load
         Storage-->>App: Err(StorageError::UnsafePartialLoad) - no write attempted
     else Complete load
-        Storage->>Inner: export_all()
-        Inner-->>Storage: issues
-        Storage->>Storage: sort issues by id (deterministic line order)
-        Storage->>FS: create(path.with_extension("tmp")) e.g. issues.tmp
-        loop For each issue (dependencies sorted)
-            Storage->>Storage: serialize CanonicalIssueRecord
-            Storage->>FS: write_all(json + \n)
+        Storage->>Storage: ensure_source_unchanged()
+        alt Source changed after mutation
+            Storage-->>App: Err(StorageError::ExternalChange) - no write attempted
+        else Source revision matches
+            Storage->>Inner: export_all()
+            Inner-->>Storage: issues
+            Storage->>Storage: sort issues by id (deterministic line order)
+            Storage->>FS: create(path.with_extension("tmp")) e.g. issues.tmp
+            loop For each issue (dependencies sorted)
+                Storage->>Storage: serialize CanonicalIssueRecord
+                Storage->>FS: write_all(json + \n)
+            end
+            Storage->>FS: flush()
+            Storage->>FS: rename(.tmp → issues.jsonl)
+            Storage->>Storage: record SHA-256 revision of bytes written
+            Storage-->>App: Ok(())
         end
-        Storage->>FS: flush()
-        Storage->>FS: rename(.tmp → issues.jsonl)
-        Storage-->>App: Ok(())
     end
 ```
 
@@ -250,6 +259,12 @@ Warning: Loaded with 1 errors. 99 issues available for read-only access.
 - **Action**: The JSONL-backed wrapper (`JsonlBackedStorage`) keeps reads available, but `ensure_writable()` rejects every mutation and `save()` with `StorageError::UnsafePartialLoad` before any state change — an incomplete in-memory representation can never replace the source file.
 - **Result**: The original JSONL bytes remain unchanged rather than replacing the skipped record
 - **Recovery**: Manually repair the JSONL file, then restart or call `reload()`; there is no implicit force-repair path
+
+#### External Source Change
+
+- **Before mutation**: a changed SHA-256 source revision triggers `reload()` while the caller still holds the storage write lock; the mutation then runs against the latest complete state.
+- **After mutation, before save**: a changed revision returns typed `StorageError::ExternalChange` before the temporary output is opened. MCP save recovery reloads the external state, and the source bytes remain unchanged.
+- **Scope**: this prevents a long-lived cache from overwriting a completed external edit. Full cross-process load/mutate/save serialization is tracked separately by `rivets-j13o`.
 
 #### Migration Conflict (warning-only)
 ```

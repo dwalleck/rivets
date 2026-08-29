@@ -1,7 +1,7 @@
 //! Error types for rivets CLI operations.
 
 use crate::domain::{IssueId, ResourceError, StatusTransitionError};
-use std::{fmt, io};
+use std::{fmt, io, path::PathBuf};
 use thiserror::Error;
 
 /// Configuration-related errors.
@@ -207,6 +207,13 @@ pub enum StorageError {
     #[error(transparent)]
     UnsafePartialLoad(#[from] PartialLoadError),
 
+    /// Persistent JSONL changed since this storage instance last synchronized.
+    #[error("Persistent storage changed externally: {}", path.display())]
+    ExternalChange {
+        /// Path whose persisted revision no longer matches the cached revision.
+        path: PathBuf,
+    },
+
     /// JSON serialization failed during storage operations.
     #[error("JSON serialization failed")]
     Serialization(#[source] serde_json::Error),
@@ -244,6 +251,7 @@ impl StorageError {
             | Self::DuplicateDependency { .. }
             | Self::InvalidFormat(_)
             | Self::UnsafePartialLoad(_)
+            | Self::ExternalChange { .. }
             | Self::Serialization(_)
             | Self::InvalidStatusTransition(_)) => Err(error),
         }
@@ -270,6 +278,7 @@ impl StorageError {
             | Self::DuplicateDependency { .. }
             | Self::InvalidFormat(_)
             | Self::UnsafePartialLoad(_)
+            | Self::ExternalChange { .. }
             | Self::Serialization(_)
             | Self::Resource(_)) => Err(error),
         }
@@ -443,6 +452,12 @@ mod tests {
     #[case::invalid_format(
         StorageError::InvalidFormat("unexpected field".to_string()),
         "Invalid format: unexpected field"
+    )]
+    #[case::external_change(
+        StorageError::ExternalChange {
+            path: PathBuf::from("/workspace/.rivets/issues.jsonl"),
+        },
+        "Persistent storage changed externally: /workspace/.rivets/issues.jsonl"
     )]
     fn storage_error_display(#[case] error: StorageError, #[case] expected: &str) {
         assert_eq!(error.to_string(), expected);

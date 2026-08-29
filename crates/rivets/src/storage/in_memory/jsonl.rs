@@ -12,6 +12,7 @@ use crate::domain::{IssueId, ResourceError};
 use crate::error::{Error, Result, StorageError};
 use crate::storage::IssueStorage;
 use rivets_jsonl::{Warning as JsonlWarning, read_jsonl_resilient_with_line_numbers};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::fs::File;
@@ -331,46 +332,36 @@ pub async fn load_from_jsonl(
 /// The function uses a write-then-rename pattern which is atomic on POSIX systems.
 /// If the process crashes or is interrupted, the original file remains unchanged.
 pub async fn save_to_jsonl(storage: &dyn IssueStorage, path: &Path) -> Result<()> {
-    // Create temp file path
-    let temp_path = path.with_extension("tmp");
+    save_to_jsonl_with_revision(storage, path).await?;
+    Ok(())
+}
 
-    // Open temp file
+/// Save atomically and return the SHA-256 revision of the bytes written.
+pub(crate) async fn save_to_jsonl_with_revision(
+    storage: &dyn IssueStorage,
+    path: &Path,
+) -> Result<[u8; 32]> {
+    let temp_path = path.with_extension("tmp");
     let file = File::create(&temp_path).await.map_err(Error::Io)?;
     let mut writer = BufWriter::new(file);
-
-    // Export all issues
+    let mut hasher = Sha256::new();
     let mut issues = storage.export_all().await?;
-
-    // Sort issues by id for deterministic serialization.
-    // `export_all` collects from a `HashMap`, so line order otherwise varies between
-    // saves even when nothing changed. Because `.rivets/issues.jsonl` is committed to
-    // git, that reshuffle makes every mutation look like a whole-file rewrite: real
-    // diffs become unreviewable, and two branches that each touched one issue collide
-    // across the entire file instead of on the lines they actually changed.
     issues.sort_by(|a, b| a.id.cmp(&b.id));
 
-    // Write each issue as a JSON line
     for mut issue in issues {
-        // Sort dependencies for deterministic serialization.
-        // This ensures consistent JSONL output across saves, preventing spurious
-        // diffs in version control when dependencies are added/removed in different orders.
         issue.dependencies.sort();
-
         let record = CanonicalIssueRecord::from(issue);
         let json = serde_json::to_string(&record).map_err(StorageError::Serialization)?;
-
-        writer.write_all(json.as_bytes()).await.map_err(Error::Io)?;
-
+        let bytes = json.as_bytes();
+        writer.write_all(bytes).await.map_err(Error::Io)?;
         writer.write_all(b"\n").await.map_err(Error::Io)?;
+        hasher.update(bytes);
+        hasher.update(b"\n");
     }
 
-    // Flush and close
     writer.flush().await.map_err(Error::Io)?;
-
-    // Atomic rename
     tokio::fs::rename(&temp_path, path)
         .await
         .map_err(Error::Io)?;
-
-    Ok(())
+    Ok(hasher.finalize().into())
 }

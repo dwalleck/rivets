@@ -75,7 +75,11 @@ use crate::domain::{
 };
 use crate::error::{PartialLoadError, Result, SkippedIssueRecordCause, StorageError};
 use async_trait::async_trait;
+use sha2::{Digest, Sha256};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use tokio::io::AsyncReadExt;
+use tokio::sync::RwLock;
 
 // Storage backend implementations
 pub mod in_memory;
@@ -372,16 +376,47 @@ impl StorageBackend {
     }
 }
 
+const SOURCE_REVISION_BUFFER_SIZE: usize = 64 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SourceRevision {
+    Missing,
+    Present([u8; 32]),
+}
+
+impl SourceRevision {
+    async fn read(path: &Path) -> Result<Self> {
+        let mut file = match tokio::fs::File::open(path).await {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Self::Missing),
+            Err(error) => return Err(error.into()),
+        };
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0_u8; SOURCE_REVISION_BUFFER_SIZE];
+        loop {
+            let bytes_read = file.read(&mut buffer).await?;
+            if bytes_read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..bytes_read]);
+        }
+        Ok(Self::Present(hasher.finalize().into()))
+    }
+}
+
 /// Wrapper that adds guarded JSONL file persistence to an in-memory backend.
 ///
-/// Reads remain available after a resilient partial load. Mutations and saves
-/// are rejected before state changes when any Issue record was omitted, so an
-/// incomplete in-memory representation can never replace the source file.
+/// Reads remain available after a resilient partial load. Before mutation, an
+/// externally changed source is reloaded under the caller's storage write lock.
+/// Mutations and saves are rejected when any Issue record was omitted, and save
+/// rejects a source revision changed after mutation, so incomplete or stale
+/// in-memory state cannot replace the source file.
 struct JsonlBackedStorage {
     inner: Box<dyn IssueStorage>,
     path: PathBuf,
     prefix: String,
     load_warnings: Vec<in_memory::LoadWarning>,
+    source_revision: RwLock<SourceRevision>,
 }
 
 impl JsonlBackedStorage {
@@ -438,12 +473,34 @@ impl JsonlBackedStorage {
             None => Ok(()),
         }
     }
+
+    async fn source_changed(&self) -> Result<bool> {
+        let current = SourceRevision::read(&self.path).await?;
+        Ok(current != *self.source_revision.read().await)
+    }
+
+    async fn prepare_mutation(&mut self) -> Result<()> {
+        if self.source_changed().await? {
+            self.reload().await?;
+        }
+        self.ensure_writable()
+    }
+
+    async fn ensure_source_unchanged(&self) -> Result<()> {
+        if self.source_changed().await? {
+            return Err(StorageError::ExternalChange {
+                path: self.path.clone(),
+            }
+            .into());
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl IssueStorage for JsonlBackedStorage {
     async fn create(&mut self, issue: NewIssue) -> Result<Issue> {
-        self.ensure_writable()?;
+        self.prepare_mutation().await?;
         self.inner.create(issue).await
     }
 
@@ -452,21 +509,21 @@ impl IssueStorage for JsonlBackedStorage {
     }
 
     async fn update(&mut self, id: &IssueId, updates: IssueUpdate) -> Result<Issue> {
-        self.ensure_writable()?;
+        self.prepare_mutation().await?;
         self.inner.update(id, updates).await
     }
 
     async fn delete(&mut self, id: &IssueId) -> Result<()> {
-        self.ensure_writable()?;
+        self.prepare_mutation().await?;
         self.inner.delete(id).await
     }
     async fn add_blocking_dependency(&mut self, dependency: BlockingDependency) -> Result<()> {
-        self.ensure_writable()?;
+        self.prepare_mutation().await?;
         self.inner.add_blocking_dependency(dependency).await
     }
 
     async fn remove_blocking_dependency(&mut self, dependency: &BlockingDependency) -> Result<()> {
-        self.ensure_writable()?;
+        self.prepare_mutation().await?;
         self.inner.remove_blocking_dependency(dependency).await
     }
 
@@ -511,17 +568,17 @@ impl IssueStorage for JsonlBackedStorage {
     }
 
     async fn add_label(&mut self, id: &IssueId, label: &str) -> Result<Issue> {
-        self.ensure_writable()?;
+        self.prepare_mutation().await?;
         self.inner.add_label(id, label).await
     }
 
     async fn remove_label(&mut self, id: &IssueId, label: &str) -> Result<Issue> {
-        self.ensure_writable()?;
+        self.prepare_mutation().await?;
         self.inner.remove_label(id, label).await
     }
 
     async fn add_resource(&mut self, id: &IssueId, resource: NewResource) -> Result<Issue> {
-        self.ensure_writable()?;
+        self.prepare_mutation().await?;
         self.inner.add_resource(id, resource).await
     }
 
@@ -531,17 +588,17 @@ impl IssueStorage for JsonlBackedStorage {
         resource_id: &ResourceId,
         update: ResourceUpdate,
     ) -> Result<Issue> {
-        self.ensure_writable()?;
+        self.prepare_mutation().await?;
         self.inner.update_resource(id, resource_id, update).await
     }
 
     async fn remove_resource(&mut self, id: &IssueId, resource_id: &ResourceId) -> Result<Issue> {
-        self.ensure_writable()?;
+        self.prepare_mutation().await?;
         self.inner.remove_resource(id, resource_id).await
     }
 
     async fn import_issues(&mut self, issues: Vec<Issue>) -> Result<()> {
-        self.ensure_writable()?;
+        self.prepare_mutation().await?;
         self.inner.import_issues(issues).await
     }
 
@@ -551,26 +608,41 @@ impl IssueStorage for JsonlBackedStorage {
 
     async fn save(&self) -> Result<()> {
         self.ensure_writable()?;
-        in_memory::save_to_jsonl(self.inner.as_ref(), &self.path).await
+        self.ensure_source_unchanged().await?;
+        let revision =
+            in_memory::save_to_jsonl_with_revision(self.inner.as_ref(), &self.path).await?;
+        *self.source_revision.write().await = SourceRevision::Present(revision);
+        Ok(())
     }
 
     async fn reload(&mut self) -> Result<()> {
-        // Reload from the JSONL file, replacing the inner storage
-        if self.path.exists() {
-            let (new_storage, warnings) =
-                in_memory::load_from_jsonl(&self.path, self.prefix.clone()).await?;
-            if !warnings.is_empty() {
-                for warning in &warnings {
-                    tracing::warn!(warning = ?warning, "JSONL reload warning");
+        let revision_before = SourceRevision::read(&self.path).await?;
+        let (new_storage, warnings) = match revision_before {
+            SourceRevision::Present(_) => {
+                let (storage, warnings) =
+                    in_memory::load_from_jsonl(&self.path, self.prefix.clone()).await?;
+                if !warnings.is_empty() {
+                    for warning in &warnings {
+                        tracing::warn!(warning = ?warning, "JSONL reload warning");
+                    }
                 }
+                (storage, warnings)
             }
-            self.inner = new_storage;
-            self.load_warnings = warnings;
-        } else {
-            // File doesn't exist - reset to empty storage
-            self.inner = in_memory::new_in_memory_storage(self.prefix.clone());
-            self.load_warnings.clear();
+            SourceRevision::Missing => (
+                in_memory::new_in_memory_storage(self.prefix.clone()),
+                Vec::new(),
+            ),
+        };
+        let revision_after = SourceRevision::read(&self.path).await?;
+        if revision_before != revision_after {
+            return Err(StorageError::ExternalChange {
+                path: self.path.clone(),
+            }
+            .into());
         }
+        self.inner = new_storage;
+        self.load_warnings = warnings;
+        *self.source_revision.get_mut() = revision_after;
         Ok(())
     }
 }
@@ -609,27 +681,33 @@ pub async fn create_storage(
     match backend {
         StorageBackend::InMemory => Ok(in_memory::new_in_memory_storage(prefix)),
         StorageBackend::Jsonl(path) => {
-            // JSONL backend uses InMemoryStorage with file persistence
-            let (inner, load_warnings) = if path.exists() {
-                let (storage, warnings) = in_memory::load_from_jsonl(&path, prefix.clone()).await?;
-                if !warnings.is_empty() {
-                    // Log warnings but continue - read operations remain usable.
-                    for warning in &warnings {
-                        tracing::warn!(warning = ?warning, "JSONL load warning");
+            let revision_before = SourceRevision::read(&path).await?;
+            let (inner, load_warnings) = match revision_before {
+                SourceRevision::Present(_) => {
+                    let (storage, warnings) =
+                        in_memory::load_from_jsonl(&path, prefix.clone()).await?;
+                    if !warnings.is_empty() {
+                        for warning in &warnings {
+                            tracing::warn!(warning = ?warning, "JSONL load warning");
+                        }
                     }
+                    (storage, warnings)
                 }
-                (storage, warnings)
-            } else {
-                // File doesn't exist yet (first run) - create empty storage
-                (in_memory::new_in_memory_storage(prefix.clone()), Vec::new())
+                SourceRevision::Missing => {
+                    (in_memory::new_in_memory_storage(prefix.clone()), Vec::new())
+                }
             };
-            // Wrap in JsonlBackedStorage so save() writes to file
+            let revision_after = SourceRevision::read(&path).await?;
+            if revision_before != revision_after {
+                return Err(StorageError::ExternalChange { path }.into());
+            }
             Ok(Box::new(JsonlBackedStorage {
                 inner,
                 path,
                 prefix,
                 load_warnings,
-            }))
+                source_revision: RwLock::new(revision_after),
+            }) as Box<dyn IssueStorage>)
         }
         StorageBackend::PostgreSQL(_conn_str) => {
             // TODO: Implement PostgreSQL backend
@@ -898,6 +976,12 @@ impl IssueStorage for MockStorage {
 mod tests {
     use super::*;
     use crate::domain::IssueKind;
+    fn issue_named(title: &str) -> NewIssue {
+        NewIssue {
+            title: title.to_string(),
+            ..Default::default()
+        }
+    }
 
     #[tokio::test]
     async fn test_trait_object_usage() {
@@ -1149,5 +1233,403 @@ mod tests {
         let result = storage.get(&issue_id).await.unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().title, "Test Issue");
+    }
+    #[tokio::test]
+    async fn stale_source_change_before_mutation_is_preserved() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().expect("temporary directory should be created");
+        let jsonl_path = temp_dir.path().join("issues.jsonl");
+        let mut cached = create_storage(StorageBackend::Jsonl(jsonl_path.clone()), "test".into())
+            .await
+            .expect("cached storage should open");
+        let cached_issue = cached
+            .create(issue_named("Cached issue"))
+            .await
+            .expect("cached issue should be created");
+        cached.save().await.expect("cached issue should persist");
+
+        let mut external = create_storage(StorageBackend::Jsonl(jsonl_path.clone()), "test".into())
+            .await
+            .expect("external storage should open");
+        let external_issue = external
+            .create(issue_named("External issue"))
+            .await
+            .expect("external issue should be created");
+        external
+            .save()
+            .await
+            .expect("external issue should persist");
+
+        cached
+            .update(
+                &cached_issue.id,
+                IssueUpdate {
+                    title: Some("Cached issue updated".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("mutation should refresh the external revision");
+        cached.save().await.expect("merged state should persist");
+
+        let reloaded = create_storage(StorageBackend::Jsonl(jsonl_path), "test".into())
+            .await
+            .expect("result should reload");
+        assert_eq!(
+            reloaded
+                .get(&cached_issue.id)
+                .await
+                .expect("cached issue lookup should succeed")
+                .expect("cached issue should remain")
+                .title,
+            "Cached issue updated"
+        );
+        assert!(
+            reloaded
+                .get(&external_issue.id)
+                .await
+                .expect("external issue lookup should succeed")
+                .is_some(),
+            "external issue must survive the cached mutation"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_source_change_after_mutation_rejects_save_without_writing() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().expect("temporary directory should be created");
+        let jsonl_path = temp_dir.path().join("issues.jsonl");
+        let mut cached = create_storage(StorageBackend::Jsonl(jsonl_path.clone()), "test".into())
+            .await
+            .expect("cached storage should open");
+        let cached_issue = cached
+            .create(issue_named("Cached issue"))
+            .await
+            .expect("cached issue should be created");
+        cached.save().await.expect("cached issue should persist");
+        cached
+            .update(
+                &cached_issue.id,
+                IssueUpdate {
+                    title: Some("Unsaved title".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("in-memory mutation should succeed");
+
+        let mut external = create_storage(StorageBackend::Jsonl(jsonl_path.clone()), "test".into())
+            .await
+            .expect("external storage should open");
+        external
+            .create(issue_named("External issue"))
+            .await
+            .expect("external issue should be created");
+        external
+            .save()
+            .await
+            .expect("external issue should persist");
+        let external_bytes =
+            std::fs::read(&jsonl_path).expect("external source bytes should be readable");
+
+        let error = cached
+            .save()
+            .await
+            .expect_err("save must reject a newer external revision");
+        assert!(matches!(
+            error,
+            crate::error::Error::Storage(StorageError::ExternalChange { ref path })
+                if path == &jsonl_path
+        ));
+        assert_eq!(
+            std::fs::read(&jsonl_path).expect("source bytes should remain readable"),
+            external_bytes,
+            "rejected save must not replace external bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_source_partial_reload_rejects_mutation() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().expect("temporary directory should be created");
+        let jsonl_path = temp_dir.path().join("issues.jsonl");
+        let mut cached = create_storage(StorageBackend::Jsonl(jsonl_path.clone()), "test".into())
+            .await
+            .expect("empty cached storage should open");
+        let malformed = b"{\"id\":\"broken\",\"notes\":[}\n";
+        std::fs::write(&jsonl_path, malformed).expect("malformed source should be written");
+
+        let error = cached
+            .create(issue_named("Must not exist"))
+            .await
+            .expect_err("stale partial reload must reject mutation");
+        assert!(matches!(
+            error,
+            crate::error::Error::Storage(StorageError::UnsafePartialLoad(_))
+        ));
+        assert_eq!(
+            std::fs::read(&jsonl_path).expect("malformed source should remain readable"),
+            malformed
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_source_own_save_advances_revision() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().expect("temporary directory should be created");
+        let jsonl_path = temp_dir.path().join("issues.jsonl");
+        let mut storage = create_storage(StorageBackend::Jsonl(jsonl_path), "test".into())
+            .await
+            .expect("storage should open");
+        let issue = storage
+            .create(issue_named("First title"))
+            .await
+            .expect("issue should be created");
+        storage.save().await.expect("first save should succeed");
+        storage
+            .update(
+                &issue.id,
+                IssueUpdate {
+                    title: Some("Second title".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("own save must not look external");
+        storage
+            .save()
+            .await
+            .expect("second save should not false-conflict");
+    }
+    #[tokio::test]
+    async fn stale_source_missing_transitions_are_observed() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().expect("temporary directory should be created");
+        let jsonl_path = temp_dir.path().join("issues.jsonl");
+        let mut cached = create_storage(StorageBackend::Jsonl(jsonl_path.clone()), "test".into())
+            .await
+            .expect("missing source should open as empty");
+        let mut external = create_storage(StorageBackend::Jsonl(jsonl_path.clone()), "test".into())
+            .await
+            .expect("second missing-source cache should open");
+        let external_issue = external
+            .create(issue_named("External first issue"))
+            .await
+            .expect("external issue should be created");
+        external
+            .save()
+            .await
+            .expect("external file should be created");
+
+        let cached_issue = cached
+            .create(issue_named("Cached second issue"))
+            .await
+            .expect("missing-to-present transition should refresh before mutation");
+        cached.save().await.expect("merged source should persist");
+
+        let merged = create_storage(StorageBackend::Jsonl(jsonl_path.clone()), "test".into())
+            .await
+            .expect("merged source should reload");
+        assert!(merged.get(&external_issue.id).await.unwrap().is_some());
+        assert!(merged.get(&cached_issue.id).await.unwrap().is_some());
+
+        std::fs::remove_file(&jsonl_path).expect("source should be deleted externally");
+        let error = cached
+            .update(
+                &cached_issue.id,
+                IssueUpdate {
+                    title: Some("Must not reappear".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("present-to-missing transition should discard stale cache");
+        assert!(matches!(
+            error,
+            crate::error::Error::IssueNotFound(ref id) if id == &cached_issue.id
+        ));
+        assert!(
+            !jsonl_path.exists(),
+            "rejected stale mutation must not recreate a deleted source"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "production-scale revision budget checkpoint"]
+    async fn stale_source_10k_preserves_records() {
+        use std::time::Instant;
+        use tempfile::TempDir;
+
+        const ISSUE_COUNT: usize = 10_000;
+        let temp_dir = TempDir::new().expect("temporary directory should be created");
+        let jsonl_path = temp_dir.path().join("issues.jsonl");
+        let mut cached = create_storage(StorageBackend::Jsonl(jsonl_path.clone()), "scale".into())
+            .await
+            .expect("scale storage should open");
+        for index in 0..ISSUE_COUNT {
+            cached
+                .create(NewIssue {
+                    title: format!("Issue {index}: λ"),
+                    description: "context\nline".to_string(),
+                    ..Default::default()
+                })
+                .await
+                .expect("scale issue should be created");
+        }
+        cached.save().await.expect("scale fixture should persist");
+        let initial_source =
+            std::fs::read_to_string(&jsonl_path).expect("scale fixture should be readable");
+        let first_id = IssueId::new(
+            serde_json::from_str::<serde_json::Value>(
+                initial_source
+                    .lines()
+                    .next()
+                    .expect("fixture should contain a first line"),
+            )
+            .expect("first canonical line should parse")["id"]
+                .as_str()
+                .expect("first record should have an id"),
+        );
+        let last_id = IssueId::new(
+            serde_json::from_str::<serde_json::Value>(
+                initial_source
+                    .lines()
+                    .next_back()
+                    .expect("fixture should contain a last line"),
+            )
+            .expect("last canonical line should parse")["id"]
+                .as_str()
+                .expect("last record should have an id"),
+        );
+        let mut external =
+            create_storage(StorageBackend::Jsonl(jsonl_path.clone()), "scale".into())
+                .await
+                .expect("external scale storage should open");
+        external
+            .update(
+                &last_id,
+                IssueUpdate {
+                    title: Some("External λ".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("external scale mutation should succeed");
+        external
+            .save()
+            .await
+            .expect("external scale mutation should persist");
+
+        let started = Instant::now();
+        cached
+            .update(
+                &first_id,
+                IssueUpdate {
+                    title: Some("Cached λ".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("cached scale mutation should refresh");
+        cached
+            .save()
+            .await
+            .expect("cached scale mutation should persist");
+        let elapsed = started.elapsed();
+
+        let source =
+            std::fs::read_to_string(&jsonl_path).expect("scale source should be directly readable");
+        assert_eq!(source.lines().count(), ISSUE_COUNT);
+        let records: Vec<serde_json::Value> = source
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("canonical line should parse"))
+            .collect();
+        assert!(records.iter().any(|record| {
+            record["id"] == last_id.as_str()
+                && record["title"] == "External λ"
+                && record["description"] == "context\nline"
+        }));
+        assert!(records.iter().any(|record| {
+            record["id"] == first_id.as_str()
+                && record["title"] == "Cached λ"
+                && record["description"] == "context\nline"
+        }));
+        eprintln!("10k guarded mutation elapsed: {elapsed:?}");
+    }
+    #[tokio::test]
+    async fn stale_source_revision_scans_every_buffer() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().expect("temporary directory should be created");
+        let path = temp_dir.path().join("revision-source");
+        let mut bytes = vec![b'a'; SOURCE_REVISION_BUFFER_SIZE + 1];
+        std::fs::write(&path, &bytes).expect("first revision should be written");
+        let first = SourceRevision::read(&path)
+            .await
+            .expect("first revision should be readable");
+        bytes[SOURCE_REVISION_BUFFER_SIZE] = b'b';
+        std::fs::write(&path, bytes).expect("second revision should be written");
+        let second = SourceRevision::read(&path)
+            .await
+            .expect("second revision should be readable");
+
+        assert_ne!(
+            first, second,
+            "bytes after the first buffer must affect revision"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_source_revision_distinguishes_missing_and_empty() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().expect("temporary directory should be created");
+        let path = temp_dir.path().join("revision-source");
+        let missing = SourceRevision::read(&path)
+            .await
+            .expect("missing revision should be readable");
+        std::fs::write(&path, []).expect("empty source should be written");
+        let empty = SourceRevision::read(&path)
+            .await
+            .expect("empty revision should be readable");
+
+        assert_ne!(missing, empty);
+    }
+    #[tokio::test]
+    async fn stale_source_own_save_revision_detects_later_deletion() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().expect("temporary directory should be created");
+        let jsonl_path = temp_dir.path().join("issues.jsonl");
+        let mut storage = create_storage(StorageBackend::Jsonl(jsonl_path.clone()), "test".into())
+            .await
+            .expect("missing source should open");
+        let issue = storage
+            .create(issue_named("Persisted issue"))
+            .await
+            .expect("issue should be created");
+        storage.save().await.expect("source should be created");
+        std::fs::remove_file(&jsonl_path).expect("source should be deleted externally");
+
+        let error = storage
+            .update(
+                &issue.id,
+                IssueUpdate {
+                    title: Some("Must not reappear".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("own save revision must detect later deletion");
+        assert!(matches!(
+            error,
+            crate::error::Error::IssueNotFound(ref id) if id == &issue.id
+        ));
+        assert!(!jsonl_path.exists());
     }
 }
