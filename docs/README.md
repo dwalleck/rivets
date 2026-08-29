@@ -6,7 +6,7 @@ Rivets is a Rust issue tracker (edition 2024, MSRV 1.94.0) that stores Issues as
 
 - `rivets` — CLI application and core issue-tracking domain
 - `rivets-jsonl` — JSONL reading/writing library
-- `rivets-mcp` — MCP server for AI assistants (25 tools)
+- `rivets-mcp` — MCP server for AI assistants (24 tools)
 
 The CLI exposes 16 top-level commands: `init`, `info`, `create`, `list`, `show`, `update`, `close`, `reopen`, `delete`, `ready`, `blocking-dependency`, `label`, `resource`, `stale`, `blocked`, and `stats`.
 
