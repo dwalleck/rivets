@@ -37,3 +37,9 @@ falsifiable-design → budgeted-plan → checkpointed-build
 ## Terminal criterion
 
 Structural — every downstream artifact satisfies its owning stage's completion criterion, ending with no FAIL in checkpointed-build's recorded gate.
+
+Result: 2026-08-29 — **PASS**
+
+- Slice 1 `f45a1bd`: all eight gate items PASS; C6 regression fence/named mutation/fence restoration are `N/A — approved risk` exactly as approved. Seven applicable named mutations turned their fences red and were restored green. The 10,000-record oracle preserved all records and completed the guarded mutation in 62.01 ms against the 2 s budget.
+- Slice 2 `8de1837`: all eight gate items PASS; production-scale loop and wall budgets are `N/A — test-only slice`. The public MCP fence turned red when stale refresh plus the save conflict check were bypassed, then green after restoration.
+- Final integration: `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test` PASS; 1,107 tests passed and 2 ignored. Focused core stress and same-instance MCP oracle checks PASS.
