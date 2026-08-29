@@ -776,6 +776,127 @@ mod tests {
     }
 
     #[test]
+    fn all_issue_id_inputs_use_domain_parser() {
+        let cases = [
+            vec![
+                "rivets",
+                "create",
+                "--title",
+                "Title",
+                "--prerequisite",
+                "invalid",
+            ],
+            vec!["rivets", "show", "invalid"],
+            vec!["rivets", "update", "invalid", "--title", "Title"],
+            vec!["rivets", "close", "invalid"],
+            vec!["rivets", "reopen", "invalid"],
+            vec!["rivets", "delete", "invalid"],
+            vec![
+                "rivets",
+                "blocking-dependency",
+                "add",
+                "--dependent",
+                "invalid",
+                "--prerequisite",
+                "ab-1",
+            ],
+            vec![
+                "rivets",
+                "blocking-dependency",
+                "add",
+                "--dependent",
+                "ab-1",
+                "--prerequisite",
+                "invalid",
+            ],
+            vec![
+                "rivets",
+                "blocking-dependency",
+                "remove",
+                "--dependent",
+                "invalid",
+                "--prerequisite",
+                "ab-1",
+            ],
+            vec![
+                "rivets",
+                "blocking-dependency",
+                "list",
+                "--dependent",
+                "invalid",
+            ],
+            vec![
+                "rivets",
+                "blocking-dependency",
+                "list",
+                "--prerequisite",
+                "invalid",
+            ],
+            vec![
+                "rivets",
+                "blocking-dependency",
+                "tree",
+                "--dependent",
+                "invalid",
+            ],
+            vec!["rivets", "label", "add", "urgent", "invalid"],
+            vec!["rivets", "label", "remove", "urgent", "invalid"],
+            vec!["rivets", "label", "list", "invalid"],
+            vec![
+                "rivets",
+                "resource",
+                "add",
+                "invalid",
+                "--url",
+                "https://example.com",
+                "--role",
+                "reference",
+            ],
+            vec![
+                "rivets",
+                "resource",
+                "update",
+                "invalid",
+                "--resource",
+                "r1",
+                "--role",
+                "evidence",
+            ],
+            vec![
+                "rivets",
+                "resource",
+                "remove",
+                "invalid",
+                "--resource",
+                "r1",
+            ],
+            vec!["rivets", "resource", "list", "invalid"],
+        ];
+
+        for invalid_args in cases {
+            let error = Cli::try_parse_from(&invalid_args)
+                .expect_err("malformed Issue ID should fail at the CLI boundary");
+            assert!(
+                error.to_string().contains("Expected format: prefix-suffix"),
+                "unexpected error for {invalid_args:?}: {error}"
+            );
+
+            let valid_args = invalid_args
+                .into_iter()
+                .map(|argument| {
+                    if argument == "invalid" {
+                        "abcdefghijklmnopqrst-feature-123"
+                    } else {
+                        argument
+                    }
+                })
+                .collect::<Vec<_>>();
+            Cli::try_parse_from(&valid_args)
+                .unwrap_or_else(|error| panic!("valid control failed for {valid_args:?}: {error}"));
+        }
+    }
+
+    #[test]
     fn test_parse_update() {
         let cli = Cli::try_parse_from([
             "rivets",

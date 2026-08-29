@@ -23,22 +23,119 @@ pub use resource::{
     ResourceTarget, ResourceUpdate, WebUrl, WorkspacePath,
 };
 
-/// Unique identifier for an issue
+/// Minimum number of ASCII-alphanumeric bytes in an Issue ID prefix.
+const MIN_ISSUE_ID_PREFIX_LENGTH: usize = 2;
+
+/// Maximum number of ASCII-alphanumeric bytes in an Issue ID prefix.
+const MAX_ISSUE_ID_PREFIX_LENGTH: usize = 20;
+
+/// Unique identifier for an Issue.
 ///
-/// Wraps a string ID in a newtype for type safety. The inner field is private
-/// to enforce encapsulation and allow future changes to the ID format.
+/// CLI and MCP inputs parse through [`FromStr`]. The infallible constructor is
+/// retained for trusted generated IDs and persistence compatibility records.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct IssueId(String);
 
 impl IssueId {
-    /// Create a new issue ID
+    /// Create an Issue ID from a trusted canonical or compatibility value.
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 
-    /// Get the ID as a string slice
+    /// Get the ID as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// Why an external Issue ID could not be parsed.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum IssueIdError {
+    /// The input is empty after trimming surrounding whitespace.
+    #[error("Issue ID cannot be empty")]
+    Empty,
+    /// The input has no prefix/suffix separator.
+    #[error(
+        "Invalid issue ID format: '{value}'. Expected format: prefix-suffix (e.g., proj-abc or proj-abc-123)"
+    )]
+    MissingSeparator {
+        /// The rejected input after trimming.
+        value: String,
+    },
+    /// The prefix is shorter than the canonical minimum.
+    #[error("Issue ID prefix must be at least {MIN_ISSUE_ID_PREFIX_LENGTH} characters")]
+    PrefixTooShort,
+    /// The prefix is longer than the canonical maximum.
+    #[error("Issue ID prefix cannot exceed {MAX_ISSUE_ID_PREFIX_LENGTH} characters")]
+    PrefixTooLong,
+    /// The prefix contains a non-ASCII-alphanumeric character.
+    #[error("Issue ID prefix must contain only alphanumeric characters")]
+    InvalidPrefixCharacter,
+    /// The suffix is absent.
+    #[error("Issue ID suffix cannot be empty")]
+    EmptySuffix,
+    /// The suffix contains a character outside its canonical grammar.
+    #[error("Issue ID suffix must contain only alphanumerics and hyphens")]
+    InvalidSuffixCharacter,
+    /// The suffix starts with a separator.
+    #[error("Issue ID suffix cannot start with a hyphen")]
+    SuffixStartsWithHyphen,
+    /// The suffix ends with a separator.
+    #[error("Issue ID suffix cannot end with a hyphen")]
+    SuffixEndsWithHyphen,
+    /// The suffix contains an empty segment.
+    #[error("Issue ID suffix cannot contain consecutive hyphens")]
+    ConsecutiveSuffixHyphens,
+}
+
+impl FromStr for IssueId {
+    type Err = IssueIdError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let input = input.trim();
+        if input.is_empty() {
+            return Err(IssueIdError::Empty);
+        }
+
+        let Some((prefix, suffix)) = input.split_once('-') else {
+            return Err(IssueIdError::MissingSeparator {
+                value: input.to_string(),
+            });
+        };
+
+        if prefix.len() < MIN_ISSUE_ID_PREFIX_LENGTH {
+            return Err(IssueIdError::PrefixTooShort);
+        }
+        if prefix.len() > MAX_ISSUE_ID_PREFIX_LENGTH {
+            return Err(IssueIdError::PrefixTooLong);
+        }
+        if !prefix
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+        {
+            return Err(IssueIdError::InvalidPrefixCharacter);
+        }
+
+        if suffix.is_empty() {
+            return Err(IssueIdError::EmptySuffix);
+        }
+        if !suffix
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-')
+        {
+            return Err(IssueIdError::InvalidSuffixCharacter);
+        }
+        if suffix.starts_with('-') {
+            return Err(IssueIdError::SuffixStartsWithHyphen);
+        }
+        if suffix.ends_with('-') {
+            return Err(IssueIdError::SuffixEndsWithHyphen);
+        }
+        if suffix.contains("--") {
+            return Err(IssueIdError::ConsecutiveSuffixHyphens);
+        }
+
+        Ok(Self(input.to_string()))
     }
 }
 
@@ -1163,6 +1260,65 @@ mod tests {
 
         assert_eq!(id1, id2);
         assert_ne!(id1, id3);
+    }
+
+    mod issue_id_parsing_tests {
+        use super::*;
+        use rstest::rstest;
+
+        #[rstest]
+        #[case::minimum_prefix("ab-1", "ab-1")]
+        #[case::maximum_prefix("abcdefghijklmnopqrst-1", "abcdefghijklmnopqrst-1")]
+        #[case::multiple_suffix_segments("rivets-feature-123", "rivets-feature-123")]
+        #[case::surrounding_whitespace("  test-abc  ", "test-abc")]
+        #[case::uppercase_ascii("TEST-XYZ", "TEST-XYZ")]
+        fn issue_id_parser_accepts_canonical_grammar(#[case] input: &str, #[case] expected: &str) {
+            let issue_id = input.parse::<IssueId>().expect("canonical ID should parse");
+            assert_eq!(issue_id.as_str(), expected);
+        }
+
+        #[rstest]
+        #[case::empty("", IssueIdError::Empty)]
+        #[case::whitespace_only(" \t\n", IssueIdError::Empty)]
+        #[case::missing_separator(
+            "invalid",
+            IssueIdError::MissingSeparator {
+                value: "invalid".to_string(),
+            }
+        )]
+        #[case::prefix_too_short("a-1", IssueIdError::PrefixTooShort)]
+        #[case::prefix_too_long("abcdefghijklmnopqrstu-1", IssueIdError::PrefixTooLong)]
+        #[case::invalid_prefix_character("te_st-1", IssueIdError::InvalidPrefixCharacter)]
+        #[case::unicode_prefix("té-1", IssueIdError::InvalidPrefixCharacter)]
+        #[case::empty_suffix("test-", IssueIdError::EmptySuffix)]
+        #[case::invalid_suffix_character("test-abc_1", IssueIdError::InvalidSuffixCharacter)]
+        #[case::unicode_suffix("test-é", IssueIdError::InvalidSuffixCharacter)]
+        #[case::leading_suffix_hyphen("test--abc", IssueIdError::SuffixStartsWithHyphen)]
+        #[case::trailing_suffix_hyphen("test-abc-", IssueIdError::SuffixEndsWithHyphen)]
+        #[case::consecutive_suffix_hyphens("test-a--b", IssueIdError::ConsecutiveSuffixHyphens)]
+        fn issue_id_parser_rejects_noncanonical_grammar(
+            #[case] input: &str,
+            #[case] expected: IssueIdError,
+        ) {
+            assert_eq!(input.parse::<IssueId>(), Err(expected));
+        }
+
+        #[test]
+        fn issue_id_parser_accepts_long_suffix_in_one_pass() {
+            let input = format!("ab-{}", "a".repeat(10_000));
+            let issue_id = input.parse::<IssueId>().expect("long suffix should parse");
+            assert_eq!(issue_id.as_str(), input);
+        }
+
+        #[test]
+        fn canonical_persisted_issue_ids_remain_readable() {
+            for issue_id in ["ab-1", "abcdefghijklmnopqrst-feature-123"] {
+                let encoded = serde_json::to_string(issue_id).expect("test ID should serialize");
+                let decoded: IssueId =
+                    serde_json::from_str(&encoded).expect("canonical persisted ID should load");
+                assert_eq!(decoded.as_str(), issue_id);
+            }
+        }
     }
 
     // ===== NewIssue::validate() Tests =====

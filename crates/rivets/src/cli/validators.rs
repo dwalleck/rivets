@@ -3,7 +3,7 @@
 //! These validators are used by clap's `value_parser` attribute to validate
 //! user input at parse time, providing immediate feedback for invalid values.
 
-use crate::domain::MAX_TITLE_LENGTH;
+use crate::domain::{IssueId, MAX_TITLE_LENGTH};
 
 /// Validate issue ID prefix format.
 ///
@@ -17,67 +17,16 @@ pub fn validate_prefix(s: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
-/// Validate issue ID format.
+/// Parse a canonical Issue ID for clap.
 ///
-/// Expected format: `prefix-suffix` where:
-/// - prefix: 2-20 alphanumeric characters
-/// - suffix: 1+ alphanumeric characters
-///
-/// Examples: `proj-abc`, `rivets-12x`, `test-1`
-pub fn validate_issue_id(s: &str) -> Result<String, String> {
-    let s = s.trim();
-
-    if s.is_empty() {
-        return Err("Issue ID cannot be empty".to_string());
-    }
-
-    // Check for the prefix-suffix format (must have at least one hyphen)
-    let parts: Vec<&str> = s.splitn(2, '-').collect();
-    if parts.len() != 2 {
-        return Err(format!(
-            "Invalid issue ID format: '{}'. Expected format: prefix-suffix (e.g., proj-abc or proj-abc-123)",
-            s
-        ));
-    }
-
-    let prefix = parts[0];
-    let suffix = parts[1];
-
-    // Validate prefix using shared validation logic
-    validate_prefix(prefix).map_err(|e| format!("Issue ID {}", e.to_lowercase()))?;
-
-    // Validate suffix
-    //
-    // Note: We use explicit checks instead of regex (e.g., `^[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*$`)
-    // to provide specific, actionable error messages and avoid adding regex as a dependency.
-    // This approach is more maintainable for a CLI tool where user-facing errors matter.
-    if suffix.is_empty() {
-        return Err("Issue ID suffix cannot be empty".to_string());
-    }
-
-    // Suffix can contain alphanumerics and hyphens (for IDs like proj-abc-123)
-    if !suffix
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-')
-    {
-        return Err("Issue ID suffix must contain only alphanumerics and hyphens".to_string());
-    }
-
-    // Prevent edge cases: leading/trailing hyphens or consecutive hyphens
-    // Equivalent to regex: ^[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*$
-    if suffix.starts_with('-') {
-        return Err("Issue ID suffix cannot start with a hyphen".to_string());
-    }
-
-    if suffix.ends_with('-') {
-        return Err("Issue ID suffix cannot end with a hyphen".to_string());
-    }
-
-    if suffix.contains("--") {
-        return Err("Issue ID suffix cannot contain consecutive hyphens".to_string());
-    }
-
-    Ok(s.to_string())
+/// The domain parser owns the grammar and error meaning. This adapter returns
+/// the canonical spelling as a `String` because the existing CLI argument
+/// structs store IDs as strings.
+pub fn validate_issue_id(input: &str) -> Result<String, String> {
+    input
+        .parse::<IssueId>()
+        .map(|issue_id| issue_id.to_string())
+        .map_err(|error| error.to_string())
 }
 
 /// Validate title length.
