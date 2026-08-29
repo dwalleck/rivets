@@ -27,9 +27,9 @@ increment B also crossed 4,000 changed lines.
 |---|---:|
 | A — Slice 1 plus PR feedback | 1,462 |
 | B — Slices 2–3 plus carried prerequisite fix | 1,338 |
-| C — Slice 4 plus review fixes/log | 3,188 |
-| **Summed increment diffs** | **5,988** |
-| **Final cumulative base diff** | **5,282** |
+| C — Slices 4–6 plus review fixes/log | 3,276 |
+| **Summed increment diffs** | **6,076** |
+| **Final cumulative base diff** | **5,451** |
 
 ### PR increment A — Typed Blocking storage foundation
 
@@ -125,6 +125,43 @@ increment B also crossed 4,000 changed lines.
 - `python scripts/render-cli-mcp-parity.py --check` → rendered Markdown and JSON registry agree and Blocking intents no longer report legacy/future adapter gaps covered by this Task.
 - `cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test` → the complete workspace gate passes after the final slice.
 
+## Slice 5: Fence MCP persistence and wire output — F26, F27
+
+**Claim IDs:** C5, C7  
+**Expected behavior:** Closing a prerequisite leaves the exact Blocking edge queryable after Tools context recreation, and add/list/tree/remove values serialize with only canonical role-named keys and the documented tree envelope.  
+**Oracle:** Compare recreated-context queries to the raw JSONL dependent record and compare serialized values to hand-authored literal objects independent of the response structs.  
+**Stress fixture:** A real temporary Workspace with two prerequisites, two dependents, one same-pair legacy Related record, a depth-one tree, one Closed prerequisite, and fresh Tools contexts. Expected: exact role-named objects, retained Closed edge, inactive blockedness, and preserved legacy tuple.  
+**Regression fence:** MCP integration tests `blocking_dependency_mcp_direction_and_context_recreation` and `test_closing_blocker_unblocks_dependent`, extended with literal serialized values and recreated-context retention.  
+**Named mutation:** Rename serialized `prerequisite_id` to legacy `depends_on_id` for C7, and remove incoming Blocking edges when closing the prerequisite for C5; each owning assertion must turn red, then restoration must return green.  
+**Complexity/production scale:** N/A — reason: test-only assertions introduce no production loop.  
+**Wall budget/phase:** N/A — reason: test-only changes introduce no runtime phase.  
+**Files:** modify `crates/rivets-mcp/tests/integration.rs`.  
+**Estimate:** 0.25 engineering day.  
+**Diff estimate:** 92 changed lines.  
+**PR increment:** B — Canonical CLI and MCP adapters; carried into C through the stack.  
+**Commands and expected results:**
+- `cargo test -p rivets-mcp --test integration blocking_dependency_mcp_direction_and_context_recreation` → add/list/tree/remove JSON matches literal canonical objects; the legacy-key mutation turns red.
+- `cargo test -p rivets-mcp --test integration test_closing_blocker_unblocks_dependent` → the dependent becomes Ready while the exact edge remains after context recreation; the close-edge-removal mutation turns red.
+
+## Slice 6: Synchronize current-reference relationship guidance — F28, F29, F30
+
+**Claim IDs:** C6, C7, C8  
+**Expected behavior:** Current-reference docs expose only `blocking-dependency`/`--prerequisite`, advertise the actual 24-tool MCP surface, use canonical Blocking operations in Wayfinder guidance, and identify Parentage as unavailable until verified Task `rivets-qcje`.  
+**Oracle:** Compare copy-pastable CLI forms to Clap help/error behavior, MCP count to the router's enumerated tool set, and the Parentage deferral to verified Task `rivets-qcje`.  
+**Stress fixture:** N/A — reason: documentation synchronization adds no runtime logic; positive controls retain every canonical command/tool while retired forms remain rejected.  
+**Regression fence:** Existing CLI/MCP registry and parity tests for canonical presence and generic-surface absence; documentation is checked against their literal accepted/rejected sets.  
+**Named mutation:** Re-add `Commands::Dep` or the MCP `dep` tool; the registry fence must turn red naming the legacy route, then restoration must return green.  
+**Complexity/production scale:** N/A — reason: documentation-only slice.  
+**Wall budget/phase:** N/A — reason: no runtime phase is introduced.  
+**Files:** modify `README.md`, `docs/README.md`, `docs/agents/issue-tracker.md`, `docs/architecture.md`, `docs/data-flow.md`, and `docs/module-structure.md`.  
+**Estimate:** 0.25 engineering day.  
+**Diff estimate:** 48 changed lines including conflict-preserving wording.  
+**PR increment:** C — Generic-surface retirement.  
+**Commands and expected results:**
+- `cargo run -p rivets -- --help` and `cargo run -p rivets -- create --help` → `blocking-dependency` and `--prerequisite` are present; `dep` and `--deps` are absent.
+- `cargo test -p rivets-mcp generic_dependency_mcp_tool_is_absent` → canonical tools remain and generic `dep` stays absent.
+- `cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings && cargo nextest run --workspace --all-features` → the stacked cutover remains green.
+
 ## Tracker taxonomy
 
 - Canonical relationship persistence remains intended work at verified Task `rivets-vio8`; this plan preserves the legacy persistence DTO until that Task.
@@ -133,11 +170,11 @@ increment B also crossed 4,000 changed lines.
 
 ## Self-review
 
-- [x] C0–C10 are assigned exactly once; every PENDING falsifier is assigned to its implementing slice.
+- [x] Original implementation coverage assigns C0–C10 exactly once; review-fix Slices 5–6 map F26–F30 to their covering claims and preserve every original falsifier owner.
 - [x] Every slice contains all thirteen mandatory fields and every conditional field has an explicit `N/A — reason` where applicable.
 - [x] Every claim’s regression fence and named mutation are created/applied in the owning slice; no fence-less risk was approved.
 - [x] Every new loop records asymptotic complexity, production/stress scale, a maximum accepted cost, and rationale; always-on storage phases have wall budgets.
-- [x] Partition arithmetic includes the original 20% churn margin; the exact 5,282-line cumulative diff is split into three independently mergeable increments after the final size tripwire.
+- [x] Partition arithmetic includes the original 20% churn margin; the exact 5,451-line cumulative diff is split into three independently mergeable increments after the final size tripwire.
 - [x] Every slice names an increment and each increment has an independent mergeable definition.
 - [x] Tracker taxonomy is applied to every intended later Task.
 - [x] No slice is declared complete; checkpointed-build owns completion.
