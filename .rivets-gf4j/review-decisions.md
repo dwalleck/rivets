@@ -1,0 +1,5 @@
+# Review decisions: rivets-gf4j
+
+| finding-id | finding | reviewer | evidence-state | evidence | decision | fix | note |
+|---|---|---|---|---|---|---|---|
+| F1 | The C5 Closed-prerequisite mutation left its fence green; diagnose the full blockedness path and strengthen or relocate the mutation before recording PASS. | advisor | Verified | With `find_blocked_issues` mutated to treat Closed prerequisites as active, `cargo test -p rivets --test in_memory_storage closed_prerequisite_stays_recorded_without_blocking` initially passed. Code reading showed `blocked_issues` has its own Closed filter while `ready_to_work` consumes `find_blocked_issues`. After the fence added literal assertions for both public paths, the same mutation turned red on Ready membership; restoration made the full `rivets` suite green. | Modify | Strengthened `closed_prerequisite_stays_recorded_without_blocking` to assert both `blocked_issues` and `ready_to_work` against the explicit Closed-state oracle; retained the graph-level named mutation because it now exercises its actual public consumer. | Accepted into uncommitted Slice 1; Slice 1 checkpoint passed, and later plan slices remain. |

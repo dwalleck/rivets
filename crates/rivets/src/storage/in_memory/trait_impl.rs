@@ -1,11 +1,14 @@
 //! IssueStorage trait implementation for in-memory storage.
 
 use super::InMemoryStorage;
-use super::graph::{find_blocked_issues, get_dependency_tree_impl, has_cycle_impl};
+use super::graph::{
+    blocking_dependency_tree_impl, find_blocked_issues, find_blocking_edge,
+    get_dependency_tree_impl, has_blocking_cycle_impl, has_cycle_impl,
+};
 use super::sorting::sort_by_policy;
 use crate::domain::{
-    Dependency, DependencyType, Issue, IssueFilter, IssueId, IssueStatus, IssueUpdate,
-    MAX_PRIORITY, NewIssue, NewResource, Note, ResourceId, ResourceUpdate, SortPolicy,
+    BlockingDependency, Dependency, DependencyType, Issue, IssueFilter, IssueId, IssueStatus,
+    IssueUpdate, MAX_PRIORITY, NewIssue, NewResource, Note, ResourceId, ResourceUpdate, SortPolicy,
 };
 use crate::error::{Error, Result, StorageError};
 use crate::storage::IssueStorage;
@@ -275,6 +278,136 @@ impl IssueStorage for InMemoryStorage {
         inner.issues.remove(id);
 
         Ok(())
+    }
+    async fn add_blocking_dependency(&mut self, dependency: BlockingDependency) -> Result<()> {
+        let mut inner = self.lock().await;
+        let dependent_id = dependency.dependent_id();
+        let prerequisite_id = dependency.prerequisite_id();
+        let dependent_node = *inner
+            .node_map
+            .get(dependent_id)
+            .ok_or_else(|| Error::IssueNotFound(dependent_id.clone()))?;
+        let prerequisite_node = *inner
+            .node_map
+            .get(prerequisite_id)
+            .ok_or_else(|| Error::IssueNotFound(prerequisite_id.clone()))?;
+
+        if find_blocking_edge(&inner.graph, dependent_node, prerequisite_node).is_some() {
+            return Err(StorageError::DuplicateDependency {
+                from: dependent_id.clone(),
+                to: prerequisite_id.clone(),
+            }
+            .into());
+        }
+        if has_blocking_cycle_impl(&inner.graph, &inner.node_map, dependent_id, prerequisite_id)? {
+            return Err(Error::CircularDependency {
+                from: dependent_id.clone(),
+                to: prerequisite_id.clone(),
+            });
+        }
+
+        inner
+            .graph
+            .add_edge(dependent_node, prerequisite_node, DependencyType::Blocks);
+        inner
+            .issues
+            .get_mut(dependent_id)
+            .ok_or_else(|| Error::IssueNotFound(dependent_id.clone()))?
+            .dependencies
+            .push(Dependency {
+                depends_on_id: prerequisite_id.clone(),
+                dep_type: DependencyType::Blocks,
+            });
+        Ok(())
+    }
+
+    async fn remove_blocking_dependency(&mut self, dependency: &BlockingDependency) -> Result<()> {
+        let mut inner = self.lock().await;
+        let dependent_id = dependency.dependent_id();
+        let prerequisite_id = dependency.prerequisite_id();
+        let dependent_node = *inner
+            .node_map
+            .get(dependent_id)
+            .ok_or_else(|| Error::IssueNotFound(dependent_id.clone()))?;
+        let prerequisite_node = *inner
+            .node_map
+            .get(prerequisite_id)
+            .ok_or_else(|| Error::IssueNotFound(prerequisite_id.clone()))?;
+        let edge = find_blocking_edge(&inner.graph, dependent_node, prerequisite_node).ok_or_else(
+            || Error::DependencyNotFound {
+                from: dependent_id.clone(),
+                to: prerequisite_id.clone(),
+            },
+        )?;
+
+        inner.graph.remove_edge(edge);
+        inner
+            .issues
+            .get_mut(dependent_id)
+            .ok_or_else(|| Error::IssueNotFound(dependent_id.clone()))?
+            .dependencies
+            .retain(|record| {
+                record.dep_type != DependencyType::Blocks
+                    || record.depends_on_id != *prerequisite_id
+            });
+        Ok(())
+    }
+
+    async fn blocking_prerequisites(
+        &self,
+        dependent_id: &IssueId,
+    ) -> Result<Vec<BlockingDependency>> {
+        let inner = self.lock().await;
+        let dependent_node = *inner
+            .node_map
+            .get(dependent_id)
+            .ok_or_else(|| Error::IssueNotFound(dependent_id.clone()))?;
+        let mut dependencies = inner
+            .graph
+            .edges(dependent_node)
+            .filter(|edge| *edge.weight() == DependencyType::Blocks)
+            .map(|edge| {
+                BlockingDependency::from_valid_parts(
+                    dependent_id.clone(),
+                    inner.graph[edge.target()].clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        dependencies.sort();
+        Ok(dependencies)
+    }
+
+    async fn blocking_dependents(
+        &self,
+        prerequisite_id: &IssueId,
+    ) -> Result<Vec<BlockingDependency>> {
+        let inner = self.lock().await;
+        let prerequisite_node = *inner
+            .node_map
+            .get(prerequisite_id)
+            .ok_or_else(|| Error::IssueNotFound(prerequisite_id.clone()))?;
+        let mut dependencies = inner
+            .graph
+            .edges_directed(prerequisite_node, Direction::Incoming)
+            .filter(|edge| *edge.weight() == DependencyType::Blocks)
+            .map(|edge| {
+                BlockingDependency::from_valid_parts(
+                    inner.graph[edge.source()].clone(),
+                    prerequisite_id.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        dependencies.sort();
+        Ok(dependencies)
+    }
+
+    async fn blocking_dependency_tree(
+        &self,
+        dependent_id: &IssueId,
+        max_depth: Option<usize>,
+    ) -> Result<Vec<(BlockingDependency, usize)>> {
+        let inner = self.lock().await;
+        blocking_dependency_tree_impl(&inner.graph, &inner.node_map, dependent_id, max_depth)
     }
 
     async fn add_dependency(
