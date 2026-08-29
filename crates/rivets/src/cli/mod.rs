@@ -40,9 +40,10 @@ use crate::app::App;
 
 // Re-export argument structs
 pub use args::{
-    BlockedArgs, CloseArgs, CreateArgs, DeleteArgs, DepAction, DepArgs, InfoArgs, InitArgs,
-    LabelAction, LabelArgs, ListArgs, ReadyArgs, ReopenArgs, ResourceAction, ResourceArgs,
-    ShowArgs, StaleArgs, StatsArgs, UpdateArgs,
+    BlockedArgs, BlockingDependencyAction, BlockingDependencyArgs, BlockingDependencyListArgs,
+    CloseArgs, CreateArgs, DeleteArgs, DepAction, DepArgs, InfoArgs, InitArgs, LabelAction,
+    LabelArgs, ListArgs, ReadyArgs, ReopenArgs, ResourceAction, ResourceArgs, ShowArgs, StaleArgs,
+    StatsArgs, UpdateArgs,
 };
 
 // Re-export types
@@ -132,6 +133,9 @@ pub enum Commands {
     /// Lists issues that are not blocked by dependencies. Issues are sorted
     /// by priority (hybrid by default) to help you pick what to work on next.
     Ready(ReadyArgs),
+
+    /// Manage directed Blocking Dependencies with explicit endpoint roles.
+    BlockingDependency(BlockingDependencyArgs),
 
     /// Add a dependency between issues
     ///
@@ -235,6 +239,10 @@ impl Cli {
             Some(Commands::Ready(args)) => {
                 let app = load_app_from_cwd().await?;
                 execute::execute_ready(&app, args, output_mode).await
+            }
+            Some(Commands::BlockingDependency(args)) => {
+                let mut app = load_app_from_cwd().await?;
+                execute::execute_blocking_dependency(&mut app, args, output_mode).await
             }
             Some(Commands::Dep(args)) => {
                 let mut app = load_app_from_cwd().await?;

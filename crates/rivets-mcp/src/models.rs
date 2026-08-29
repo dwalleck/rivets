@@ -333,6 +333,53 @@ pub struct CloseParams {
     pub workspace_root: Option<String>,
 }
 
+/// Parameters shared by Blocking Dependency add and remove tools.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BlockingDependencyPairParams {
+    /// Issue that depends on the prerequisite.
+    pub dependent_id: String,
+    /// Issue that must be completed first.
+    pub prerequisite_id: String,
+    /// Optional workspace root (uses current context if not specified).
+    pub workspace_root: Option<String>,
+}
+
+/// One valid perspective for listing Blocking Dependencies.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BlockingDependencyListQuery {
+    /// List prerequisites required by one dependent.
+    PrerequisitesOf {
+        /// Issue whose prerequisite edges are requested.
+        dependent_id: String,
+    },
+    /// List Issues that depend on one prerequisite.
+    DependentsOf {
+        /// Issue whose incoming dependent edges are requested.
+        prerequisite_id: String,
+    },
+}
+
+/// Parameters for the canonical Blocking Dependency list tool.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BlockingDependencyListParams {
+    /// Role-safe endpoint perspective.
+    pub query: BlockingDependencyListQuery,
+    /// Optional workspace root (uses current context if not specified).
+    pub workspace_root: Option<String>,
+}
+
+/// Parameters for the canonical Blocking Dependency tree tool.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BlockingDependencyTreeParams {
+    /// Root dependent Issue.
+    pub dependent_id: String,
+    /// Maximum depth; zero means unlimited.
+    pub depth: Option<usize>,
+    /// Optional workspace root (uses current context if not specified).
+    pub workspace_root: Option<String>,
+}
+
 /// Parameters for the `dep` tool.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DepParams {
@@ -619,4 +666,24 @@ mod tests {
         .collect();
         assert_eq!(enum_values, expected);
     }
+}
+
+/// One role-named entry in a Blocking prerequisite tree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockingDependencyTreeEntry {
+    /// Issue that depends on the prerequisite.
+    pub dependent_id: String,
+    /// Issue that must be completed first.
+    pub prerequisite_id: String,
+    /// One-based distance from the requested root dependent.
+    pub depth: usize,
+}
+
+/// Structured Blocking prerequisite tree response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockingDependencyTreeResponse {
+    /// Root dependent used for the traversal.
+    pub root_dependent_id: String,
+    /// Blocking edges in deterministic breadth-first order.
+    pub prerequisites: Vec<BlockingDependencyTreeEntry>,
 }

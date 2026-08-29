@@ -12,7 +12,7 @@ pub mod color;
 mod json;
 pub mod tree;
 
-use crate::domain::{Dependency, Issue, Note};
+use crate::domain::{BlockingDependency, Issue, Note};
 use colored::Colorize;
 use serde::Serialize;
 use std::env;
@@ -270,8 +270,8 @@ pub fn print_issues_to<W: Write>(w: &mut W, issues: &[Issue], mode: OutputMode) 
 /// Print an issue with full details (for show command)
 pub fn print_issue_details(
     issue: &Issue,
-    deps: &[Dependency],
-    dependents: &[Dependency],
+    prerequisites: &[BlockingDependency],
+    dependents: &[BlockingDependency],
     mode: OutputMode,
 ) -> io::Result<()> {
     let stdout = io::stdout();
@@ -279,8 +279,10 @@ pub fn print_issue_details(
     let config = OutputConfig::from_env();
 
     match mode {
-        OutputMode::Text => print_issue_details_text(&mut handle, issue, deps, dependents, &config),
-        OutputMode::Json => print_issue_details_json(&mut handle, issue, deps, dependents),
+        OutputMode::Text => {
+            print_issue_details_text(&mut handle, issue, prerequisites, dependents, &config)
+        }
+        OutputMode::Json => print_issue_details_json(&mut handle, issue, prerequisites, dependents),
     }
 }
 
@@ -374,8 +376,8 @@ fn print_issues_text<W: Write>(
 fn print_issue_details_text<W: Write>(
     w: &mut W,
     issue: &Issue,
-    deps: &[Dependency],
-    dependents: &[Dependency],
+    prerequisites: &[BlockingDependency],
+    dependents: &[BlockingDependency],
     config: &OutputConfig,
 ) -> io::Result<()> {
     let terminal_width = get_terminal_width();
@@ -461,32 +463,40 @@ fn print_issue_details_text<W: Write>(
     )?;
     print_notes_section(w, issue.notes(), content_width, config)?;
 
-    // Dependencies section
-    if !deps.is_empty() {
+    if !prerequisites.is_empty() {
         writeln!(w)?;
-        writeln!(w, "{} ({}):", bold("Dependencies", config), deps.len())?;
-        for dep in deps {
+        writeln!(
+            w,
+            "{} ({}):",
+            bold("Blocking prerequisites", config),
+            prerequisites.len()
+        )?;
+        for dependency in prerequisites {
             writeln!(
                 w,
-                "  {} {} ({})",
+                "  {} {} depends on {}",
                 cyan("→", config),
-                colorize_id(dep.depends_on_id.as_str(), config),
-                dep.dep_type
+                colorize_id(dependency.dependent_id().as_str(), config),
+                colorize_id(dependency.prerequisite_id().as_str(), config)
             )?;
         }
     }
 
-    // Dependents section
     if !dependents.is_empty() {
         writeln!(w)?;
-        writeln!(w, "{} ({}):", bold("Dependents", config), dependents.len())?;
-        for dep in dependents {
+        writeln!(
+            w,
+            "{} ({}):",
+            bold("Blocking dependents", config),
+            dependents.len()
+        )?;
+        for dependency in dependents {
             writeln!(
                 w,
-                "  {} {} ({})",
+                "  {} {} is blocked by {}",
                 yellow("←", config),
-                colorize_id(dep.depends_on_id.as_str(), config),
-                dep.dep_type
+                colorize_id(dependency.dependent_id().as_str(), config),
+                colorize_id(dependency.prerequisite_id().as_str(), config)
             )?;
         }
     }
@@ -559,7 +569,7 @@ fn print_blocked_text<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{Dependency, DependencyType, IssueId, IssueKind, IssueStatus};
+    use crate::domain::{BlockingDependency, IssueId, IssueKind, IssueStatus};
     use chrono::Utc;
     fn test_issue() -> Issue {
         Issue {
@@ -713,20 +723,20 @@ mod tests {
     fn test_print_issue_details_text() {
         let issue = test_issue();
         let config = OutputConfig::default();
-        let deps = vec![Dependency {
-            depends_on_id: IssueId::new("test-xyz"),
-            dep_type: DependencyType::Blocks,
-        }];
+        let prerequisites = vec![
+            BlockingDependency::new(IssueId::new("test-abc"), IssueId::new("test-xyz")).unwrap(),
+        ];
         let dependents = vec![];
 
         let mut buffer = Vec::new();
-        print_issue_details_text(&mut buffer, &issue, &deps, &dependents, &config).unwrap();
+        print_issue_details_text(&mut buffer, &issue, &prerequisites, &dependents, &config)
+            .unwrap();
 
         let output = String::from_utf8(buffer).unwrap();
         assert!(output.contains("test-abc"));
-        assert!(output.contains("Dependencies"));
+        assert!(output.contains("Blocking prerequisites"));
         assert!(output.contains("test-xyz"));
-        assert!(output.contains("blocks"));
+        assert!(output.contains("test-abc depends on test-xyz"));
     }
 
     #[test]

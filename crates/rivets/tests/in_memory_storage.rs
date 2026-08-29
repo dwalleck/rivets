@@ -14,6 +14,7 @@ use rivets::storage::IssueStorage;
 use rivets::storage::in_memory::{load_from_jsonl, new_in_memory_storage, save_to_jsonl};
 use rstest::rstest;
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 fn create_test_issue(title: &str) -> NewIssue {
@@ -27,7 +28,7 @@ fn create_test_issue(title: &str) -> NewIssue {
         design: None,
         acceptance_criteria: None,
         initial_note: None,
-        dependencies: vec![],
+        prerequisites: vec![],
     }
 }
 
@@ -42,7 +43,7 @@ fn create_test_issue_with_priority(title: &str, priority: u8) -> NewIssue {
         design: None,
         acceptance_criteria: None,
         initial_note: None,
-        dependencies: vec![],
+        prerequisites: vec![],
     }
 }
 fn literal_path_exists<'a>(edges: &[(&'a str, &'a str)], start: &'a str, target: &'a str) -> bool {
@@ -76,6 +77,78 @@ async fn test_create_issue() {
     assert_eq!(issue.title, "Test Issue");
     assert_eq!(issue.status, IssueStatus::Open);
     assert_eq!(issue.priority, 2);
+}
+
+#[tokio::test]
+async fn create_with_prerequisites_is_atomic() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let prerequisite_a = storage.create(create_test_issue("A")).await.unwrap();
+    let prerequisite_b = storage.create(create_test_issue("B")).await.unwrap();
+    let mut valid = create_test_issue("Valid dependent");
+    valid.prerequisites = vec![prerequisite_b.id.clone(), prerequisite_a.id.clone()];
+    let dependent = storage.create(valid).await.unwrap();
+    let relationships = storage.blocking_prerequisites(&dependent.id).await.unwrap();
+    assert_eq!(relationships.len(), 2);
+    let mut expected_prerequisites = vec![&prerequisite_a.id, &prerequisite_b.id];
+    expected_prerequisites.sort_unstable();
+    assert_eq!(
+        relationships
+            .iter()
+            .map(|dependency| dependency.prerequisite_id())
+            .collect::<Vec<_>>(),
+        expected_prerequisites
+    );
+
+    let count_before_failures = storage.export_all().await.unwrap().len();
+    let mut duplicate = create_test_issue("Duplicate prerequisites");
+    duplicate.prerequisites = vec![prerequisite_a.id.clone(), prerequisite_a.id.clone()];
+    assert!(storage.create(duplicate).await.is_err());
+    assert_eq!(
+        storage.export_all().await.unwrap().len(),
+        count_before_failures
+    );
+
+    let mut missing = create_test_issue("Missing prerequisite");
+    missing.prerequisites = vec![IssueId::new("test-missing")];
+    assert!(storage.create(missing).await.is_err());
+    assert_eq!(
+        storage.export_all().await.unwrap().len(),
+        count_before_failures
+    );
+}
+
+#[tokio::test]
+async fn create_prerequisite_validation_stays_within_budget() {
+    const PREREQUISITE_COUNT: usize = 1_000;
+    let mut storage = new_in_memory_storage("test".to_string());
+    let mut prerequisite_ids = Vec::with_capacity(PREREQUISITE_COUNT);
+    for index in 0..PREREQUISITE_COUNT {
+        prerequisite_ids.push(
+            storage
+                .create(create_test_issue(&format!("Prerequisite {index}")))
+                .await
+                .unwrap()
+                .id,
+        );
+    }
+    let mut candidate = create_test_issue("Stress dependent");
+    candidate.prerequisites = prerequisite_ids;
+
+    let started = Instant::now();
+    let created = storage.create(candidate).await.unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(
+        storage
+            .blocking_prerequisites(&created.id)
+            .await
+            .unwrap()
+            .len(),
+        PREREQUISITE_COUNT
+    );
+    assert!(
+        elapsed <= Duration::from_millis(20),
+        "1,000-prerequisite create took {elapsed:?}"
+    );
 }
 
 #[tokio::test]

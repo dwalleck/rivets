@@ -61,12 +61,9 @@ pub struct CreateArgs {
     #[arg(short, long, value_delimiter = ',')]
     pub labels: Vec<String>,
 
-    /// Dependencies (comma-separated issue IDs)
-    ///
-    /// Format: "issue-id" or "type:issue-id" where type is blocks, related,
-    /// parent-child, or discovered-from.
-    #[arg(long, value_delimiter = ',')]
-    pub deps: Vec<String>,
+    /// Blocking prerequisite Issue IDs. Repeat for multiple prerequisites.
+    #[arg(long = "prerequisite", value_parser = validate_issue_id)]
+    pub prerequisites: Vec<String>,
 
     /// Design notes
     #[arg(long, allow_hyphen_values = true)]
@@ -285,6 +282,65 @@ pub struct ReadyArgs {
     /// Sort policy
     #[arg(long, value_enum, default_value = "hybrid")]
     pub sort: SortPolicyArg,
+}
+
+/// Arguments for canonical Blocking Dependency operations.
+#[derive(Parser, Debug, Clone)]
+pub struct BlockingDependencyArgs {
+    /// Blocking Dependency subcommand.
+    #[command(subcommand)]
+    pub action: BlockingDependencyAction,
+}
+
+/// Canonical Blocking Dependency actions.
+#[derive(Subcommand, Debug, Clone)]
+pub enum BlockingDependencyAction {
+    /// Add a dependent-to-prerequisite Blocking Dependency.
+    Add {
+        /// Issue that depends on the prerequisite.
+        #[arg(long, value_parser = validate_issue_id)]
+        dependent: String,
+        /// Issue that must be completed first.
+        #[arg(long, value_parser = validate_issue_id)]
+        prerequisite: String,
+    },
+    /// Remove one dependent-to-prerequisite Blocking Dependency.
+    Remove {
+        /// Issue that depends on the prerequisite.
+        #[arg(long, value_parser = validate_issue_id)]
+        dependent: String,
+        /// Issue that must be completed first.
+        #[arg(long, value_parser = validate_issue_id)]
+        prerequisite: String,
+    },
+    /// List prerequisites of a dependent or dependents of a prerequisite.
+    List(BlockingDependencyListArgs),
+    /// Display the transitive prerequisite tree for a dependent.
+    Tree {
+        /// Root dependent Issue.
+        #[arg(long, value_parser = validate_issue_id)]
+        dependent: String,
+        /// Maximum depth; zero means unlimited.
+        #[arg(long, default_value = "5")]
+        depth: usize,
+    },
+}
+
+/// Select exactly one Blocking Dependency endpoint perspective.
+#[derive(Parser, Debug, Clone)]
+#[command(group(
+    clap::ArgGroup::new("endpoint")
+        .required(true)
+        .multiple(false)
+        .args(["dependent", "prerequisite"])
+))]
+pub struct BlockingDependencyListArgs {
+    /// List prerequisites required by this dependent.
+    #[arg(long, value_parser = validate_issue_id)]
+    pub dependent: Option<String>,
+    /// List Issues that depend on this prerequisite.
+    #[arg(long, value_parser = validate_issue_id)]
+    pub prerequisite: Option<String>,
 }
 
 /// Arguments for the `dep` command

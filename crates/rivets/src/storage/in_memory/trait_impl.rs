@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use petgraph::Direction;
 use petgraph::visit::EdgeRef;
+use std::collections::HashSet;
 
 /// Check if an issue matches all criteria in the filter.
 ///
@@ -52,10 +53,17 @@ impl IssueStorage for InMemoryStorage {
         // Validate the new issue data (title, priority, etc.)
         new_issue.validate().map_err(StorageError::Validation)?;
 
-        // Validate all dependency targets exist
-        for (depends_on_id, _dep_type) in &new_issue.dependencies {
-            if !inner.issues.contains_key(depends_on_id) {
-                return Err(Error::IssueNotFound(depends_on_id.clone()));
+        // Validate every prerequisite and reject duplicates before ID generation.
+        let mut unique_prerequisites = HashSet::with_capacity(new_issue.prerequisites.len());
+        for prerequisite_id in &new_issue.prerequisites {
+            if !inner.issues.contains_key(prerequisite_id) {
+                return Err(Error::IssueNotFound(prerequisite_id.clone()));
+            }
+            if !unique_prerequisites.insert(prerequisite_id) {
+                return Err(StorageError::Validation(format!(
+                    "Duplicate prerequisite: {prerequisite_id}"
+                ))
+                .into());
             }
         }
 
@@ -67,14 +75,13 @@ impl IssueStorage for InMemoryStorage {
         let temp_node = inner.graph.add_node(id.clone());
         inner.node_map.insert(id.clone(), temp_node);
 
-        for (depends_on_id, _dep_type) in &new_issue.dependencies {
-            if has_cycle_impl(&inner.graph, &inner.node_map, &id, depends_on_id)? {
-                // Rollback: remove the temporary node before returning error
+        for prerequisite_id in &new_issue.prerequisites {
+            if has_blocking_cycle_impl(&inner.graph, &inner.node_map, &id, prerequisite_id)? {
                 inner.graph.remove_node(temp_node);
                 inner.node_map.remove(&id);
                 return Err(Error::CircularDependency {
                     from: id,
-                    to: depends_on_id.clone(),
+                    to: prerequisite_id.clone(),
                 });
             }
         }
@@ -86,15 +93,15 @@ impl IssueStorage for InMemoryStorage {
             .map(|content| vec![Note::from_parts(content, now)])
             .unwrap_or_default();
 
-        // Convert dependencies from tuples to Dependency structs
-        let dependencies: Vec<Dependency> = new_issue
-            .dependencies
+        let dependencies = new_issue
+            .prerequisites
             .iter()
-            .map(|(depends_on_id, dep_type)| Dependency {
-                depends_on_id: depends_on_id.clone(),
-                dep_type: *dep_type,
+            .cloned()
+            .map(|depends_on_id| Dependency {
+                depends_on_id,
+                dep_type: DependencyType::Blocks,
             })
-            .collect();
+            .collect::<Vec<_>>();
 
         let issue = Issue {
             id: id.clone(),
@@ -119,11 +126,13 @@ impl IssueStorage for InMemoryStorage {
         // Store issue (node already added during validation)
         inner.issues.insert(id.clone(), issue.clone());
 
-        // Add dependency edges (all validations passed, so this is safe)
-        for (depends_on_id, dep_type) in new_issue.dependencies {
-            let from_node = inner.node_map[&id];
-            let to_node = inner.node_map[&depends_on_id];
-            inner.graph.add_edge(from_node, to_node, dep_type);
+        // Add Blocking edges after all validation and Issue insertion succeed.
+        for prerequisite_id in new_issue.prerequisites {
+            let dependent_node = inner.node_map[&id];
+            let prerequisite_node = inner.node_map[&prerequisite_id];
+            inner
+                .graph
+                .add_edge(dependent_node, prerequisite_node, DependencyType::Blocks);
         }
 
         Ok(issue)

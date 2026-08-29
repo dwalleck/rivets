@@ -68,6 +68,9 @@ pub enum Error {
         /// The reason for the failure.
         reason: String,
     },
+    /// Blocking Dependency endpoint roles failed domain validation.
+    #[error("Invalid Blocking Dependency: {0}")]
+    InvalidBlockingDependency(#[from] rivets::domain::BlockingDependencyError),
 
     /// An error from the rivets storage layer.
     #[error("Storage error: {0}")]

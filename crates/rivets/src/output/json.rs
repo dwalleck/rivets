@@ -1,6 +1,6 @@
 //! JSON output formatting for CLI commands.
 
-use crate::domain::{Dependency, Issue};
+use crate::domain::{BlockingDependency, Issue};
 use serde::Serialize;
 use std::io::{self, Write};
 
@@ -20,20 +20,20 @@ pub(crate) fn print_issues_json<W: Write>(w: &mut W, issues: &[Issue]) -> io::Re
 pub(crate) struct IssueDetails<'a> {
     #[serde(flatten)]
     pub issue: &'a Issue,
-    pub dependency_details: Vec<&'a Dependency>,
-    pub dependent_details: Vec<&'a Dependency>,
+    pub blocking_prerequisites: Vec<&'a BlockingDependency>,
+    pub blocking_dependents: Vec<&'a BlockingDependency>,
 }
 
 pub(crate) fn print_issue_details_json<W: Write>(
     w: &mut W,
     issue: &Issue,
-    deps: &[Dependency],
-    dependents: &[Dependency],
+    prerequisites: &[BlockingDependency],
+    dependents: &[BlockingDependency],
 ) -> io::Result<()> {
     let details = IssueDetails {
         issue,
-        dependency_details: deps.iter().collect(),
-        dependent_details: dependents.iter().collect(),
+        blocking_prerequisites: prerequisites.iter().collect(),
+        blocking_dependents: dependents.iter().collect(),
     };
 
     let json = serde_json::to_string_pretty(&details)

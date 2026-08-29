@@ -59,7 +59,7 @@
 //!         design: None,
 //!         acceptance_criteria: None,
 //!         initial_note: None,
-//!         dependencies: vec![],
+//!         prerequisites: vec![],
 //!     };
 //!
 //!     let issue = storage.create(new_issue).await?;
@@ -1059,7 +1059,7 @@ mod tests {
             design: None,
             acceptance_criteria: None,
             initial_note: None,
-            dependencies: vec![],
+            prerequisites: vec![],
         };
 
         let issue = storage.create(new_issue).await.unwrap();
@@ -1137,7 +1137,7 @@ mod tests {
             design: None,
             acceptance_criteria: None,
             initial_note: None,
-            dependencies: vec![],
+            prerequisites: vec![],
         };
 
         let created = storage.create(new_issue).await.unwrap();
@@ -1262,7 +1262,7 @@ mod tests {
             design: None,
             acceptance_criteria: None,
             initial_note: None,
-            dependencies: vec![],
+            prerequisites: vec![],
         };
 
         let created = storage.create(new_issue).await.unwrap();
@@ -1296,7 +1296,7 @@ mod tests {
             design: None,
             acceptance_criteria: None,
             initial_note: None,
-            dependencies: vec![],
+            prerequisites: vec![],
         };
 
         let created = storage.create(new_issue).await.unwrap();

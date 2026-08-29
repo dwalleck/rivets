@@ -9,12 +9,16 @@
 
 use chrono::{DateTime, Utc};
 use rivets::domain::{
-    Issue, IssueKind, IssueStatus, ResourceTarget, StatusTransitionError, WorkspacePath,
+    BlockingDependency, Issue, IssueKind, IssueStatus, ResourceTarget, StatusTransitionError,
+    WorkspacePath,
 };
 use rivets::error::{Error as RivetsError, StorageError};
 use rivets_mcp::context::Context;
 use rivets_mcp::error::Error;
-use rivets_mcp::models::{CreateParams, IssueKindInput, ListParams, ReadyParams, UpdateParams};
+use rivets_mcp::models::{
+    BlockingDependencyListQuery, BlockingDependencyTreeResponse, CreateParams, IssueKindInput,
+    ListParams, ReadyParams, UpdateParams,
+};
 use rivets_mcp::tools::Tools;
 use rmcp::model::Content;
 use rstest::rstest;
@@ -520,26 +524,11 @@ async fn mcp_full_issue_json_golden() {
     let workspace = create_temp_workspace();
     let tools = create_tools();
     set_context(&tools, workspace.path()).await;
-    let (created, dependencies) = create_golden_issue(&tools).await;
+    let (created, _) = create_golden_issue(&tools).await;
     let issue = reload_golden_issue(&workspace, created.id.as_str()).await;
 
     let mut actual = mcp_content_json(&issue);
     normalize_wire_timestamps(&mut actual);
-
-    let mut expected_dependencies: Vec<Value> = dependencies
-        .into_iter()
-        .map(|(depends_on_id, dep_type)| {
-            json!({
-                "depends_on_id": depends_on_id,
-                "dep_type": dep_type,
-            })
-        })
-        .collect();
-    expected_dependencies.sort_by(|left, right| {
-        left["depends_on_id"]
-            .as_str()
-            .cmp(&right["depends_on_id"].as_str())
-    });
 
     let expected = json!({
         "id": issue.id,
@@ -590,7 +579,6 @@ async fn mcp_full_issue_json_golden() {
                 "label": "Reference source",
             },
         ],
-        "dependencies": expected_dependencies,
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "closed_at": "<timestamp>",
@@ -1460,8 +1448,233 @@ async fn test_explicit_workspace_cache_eviction_preserves_current_context() {
 // ============================================================================
 // Dependency Tests
 // ============================================================================
+fn relationship_value(dependent: &Issue, prerequisite: &Issue) -> Value {
+    json!({
+        "dependent_id": dependent.id,
+        "prerequisite_id": prerequisite.id
+    })
+}
+
+fn assert_relationship_wire(actual: &BlockingDependency, dependent: &Issue, prerequisite: &Issue) {
+    assert_eq!(actual.dependent_id(), &dependent.id);
+    assert_eq!(actual.prerequisite_id(), &prerequisite.id);
+    assert_eq!(
+        serde_json::to_value(actual).expect("relationship should serialize"),
+        relationship_value(dependent, prerequisite)
+    );
+}
+
+fn assert_relationship_list_wire(
+    actual: &[BlockingDependency],
+    expected: &[(&Issue, &Issue)],
+    sort_key: &str,
+) {
+    let mut expected = expected
+        .iter()
+        .map(|(dependent, prerequisite)| relationship_value(dependent, prerequisite))
+        .collect::<Vec<_>>();
+    expected.sort_by(|left, right| left[sort_key].as_str().cmp(&right[sort_key].as_str()));
+    assert_eq!(
+        serde_json::to_value(actual).expect("relationships should serialize"),
+        Value::Array(expected)
+    );
+}
+
+fn assert_tree_wire(
+    actual: &BlockingDependencyTreeResponse,
+    dependent: &Issue,
+    prerequisites: [&Issue; 2],
+) {
+    let mut expected = prerequisites
+        .map(|prerequisite| {
+            let mut row = relationship_value(dependent, prerequisite);
+            row["depth"] = json!(1);
+            row
+        })
+        .to_vec();
+    expected.sort_by(|left, right| {
+        left["prerequisite_id"]
+            .as_str()
+            .cmp(&right["prerequisite_id"].as_str())
+    });
+    assert_eq!(
+        serde_json::to_value(actual).expect("tree should serialize"),
+        json!({
+            "root_dependent_id": dependent.id,
+            "prerequisites": expected
+        })
+    );
+}
+
+async fn assert_blocking_dependency_queries(
+    tools: &Tools,
+    dependent: &Issue,
+    second_dependent: &Issue,
+    prerequisite_a: &Issue,
+    prerequisite_b: &Issue,
+) -> Vec<BlockingDependency> {
+    let prerequisites = tools
+        .blocking_dependency_list(
+            &BlockingDependencyListQuery::PrerequisitesOf {
+                dependent_id: dependent.id.to_string(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let mut actual = prerequisites
+        .iter()
+        .map(|relationship| relationship.prerequisite_id().to_string())
+        .collect::<Vec<_>>();
+    actual.sort();
+    let mut expected = vec![prerequisite_a.id.to_string(), prerequisite_b.id.to_string()];
+    expected.sort();
+    assert_eq!(actual, expected);
+    assert_relationship_list_wire(
+        &prerequisites,
+        &[(dependent, prerequisite_a), (dependent, prerequisite_b)],
+        "prerequisite_id",
+    );
+
+    let dependents = tools
+        .blocking_dependency_list(
+            &BlockingDependencyListQuery::DependentsOf {
+                prerequisite_id: prerequisite_a.id.to_string(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        dependents
+            .iter()
+            .any(|edge| edge.dependent_id() == &dependent.id)
+    );
+    assert!(
+        dependents
+            .iter()
+            .any(|edge| edge.dependent_id() == &second_dependent.id)
+    );
+    assert_relationship_list_wire(
+        &dependents,
+        &[
+            (dependent, prerequisite_a),
+            (second_dependent, prerequisite_a),
+        ],
+        "dependent_id",
+    );
+
+    let tree = tools
+        .blocking_dependency_tree(dependent.id.as_str(), Some(1), None)
+        .await
+        .unwrap();
+    assert_eq!(tree.root_dependent_id, dependent.id.to_string());
+    assert_eq!(tree.prerequisites.len(), 2);
+    assert!(
+        tree.prerequisites
+            .iter()
+            .all(|entry| entry.depth == 1 && entry.dependent_id == dependent.id.as_str())
+    );
+    assert_tree_wire(&tree, dependent, [prerequisite_a, prerequisite_b]);
+    dependents
+}
 
 /// Test adding dependencies between issues.
+#[tokio::test]
+async fn blocking_dependency_mcp_direction_and_context_recreation() {
+    let workspace = create_temp_workspace();
+    let issues_path = workspace.path().join(".rivets/issues.jsonl");
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+    let prerequisite_a = create_issue(&tools, "Prerequisite A").await;
+    let prerequisite_b = create_issue(&tools, "Prerequisite B").await;
+    let dependent = create_issue(&tools, "Dependent").await;
+    let second_dependent = create_issue(&tools, "Second dependent").await;
+
+    tools
+        .blocking_dependency_add(dependent.id.as_str(), prerequisite_b.id.as_str(), None)
+        .await
+        .unwrap();
+    tools
+        .blocking_dependency_add(
+            dependent.id.as_str(),
+            prerequisite_a.id.as_str(),
+            Some(workspace.path().to_str().unwrap()),
+        )
+        .await
+        .unwrap();
+    tools
+        .dep(
+            second_dependent.id.as_str(),
+            prerequisite_a.id.as_str(),
+            Some("related"),
+            None,
+        )
+        .await
+        .unwrap();
+    let added = tools
+        .blocking_dependency_add(
+            second_dependent.id.as_str(),
+            prerequisite_a.id.as_str(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_relationship_wire(&added, &second_dependent, &prerequisite_a);
+
+    let dependents = assert_blocking_dependency_queries(
+        &tools,
+        &dependent,
+        &second_dependent,
+        &prerequisite_a,
+        &prerequisite_b,
+    )
+    .await;
+
+    let restarted = create_tools();
+    set_context(&restarted, workspace.path()).await;
+    let persisted = restarted
+        .blocking_dependency_list(
+            &BlockingDependencyListQuery::DependentsOf {
+                prerequisite_id: prerequisite_a.id.to_string(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(persisted, dependents);
+
+    let removed = restarted
+        .blocking_dependency_remove(
+            second_dependent.id.as_str(),
+            prerequisite_a.id.as_str(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_relationship_wire(&removed, &second_dependent, &prerequisite_a);
+    let records = std::fs::read_to_string(issues_path).unwrap();
+    let second_record: Value = records
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .find(|record: &Value| record["id"] == second_dependent.id.as_str())
+        .unwrap();
+    assert_eq!(
+        second_record["dependencies"],
+        json!([
+            {"depends_on_id": prerequisite_a.id, "dep_type": "related"}
+        ])
+    );
+
+    let self_reference = restarted
+        .blocking_dependency_add(dependent.id.as_str(), dependent.id.as_str(), None)
+        .await;
+    assert!(matches!(
+        self_reference,
+        Err(Error::InvalidBlockingDependency(_))
+    ));
+}
+
 #[tokio::test]
 async fn test_dependency_management() {
     let workspace = create_temp_workspace();
@@ -3666,6 +3879,21 @@ async fn test_closing_blocker_unblocks_dependent() {
         ready.iter().any(|i| i.id == dependent.id),
         "Dependent should be ready after blocker is closed"
     );
+
+    let restarted = create_tools();
+    set_context(&restarted, workspace.path()).await;
+    let retained = restarted
+        .blocking_dependency_list(
+            &BlockingDependencyListQuery::PrerequisitesOf {
+                dependent_id: dependent.id.to_string(),
+            },
+            None,
+        )
+        .await
+        .expect("closed prerequisite relationship should reload");
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].dependent_id(), &dependent.id);
+    assert_eq!(retained[0].prerequisite_id(), &blocker.id);
 }
 
 /// Test stats are accurate after various operations.
