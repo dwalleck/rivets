@@ -4,10 +4,26 @@ use super::IssueId;
 use serde::{Deserialize, Serialize};
 
 /// A directed relationship from an Issue that depends on work to its prerequisite.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct BlockingDependency {
     dependent_id: IssueId,
     prerequisite_id: IssueId,
+}
+
+impl<'de> Deserialize<'de> for BlockingDependency {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            dependent_id: IssueId,
+            prerequisite_id: IssueId,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Self::new(wire.dependent_id, wire.prerequisite_id).map_err(serde::de::Error::custom)
+    }
 }
 
 impl BlockingDependency {
@@ -88,6 +104,26 @@ mod tests {
             Err(BlockingDependencyError::SelfReference {
                 issue_id: IssueId::new("test-a")
             })
+        );
+    }
+
+    #[test]
+    fn blocking_dependency_deserialization_enforces_invariant() {
+        let dependency: BlockingDependency = serde_json::from_value(serde_json::json!({
+            "dependent_id": "test-dependent",
+            "prerequisite_id": "test-prerequisite"
+        }))
+        .expect("distinct endpoint roles should deserialize");
+        assert_eq!(dependency.dependent_id().as_str(), "test-dependent");
+        assert_eq!(dependency.prerequisite_id().as_str(), "test-prerequisite");
+
+        let self_reference = serde_json::from_value::<BlockingDependency>(serde_json::json!({
+            "dependent_id": "test-self",
+            "prerequisite_id": "test-self"
+        }));
+        assert!(
+            self_reference.is_err(),
+            "deserialization must preserve the self-reference invariant"
         );
     }
 }
