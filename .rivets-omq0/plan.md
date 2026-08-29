@@ -61,7 +61,7 @@
 
 **Wall budget/phase:** N/A — no new runtime phase beyond Slice 1; this slice adds only an integration fence.
 
-**Files:** `crates/rivets-mcp/tests/integration.rs`.
+**Files:** `crates/rivets-mcp/tests/stale_cache.rs`.
 
 **Estimate:** 1–2 hours.
 
