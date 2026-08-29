@@ -1003,6 +1003,71 @@ mod tests {
                 "canonical Issue ID rule is missing behavioral evidence: {expected}"
             );
         }
+
+        let canonical_label = registry
+            .target_rules
+            .iter()
+            .find(|rule| rule.id == "canonical-label-input")
+            .expect("canonical Label target rule must exist");
+        assert_eq!(
+            canonical_label.status.as_deref(),
+            Some("conformant"),
+            "canonical Label rule may be conformant only with cross-adapter fences"
+        );
+        for expected in [
+            "crates/rivets/src/domain/label.rs::tests",
+            "crates/rivets/src/cli/mod.rs::tests::all_issue_label_inputs_use_domain_parser",
+            "crates/rivets-mcp/tests/integration.rs::every_mcp_label_operation_rejects_noncanonical_input_before_behavior",
+            "crates/rivets-mcp/tests/integration.rs::cli_and_mcp_label_parsing_have_the_same_semantics",
+            "crates/rivets/tests/in_memory_resilient_loading.rs::noncanonical_persisted_label_is_invalid_issue_data",
+        ] {
+            assert!(
+                canonical_label
+                    .evidence
+                    .iter()
+                    .any(|evidence| evidence == expected),
+                "canonical Label rule is missing behavioral evidence: {expected}"
+            );
+        }
+    }
+
+    fn validate_label_operation_statuses(registry: &ParityRegistry) {
+        for operation_id in [
+            "add_label",
+            "remove_label",
+            "list_issue_labels",
+            "list_all_labels",
+        ] {
+            let operation = registry
+                .operations
+                .iter()
+                .find(|operation| operation.id == operation_id)
+                .expect("Label operation must be classified");
+            assert_eq!(
+                operation.current_parity, "conformant",
+                "{operation_id} should have current parity"
+            );
+            assert_eq!(
+                operation.target_status, "conformant",
+                "{operation_id} should meet its target contract"
+            );
+        }
+        for operation_id in [
+            "create_issue",
+            "list_issues",
+            "update_issue",
+            "ready_issues",
+        ] {
+            let operation = registry
+                .operations
+                .iter()
+                .find(|operation| operation.id == operation_id)
+                .expect("broader Label-aware operation must be classified");
+            assert_ne!(
+                operation.target_status, "conformant",
+                "{operation_id} still has non-Label parity gaps"
+            );
+        }
     }
 
     fn classify_registry_operations(registry: &ParityRegistry) -> ClassifiedSurfaces {
@@ -1235,6 +1300,7 @@ mod tests {
         let registry = parity_registry();
         validate_registry_header(&registry);
         validate_target_rules(&registry);
+        validate_label_operation_statuses(&registry);
         let classified = classify_registry_operations(&registry);
 
         assert_required_future_intents(&registry);
@@ -1376,6 +1442,37 @@ mod tests {
             assert!(
                 !schema.contains("\"issue_type\""),
                 "{tool_name} schema should hide migration-only issue_type: {schema}"
+            );
+        }
+    }
+
+    #[test]
+    fn label_tool_schemas_publish_canonical_constraints() {
+        let server = RivetsMcpServer::new();
+        let tools = server.tool_router.list_all();
+
+        for tool_name in [
+            "ready",
+            "list",
+            "create",
+            "update",
+            "label_add",
+            "label_remove",
+        ] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool.name == tool_name)
+                .expect("Label-aware tool should be registered");
+            let schema = serde_json::to_string(&tool.input_schema)
+                .expect("tool input schema should serialize");
+
+            assert!(
+                schema.contains(r#""pattern":"^[a-z0-9]+(?:[-_][a-z0-9]+)*$""#),
+                "{tool_name} schema should publish canonical Label pattern: {schema}"
+            );
+            assert!(
+                schema.contains(r#""minLength":1"#) && schema.contains(r#""maxLength":50"#),
+                "{tool_name} schema should publish canonical Label length: {schema}"
             );
         }
     }
@@ -1567,6 +1664,16 @@ mod tests {
         let err = to_mcp_error(&Error::InvalidIssueId(IssueIdError::Empty));
         assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
         assert_eq!(err.message, "Issue ID cannot be empty");
+    }
+
+    #[test]
+    fn test_to_mcp_error_classifies_invalid_label_as_invalid_params() {
+        use rivets::domain::LabelError;
+        use rmcp::model::ErrorCode;
+
+        let err = to_mcp_error(&Error::InvalidLabel(LabelError::Empty));
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+        assert_eq!(err.message, "Label cannot be empty");
     }
 
     #[test]

@@ -24,8 +24,8 @@ use crate::models::{
 };
 use rivets::domain::{
     AssignmentError, AssociatedResource, BlockingDependency, DiscoveryOrigin, Issue, IssueFilter,
-    IssueId, IssueKind, IssueStatus, IssueUpdate, NewIssue, NewResource, NoteContent, Parentage,
-    ReadyAssignmentFilter, ReadyFilter, RelatedAssociation, ResourceId, ResourceLabel,
+    IssueId, IssueKind, IssueStatus, IssueUpdate, Label, NewIssue, NewResource, NoteContent,
+    Parentage, ReadyAssignmentFilter, ReadyFilter, RelatedAssociation, ResourceId, ResourceLabel,
     ResourceRole, ResourceTarget, ResourceUpdate, WebUrl, WorkspacePath,
 };
 use rivets::storage::IssueStorage;
@@ -50,6 +50,19 @@ enum AssignmentOperation {
 /// Parse an untrusted Issue ID before any storage lookup or mutation.
 fn parse_issue_id(input: &str) -> Result<IssueId> {
     Ok(input.parse()?)
+}
+
+/// Parse an untrusted Issue Label before any query or mutation.
+fn parse_label(input: &str) -> Result<Label> {
+    Ok(input.parse()?)
+}
+
+/// Parse a collection of untrusted Issue Labels without partial success.
+fn parse_labels(inputs: Vec<String>) -> Result<Vec<Label>> {
+    inputs
+        .into_iter()
+        .map(|input| parse_label(&input))
+        .collect()
 }
 
 /// Parse and validate a status string.
@@ -277,6 +290,7 @@ impl Tools {
             (None, true) => ReadyAssignmentFilter::All,
             (None, false) => ReadyAssignmentFilter::Unassigned,
         };
+        let label = params.label.as_deref().map(parse_label).transpose()?;
 
         // Release context lock before acquiring storage lock to prevent deadlocks
         let storage = self.storage_for(params.workspace_root.as_deref()).await?;
@@ -285,7 +299,7 @@ impl Tools {
             priority: params.priority,
             issue_kind,
             assignment,
-            label: params.label,
+            label,
             limit: Some(params.limit.unwrap_or(DEFAULT_QUERY_LIMIT)),
         };
 
@@ -307,6 +321,7 @@ impl Tools {
         debug!("Listing issues");
         let status = params.status.as_deref().map(validate_status).transpose()?;
         let issue_kind = params.kind.resolve("list");
+        let label = params.label.as_deref().map(parse_label).transpose()?;
 
         let storage = self.storage_for(params.workspace_root.as_deref()).await?;
         let storage = storage.read().await;
@@ -316,7 +331,7 @@ impl Tools {
             priority: params.priority,
             issue_kind,
             assignee: params.assignee,
-            label: params.label,
+            label,
             limit: Some(params.limit.unwrap_or(DEFAULT_QUERY_LIMIT)),
         };
 
@@ -370,6 +385,7 @@ impl Tools {
         debug!("Creating issue");
         let issue_kind = params.kind.resolve("create").unwrap_or(IssueKind::Task);
         let initial_note = params.initial_note.map(NoteContent::new).transpose()?;
+        let labels = parse_labels(params.labels.unwrap_or_default())?;
 
         let mut storage = self
             .mutation_storage_for(params.workspace_root.as_deref())
@@ -381,7 +397,7 @@ impl Tools {
             priority: params.priority.unwrap_or(2),
             issue_kind,
             assignee: params.assignee,
-            labels: params.labels.unwrap_or_default(),
+            labels,
             design: params.design,
             acceptance_criteria: params.acceptance,
             initial_note,
@@ -419,6 +435,7 @@ impl Tools {
         let status = params.status.as_deref().map(validate_status).transpose()?;
         let issue_kind = params.kind.resolve("update");
 
+        let labels = params.labels.map(parse_labels).transpose()?;
         let id = parse_issue_id(&params.issue_id)?;
         let mut storage = self
             .mutation_storage_for(params.workspace_root.as_deref())
@@ -434,7 +451,7 @@ impl Tools {
             design: params.design,
             acceptance_criteria: params.acceptance_criteria,
             note: None,
-            labels: params.labels,
+            labels,
         };
 
         let issue = storage.update(&id, updates).await?;
@@ -1098,9 +1115,10 @@ impl Tools {
     ) -> Result<Issue> {
         debug!("Adding label to issue");
         let id = parse_issue_id(issue_id)?;
+        let label = parse_label(label)?;
         let mut storage = self.mutation_storage_for(workspace_root).await?;
 
-        let issue = storage.add_label(&id, label).await?;
+        let issue = storage.add_label(&id, &label).await?;
         save_or_reload(storage.as_mut()).await?;
         debug!("Added label");
         Ok(issue)
@@ -1120,9 +1138,10 @@ impl Tools {
     ) -> Result<Issue> {
         debug!("Removing label from issue");
         let id = parse_issue_id(issue_id)?;
+        let label = parse_label(label)?;
         let mut storage = self.mutation_storage_for(workspace_root).await?;
 
-        let issue = storage.remove_label(&id, label).await?;
+        let issue = storage.remove_label(&id, &label).await?;
         save_or_reload(storage.as_mut()).await?;
         debug!("Removed label");
         Ok(issue)
@@ -1150,7 +1169,7 @@ impl Tools {
             .ok_or_else(|| Error::IssueNotFound(issue_id.to_string()))?;
 
         debug!(count = issue.labels.len(), "Found labels");
-        Ok(issue.labels)
+        Ok(issue.labels.into_iter().map(Label::into_string).collect())
     }
 
     /// List all unique labels across all issues.
@@ -1167,12 +1186,12 @@ impl Tools {
         let issues = storage.list(&IssueFilter::default()).await?;
 
         // Collect unique labels
-        let mut labels: Vec<String> = issues.into_iter().flat_map(|issue| issue.labels).collect();
+        let mut labels: Vec<Label> = issues.into_iter().flat_map(|issue| issue.labels).collect();
         labels.sort();
         labels.dedup();
 
         debug!(count = labels.len(), "Found unique labels");
-        Ok(labels)
+        Ok(labels.into_iter().map(Label::into_string).collect())
     }
 }
 
@@ -1816,7 +1835,12 @@ mod tests {
             .label_add(issue.id.as_str(), "feature", None)
             .await
             .expect("label_add should succeed");
-        assert!(updated.labels.contains(&"feature".to_string()));
+        assert!(
+            updated
+                .labels
+                .iter()
+                .any(|label| label.as_str() == "feature")
+        );
 
         // List labels
         let labels = tools
@@ -1846,14 +1870,14 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert!(issue.labels.contains(&"bug".to_string()));
+        assert!(issue.labels.iter().any(|label| label.as_str() == "bug"));
 
         // Remove the label
         let updated = tools
             .label_remove(issue.id.as_str(), "bug", None)
             .await
             .expect("label_remove should succeed");
-        assert!(!updated.labels.contains(&"bug".to_string()));
+        assert!(!updated.labels.iter().any(|label| label.as_str() == "bug"));
     }
 
     #[rstest]

@@ -205,7 +205,7 @@ graph TD
 
 #### domain/mod.rs
 
-Central domain types include `IssueId`, `IssueStatus`, `IssueKind`,
+Central domain types include `IssueId`, `IssueStatus`, `IssueKind`, `Label`,
 `BlockingDependency`, `IssueFilter`, Notes, and the Issue aggregate.
 `Dependency` / `DependencyType` remain compatibility record types only:
 
@@ -219,6 +219,9 @@ pub struct Note {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoteContent(String);
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Label(String); // fallible construction; canonical serde string
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Issue {
     pub id: IssueId,
@@ -228,7 +231,7 @@ pub struct Issue {
     pub priority: u8,
     pub issue_kind: IssueKind,
     pub assignee: Option<String>,
-    pub labels: Vec<String>,
+    pub labels: Vec<Label>,
     pub design: Option<String>,
     pub acceptance_criteria: Option<String>,
     pub(crate) notes: Vec<Note>,
@@ -249,7 +252,7 @@ pub struct NewIssue {
     pub priority: u8,
     pub issue_kind: IssueKind,
     pub assignee: Option<String>,
-    pub labels: Vec<String>,
+    pub labels: Vec<Label>,
     pub design: Option<String>,
     pub acceptance_criteria: Option<String>,
     pub initial_note: Option<NoteContent>,
@@ -267,13 +270,16 @@ pub struct IssueUpdate {
     pub design: Option<String>,
     pub acceptance_criteria: Option<String>,
     pub note: Option<NoteContent>,
-    pub labels: Option<Vec<String>>,
+    pub labels: Option<Vec<Label>>,
 }
 ```
 
 `Issue` and `Note` intentionally do not implement `Deserialize`. JSONL loading
 uses the compatibility `IssueRecord` DTO in `storage/in_memory/issue_record.rs`,
 then converts validated records into the domain model.
+Issue Label fields in the compatibility DTO remain raw strings and are parsed
+to `Label` during conversion so invalid persisted spellings retain Issue ID
+context in resilient-load warnings.
 
 #### domain/resource.rs
 

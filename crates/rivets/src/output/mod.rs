@@ -566,7 +566,7 @@ fn print_blocked_text<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{BlockingDependency, IssueId, IssueKind, IssueStatus};
+    use crate::domain::{BlockingDependency, IssueId, IssueKind, IssueStatus, Label};
     use chrono::Utc;
     fn test_issue() -> Issue {
         Issue {
@@ -577,7 +577,7 @@ mod tests {
             priority: 1,
             issue_kind: IssueKind::Task,
             assignee: Some("alice".to_string()),
-            labels: vec!["urgent".to_string()],
+            labels: vec![Label::new("urgent").expect("canonical test Label")],
             design: None,
             acceptance_criteria: None,
             notes: vec![],

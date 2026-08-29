@@ -1189,7 +1189,7 @@ fn resolve_label_issue_ids(issue_id: &Option<String>, ids: &[String]) -> Result<
 /// Add a label to one or more issues.
 async fn execute_label_add(
     app: &mut crate::app::App,
-    label: &str,
+    label: &crate::domain::Label,
     issue_id: &Option<String>,
     ids: &[String],
     output_mode: OutputMode,
@@ -1237,7 +1237,7 @@ async fn execute_label_add(
 /// Remove a label from one or more issues.
 async fn execute_label_remove(
     app: &mut crate::app::App,
-    label: &str,
+    label: &crate::domain::Label,
     issue_id: &Option<String>,
     ids: &[String],
     output_mode: OutputMode,
@@ -1329,7 +1329,7 @@ async fn execute_label_list_all(app: &crate::app::App, output_mode: OutputMode) 
     let all_issues = app.storage().list(&IssueFilter::default()).await?;
 
     // Collect all unique labels
-    let all_labels: BTreeSet<String> = all_issues
+    let all_labels: BTreeSet<crate::domain::Label> = all_issues
         .iter()
         .flat_map(|i| i.labels.iter().cloned())
         .collect();

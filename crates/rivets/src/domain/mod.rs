@@ -9,11 +9,13 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::OnceLock;
 
+mod label;
 mod relationship;
 mod resource;
 #[cfg(test)]
 mod workspace_path_corpus;
 
+pub use label::{Label, LabelError, MAX_LABEL_LENGTH};
 pub use relationship::{
     BlockingDependency, BlockingDependencyError, DiscoveryOrigin, DiscoveryOriginError, Parentage,
     ParentageError, RelatedAssociation, RelatedAssociationError,
@@ -279,7 +281,7 @@ pub struct Issue {
     pub assignee: Option<String>,
 
     /// Labels
-    pub labels: Vec<String>,
+    pub labels: Vec<Label>,
 
     /// Design notes (optional)
     pub design: Option<String>,
@@ -543,7 +545,6 @@ impl Issue {
         validate_text_fields(
             &self.description,
             self.assignee.as_deref(),
-            &self.labels,
             self.design.as_deref(),
             self.acceptance_criteria.as_deref(),
         )
@@ -1006,7 +1007,6 @@ fn validate_title_and_priority(title: &str, priority: u8) -> Result<(), String> 
 fn validate_text_fields(
     description: &str,
     assignee: Option<&str>,
-    labels: &[String],
     design: Option<&str>,
     acceptance_criteria: Option<&str>,
 ) -> Result<(), String> {
@@ -1022,13 +1022,6 @@ fn validate_text_fields(
         if let Some(pos) = find_control_char(val) {
             return Err(format!(
                 "Assignee contains invalid control character at position {pos}"
-            ));
-        }
-    }
-    for (i, label) in labels.iter().enumerate() {
-        if let Some(pos) = find_control_char(label) {
-            return Err(format!(
-                "Label {i} contains invalid control character at position {pos}"
             ));
         }
     }
@@ -1068,7 +1061,7 @@ pub struct NewIssue {
     pub assignee: Option<String>,
 
     /// Labels
-    pub labels: Vec<String>,
+    pub labels: Vec<Label>,
 
     /// Design notes (optional)
     pub design: Option<String>,
@@ -1097,7 +1090,6 @@ impl NewIssue {
         validate_text_fields(
             &self.description,
             self.assignee.as_deref(),
-            &self.labels,
             self.design.as_deref(),
             self.acceptance_criteria.as_deref(),
         )
@@ -1157,7 +1149,7 @@ pub struct IssueUpdate {
     pub note: Option<NoteContent>,
 
     /// New labels (if updating) - replaces existing labels
-    pub labels: Option<Vec<String>>,
+    pub labels: Option<Vec<Label>>,
 }
 
 /// Assignment visibility for a Ready query.
@@ -1195,7 +1187,7 @@ pub struct ReadyFilter {
     /// Select Assignment visibility.
     pub assignment: ReadyAssignmentFilter,
     /// Filter by label.
-    pub label: Option<String>,
+    pub label: Option<Label>,
     /// Limit the ordered result set.
     pub limit: Option<usize>,
 }
@@ -1216,7 +1208,7 @@ pub struct IssueFilter {
     pub assignee: Option<String>,
 
     /// Filter by label
-    pub label: Option<String>,
+    pub label: Option<Label>,
 
     /// Limit number of results
     pub limit: Option<usize>,
@@ -1822,19 +1814,6 @@ mod tests {
         }
 
         #[test]
-        fn label_with_control_char_rejected() {
-            let issue = NewIssue {
-                title: "Clean title".to_string(),
-                labels: vec!["good".to_string(), "bad\x1btag".to_string()],
-                ..Default::default()
-            };
-            let result = issue.validate();
-            assert!(result.is_err());
-            let err = result.unwrap_err();
-            assert!(err.contains("Label 1"), "Error should identify label index");
-        }
-
-        #[test]
         fn notes_with_escape_rejected() {
             let result = NoteContent::new("See \x1b[4munderlined\x1b[0m note");
             assert!(matches!(
@@ -1861,7 +1840,6 @@ mod tests {
                 validate_text_fields(
                     "A normal description\nwith newlines",
                     Some("alice"),
-                    &["bug".to_string(), "urgent".to_string()],
                     Some("Use approach A"),
                     Some("- [ ] Done"),
                 )

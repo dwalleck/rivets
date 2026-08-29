@@ -37,6 +37,10 @@ pub enum Error {
     #[error(transparent)]
     InvalidIssueId(#[from] rivets::domain::IssueIdError),
 
+    /// Issue Label input failed domain parsing.
+    #[error(transparent)]
+    InvalidLabel(#[from] rivets::domain::LabelError),
+
     /// Note content failed domain validation.
     #[error("Invalid note: {0}")]
     InvalidNote(#[from] rivets::domain::NoteError),
@@ -168,8 +172,9 @@ impl Error {
             Self::NoContext
             | Self::InvalidArgument { .. }
             | Self::InvalidIssueId(_)
-            | Self::InvalidNote(_)
+            | Self::InvalidLabel(_)
             | Self::InvalidResource(_)
+            | Self::InvalidNote(_)
             | Self::InvalidBlockingDependency(_)
             | Self::InvalidParentage(_)
             | Self::InvalidStatusTransition(_)

@@ -362,7 +362,7 @@ impl Cli {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{IssueKind, IssueStatus};
+    use crate::domain::{IssueKind, IssueStatus, Label};
 
     fn parses_as_mutation(args: &[&str]) -> bool {
         let argv: Vec<_> = std::iter::once("rivets")
@@ -668,7 +668,10 @@ mod tests {
                 assert_eq!(args.priority, 1);
                 assert_eq!(args.issue_kind, IssueKind::Bug);
                 assert_eq!(args.assignee, Some("alice".to_string()));
-                assert_eq!(args.labels, vec!["urgent", "backend"]);
+                assert_eq!(
+                    args.labels.iter().map(Label::as_str).collect::<Vec<_>>(),
+                    vec!["urgent", "backend"]
+                );
             }
             _ => panic!("Expected Create command"),
         }
@@ -916,6 +919,48 @@ mod tests {
                 .map(|argument| {
                     if argument == "invalid" {
                         "abcdefghijklmnopqrst-feature-123"
+                    } else {
+                        argument
+                    }
+                })
+                .collect::<Vec<_>>();
+            Cli::try_parse_from(&valid_args)
+                .unwrap_or_else(|error| panic!("valid control failed for {valid_args:?}: {error}"));
+        }
+    }
+
+    #[test]
+    fn all_issue_label_inputs_use_domain_parser() {
+        let cases = [
+            vec![
+                "rivets",
+                "create",
+                "--title",
+                "Title",
+                "--labels",
+                "bad label",
+            ],
+            vec!["rivets", "list", "--label", "bad label"],
+            vec!["rivets", "ready", "--label", "bad label"],
+            vec!["rivets", "label", "add", "bad label", "ab-1"],
+            vec!["rivets", "label", "remove", "bad label", "ab-1"],
+        ];
+
+        for invalid_args in cases {
+            let error = Cli::try_parse_from(&invalid_args)
+                .expect_err("noncanonical Label should fail at the CLI boundary");
+            assert!(
+                error
+                    .to_string()
+                    .contains("Label must contain only lowercase letters"),
+                "unexpected error for {invalid_args:?}: {error}"
+            );
+
+            let valid_args = invalid_args
+                .into_iter()
+                .map(|argument| {
+                    if argument == "bad label" {
+                        "ready-for-agent"
                     } else {
                         argument
                     }

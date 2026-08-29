@@ -10,7 +10,8 @@
 use chrono::{DateTime, Utc};
 use rivets::domain::{
     AssignmentError, BlockingDependency, DiscoveryOrigin, Issue, IssueIdError, IssueKind,
-    IssueStatus, RelatedAssociation, ResourceTarget, StatusTransitionError, WorkspacePath,
+    IssueStatus, Label, LabelError, RelatedAssociation, ResourceTarget, StatusTransitionError,
+    WorkspacePath,
 };
 use rivets_mcp::context::Context;
 use rivets_mcp::error::Error;
@@ -311,6 +312,77 @@ impl InvalidIssueIdOperation {
             Self::ParentMoveChild => tools.parent_move(INVALID, VALID, None).await.map(drop),
             Self::ParentMoveParent => tools.parent_move(VALID, INVALID, None).await.map(drop),
             Self::ParentShow => tools.parent_show(INVALID, None).await.map(drop),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum InvalidLabelOperation {
+    Create,
+    Update,
+    ReadyFilter,
+    ListFilter,
+    Add,
+    Remove,
+}
+
+impl InvalidLabelOperation {
+    async fn invoke(self, tools: &Tools, label: &str) -> Result<(), Error> {
+        match self {
+            Self::Create => tools
+                .create(create_params(
+                    "Invalid Label Create".to_string(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(vec![label.to_string()]),
+                    None,
+                    None,
+                    None,
+                ))
+                .await
+                .map(drop),
+            Self::Update => tools
+                .update(update_params(
+                    "ab-1",
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(vec![label.to_string()]),
+                    None,
+                ))
+                .await
+                .map(drop),
+            Self::ReadyFilter => tools
+                .ready(ready_params(
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(label.to_string()),
+                    None,
+                ))
+                .await
+                .map(drop),
+            Self::ListFilter => tools
+                .list(list_params(
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(label.to_string()),
+                    None,
+                    None,
+                ))
+                .await
+                .map(drop),
+            Self::Add => tools.label_add("ab-1", label, None).await.map(drop),
+            Self::Remove => tools.label_remove("ab-1", label, None).await.map(drop),
         }
     }
 }
@@ -1757,6 +1829,94 @@ async fn cli_and_mcp_issue_id_parsing_have_the_same_semantics() {
             assert_eq!(mcp_error.to_string(), cli_error, "input: {input:?}");
             assert!(
                 matches!(&mcp_error, Error::InvalidIssueId(_)),
+                "input {input:?} reached the wrong MCP error: {mcp_error:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn every_mcp_label_operation_rejects_noncanonical_input_before_behavior() {
+    let workspace = create_temp_workspace();
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+    let expected = Label::new("bad label")
+        .expect_err("test spelling should be noncanonical")
+        .to_string();
+    let operations = [
+        InvalidLabelOperation::Create,
+        InvalidLabelOperation::Update,
+        InvalidLabelOperation::ReadyFilter,
+        InvalidLabelOperation::ListFilter,
+        InvalidLabelOperation::Add,
+        InvalidLabelOperation::Remove,
+    ];
+
+    for operation in operations {
+        let error = operation
+            .invoke(&tools, "bad label")
+            .await
+            .expect_err("noncanonical Label should be rejected before behavior");
+        assert_eq!(
+            error.to_string(),
+            expected,
+            "{operation:?} changed the shared Label error meaning"
+        );
+        assert!(
+            matches!(
+                &error,
+                Error::InvalidLabel(LabelError::InvalidCharacter { position: 3 })
+            ),
+            "{operation:?} reached the wrong error: {error:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn cli_and_mcp_label_parsing_have_the_same_semantics() {
+    let workspace = create_temp_workspace();
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+    let cases = [
+        ("", false),
+        ("Bug", false),
+        ("bad label", false),
+        ("a-_b", false),
+        ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false),
+        ("a", true),
+        ("ready-for-agent", true),
+        ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", true),
+    ];
+
+    for (input, valid) in cases {
+        let cli_result = rivets::cli::Cli::try_parse_from(["rivets", "list", "--label", input]);
+        let mcp_result = tools
+            .list(list_params(
+                None,
+                None,
+                None,
+                None,
+                Some(input.to_string()),
+                None,
+                None,
+            ))
+            .await;
+        if valid {
+            cli_result.expect("CLI should accept canonical Label");
+            mcp_result.expect("MCP should accept canonical Label");
+        } else {
+            let domain_error = Label::new(input)
+                .expect_err("test spelling should be noncanonical")
+                .to_string();
+            let cli_error = cli_result.expect_err("CLI should reject noncanonical Label");
+            assert!(
+                cli_error.to_string().contains(&domain_error),
+                "CLI error changed domain meaning for {input:?}: {cli_error}"
+            );
+            let mcp_error = mcp_result.expect_err("MCP should reject noncanonical Label");
+            assert_eq!(mcp_error.to_string(), domain_error, "input: {input:?}");
+            assert!(
+                matches!(&mcp_error, Error::InvalidLabel(_)),
                 "input {input:?} reached the wrong MCP error: {mcp_error:?}"
             );
         }
@@ -3658,9 +3818,14 @@ async fn test_multiple_labels_filter() {
 
     assert_eq!(results.len(), 1, "Expected 1 issue with 'backend' label");
     assert_eq!(results[0].title, "Multi-label Issue");
-    assert!(results[0].labels.contains(&"backend".to_string()));
-    assert!(results[0].labels.contains(&"frontend".to_string()));
-    assert!(results[0].labels.contains(&"urgent".to_string()));
+    let result_labels = results[0]
+        .labels
+        .iter()
+        .map(Label::as_str)
+        .collect::<Vec<_>>();
+    assert!(result_labels.contains(&"backend"));
+    assert!(result_labels.contains(&"frontend"));
+    assert!(result_labels.contains(&"urgent"));
 
     // Filter by "frontend" - should find all three
     let frontend_results = tools
@@ -3825,8 +3990,8 @@ async fn test_unicode_support() {
         .expect("show should work with unicode issue");
     assert_eq!(shown.title, "バグ修正");
 
-    // Create issue with emoji label
-    let emoji_issue = tools
+    // Issue Labels have an ASCII canonical grammar even when other fields use Unicode.
+    let create_error = tools
         .create(create_params(
             "Hot Fix".to_string(),
             None,
@@ -3839,12 +4004,13 @@ async fn test_unicode_support() {
             None,
         ))
         .await
-        .expect("create with emoji label should succeed");
+        .expect_err("emoji Label should be rejected");
+    assert!(matches!(
+        create_error,
+        Error::InvalidLabel(LabelError::InvalidCharacter { position: 0 })
+    ));
 
-    assert!(emoji_issue.labels.contains(&"🔥hotfix".to_string()));
-
-    // Filter by emoji label
-    let emoji_filtered = tools
+    let filter_error = tools
         .list(list_params(
             None,
             None,
@@ -3855,10 +4021,11 @@ async fn test_unicode_support() {
             None,
         ))
         .await
-        .expect("list with emoji label filter should succeed");
-
-    assert_eq!(emoji_filtered.len(), 1);
-    assert_eq!(emoji_filtered[0].title, "Hot Fix");
+        .expect_err("emoji Label filter should be rejected");
+    assert!(matches!(
+        filter_error,
+        Error::InvalidLabel(LabelError::InvalidCharacter { position: 0 })
+    ));
 
     // Create issue with accented assignee name
     let accented_issue = tools
@@ -3901,7 +4068,11 @@ async fn test_unicode_support() {
         .await
         .expect("list all should succeed");
 
-    assert_eq!(all_issues.len(), 3, "Should have 3 unicode-related issues");
+    assert_eq!(
+        all_issues.len(),
+        2,
+        "rejected emoji Label must not persist a partial Issue"
+    );
 }
 
 /// Test Unicode in title search/list.
@@ -4302,7 +4473,10 @@ async fn test_update_preserves_unmodified_fields() {
         updated.acceptance_criteria,
         Some("Original Criteria".to_string())
     );
-    assert_eq!(updated.labels, vec!["label1", "label2"]);
+    assert_eq!(
+        updated.labels.iter().map(Label::as_str).collect::<Vec<_>>(),
+        vec!["label1", "label2"]
+    );
 }
 
 /// Test rapid context switching between workspaces.

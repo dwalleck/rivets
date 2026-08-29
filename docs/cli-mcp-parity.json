@@ -50,7 +50,15 @@
     },
     {
       "id": "canonical-label-input",
-      "contract": "Labels are 1-50 lowercase ASCII alphanumeric characters with internal hyphens or underscores, start and end alphanumeric, and contain no consecutive separators."
+      "contract": "Labels are 1-50 lowercase ASCII alphanumeric characters with internal hyphens or underscores, start and end alphanumeric, and contain no consecutive separators.",
+      "status": "conformant",
+      "evidence": [
+        "crates/rivets/src/domain/label.rs::tests",
+        "crates/rivets/src/cli/mod.rs::tests::all_issue_label_inputs_use_domain_parser",
+        "crates/rivets-mcp/tests/integration.rs::every_mcp_label_operation_rejects_noncanonical_input_before_behavior",
+        "crates/rivets-mcp/tests/integration.rs::cli_and_mcp_label_parsing_have_the_same_semantics",
+        "crates/rivets/tests/in_memory_resilient_loading.rs::noncanonical_persisted_label_is_invalid_issue_data"
+      ]
     },
     {
       "id": "canonical-workflow",
@@ -634,8 +642,8 @@
       "id": "add_label",
       "title": "Add Label",
       "requirement": "shared",
-      "current_parity": "drift",
-      "target_status": "gap_both",
+      "current_parity": "conformant",
+      "target_status": "conformant",
       "target": "Idempotently add one canonical Label to an Issue.",
       "cli": {
         "surfaces": [
@@ -653,35 +661,31 @@
         ],
         "arguments": {
           "issue_id": "one Issue ID",
-          "label": "unconstrained string",
+          "label": "canonical Label",
           "workspace_root": "optional adapter mechanic"
         },
         "result": "Updated Issue."
       },
       "differences": [
-        "CLI trims and validates most Label grammar but permits mixed adjacent separators.",
-        "MCP and storage accept raw unconstrained Label strings.",
-        "Create/update Label collections and Label filters bypass one canonical Label value.",
         "CLI batching is loop-equivalent and intentional."
       ],
-      "risk": "Adapter and entry-point choice changes which Label spellings can be persisted or queried.",
-      "required_resolution": "Introduce one domain-owned canonical Label value and parse every CLI, MCP, create/update, filter, persistence, and storage input through it.",
+      "risk": "None.",
+      "required_resolution": "Preserve canonical Label parsing, typed storage, and idempotent mutation behavior.",
       "evidence": [
         "CONTEXT.md::Label",
-        "crates/rivets/src/cli/validators.rs::validate_label",
-        "crates/rivets/src/cli/execute.rs::execute_label_add",
-        "crates/rivets/src/cli/execute.rs::execute_label_remove",
+        "crates/rivets/src/domain/label.rs::Label",
         "crates/rivets/src/storage/in_memory/trait_impl.rs::add_label",
         "crates/rivets-mcp/src/tools.rs::label_add",
-        "crates/rivets-mcp/src/tools.rs::label_remove"
+        "crates/rivets-mcp/tests/integration.rs::every_mcp_label_operation_rejects_noncanonical_input_before_behavior",
+        "crates/rivets-mcp/tests/integration.rs::cli_and_mcp_label_parsing_have_the_same_semantics"
       ]
     },
     {
       "id": "remove_label",
       "title": "Remove Label",
       "requirement": "shared",
-      "current_parity": "drift",
-      "target_status": "gap_both",
+      "current_parity": "conformant",
+      "target_status": "conformant",
       "target": "Idempotently remove one canonical Label from an Issue.",
       "cli": {
         "surfaces": [
@@ -699,35 +703,31 @@
         ],
         "arguments": {
           "issue_id": "one Issue ID",
-          "label": "unconstrained string",
+          "label": "canonical Label",
           "workspace_root": "optional adapter mechanic"
         },
         "result": "Updated Issue."
       },
       "differences": [
-        "CLI trims and validates most Label grammar but permits mixed adjacent separators.",
-        "MCP and storage accept raw unconstrained Label strings.",
-        "Create/update Label collections and Label filters bypass one canonical Label value.",
         "CLI batching is loop-equivalent and intentional."
       ],
-      "risk": "Adapter and entry-point choice changes which Label spellings can be persisted or queried.",
-      "required_resolution": "Introduce one domain-owned canonical Label value and parse every CLI, MCP, create/update, filter, persistence, and storage input through it.",
+      "risk": "None.",
+      "required_resolution": "Preserve canonical Label parsing, typed storage, and idempotent mutation behavior.",
       "evidence": [
         "CONTEXT.md::Label",
-        "crates/rivets/src/cli/validators.rs::validate_label",
-        "crates/rivets/src/cli/execute.rs::execute_label_add",
-        "crates/rivets/src/cli/execute.rs::execute_label_remove",
-        "crates/rivets/src/storage/in_memory/trait_impl.rs::add_label",
-        "crates/rivets-mcp/src/tools.rs::label_add",
-        "crates/rivets-mcp/src/tools.rs::label_remove"
+        "crates/rivets/src/domain/label.rs::Label",
+        "crates/rivets/src/storage/in_memory/trait_impl.rs::remove_label",
+        "crates/rivets-mcp/src/tools.rs::label_remove",
+        "crates/rivets-mcp/tests/integration.rs::every_mcp_label_operation_rejects_noncanonical_input_before_behavior",
+        "crates/rivets-mcp/tests/integration.rs::cli_and_mcp_label_parsing_have_the_same_semantics"
       ]
     },
     {
       "id": "list_issue_labels",
       "title": "List Issue Labels",
       "requirement": "shared",
-      "current_parity": "drift",
-      "target_status": "gap_mcp",
+      "current_parity": "conformant",
+      "target_status": "conformant",
       "target": "Return an Issue's Labels.",
       "cli": {
         "surfaces": [
@@ -748,15 +748,14 @@
         },
         "result": "Label list."
       },
-      "differences": [
-        "CLI validates Issue ID grammar before lookup; MCP uses an unconstrained string.",
-        "Both return Label insertion order."
-      ],
-      "risk": "MCP accepts Issue IDs rejected by CLI; Label result meaning otherwise matches.",
-      "required_resolution": "Adopt canonical Issue ID parsing without changing ordered Label results.",
+      "differences": [],
+      "risk": "None.",
+      "required_resolution": "Preserve canonical Issue ID parsing and Label insertion order.",
       "evidence": [
         "crates/rivets/src/cli/execute.rs::execute_label_list",
-        "crates/rivets-mcp/src/tools.rs::label_list"
+        "crates/rivets-mcp/src/tools.rs::label_list",
+        "crates/rivets-mcp/tests/integration.rs::every_mcp_issue_id_operation_rejects_malformed_input_before_storage",
+        "crates/rivets-mcp/tests/integration.rs::cli_and_mcp_issue_id_parsing_have_the_same_semantics"
       ]
     },
     {
