@@ -2,6 +2,8 @@
 
 Issues and planning artifacts for this repo live in Rivets. The checked-in `.rivets/issues.jsonl` file is the source of truth. Use the connected Rivets MCP tools when available; otherwise use the `rivets` CLI. Never edit the JSONL store by hand.
 
+Before adding or changing a CLI command, MCP tool, argument, default, validation rule, ordering rule, error, or result shape, read the [CLI and MCP Interface Parity](../cli-mcp-parity.md) contract. Update its registry and rendered reference in the same change.
+
 ## Conventions
 
 - **Initialize MCP context**: call `set_context` with the repository root before other Rivets MCP operations.

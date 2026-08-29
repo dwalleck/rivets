@@ -546,7 +546,362 @@ impl ServerHandler for RivetsMcpServer {
 mod tests {
     use super::*;
     use crate::models::{ListParams, ReadyParams, ShowParams};
+    use clap::{Command, CommandFactory};
     use rmcp::handler::server::ServerHandler;
+    use serde::Deserialize;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::Path;
+
+    #[derive(Debug, Deserialize)]
+    struct ParityRegistry {
+        schema_version: u32,
+        decision: ParityDecision,
+        current_parity_values: BTreeMap<String, String>,
+        target_status_values: BTreeMap<String, String>,
+        operations: Vec<ParityOperation>,
+        delivery_groups: Vec<ParityDeliveryGroup>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ParityDecision {
+        id: String,
+        path: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ParityOperation {
+        id: String,
+        requirement: String,
+        current_parity: String,
+        target_status: String,
+        risk: String,
+        required_resolution: String,
+        cli: ParityAdapter,
+        mcp: ParityAdapter,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ParityAdapter {
+        surfaces: Vec<String>,
+        #[serde(default)]
+        forms: Vec<ParityForm>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ParityForm {
+        surface: String,
+        argument: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ParityDeliveryGroup {
+        id: String,
+        title: String,
+        tracking_issue: String,
+        intents: Vec<String>,
+        blocked_by: Vec<String>,
+    }
+
+    fn collect_cli_leaf_paths(command: &Command, prefix: &str, leaves: &mut BTreeSet<String>) {
+        let mut has_subcommands = false;
+        for subcommand in command
+            .get_subcommands()
+            .filter(|subcommand| subcommand.get_name() != "help")
+        {
+            has_subcommands = true;
+            let path = if prefix.is_empty() {
+                subcommand.get_name().to_string()
+            } else {
+                format!("{prefix} {}", subcommand.get_name())
+            };
+            collect_cli_leaf_paths(subcommand, &path, leaves);
+        }
+
+        if !has_subcommands && !prefix.is_empty() {
+            leaves.insert(prefix.to_string());
+        }
+    }
+
+    fn cli_command_for_path<'a>(command: &'a Command, path: &str) -> Option<&'a Command> {
+        path.split_whitespace().try_fold(command, |parent, name| {
+            parent
+                .get_subcommands()
+                .find(|subcommand| subcommand.get_name() == name)
+        })
+    }
+
+    fn parity_registry() -> ParityRegistry {
+        serde_json::from_str(include_str!("../../../docs/cli-mcp-parity.json"))
+            .expect("CLI/MCP parity registry should be valid")
+    }
+
+    struct ClassifiedSurfaces {
+        cli: BTreeSet<String>,
+        mcp: BTreeSet<String>,
+        cli_forms: BTreeSet<(String, String)>,
+    }
+
+    const REQUIRED_FUTURE_INTENTS: &[&str] = &[
+        "claim_assignment",
+        "release_assignment",
+        "add_blocking_dependency",
+        "remove_blocking_dependency",
+        "list_blocking_dependencies",
+        "show_blocking_dependency_tree",
+        "set_parentage",
+        "clear_parentage",
+        "move_parentage",
+        "show_parentage",
+        "add_related_association",
+        "remove_related_association",
+        "list_related_associations",
+        "add_discovery_origin",
+        "remove_discovery_origin",
+        "list_discovery_origins",
+    ];
+
+    fn validate_registry_header(registry: &ParityRegistry) {
+        assert_eq!(
+            registry.schema_version, 1,
+            "unsupported parity registry schema"
+        );
+        assert!(
+            !registry.decision.id.trim().is_empty(),
+            "parity registry decision id must not be empty"
+        );
+        let decision_number = registry
+            .decision
+            .id
+            .strip_prefix("ADR-")
+            .expect("parity registry decision id must use ADR-NNNN");
+        assert!(
+            decision_number.len() == 4 && decision_number.bytes().all(|byte| byte.is_ascii_digit()),
+            "parity registry decision id must use ADR-NNNN: {}",
+            registry.decision.id
+        );
+        let decision_file_name = Path::new(&registry.decision.path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("parity registry decision path must name a UTF-8 file");
+        assert!(
+            decision_file_name.starts_with(&format!("{decision_number}-")),
+            "parity registry decision id and path disagree: {} != {}",
+            registry.decision.id,
+            registry.decision.path
+        );
+        let decision_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs")
+            .join(&registry.decision.path);
+        assert!(
+            decision_path.is_file(),
+            "parity registry decision does not exist: {}",
+            decision_path.display()
+        );
+    }
+
+    fn classify_registry_operations(registry: &ParityRegistry) -> ClassifiedSurfaces {
+        let mut operation_ids = BTreeSet::new();
+        let mut classified = ClassifiedSurfaces {
+            cli: BTreeSet::new(),
+            mcp: BTreeSet::new(),
+            cli_forms: BTreeSet::new(),
+        };
+
+        for operation in &registry.operations {
+            assert!(
+                operation_ids.insert(operation.id.clone()),
+                "duplicate parity operation id: {}",
+                operation.id
+            );
+            assert!(
+                ["shared", "future_shared", "cli_only", "mcp_only", "legacy"]
+                    .contains(&operation.requirement.as_str()),
+                "unknown parity requirement for {}: {}",
+                operation.id,
+                operation.requirement
+            );
+            assert!(
+                registry
+                    .current_parity_values
+                    .contains_key(&operation.current_parity),
+                "unknown current parity classification for {}: {}",
+                operation.id,
+                operation.current_parity
+            );
+            assert!(
+                registry
+                    .target_status_values
+                    .contains_key(&operation.target_status),
+                "unknown target status classification for {}: {}",
+                operation.id,
+                operation.target_status
+            );
+            assert!(
+                !operation.risk.trim().is_empty(),
+                "parity operation must state its risk: {}",
+                operation.id
+            );
+            assert!(
+                !operation.required_resolution.trim().is_empty(),
+                "parity operation must state its required resolution: {}",
+                operation.id
+            );
+            for surface in &operation.cli.surfaces {
+                assert!(
+                    classified.cli.insert(surface.clone()),
+                    "CLI leaf is classified more than once: {surface}"
+                );
+            }
+            for form in &operation.cli.forms {
+                assert!(
+                    classified
+                        .cli_forms
+                        .insert((form.surface.clone(), form.argument.clone())),
+                    "CLI form is classified more than once: {} --{}",
+                    form.surface,
+                    form.argument
+                );
+            }
+            for surface in &operation.mcp.surfaces {
+                assert!(
+                    classified.mcp.insert(surface.clone()),
+                    "MCP tool is classified more than once: {surface}"
+                );
+            }
+        }
+        classified
+    }
+
+    fn assert_classified_cli_forms(cli: &Command, forms: &BTreeSet<(String, String)>) {
+        for (surface, argument) in forms {
+            let command = cli_command_for_path(cli, surface)
+                .unwrap_or_else(|| panic!("classified CLI form has no command: {surface}"));
+            assert!(
+                command
+                    .get_arguments()
+                    .any(|candidate| candidate.get_long() == Some(argument.as_str())),
+                "classified CLI form has no --{argument} argument: {surface}"
+            );
+        }
+    }
+
+    fn assert_required_future_intents(registry: &ParityRegistry) {
+        for required_id in REQUIRED_FUTURE_INTENTS {
+            let operation = registry
+                .operations
+                .iter()
+                .find(|operation| operation.id == *required_id)
+                .unwrap_or_else(|| panic!("required future intent is unclassified: {required_id}"));
+            assert_eq!(
+                operation.requirement, "future_shared",
+                "required future intent has wrong requirement: {required_id}"
+            );
+        }
+    }
+
+    fn validate_delivery_groups(registry: &ParityRegistry) {
+        let operation_ids = registry
+            .operations
+            .iter()
+            .map(|operation| operation.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let required_tracking = registry
+            .operations
+            .iter()
+            .filter(|operation| {
+                operation.target_status.starts_with("gap_")
+                    || operation.target_status == "legacy_cutover"
+            })
+            .map(|operation| operation.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let tracker_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.rivets/issues.jsonl");
+        let tracker = std::fs::read_to_string(&tracker_path).unwrap_or_else(|error| {
+            panic!(
+                "parity registry tracker cannot be read at {}: {error}",
+                tracker_path.display()
+            )
+        });
+        let tracker_issues = tracker
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                let issue: serde_json::Value =
+                    serde_json::from_str(line).expect("tracker line should be valid JSON");
+                let issue_id = issue["id"]
+                    .as_str()
+                    .expect("tracker Issue should have a string id")
+                    .to_string();
+                let blocking_dependencies = issue["dependencies"]
+                    .as_array()
+                    .expect("tracker Issue should have dependencies")
+                    .iter()
+                    .filter(|dependency| dependency["dep_type"] == "blocks")
+                    .map(|dependency| {
+                        dependency["depends_on_id"]
+                            .as_str()
+                            .expect("Blocking Dependency should have depends_on_id")
+                            .to_string()
+                    })
+                    .collect::<BTreeSet<_>>();
+                (issue_id, blocking_dependencies)
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        let mut group_ids = BTreeSet::new();
+        let mut tracked_intents = BTreeSet::new();
+        for group in &registry.delivery_groups {
+            assert!(
+                group_ids.insert(group.id.as_str()),
+                "duplicate parity delivery group: {}",
+                group.id
+            );
+            assert!(
+                !group.title.trim().is_empty(),
+                "parity delivery group must have a title: {}",
+                group.id
+            );
+            assert!(
+                tracker_issues.contains_key(&group.tracking_issue),
+                "parity delivery group references an unknown Issue: {}",
+                group.tracking_issue
+            );
+            assert!(
+                !group.intents.is_empty(),
+                "parity delivery group must own at least one intent: {}",
+                group.id
+            );
+            for intent in &group.intents {
+                assert!(
+                    operation_ids.contains(intent.as_str()),
+                    "parity delivery group {} references an unknown intent: {intent}",
+                    group.id
+                );
+                tracked_intents.insert(intent.as_str());
+            }
+            for blocker in &group.blocked_by {
+                assert!(
+                    tracker_issues.contains_key(blocker),
+                    "parity delivery group {} references an unknown blocker: {blocker}",
+                    group.id
+                );
+            }
+            let registered_blockers = group.blocked_by.iter().cloned().collect::<BTreeSet<_>>();
+            assert_eq!(
+                tracker_issues[&group.tracking_issue], registered_blockers,
+                "parity delivery group blockers drifted from tracker Issue {}",
+                group.tracking_issue
+            );
+        }
+
+        assert_eq!(
+            required_tracking
+                .difference(&tracked_intents)
+                .copied()
+                .collect::<Vec<_>>(),
+            Vec::<&str>::new(),
+            "every parity gap must map to a tracked delivery group"
+        );
+    }
 
     #[test]
     fn test_server_creation() {
@@ -570,38 +925,39 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_router_has_all_tools() {
+    fn parity_registry_classifies_every_cli_leaf_and_mcp_tool() {
+        let registry = parity_registry();
+        validate_registry_header(&registry);
+        let classified = classify_registry_operations(&registry);
+
+        assert_required_future_intents(&registry);
+        validate_delivery_groups(&registry);
+        let cli = rivets::cli::Cli::command();
+        let mut current_cli = BTreeSet::new();
+        collect_cli_leaf_paths(&cli, "", &mut current_cli);
+        assert_classified_cli_forms(&cli, &classified.cli_forms);
+
+        let current_mcp: BTreeSet<String> = RivetsMcpServer::new()
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+
+        assert_eq!(
+            classified.cli, current_cli,
+            "every current CLI leaf must have exactly one parity classification"
+        );
+        assert_eq!(
+            classified.mcp, current_mcp,
+            "every current MCP tool must have exactly one parity classification"
+        );
+    }
+
+    #[test]
+    fn test_tool_schemas_publish_expected_fields() {
         let server = RivetsMcpServer::new();
-        // Access the tool_router directly to list tools
         let tools = server.tool_router.list_all();
-
-        // Verify all expected tools are registered
-        let tool_names: Vec<&str> = tools.iter().map(|t| &*t.name).collect();
-
-        assert!(tool_names.contains(&"set_context"));
-        assert!(tool_names.contains(&"where_am_i"));
-        assert!(tool_names.contains(&"ready"));
-        assert!(tool_names.contains(&"list"));
-        assert!(tool_names.contains(&"show"));
-        assert!(tool_names.contains(&"blocked"));
-        assert!(tool_names.contains(&"create"));
-        assert!(tool_names.contains(&"update"));
-        assert!(tool_names.contains(&"add_note"));
-        assert!(tool_names.contains(&"close"));
-        assert!(tool_names.contains(&"reopen"));
-        assert!(tool_names.contains(&"stale"));
-        assert!(tool_names.contains(&"label_add"));
-        assert!(tool_names.contains(&"label_remove"));
-        assert!(tool_names.contains(&"label_list"));
-        assert!(tool_names.contains(&"label_list_all"));
-        assert!(tool_names.contains(&"resource_add"));
-        assert!(tool_names.contains(&"resource_list"));
-        assert!(tool_names.contains(&"resource_update"));
-        assert!(tool_names.contains(&"resource_remove"));
-        assert!(tool_names.contains(&"blocking_dependency_add"));
-        assert!(tool_names.contains(&"blocking_dependency_remove"));
-        assert!(tool_names.contains(&"blocking_dependency_list"));
-        assert!(tool_names.contains(&"blocking_dependency_tree"));
         let input_properties = |name: &str| {
             tools
                 .iter()
@@ -636,7 +992,6 @@ mod tests {
         let list_schema = serde_json::to_string(&list_tool.input_schema).unwrap();
         assert!(list_schema.contains("prerequisites_of"));
         assert!(list_schema.contains("dependents_of"));
-        assert_eq!(tools.len(), 24);
     }
 
     #[test]
