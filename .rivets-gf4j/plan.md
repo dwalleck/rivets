@@ -19,19 +19,35 @@
 | Churn margin | 760 lines (20%; broad exported-trait/test callsite migration and generated parity documentation are the main uncertainty) |
 | **Projected total** | **4,560 lines** |
 
-The projected total exceeds the 4,000-line review-size gate, so the plan has two independently mergeable PR increments.
+The projected total exceeded the 4,000-line review-size gate. The initial
+two-increment partition was revised at the final size tripwire because actual
+increment B also crossed 4,000 changed lines.
+
+| Actual increment | Changed lines |
+|---|---:|
+| A — Slice 1 plus PR feedback | 1,462 |
+| B — Slices 2–3 plus carried prerequisite fix | 1,338 |
+| C — Slices 4–6 plus review fixes/log | 3,276 |
+| **Summed increment diffs** | **6,076** |
+| **Final cumulative base diff** | **5,451** |
 
 ### PR increment A — Typed Blocking storage foundation
 
 - Slices: 1.
 - Mergeable definition: adds the role-safe domain value and dedicated storage queries/mutations alongside the still-working legacy adapter surfaces. Existing CLI and MCP remain green.
-- Independent verification: domain/storage/resilient-loader fences and the full `rivets` crate tests pass without increment B.
+- Independent verification: domain/storage/resilient-loader fences and the full `rivets` crate tests pass without increments B or C.
 
-### PR increment B — Canonical adapter cutover
+### PR increment B — Canonical CLI and MCP adapters
 
-- Slices: 2–4.
-- Mergeable definition: migrates create, CLI, MCP, output, tests, and documentation to the approved Blocking interface, then removes generic adapter/storage mutation surfaces.
-- Independent verification: real CLI process tests, MCP context-recreation tests, registry absence fences, parity rendering, and the full workspace gate pass against increment A.
+- Slices: 2–3.
+- Mergeable definition: migrates create, CLI, MCP, output, and adapter tests to the approved Blocking interface while the generic routes remain available only until increment C.
+- Independent verification: real CLI process tests and MCP context-recreation/schema tests pass against increment A.
+
+### PR increment C — Generic-surface retirement
+
+- Slices: 4.
+- Mergeable definition: removes generic CLI/MCP/storage mutation/query surfaces and synchronizes current-reference documentation.
+- Independent verification: registry absence fences, current-reference documentation audit, parity rendering, and the full workspace gate pass against increment B.
 
 ## Slice 1: Add the typed Blocking value and deep storage interface
 
@@ -103,11 +119,48 @@ The projected total exceeds the 4,000-line review-size gate, so the plan has two
 **Files:** modify remaining generic callers/implementations in `crates/rivets/src/{domain/mod.rs,storage/mod.rs,storage/in_memory/trait_impl.rs,cli/mod.rs,cli/args.rs,cli/execute.rs,output/mod.rs,output/json.rs,output/tree.rs}`; remove MCP `DepParams`/`dep`; update `README.md`, `docs/{README.md,architecture.md,storage-architecture.md,data-flow.md,cli-mcp-parity.md,cli-mcp-parity.json,agents/issue-tracker.md}`, `.agents/summary/{interfaces.md,data_models.md,components.md,workflows.md,architecture.md,review_notes.md}`, and parity-rendering inputs/scripts only where the canonical intent registry requires it. `CONTEXT.md` and ADR-0002 remain unchanged because they already state the target.  
 **Estimate:** 1 engineering day.  
 **Diff estimate:** 850 changed lines including migrated tests and synchronized documentation.  
-**PR increment:** B — Canonical adapter cutover.  
+**PR increment:** C — Generic-surface retirement.  
 **Commands and expected results:**
 - `cargo test -p rivets -p rivets-mcp generic_dependency_mutation_surfaces_are_absent` → every canonical positive control exists; `dep`, `--type`, and `--deps` are absent and rejected; each named reintroduction turns red.
 - `python scripts/render-cli-mcp-parity.py --check` → rendered Markdown and JSON registry agree and Blocking intents no longer report legacy/future adapter gaps covered by this Task.
 - `cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test` → the complete workspace gate passes after the final slice.
+
+## Slice 5: Fence MCP persistence and wire output — F26, F27
+
+**Claim IDs:** C5, C7  
+**Expected behavior:** Closing a prerequisite leaves the exact Blocking edge queryable after Tools context recreation, and add/list/tree/remove values serialize with only canonical role-named keys and the documented tree envelope.  
+**Oracle:** Compare recreated-context queries to the raw JSONL dependent record and compare serialized values to hand-authored literal objects independent of the response structs.  
+**Stress fixture:** A real temporary Workspace with two prerequisites, two dependents, one same-pair legacy Related record, a depth-one tree, one Closed prerequisite, and fresh Tools contexts. Expected: exact role-named objects, retained Closed edge, inactive blockedness, and preserved legacy tuple.  
+**Regression fence:** MCP integration tests `blocking_dependency_mcp_direction_and_context_recreation` and `test_closing_blocker_unblocks_dependent`, extended with literal serialized values and recreated-context retention.  
+**Named mutation:** Rename serialized `prerequisite_id` to legacy `depends_on_id` for C7, and remove incoming Blocking edges when closing the prerequisite for C5; each owning assertion must turn red, then restoration must return green.  
+**Complexity/production scale:** N/A — reason: test-only assertions introduce no production loop.  
+**Wall budget/phase:** N/A — reason: test-only changes introduce no runtime phase.  
+**Files:** modify `crates/rivets-mcp/tests/integration.rs`.  
+**Estimate:** 0.25 engineering day.  
+**Diff estimate:** 92 changed lines.  
+**PR increment:** B — Canonical CLI and MCP adapters; carried into C through the stack.  
+**Commands and expected results:**
+- `cargo test -p rivets-mcp --test integration blocking_dependency_mcp_direction_and_context_recreation` → add/list/tree/remove JSON matches literal canonical objects; the legacy-key mutation turns red.
+- `cargo test -p rivets-mcp --test integration test_closing_blocker_unblocks_dependent` → the dependent becomes Ready while the exact edge remains after context recreation; the close-edge-removal mutation turns red.
+
+## Slice 6: Synchronize current-reference relationship guidance — F28, F29, F30
+
+**Claim IDs:** C6, C7, C8  
+**Expected behavior:** Current-reference docs expose only `blocking-dependency`/`--prerequisite`, advertise the actual 24-tool MCP surface, use canonical Blocking operations in Wayfinder guidance, and identify Parentage as unavailable until verified Task `rivets-qcje`.  
+**Oracle:** Compare copy-pastable CLI forms to Clap help/error behavior, MCP count to the router's enumerated tool set, and the Parentage deferral to verified Task `rivets-qcje`.  
+**Stress fixture:** N/A — reason: documentation synchronization adds no runtime logic; positive controls retain every canonical command/tool while retired forms remain rejected.  
+**Regression fence:** Existing CLI/MCP registry and parity tests for canonical presence and generic-surface absence; documentation is checked against their literal accepted/rejected sets.  
+**Named mutation:** Re-add `Commands::Dep` or the MCP `dep` tool; the registry fence must turn red naming the legacy route, then restoration must return green.  
+**Complexity/production scale:** N/A — reason: documentation-only slice.  
+**Wall budget/phase:** N/A — reason: no runtime phase is introduced.  
+**Files:** modify `README.md`, `docs/README.md`, `docs/agents/issue-tracker.md`, `docs/architecture.md`, `docs/data-flow.md`, and `docs/module-structure.md`.  
+**Estimate:** 0.25 engineering day.  
+**Diff estimate:** 48 changed lines including conflict-preserving wording.  
+**PR increment:** C — Generic-surface retirement.  
+**Commands and expected results:**
+- `cargo run -p rivets -- --help` and `cargo run -p rivets -- create --help` → `blocking-dependency` and `--prerequisite` are present; `dep` and `--deps` are absent.
+- `cargo test -p rivets-mcp generic_dependency_mcp_tool_is_absent` → canonical tools remain and generic `dep` stays absent.
+- `cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings && cargo nextest run --workspace --all-features` → the stacked cutover remains green.
 
 ## Tracker taxonomy
 
@@ -117,11 +170,11 @@ The projected total exceeds the 4,000-line review-size gate, so the plan has two
 
 ## Self-review
 
-- [x] C0–C10 are assigned exactly once; every PENDING falsifier is assigned to its implementing slice.
+- [x] Original implementation coverage assigns C0–C10 exactly once; review-fix Slices 5–6 map F26–F30 to their covering claims and preserve every original falsifier owner.
 - [x] Every slice contains all thirteen mandatory fields and every conditional field has an explicit `N/A — reason` where applicable.
 - [x] Every claim’s regression fence and named mutation are created/applied in the owning slice; no fence-less risk was approved.
 - [x] Every new loop records asymptotic complexity, production/stress scale, a maximum accepted cost, and rationale; always-on storage phases have wall budgets.
-- [x] Partition arithmetic includes a 20% churn margin; the 4,560-line total is split into two independently mergeable increments.
+- [x] Partition arithmetic includes the original 20% churn margin; the exact 5,451-line cumulative diff is split into three independently mergeable increments after the final size tripwire.
 - [x] Every slice names an increment and each increment has an independent mergeable definition.
 - [x] Tracker taxonomy is applied to every intended later Task.
 - [x] No slice is declared complete; checkpointed-build owns completion.

@@ -23,9 +23,9 @@ use crate::models::{
     SetContextResponse, UpdateParams, WhereAmIResponse,
 };
 use rivets::domain::{
-    AssociatedResource, BlockingDependency, DependencyType, Issue, IssueFilter, IssueId, IssueKind,
-    IssueStatus, IssueUpdate, NewIssue, NewResource, NoteContent, ResourceId, ResourceLabel,
-    ResourceRole, ResourceTarget, ResourceUpdate, WebUrl, WorkspacePath,
+    AssociatedResource, BlockingDependency, Issue, IssueFilter, IssueId, IssueKind, IssueStatus,
+    IssueUpdate, NewIssue, NewResource, NoteContent, ResourceId, ResourceLabel, ResourceRole,
+    ResourceTarget, ResourceUpdate, WebUrl, WorkspacePath,
 };
 use rivets::storage::IssueStorage;
 use std::path::Path;
@@ -84,15 +84,6 @@ fn parse_resource_target(url: Option<String>, path: Option<String>) -> Result<Re
         field: "target",
         value: "neither url nor path provided".to_string(),
         valid_values: "exactly one of url or path",
-    })
-}
-
-/// Parse and validate a dependency type string.
-fn validate_dep_type(dep_type: &str) -> Result<DependencyType> {
-    dep_type.parse().map_err(|_| Error::InvalidArgument {
-        field: "dep_type",
-        value: dep_type.to_string(),
-        valid_values: DependencyType::valid_values(),
     })
 }
 
@@ -656,43 +647,6 @@ impl Tools {
         })
     }
 
-    /// Add a dependency between issues.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if no context is set, invalid `dep_type`, issues not found, cycle detected,
-    /// or storage fails.
-    #[instrument(skip(self), fields(%issue_id, %depends_on_id))]
-    pub async fn dep(
-        &self,
-        issue_id: &str,
-        depends_on_id: &str,
-        dep_type: Option<&str>,
-        workspace_root: Option<&str>,
-    ) -> Result<String> {
-        debug!("Adding dependency");
-        // Validate dep_type before acquiring locks
-        let dep_type = dep_type
-            .map(validate_dep_type)
-            .transpose()?
-            .unwrap_or(DependencyType::Blocks);
-
-        let storage = self.storage_for(workspace_root).await?;
-        let mut storage = storage.write().await;
-
-        let from = IssueId::new(issue_id);
-        let to = IssueId::new(depends_on_id);
-
-        storage.add_dependency(&from, &to, dep_type).await?;
-        save_or_reload(storage.as_mut()).await?;
-
-        let dep_type_str = dep_type.to_string();
-        debug!(dep_type = %dep_type_str, "Added dependency");
-        Ok(format!(
-            "Added dependency: {issue_id} depends on {depends_on_id} ({dep_type_str})"
-        ))
-    }
-
     /// Reopen a closed issue.
     ///
     /// # Errors
@@ -906,45 +860,6 @@ mod tests {
                 assert_eq!(field, "status");
                 assert_eq!(value, lenient);
                 assert_eq!(valid_values, "open, in_progress, blocked, closed");
-            }
-            other => panic!("expected InvalidArgument, got: {other:?}"),
-        }
-    }
-
-    #[rstest]
-    #[case::blocks("blocks", DependencyType::Blocks)]
-    #[case::related("related", DependencyType::Related)]
-    #[case::parent_child("parent-child", DependencyType::ParentChild)]
-    #[case::discovered_from("discovered-from", DependencyType::DiscoveredFrom)]
-    fn validate_dep_type_accepts_canonical(#[case] input: &str, #[case] expected: DependencyType) {
-        assert_eq!(
-            validate_dep_type(input).expect("canonical dep type"),
-            expected
-        );
-    }
-
-    #[rstest]
-    #[case::uppercase("BLOCKS")]
-    #[case::underscore_parent("parent_child")]
-    #[case::underscore_discovered("discovered_from")]
-    #[case::unknown("bogus")]
-    #[case::empty("")]
-    fn validate_dep_type_rejects_lenient(#[case] lenient: &str) {
-        // The former lenient spellings (case-folded, underscore forms) are
-        // rejected with the existing InvalidArgument shape.
-        let error = validate_dep_type(lenient).expect_err("lenient dep type rejected");
-        match error {
-            Error::InvalidArgument {
-                field,
-                value,
-                valid_values,
-            } => {
-                assert_eq!(field, "dep_type");
-                assert_eq!(value, lenient);
-                assert_eq!(
-                    valid_values,
-                    "blocks, related, parent-child, discovered-from"
-                );
             }
             other => panic!("expected InvalidArgument, got: {other:?}"),
         }
@@ -1204,7 +1119,7 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    async fn test_add_dependency(#[future] tools: Tools) {
+    async fn test_add_blocking_dependency(#[future] tools: Tools) {
         let tools = tools.await;
 
         let issue1 = create_issue(&tools, "Issue 1").await;
@@ -1212,12 +1127,12 @@ mod tests {
 
         // Add dependency
         let result = tools
-            .dep(issue1.id.as_str(), issue2.id.as_str(), Some("blocks"), None)
+            .blocking_dependency_add(issue1.id.as_str(), issue2.id.as_str(), None)
             .await
             .expect("dep should succeed");
 
-        assert!(result.contains("Added dependency"));
-        assert!(result.contains("blocks"));
+        assert_eq!(result.dependent_id(), &issue1.id);
+        assert_eq!(result.prerequisite_id(), &issue2.id);
     }
 
     #[rstest]
@@ -1230,10 +1145,9 @@ mod tests {
         let dependent_issue = create_issue(&tools, "Dependent Issue").await;
 
         tools
-            .dep(
+            .blocking_dependency_add(
                 dependent_issue.id.as_str(),
                 blocking_issue.id.as_str(),
-                Some("blocks"),
                 None,
             )
             .await

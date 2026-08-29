@@ -12,8 +12,8 @@ Issues and planning artifacts for this repo live in Rivets. The checked-in `.riv
 - **Update an issue**: use `update`, or `rivets update <issue-id>`. Prefer atomic label add/remove operations over replacing the full label set.
 - **Record discussion or resolution**: Rivets has no authored comment history. Use MCP `add_note` or CLI `rivets update <issue-id> --notes "..."`; each operation appends one immutable, system-timestamped Note.
 - **Close or reopen**: use `close` / `reopen`, or the corresponding CLI commands, with a concise reason.
-- **Add a dependency**: the first issue depends on the second. Use `dep`, or `rivets dep add <dependent> <dependency> --type <blocks|related|parent-child|discovered-from>`.
-- **Remove a dependency or delete an issue**: use the CLI when the MCP surface does not expose the required mutation.
+- **Add a Blocking Dependency**: the dependent Issue depends on the prerequisite. Use MCP `blocking_dependency_add`, or `rivets blocking-dependency add --dependent <issue> --prerequisite <issue>`.
+- **Inspect or remove Blocking Dependencies**: use the matching MCP `blocking_dependency_list` / `blocking_dependency_tree` / `blocking_dependency_remove` tools or CLI `blocking-dependency` subcommands. Never reverse dependent and prerequisite wording.
 
 ## When a skill says "publish to the issue tracker"
 
@@ -25,12 +25,14 @@ Load it with `show` so its description, notes, labels, dependencies, and depende
 
 ## Wayfinding operations
 
-Used by `/wayfinder`. The map is one Rivets epic and its tickets are child issues.
+Used by `/wayfinder`. The map is one Rivets Epic; until canonical Parentage
+lands in `rivets-qcje`, map membership is represented by `wayfinder:<type>`
+labels rather than a relationship.
 
 - **Map**: create an `epic` labelled `wayfinder:map`. Store Destination, Notes, Decisions-so-far, Not-yet-specified, and Out-of-scope in its description.
-- **Child ticket**: create a `task` labelled `wayfinder:<type>`, with its question in the description. Add a `parent-child` dependency from the ticket to the map: the child is the dependent; the map is the dependency.
-- **Blocking**: add a `blocks` dependency from the blocked ticket to its blocker: the blocked ticket is the dependent; the blocker is the dependency.
-- **Frontier query**: get unblocked issues with `ready`, then retain the map's open, unassigned children by inspecting parent-child relationships. Use the tracker result order because Rivets has no explicit sub-issue order.
+- **Child ticket**: create a `task` labelled `wayfinder:<type>`, with its question in the description. Do not create a legacy `parent-child` dependency; canonical set/clear/move/show Parentage is tracked at `rivets-qcje`.
+- **Blocking**: use MCP `blocking_dependency_add`, or `rivets blocking-dependency add --dependent <blocked-ticket> --prerequisite <blocker>`.
+- **Frontier query**: get unblocked issues with `ready`, then retain the map's open, unassigned tickets by their `wayfinder:<type>` labels. Use the tracker result order because Rivets has no explicit sub-issue order.
 - **Claim**: as the first write, set the ticket assignee to the driving developer. The assignee is the claim; status alone is not a claim.
 - **Resolve**: append the answer with `add_note`, close the ticket with a concise reason, then append a one-line title-first context pointer with the issue id to the map's Decisions-so-far.
 - **Concurrent edits**: reload the map and affected tickets immediately before updating them. Preserve unrelated labels, notes, description sections, and dependencies.

@@ -152,9 +152,9 @@ impl Note {
 
 /// Represents an issue in the tracking system
 ///
-/// Note: Dependencies are managed by the storage backend and accessed via
-/// `IssueStorage::get_dependencies()` rather than being stored on the Issue
-/// itself. This prevents data duplication and ensures a single source of truth.
+/// Blocking relationships are owned by storage and queried through the
+/// role-named `IssueStorage` interface. The legacy `dependencies` collection
+/// remains only as the JSONL compatibility representation until migration.
 #[derive(Debug, Clone, Serialize)]
 pub struct Issue {
     /// Unique identifier for the issue
@@ -609,7 +609,7 @@ pub struct Dependency {
 }
 
 /// Type of dependency relationship
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DependencyType {
     /// Hard blocker - prevents work
@@ -633,18 +633,6 @@ impl fmt::Display for DependencyType {
             Self::ParentChild => write!(f, "parent-child"),
             Self::DiscoveredFrom => write!(f, "discovered-from"),
         }
-    }
-}
-
-impl DependencyType {
-    /// Comma-separated canonical dependency-type names, for error messages.
-    ///
-    /// Derived from the enum declaration rather than hand-written, so the
-    /// listed values cannot drift from the accepted vocabulary.
-    #[must_use]
-    pub fn valid_values() -> &'static str {
-        static VALUES: OnceLock<String> = OnceLock::new();
-        VALUES.get_or_init(join_canonical_names::<Self>)
     }
 }
 
@@ -1356,10 +1344,6 @@ mod tests {
             IssueStatus::valid_values(),
             "open, in_progress, blocked, closed"
         );
-        assert_eq!(
-            DependencyType::valid_values(),
-            "blocks, related, parent-child, discovered-from"
-        );
     }
 
     // ===== CLI ValueEnum Vocabulary Tests =====
@@ -1398,15 +1382,6 @@ mod tests {
         ] {
             let possible = role.to_possible_value().expect("possible value");
             assert_eq!(possible.get_name(), role.to_string());
-        }
-        for dep_type in [
-            DependencyType::Blocks,
-            DependencyType::Related,
-            DependencyType::ParentChild,
-            DependencyType::DiscoveredFrom,
-        ] {
-            let possible = dep_type.to_possible_value().expect("possible value");
-            assert_eq!(possible.get_name(), dep_type.to_string());
         }
     }
 
