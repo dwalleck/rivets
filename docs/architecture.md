@@ -45,7 +45,7 @@ graph TB
     end
 
     subgraph "Domain Layer (rivets)"
-        Types[Domain Types<br/>Issue, Dependency, Note,<br/>AssociatedResource, Filter]
+        Types[Domain Types<br/>Issue, BlockingDependency, Note,<br/>AssociatedResource, Filter]
         IDs[Hash-based IDs<br/>SHA256 over content +<br/>timestamp + nonce]
     end
 
@@ -79,14 +79,14 @@ graph TB
 
 - **Entry Point**: `main.rs` with `#[tokio::main(flavor = "current_thread")]`
 - **Argument Parsing**: Clap derive API for type-safe CLI arguments
-- **Commands** (16 top-level): init, info, create, list, show, update, close, reopen, delete, ready, dep, label, resource, stale, blocked, stats
-- **Validation**: Priority 0-4, enum types (status, kind, dependency type), ID format validation, prefix validation (2-20 alphanumeric characters)
+- **Commands** (16 top-level): init, info, create, list, show, update, close, reopen, delete, ready, blocking-dependency, label, resource, stale, blocked, stats
+- **Validation**: Priority 0-4, enum types (status, kind), explicit Blocking endpoint roles, ID format validation, prefix validation (2-20 alphanumeric characters)
 
 ### 2. Application Layer (`rivets`)
 
 - **App Struct**: Manages storage lifecycle and command execution; `App::from_directory` searches upward (max depth 256) for the `.rivets/` directory, loads configuration, and creates storage from it
 - **Configuration**: `.rivets/config.yaml` is the **single** configuration source: `issue-prefix` plus a `storage` section (`backend` and `data_file`). There is no config layering, no environment-variable merge, and no user-level config. Defaults (prefix `proj`, backend `jsonl`, data file `.rivets/issues.jsonl`) are baked into `init`
-- **Auto-save**: Mutating commands persist after execution. Batch `update`/`close`/`reopen` and label mutations reload storage after a failed save; `create`, `delete`, dependency mutations, and resource mutations return the save error without reloading that process's in-memory state
+- **Auto-save**: Mutating commands persist after execution. Batch `update`/`close`/`reopen` and label mutations reload storage after a failed save; `create`, `delete`, Blocking Dependency mutations, and resource mutations return the save error without reloading that process's in-memory state
 - **Async Runtime**: Tokio current-thread for sequential CLI operations
 
 ### 3. Storage Abstraction (`rivets`)
@@ -247,7 +247,7 @@ sequenceDiagram
 - ✅ JSONL persistence as the default backend with atomic writes
 - ✅ Three-stage resilient JSONL load (parse compatibility records → import Issues → rebuild relationships)
 - ✅ 16-command CLI surface
-- ✅ Dependency system with cycle detection, removal, and dependency/dependent/tree queries
+- ✅ Blocking Dependency system with Blocking-only cycle detection, removal, and prerequisite/dependent/tree queries
 - ✅ Graph-derived `ready` and `blocked` queries
 - ✅ Hash-based IDs (prefix + adaptive-length hash over content, timestamp, and nonce)
 - ✅ Single-source YAML configuration (`.rivets/config.yaml`)

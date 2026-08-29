@@ -289,8 +289,8 @@ graph TD
 
 #### storage/mod.rs
 
-Defines the `IssueStorage` trait (CRUD, dependencies, labels, resources,
-queries, import/export, `save`, `reload`), the `StorageBackend` enum
+Defines the `IssueStorage` trait (CRUD, role-named Blocking Dependency
+operations, labels, resources, queries, import/export, `save`, `reload`), the `StorageBackend` enum
 (`InMemory`, `Jsonl(PathBuf)`, `PostgreSQL` placeholder), and the
 `create_storage` factory.
 

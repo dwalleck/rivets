@@ -50,16 +50,16 @@ rivets close "$ID"
 |---------|---------|
 | `init` | Initialize a repository (`.rivets/` and `config.yaml`); `--prefix <name>` sets the ID prefix |
 | `info` | Repository info: database path, prefix, and summary counts |
-| `create` | Create an issue (`--title`, `--kind`, `--priority`, `--assignee`, `--labels`, `--deps`, `--design`, `--acceptance`, `--notes`) |
+| `create` | Create an issue (`--title`, `--kind`, `--priority`, `--assignee`, `--labels`, repeatable `--prerequisite`, `--design`, `--acceptance`, `--notes`) |
 | `list` | List issues; filter with `--status`, `--priority`, `--kind`, `--assignee`, `--label`; `--sort` and `--limit` |
-| `show` | Show one or more issues with their dependencies and resources |
+| `show` | Show one or more issues with their Blocking prerequisites/dependents and resources |
 | `update` | Update status, Kind, assignment, design, acceptance criteria, or append a Note; labels use the `label` command |
 | `close` | Close one or more issues, optionally `--reason` |
 | `reopen` | Reopen a closed issue, optionally `--reason` |
 | `delete` | Delete an issue permanently (`--force` skips the confirmation prompt) |
 | `ready` | Issues with no blockers, hybrid-sorted by priority |
-| `blocked` | Issues blocked by dependencies, along with their blockers |
-| `dep` | Dependencies: `add <dependent> <prerequisite> [--type blocks\|related\|parent-child\|discovered-from]`, `remove`, `list [--reverse]`, `tree [--depth N]` |
+| `blocked` | Issues blocked by open Blocking prerequisites, along with those prerequisites |
+| `blocking-dependency` | Blocking Dependencies: `add`/`remove --dependent <id> --prerequisite <id>`, `list --dependent|--prerequisite <id>`, `tree --dependent <id> [--depth N]` |
 | `label` | Labels: `add <label> [<issue-id>]`, `remove`, `list <issue-id>`, `list-all`; use `--ids` for batches |
 | `resource` | Associated Resources: `add`, `list`, `update`, `remove` (see below) |
 | `stale` | Issues not updated in N days (`--days`, default 30) |

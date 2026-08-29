@@ -25,12 +25,14 @@ Load it with `show` so its description, notes, labels, dependencies, and depende
 
 ## Wayfinding operations
 
-Used by `/wayfinder`. The map is one Rivets epic and its tickets are child issues.
+Used by `/wayfinder`. The map is one Rivets Epic; until canonical Parentage
+lands in `rivets-qcje`, map membership is represented by `wayfinder:<type>`
+labels rather than a relationship.
 
 - **Map**: create an `epic` labelled `wayfinder:map`. Store Destination, Notes, Decisions-so-far, Not-yet-specified, and Out-of-scope in its description.
-- **Child ticket**: create a `task` labelled `wayfinder:<type>`, with its question in the description. Add a `parent-child` dependency from the ticket to the map: the child is the dependent; the map is the dependency.
-- **Blocking**: add a `blocks` dependency from the blocked ticket to its blocker: the blocked ticket is the dependent; the blocker is the dependency.
-- **Frontier query**: get unblocked issues with `ready`, then retain the map's open, unassigned children by inspecting parent-child relationships. Use the tracker result order because Rivets has no explicit sub-issue order.
+- **Child ticket**: create a `task` labelled `wayfinder:<type>`, with its question in the description. Do not create a legacy `parent-child` dependency; canonical set/clear/move/show Parentage is tracked at `rivets-qcje`.
+- **Blocking**: use MCP `blocking_dependency_add`, or `rivets blocking-dependency add --dependent <blocked-ticket> --prerequisite <blocker>`.
+- **Frontier query**: get unblocked issues with `ready`, then retain the map's open, unassigned tickets by their `wayfinder:<type>` labels. Use the tracker result order because Rivets has no explicit sub-issue order.
 - **Claim**: as the first write, set the ticket assignee to the driving developer. The assignee is the claim; status alone is not a claim.
 - **Resolve**: append the answer with `add_note`, close the ticket with a concise reason, then append a one-line title-first context pointer with the issue id to the map's Decisions-so-far.
 - **Concurrent edits**: reload the map and affected tickets immediately before updating them. Preserve unrelated labels, notes, description sections, and dependencies.

@@ -139,15 +139,15 @@ flowchart TD
     Interactive --> BuildIssue
     GatherMissing -->|Yes| BuildIssue[Build NewIssue struct]
 
-    BuildIssue --> Validate{Validate fields<br/>+ dep targets exist?}
+    BuildIssue --> Validate{Validate fields<br/>+ all prerequisites exist?}
     Validate -->|No| ValidationError[Error: validation failure]
     Validate -->|Yes| Generate[Generate ID: prefix + adaptive hash<br/>SHA256(title|description|creator|timestamp|nonce)<br/>→ base36, length 4-6 by db size]
 
     Generate --> CheckCollision{ID collision?}
     CheckCollision -->|Yes, retry with nonce| Generate
-    CheckCollision -->|No| CheckCycle{Would create<br/>cycle?}
-    CheckCycle -->|Yes| CycleError[Error: Circular dependency<br/>rollback temp node]
-    CheckCycle -->|No| Insert[Insert Issue<br/>status: open<br/>add node + edges to graph]
+    CheckCollision -->|No| CheckCycle{Would create a<br/>Blocking cycle?}
+    CheckCycle -->|Yes| CycleError[Error: Circular Blocking Dependency<br/>no Issue or edge committed]
+    CheckCycle -->|No| Insert[Insert Issue<br/>status: open<br/>add node + Blocking edges]
 
     Insert --> Save[Auto-save to JSONL]
     Save --> AtomicWrite[Write temp file<br/>Rename atomically]
@@ -163,8 +163,9 @@ current timestamp and a nonce, so the hash does not identify the content. The
 hash length adapts to database size (4 chars up to 500 issues, 5 up to 1,500,
 6 beyond), with nonce retries and a length bump on collision.
 
-Dependencies passed to `create --deps` use the form `issue-id` (defaults to
-`blocks`) or `type:issue-id` (e.g. `blocks:rivets-x9k2`).
+Blocking prerequisites passed to `create` use a repeatable, role-specific
+`--prerequisite issue-id` option. Creation accepts only Blocking prerequisites;
+other relationship kinds have dedicated interfaces in later ADR-0002 slices.
 
 ## List/Query Flow
 
