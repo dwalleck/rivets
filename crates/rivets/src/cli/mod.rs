@@ -777,7 +777,7 @@ mod tests {
 
     #[test]
     fn all_issue_id_inputs_use_domain_parser() {
-        let cases = [
+        let mut cases = vec![
             vec![
                 "rivets",
                 "create",
@@ -808,15 +808,6 @@ mod tests {
                 "ab-1",
                 "--prerequisite",
                 "invalid",
-            ],
-            vec![
-                "rivets",
-                "blocking-dependency",
-                "remove",
-                "--dependent",
-                "invalid",
-                "--prerequisite",
-                "ab-1",
             ],
             vec![
                 "rivets",
@@ -873,11 +864,50 @@ mod tests {
             vec!["rivets", "resource", "list", "invalid"],
         ];
 
+        for action in ["claim", "release"] {
+            cases.push(vec!["rivets", action, "invalid", "--assignee", "agent"]);
+        }
+        for (command, action, first_role, second_role) in [
+            (
+                "blocking-dependency",
+                "remove",
+                "--dependent",
+                "--prerequisite",
+            ),
+            ("parent", "set", "--child", "--parent"),
+            ("parent", "move", "--child", "--parent"),
+            ("related", "add", "--issue", "--related"),
+            ("related", "remove", "--issue", "--related"),
+            ("discovery", "add", "--discovered", "--source"),
+            ("discovery", "remove", "--discovered", "--source"),
+        ] {
+            for (first, second) in [("invalid", "ab-1"), ("ab-1", "invalid")] {
+                cases.push(vec![
+                    "rivets",
+                    command,
+                    action,
+                    first_role,
+                    first,
+                    second_role,
+                    second,
+                ]);
+            }
+        }
+        for (command, action, role) in [
+            ("parent", "clear", "--child"),
+            ("parent", "show", "--child"),
+            ("related", "list", "--issue"),
+            ("discovery", "list", "--discovered"),
+        ] {
+            cases.push(vec!["rivets", command, action, role, "invalid"]);
+        }
+
         for invalid_args in cases {
             let error = Cli::try_parse_from(&invalid_args)
                 .expect_err("malformed Issue ID should fail at the CLI boundary");
-            assert!(
-                error.to_string().contains("Expected format: prefix-suffix"),
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::ValueValidation,
                 "unexpected error for {invalid_args:?}: {error}"
             );
 

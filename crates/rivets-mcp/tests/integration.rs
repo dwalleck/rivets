@@ -9,14 +9,14 @@
 
 use chrono::{DateTime, Utc};
 use rivets::domain::{
-    AssignmentError, BlockingDependency, DiscoveryOrigin, Issue, IssueKind, IssueStatus,
-    RelatedAssociation, ResourceTarget, StatusTransitionError, WorkspacePath,
+    AssignmentError, BlockingDependency, DiscoveryOrigin, Issue, IssueIdError, IssueKind,
+    IssueStatus, RelatedAssociation, ResourceTarget, StatusTransitionError, WorkspacePath,
 };
 use rivets_mcp::context::Context;
 use rivets_mcp::error::Error;
 use rivets_mcp::models::{
     BlockingDependencyListQuery, BlockingDependencyTreeResponse, CreateParams, IssueKindInput,
-    ListParams, ReadyParams, UpdateParams,
+    ListParams, ReadyParams, ResourceUpdateParams, UpdateParams,
 };
 use rivets_mcp::tools::Tools;
 use rmcp::model::Content;
@@ -133,6 +133,186 @@ fn update_params(
         "workspace_root": workspace_root,
     }))
     .expect("update parameters should deserialize")
+}
+
+#[derive(Debug, Clone, Copy)]
+enum InvalidIssueIdOperation {
+    Show,
+    Update,
+    Claim,
+    Release,
+    AddNote,
+    Resource(InvalidResourceIssueIdOperation),
+    Close,
+    BlockingAddDependent,
+    BlockingAddPrerequisite,
+    BlockingRemoveDependent,
+    BlockingRemovePrerequisite,
+    BlockingListDependent,
+    BlockingListPrerequisite,
+    BlockingTree,
+    RelatedAddIssue,
+    RelatedAddRelated,
+    RelatedRemoveIssue,
+    RelatedRemoveRelated,
+    RelatedList,
+    DiscoveryAddDiscovered,
+    DiscoveryAddSource,
+    DiscoveryRemoveDiscovered,
+    DiscoveryRemoveSource,
+    DiscoveryList,
+    ParentSetChild,
+    ParentSetParent,
+    ParentClear,
+    ParentMoveChild,
+    ParentMoveParent,
+    ParentShow,
+    Reopen,
+    LabelAdd,
+    LabelRemove,
+    LabelList,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum InvalidResourceIssueIdOperation {
+    Add,
+    Update,
+    Remove,
+    List,
+}
+
+impl InvalidResourceIssueIdOperation {
+    async fn invoke(self, tools: &Tools) -> Result<(), Error> {
+        const INVALID: &str = "invalid";
+        match self {
+            Self::Add => tools
+                .resource_add(
+                    INVALID,
+                    Some("https://example.com".to_string()),
+                    None,
+                    "reference",
+                    None,
+                    None,
+                )
+                .await
+                .map(drop),
+            Self::Update => tools
+                .resource_update(ResourceUpdateParams {
+                    issue_id: INVALID.to_string(),
+                    resource_id: "r1".to_string(),
+                    url: None,
+                    path: None,
+                    role: Some("evidence".to_string()),
+                    label: None,
+                    clear_label: false,
+                    workspace_root: None,
+                })
+                .await
+                .map(drop),
+            Self::Remove => tools.resource_remove(INVALID, "r1", None).await.map(drop),
+            Self::List => tools.resource_list(INVALID, None).await.map(drop),
+        }
+    }
+}
+
+impl InvalidIssueIdOperation {
+    async fn invoke(self, tools: &Tools) -> Result<(), Error> {
+        const INVALID: &str = "invalid";
+        const VALID: &str = "ab-1";
+
+        match self {
+            Self::Show => tools.show(INVALID, None).await.map(drop),
+            Self::Claim => tools.claim(INVALID, "agent", None).await.map(drop),
+            Self::Release => tools.release(INVALID, "agent", None).await.map(drop),
+            Self::Update => tools
+                .update(update_params(
+                    INVALID,
+                    Some("Changed".to_string()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ))
+                .await
+                .map(drop),
+            Self::AddNote => tools
+                .add_note(INVALID, "Finding".to_string(), None)
+                .await
+                .map(drop),
+            Self::Resource(operation) => operation.invoke(tools).await,
+            Self::Close => tools.close(INVALID, None, None).await.map(drop),
+            Self::BlockingAddDependent => tools
+                .blocking_dependency_add(INVALID, VALID, None)
+                .await
+                .map(drop),
+            Self::BlockingAddPrerequisite => tools
+                .blocking_dependency_add(VALID, INVALID, None)
+                .await
+                .map(drop),
+            Self::BlockingRemoveDependent => tools
+                .blocking_dependency_remove(INVALID, VALID, None)
+                .await
+                .map(drop),
+            Self::BlockingRemovePrerequisite => tools
+                .blocking_dependency_remove(VALID, INVALID, None)
+                .await
+                .map(drop),
+            Self::BlockingListDependent => tools
+                .blocking_dependency_list(
+                    &BlockingDependencyListQuery::PrerequisitesOf {
+                        dependent_id: INVALID.to_string(),
+                    },
+                    None,
+                )
+                .await
+                .map(drop),
+            Self::BlockingListPrerequisite => tools
+                .blocking_dependency_list(
+                    &BlockingDependencyListQuery::DependentsOf {
+                        prerequisite_id: INVALID.to_string(),
+                    },
+                    None,
+                )
+                .await
+                .map(drop),
+            Self::BlockingTree => tools
+                .blocking_dependency_tree(INVALID, Some(5), None)
+                .await
+                .map(drop),
+            Self::Reopen => tools.reopen(INVALID, None, None).await.map(drop),
+            Self::LabelAdd => tools.label_add(INVALID, "urgent", None).await.map(drop),
+            Self::LabelRemove => tools.label_remove(INVALID, "urgent", None).await.map(drop),
+            Self::LabelList => tools.label_list(INVALID, None).await.map(drop),
+            Self::RelatedAddIssue => tools.related_add(INVALID, VALID, None).await.map(drop),
+            Self::RelatedAddRelated => tools.related_add(VALID, INVALID, None).await.map(drop),
+            Self::RelatedRemoveIssue => tools.related_remove(INVALID, VALID, None).await.map(drop),
+            Self::RelatedRemoveRelated => {
+                tools.related_remove(VALID, INVALID, None).await.map(drop)
+            }
+            Self::RelatedList => tools.related_list(INVALID, None).await.map(drop),
+            Self::DiscoveryAddDiscovered => {
+                tools.discovery_add(INVALID, VALID, None).await.map(drop)
+            }
+            Self::DiscoveryAddSource => tools.discovery_add(VALID, INVALID, None).await.map(drop),
+            Self::DiscoveryRemoveDiscovered => {
+                tools.discovery_remove(INVALID, VALID, None).await.map(drop)
+            }
+            Self::DiscoveryRemoveSource => {
+                tools.discovery_remove(VALID, INVALID, None).await.map(drop)
+            }
+            Self::DiscoveryList => tools.discovery_list(INVALID, None).await.map(drop),
+            Self::ParentSetChild => tools.parent_set(INVALID, VALID, None).await.map(drop),
+            Self::ParentSetParent => tools.parent_set(VALID, INVALID, None).await.map(drop),
+            Self::ParentClear => tools.parent_clear(INVALID, None).await.map(drop),
+            Self::ParentMoveChild => tools.parent_move(INVALID, VALID, None).await.map(drop),
+            Self::ParentMoveParent => tools.parent_move(VALID, INVALID, None).await.map(drop),
+            Self::ParentShow => tools.parent_show(INVALID, None).await.map(drop),
+        }
+    }
 }
 
 mod helpers {
@@ -1474,6 +1654,110 @@ async fn test_error_issue_not_found() {
             assert_eq!(id, "nonexistent-123");
         }
         e => panic!("Expected IssueNotFound error, got: {e:?}"),
+    }
+}
+
+#[tokio::test]
+async fn every_mcp_issue_id_operation_rejects_malformed_input_before_storage() {
+    let workspace = create_temp_workspace();
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+    let cli_error = rivets::cli::validate_issue_id("invalid")
+        .expect_err("CLI should reject malformed Issue ID");
+    let operations = [
+        InvalidIssueIdOperation::Show,
+        InvalidIssueIdOperation::Update,
+        InvalidIssueIdOperation::Claim,
+        InvalidIssueIdOperation::Release,
+        InvalidIssueIdOperation::AddNote,
+        InvalidIssueIdOperation::Resource(InvalidResourceIssueIdOperation::Add),
+        InvalidIssueIdOperation::Resource(InvalidResourceIssueIdOperation::Update),
+        InvalidIssueIdOperation::Resource(InvalidResourceIssueIdOperation::Remove),
+        InvalidIssueIdOperation::Resource(InvalidResourceIssueIdOperation::List),
+        InvalidIssueIdOperation::Close,
+        InvalidIssueIdOperation::BlockingAddDependent,
+        InvalidIssueIdOperation::BlockingAddPrerequisite,
+        InvalidIssueIdOperation::BlockingRemoveDependent,
+        InvalidIssueIdOperation::BlockingRemovePrerequisite,
+        InvalidIssueIdOperation::BlockingListDependent,
+        InvalidIssueIdOperation::BlockingListPrerequisite,
+        InvalidIssueIdOperation::BlockingTree,
+        InvalidIssueIdOperation::RelatedAddIssue,
+        InvalidIssueIdOperation::RelatedAddRelated,
+        InvalidIssueIdOperation::RelatedRemoveIssue,
+        InvalidIssueIdOperation::RelatedRemoveRelated,
+        InvalidIssueIdOperation::RelatedList,
+        InvalidIssueIdOperation::DiscoveryAddDiscovered,
+        InvalidIssueIdOperation::DiscoveryAddSource,
+        InvalidIssueIdOperation::DiscoveryRemoveDiscovered,
+        InvalidIssueIdOperation::DiscoveryRemoveSource,
+        InvalidIssueIdOperation::DiscoveryList,
+        InvalidIssueIdOperation::ParentSetChild,
+        InvalidIssueIdOperation::ParentSetParent,
+        InvalidIssueIdOperation::ParentClear,
+        InvalidIssueIdOperation::ParentMoveChild,
+        InvalidIssueIdOperation::ParentMoveParent,
+        InvalidIssueIdOperation::ParentShow,
+        InvalidIssueIdOperation::Reopen,
+        InvalidIssueIdOperation::LabelAdd,
+        InvalidIssueIdOperation::LabelRemove,
+        InvalidIssueIdOperation::LabelList,
+    ];
+
+    for operation in operations {
+        let error = operation
+            .invoke(&tools)
+            .await
+            .expect_err("malformed Issue ID should be rejected before storage");
+        assert_eq!(
+            error.to_string(),
+            cli_error,
+            "{operation:?} changed the shared domain error meaning"
+        );
+        assert!(
+            matches!(
+                &error,
+                Error::InvalidIssueId(IssueIdError::MissingSeparator { value })
+                    if value == "invalid"
+            ),
+            "{operation:?} reached the wrong error: {error:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn cli_and_mcp_issue_id_parsing_have_the_same_semantics() {
+    let workspace = create_temp_workspace();
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+    let cases = [
+        ("", false),
+        ("invalid", false),
+        ("a-1", false),
+        ("abcdefghijklmnopqrstu-1", false),
+        ("ab-1", true),
+        ("abcdefghijklmnopqrst-feature-123", true),
+    ];
+
+    for (input, valid) in cases {
+        let cli_result = rivets::cli::validate_issue_id(input);
+        let mcp_result = tools.show(input, None).await;
+        if valid {
+            let canonical = cli_result.expect("CLI should accept canonical Issue ID");
+            assert_eq!(canonical, input);
+            assert!(
+                matches!(&mcp_result, Err(Error::IssueNotFound(id)) if id == input),
+                "valid MCP input should reach lookup: {input:?} -> {mcp_result:?}"
+            );
+        } else {
+            let cli_error = cli_result.expect_err("CLI should reject malformed Issue ID");
+            let mcp_error = mcp_result.expect_err("MCP should reject malformed Issue ID");
+            assert_eq!(mcp_error.to_string(), cli_error, "input: {input:?}");
+            assert!(
+                matches!(&mcp_error, Error::InvalidIssueId(_)),
+                "input {input:?} reached the wrong MCP error: {mcp_error:?}"
+            );
+        }
     }
 }
 

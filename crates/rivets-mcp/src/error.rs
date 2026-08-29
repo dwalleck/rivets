@@ -33,6 +33,10 @@ pub enum Error {
         valid_values: &'static str,
     },
 
+    /// Issue ID input failed domain parsing.
+    #[error(transparent)]
+    InvalidIssueId(#[from] rivets::domain::IssueIdError),
+
     /// Note content failed domain validation.
     #[error("Invalid note: {0}")]
     InvalidNote(#[from] rivets::domain::NoteError),
@@ -163,6 +167,7 @@ impl Error {
             ),
             Self::NoContext
             | Self::InvalidArgument { .. }
+            | Self::InvalidIssueId(_)
             | Self::InvalidNote(_)
             | Self::InvalidResource(_)
             | Self::InvalidBlockingDependency(_)

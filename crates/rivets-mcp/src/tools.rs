@@ -47,6 +47,11 @@ enum AssignmentOperation {
     Release,
 }
 
+/// Parse an untrusted Issue ID before any storage lookup or mutation.
+fn parse_issue_id(input: &str) -> Result<IssueId> {
+    Ok(input.parse()?)
+}
+
 /// Parse and validate a status string.
 fn validate_status(status: &str) -> Result<IssueStatus> {
     status.parse().map_err(|_| Error::InvalidArgument {
@@ -327,10 +332,10 @@ impl Tools {
     /// Returns an error if no context is set, issue not found, or storage operations fail.
     #[instrument(skip(self), fields(%issue_id))]
     pub async fn show(&self, issue_id: &str, workspace_root: Option<&str>) -> Result<Issue> {
+        let id = parse_issue_id(issue_id)?;
         let storage = self.storage_for(workspace_root).await?;
         let storage = storage.read().await;
 
-        let id = IssueId::new(issue_id);
         let issue = storage
             .get(&id)
             .await?
@@ -414,11 +419,11 @@ impl Tools {
         let status = params.status.as_deref().map(validate_status).transpose()?;
         let issue_kind = params.kind.resolve("update");
 
+        let id = parse_issue_id(&params.issue_id)?;
         let mut storage = self
             .mutation_storage_for(params.workspace_root.as_deref())
             .await?;
 
-        let id = IssueId::new(&params.issue_id);
         let updates = IssueUpdate {
             title: params.title,
             description: params.description,
@@ -445,7 +450,7 @@ impl Tools {
         workspace_root: Option<&str>,
         operation: AssignmentOperation,
     ) -> Result<Issue> {
-        let issue_id = IssueId::new(issue_id);
+        let issue_id = parse_issue_id(issue_id)?;
         if assignee.trim().is_empty() {
             return Err(Error::Assignment(AssignmentError::BlankAssignee {
                 issue_id,
@@ -519,12 +524,13 @@ impl Tools {
         content: String,
         workspace_root: Option<&str>,
     ) -> Result<Issue> {
+        let issue_id = parse_issue_id(issue_id)?;
         let note = NoteContent::new(content)?;
         let mut storage = self.mutation_storage_for(workspace_root).await?;
 
         let issue = storage
             .update(
-                &IssueId::new(issue_id),
+                &issue_id,
                 IssueUpdate {
                     note: Some(note),
                     ..Default::default()
@@ -552,6 +558,7 @@ impl Tools {
         label: Option<String>,
         workspace_root: Option<&str>,
     ) -> Result<Issue> {
+        let issue_id = parse_issue_id(issue_id)?;
         let target = parse_resource_target(url, path)?;
         let resource = NewResource {
             target,
@@ -560,9 +567,7 @@ impl Tools {
         };
         let mut storage = self.mutation_storage_for(workspace_root).await?;
 
-        let issue = storage
-            .add_resource(&IssueId::new(issue_id), resource)
-            .await?;
+        let issue = storage.add_resource(&issue_id, resource).await?;
         save_or_reload(storage.as_mut()).await?;
         Ok(issue)
     }
@@ -589,6 +594,7 @@ impl Tools {
             clear_label,
             workspace_root,
         } = params;
+        let issue_id = parse_issue_id(&issue_id)?;
         let target = parse_optional_resource_target(url, path)?;
         let label = match (label, clear_label) {
             (Some(label), false) => Some(Some(ResourceLabel::new(label)?)),
@@ -610,11 +616,7 @@ impl Tools {
         let mut storage = self.mutation_storage_for(workspace_root.as_deref()).await?;
 
         let issue = storage
-            .update_resource(
-                &IssueId::new(issue_id),
-                &ResourceId::new(resource_id)?,
-                update,
-            )
+            .update_resource(&issue_id, &ResourceId::new(resource_id)?, update)
             .await?;
         save_or_reload(storage.as_mut()).await?;
         Ok(issue)
@@ -635,10 +637,11 @@ impl Tools {
         resource_id: &str,
         workspace_root: Option<&str>,
     ) -> Result<Issue> {
+        let issue_id = parse_issue_id(issue_id)?;
         let mut storage = self.mutation_storage_for(workspace_root).await?;
 
         let issue = storage
-            .remove_resource(&IssueId::new(issue_id), &ResourceId::new(resource_id)?)
+            .remove_resource(&issue_id, &ResourceId::new(resource_id)?)
             .await?;
         save_or_reload(storage.as_mut()).await?;
         Ok(issue)
@@ -655,10 +658,11 @@ impl Tools {
         issue_id: &str,
         workspace_root: Option<&str>,
     ) -> Result<Vec<AssociatedResource>> {
+        let issue_id = parse_issue_id(issue_id)?;
         let storage = self.storage_for(workspace_root).await?;
         let storage = storage.read().await;
         let issue = storage
-            .get(&IssueId::new(issue_id))
+            .get(&issue_id)
             .await?
             .ok_or_else(|| Error::IssueNotFound(issue_id.to_string()))?;
         Ok(issue.resources().to_vec())
@@ -678,10 +682,10 @@ impl Tools {
         workspace_root: Option<&str>,
     ) -> Result<Issue> {
         debug!("Closing issue");
+        let id = parse_issue_id(issue_id)?;
         let note = reason.map(NoteContent::closing_reason).transpose()?;
         let mut storage = self.mutation_storage_for(workspace_root).await?;
 
-        let id = IssueId::new(issue_id);
         let updates = IssueUpdate {
             status: Some(rivets::domain::IssueStatus::Closed),
             note,
@@ -707,8 +711,10 @@ impl Tools {
         prerequisite_id: &str,
         workspace_root: Option<&str>,
     ) -> Result<BlockingDependency> {
-        let dependency =
-            BlockingDependency::new(IssueId::new(dependent_id), IssueId::new(prerequisite_id))?;
+        let dependency = BlockingDependency::new(
+            parse_issue_id(dependent_id)?,
+            parse_issue_id(prerequisite_id)?,
+        )?;
         let mut storage = self.mutation_storage_for(workspace_root).await?;
         storage.add_blocking_dependency(dependency.clone()).await?;
         save_or_reload(storage.as_mut()).await?;
@@ -728,8 +734,10 @@ impl Tools {
         prerequisite_id: &str,
         workspace_root: Option<&str>,
     ) -> Result<BlockingDependency> {
-        let dependency =
-            BlockingDependency::new(IssueId::new(dependent_id), IssueId::new(prerequisite_id))?;
+        let dependency = BlockingDependency::new(
+            parse_issue_id(dependent_id)?,
+            parse_issue_id(prerequisite_id)?,
+        )?;
         let mut storage = self.mutation_storage_for(workspace_root).await?;
         storage.remove_blocking_dependency(&dependency).await?;
         save_or_reload(storage.as_mut()).await?;
@@ -751,10 +759,10 @@ impl Tools {
         let storage = storage.read().await;
         match query {
             BlockingDependencyListQuery::PrerequisitesOf { dependent_id } => Ok(storage
-                .blocking_prerequisites(&IssueId::new(dependent_id))
+                .blocking_prerequisites(&parse_issue_id(dependent_id)?)
                 .await?),
             BlockingDependencyListQuery::DependentsOf { prerequisite_id } => Ok(storage
-                .blocking_dependents(&IssueId::new(prerequisite_id))
+                .blocking_dependents(&parse_issue_id(prerequisite_id)?)
                 .await?),
         }
     }
@@ -771,11 +779,12 @@ impl Tools {
         depth: Option<usize>,
         workspace_root: Option<&str>,
     ) -> Result<BlockingDependencyTreeResponse> {
+        let dependent_id = parse_issue_id(dependent_id)?;
         let storage = self.storage_for(workspace_root).await?;
         let storage = storage.read().await;
         let max_depth = depth.filter(|depth| *depth != 0);
         let prerequisites = storage
-            .blocking_dependency_tree(&IssueId::new(dependent_id), max_depth)
+            .blocking_dependency_tree(&dependent_id, max_depth)
             .await?
             .into_iter()
             .map(|(dependency, depth)| BlockingDependencyTreeEntry {
@@ -804,7 +813,7 @@ impl Tools {
         workspace_root: Option<&str>,
     ) -> Result<RelatedAssociation> {
         let association =
-            RelatedAssociation::new(IssueId::new(issue_id), IssueId::new(related_issue_id))?;
+            RelatedAssociation::new(parse_issue_id(issue_id)?, parse_issue_id(related_issue_id)?)?;
         let mut storage = self.mutation_storage_for(workspace_root).await?;
         storage.add_related_association(association.clone()).await?;
         save_or_reload(storage.as_mut()).await?;
@@ -825,7 +834,7 @@ impl Tools {
         workspace_root: Option<&str>,
     ) -> Result<RelatedAssociation> {
         let association =
-            RelatedAssociation::new(IssueId::new(issue_id), IssueId::new(related_issue_id))?;
+            RelatedAssociation::new(parse_issue_id(issue_id)?, parse_issue_id(related_issue_id)?)?;
         let mut storage = self.mutation_storage_for(workspace_root).await?;
         storage.remove_related_association(&association).await?;
         save_or_reload(storage.as_mut()).await?;
@@ -844,11 +853,10 @@ impl Tools {
         issue_id: &str,
         workspace_root: Option<&str>,
     ) -> Result<Vec<RelatedAssociation>> {
+        let issue_id = parse_issue_id(issue_id)?;
         let storage = self.storage_for(workspace_root).await?;
         let storage = storage.read().await;
-        Ok(storage
-            .related_associations(&IssueId::new(issue_id))
-            .await?)
+        Ok(storage.related_associations(&issue_id).await?)
     }
 
     /// Add one directed Discovery Origin.
@@ -865,8 +873,8 @@ impl Tools {
         workspace_root: Option<&str>,
     ) -> Result<DiscoveryOrigin> {
         let origin = DiscoveryOrigin::new(
-            IssueId::new(discovered_issue_id),
-            IssueId::new(source_issue_id),
+            parse_issue_id(discovered_issue_id)?,
+            parse_issue_id(source_issue_id)?,
         )?;
         let mut storage = self.mutation_storage_for(workspace_root).await?;
         storage.add_discovery_origin(origin.clone()).await?;
@@ -888,8 +896,8 @@ impl Tools {
         workspace_root: Option<&str>,
     ) -> Result<DiscoveryOrigin> {
         let origin = DiscoveryOrigin::new(
-            IssueId::new(discovered_issue_id),
-            IssueId::new(source_issue_id),
+            parse_issue_id(discovered_issue_id)?,
+            parse_issue_id(source_issue_id)?,
         )?;
         let mut storage = self.mutation_storage_for(workspace_root).await?;
         storage.remove_discovery_origin(&origin).await?;
@@ -909,11 +917,10 @@ impl Tools {
         discovered_issue_id: &str,
         workspace_root: Option<&str>,
     ) -> Result<Vec<DiscoveryOrigin>> {
+        let discovered_issue_id = parse_issue_id(discovered_issue_id)?;
         let storage = self.storage_for(workspace_root).await?;
         let storage = storage.read().await;
-        Ok(storage
-            .discovery_origins(&IssueId::new(discovered_issue_id))
-            .await?)
+        Ok(storage.discovery_origins(&discovered_issue_id).await?)
     }
     /// Attach one unparented child to an Epic.
     ///
@@ -928,7 +935,7 @@ impl Tools {
         parent_id: &str,
         workspace_root: Option<&str>,
     ) -> Result<Parentage> {
-        let parentage = Parentage::new(IssueId::new(child_id), IssueId::new(parent_id))?;
+        let parentage = Parentage::new(parse_issue_id(child_id)?, parse_issue_id(parent_id)?)?;
         let mut storage = self.mutation_storage_for(workspace_root).await?;
         let parentage = storage.set_parent(parentage).await?;
         save_or_reload(storage.as_mut()).await?;
@@ -947,8 +954,9 @@ impl Tools {
         child_id: &str,
         workspace_root: Option<&str>,
     ) -> Result<Parentage> {
+        let child_id = parse_issue_id(child_id)?;
         let mut storage = self.mutation_storage_for(workspace_root).await?;
-        let parentage = storage.clear_parent(&IssueId::new(child_id)).await?;
+        let parentage = storage.clear_parent(&child_id).await?;
         save_or_reload(storage.as_mut()).await?;
         Ok(parentage)
     }
@@ -966,7 +974,7 @@ impl Tools {
         parent_id: &str,
         workspace_root: Option<&str>,
     ) -> Result<Parentage> {
-        let parentage = Parentage::new(IssueId::new(child_id), IssueId::new(parent_id))?;
+        let parentage = Parentage::new(parse_issue_id(child_id)?, parse_issue_id(parent_id)?)?;
         let mut storage = self.mutation_storage_for(workspace_root).await?;
         storage.move_parent(parentage.clone()).await?;
         save_or_reload(storage.as_mut()).await?;
@@ -983,9 +991,10 @@ impl Tools {
         child_id: &str,
         workspace_root: Option<&str>,
     ) -> Result<Option<Parentage>> {
+        let child_id = parse_issue_id(child_id)?;
         let storage = self.storage_for(workspace_root).await?;
         let storage = storage.read().await;
-        Ok(storage.parent_of(&IssueId::new(child_id)).await?)
+        Ok(storage.parent_of(&child_id).await?)
     }
 
     /// Reopen a closed issue.
@@ -1002,10 +1011,10 @@ impl Tools {
         workspace_root: Option<&str>,
     ) -> Result<Issue> {
         debug!("Reopening issue");
+        let id = parse_issue_id(issue_id)?;
         let note = reason.map(NoteContent::reopening_reason).transpose()?;
         let mut storage = self.mutation_storage_for(workspace_root).await?;
 
-        let id = IssueId::new(issue_id);
         let current = storage
             .get(&id)
             .await?
@@ -1083,9 +1092,9 @@ impl Tools {
         workspace_root: Option<&str>,
     ) -> Result<Issue> {
         debug!("Adding label to issue");
+        let id = parse_issue_id(issue_id)?;
         let mut storage = self.mutation_storage_for(workspace_root).await?;
 
-        let id = IssueId::new(issue_id);
         let issue = storage.add_label(&id, label).await?;
         save_or_reload(storage.as_mut()).await?;
         debug!("Added label");
@@ -1105,9 +1114,9 @@ impl Tools {
         workspace_root: Option<&str>,
     ) -> Result<Issue> {
         debug!("Removing label from issue");
+        let id = parse_issue_id(issue_id)?;
         let mut storage = self.mutation_storage_for(workspace_root).await?;
 
-        let id = IssueId::new(issue_id);
         let issue = storage.remove_label(&id, label).await?;
         save_or_reload(storage.as_mut()).await?;
         debug!("Removed label");
@@ -1126,10 +1135,10 @@ impl Tools {
         workspace_root: Option<&str>,
     ) -> Result<Vec<String>> {
         debug!("Listing labels for issue");
+        let id = parse_issue_id(issue_id)?;
         let storage = self.storage_for(workspace_root).await?;
         let storage = storage.read().await;
 
-        let id = IssueId::new(issue_id);
         let issue = storage
             .get(&id)
             .await?

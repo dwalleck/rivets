@@ -1496,6 +1496,16 @@ mod tests {
     }
 
     #[test]
+    fn test_to_mcp_error_classifies_invalid_issue_id_as_invalid_params() {
+        use rivets::domain::IssueIdError;
+        use rmcp::model::ErrorCode;
+
+        let err = to_mcp_error(&Error::InvalidIssueId(IssueIdError::Empty));
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+        assert_eq!(err.message, "Issue ID cannot be empty");
+    }
+
+    #[test]
     fn test_to_mcp_error_classifies_rejected_transition_as_invalid_params() {
         use rivets::domain::{IssueStatus, StatusTransitionError};
         use rmcp::model::ErrorCode;
