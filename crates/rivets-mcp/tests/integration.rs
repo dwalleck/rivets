@@ -16,8 +16,8 @@ use rivets::error::{Error as RivetsError, StorageError};
 use rivets_mcp::context::Context;
 use rivets_mcp::error::Error;
 use rivets_mcp::models::{
-    BlockingDependencyListQuery, CreateParams, IssueKindInput, ListParams, ReadyParams,
-    UpdateParams,
+    BlockingDependencyListQuery, BlockingDependencyTreeResponse, CreateParams, IssueKindInput,
+    ListParams, ReadyParams, UpdateParams,
 };
 use rivets_mcp::tools::Tools;
 use rmcp::model::Content;
@@ -1448,6 +1448,64 @@ async fn test_explicit_workspace_cache_eviction_preserves_current_context() {
 // ============================================================================
 // Dependency Tests
 // ============================================================================
+fn relationship_value(dependent: &Issue, prerequisite: &Issue) -> Value {
+    json!({
+        "dependent_id": dependent.id,
+        "prerequisite_id": prerequisite.id
+    })
+}
+
+fn assert_relationship_wire(actual: &BlockingDependency, dependent: &Issue, prerequisite: &Issue) {
+    assert_eq!(actual.dependent_id(), &dependent.id);
+    assert_eq!(actual.prerequisite_id(), &prerequisite.id);
+    assert_eq!(
+        serde_json::to_value(actual).expect("relationship should serialize"),
+        relationship_value(dependent, prerequisite)
+    );
+}
+
+fn assert_relationship_list_wire(
+    actual: &[BlockingDependency],
+    expected: &[(&Issue, &Issue)],
+    sort_key: &str,
+) {
+    let mut expected = expected
+        .iter()
+        .map(|(dependent, prerequisite)| relationship_value(dependent, prerequisite))
+        .collect::<Vec<_>>();
+    expected.sort_by(|left, right| left[sort_key].as_str().cmp(&right[sort_key].as_str()));
+    assert_eq!(
+        serde_json::to_value(actual).expect("relationships should serialize"),
+        Value::Array(expected)
+    );
+}
+
+fn assert_tree_wire(
+    actual: &BlockingDependencyTreeResponse,
+    dependent: &Issue,
+    prerequisites: [&Issue; 2],
+) {
+    let mut expected = prerequisites
+        .map(|prerequisite| {
+            let mut row = relationship_value(dependent, prerequisite);
+            row["depth"] = json!(1);
+            row
+        })
+        .to_vec();
+    expected.sort_by(|left, right| {
+        left["prerequisite_id"]
+            .as_str()
+            .cmp(&right["prerequisite_id"].as_str())
+    });
+    assert_eq!(
+        serde_json::to_value(actual).expect("tree should serialize"),
+        json!({
+            "root_dependent_id": dependent.id,
+            "prerequisites": expected
+        })
+    );
+}
+
 async fn assert_blocking_dependency_queries(
     tools: &Tools,
     dependent: &Issue,
@@ -1472,6 +1530,11 @@ async fn assert_blocking_dependency_queries(
     let mut expected = vec![prerequisite_a.id.to_string(), prerequisite_b.id.to_string()];
     expected.sort();
     assert_eq!(actual, expected);
+    assert_relationship_list_wire(
+        &prerequisites,
+        &[(dependent, prerequisite_a), (dependent, prerequisite_b)],
+        "prerequisite_id",
+    );
 
     let dependents = tools
         .blocking_dependency_list(
@@ -1492,6 +1555,14 @@ async fn assert_blocking_dependency_queries(
             .iter()
             .any(|edge| edge.dependent_id() == &second_dependent.id)
     );
+    assert_relationship_list_wire(
+        &dependents,
+        &[
+            (dependent, prerequisite_a),
+            (second_dependent, prerequisite_a),
+        ],
+        "dependent_id",
+    );
 
     let tree = tools
         .blocking_dependency_tree(dependent.id.as_str(), Some(1), None)
@@ -1504,6 +1575,7 @@ async fn assert_blocking_dependency_queries(
             .iter()
             .all(|entry| entry.depth == 1 && entry.dependent_id == dependent.id.as_str())
     );
+    assert_tree_wire(&tree, dependent, [prerequisite_a, prerequisite_b]);
     dependents
 }
 
@@ -1548,8 +1620,7 @@ async fn blocking_dependency_mcp_direction_and_context_recreation() {
         )
         .await
         .unwrap();
-    assert_eq!(added.dependent_id(), &second_dependent.id);
-    assert_eq!(added.prerequisite_id(), &prerequisite_a.id);
+    assert_relationship_wire(&added, &second_dependent, &prerequisite_a);
 
     let dependents = assert_blocking_dependency_queries(
         &tools,
@@ -1573,7 +1644,7 @@ async fn blocking_dependency_mcp_direction_and_context_recreation() {
         .unwrap();
     assert_eq!(persisted, dependents);
 
-    restarted
+    let removed = restarted
         .blocking_dependency_remove(
             second_dependent.id.as_str(),
             prerequisite_a.id.as_str(),
@@ -1581,6 +1652,7 @@ async fn blocking_dependency_mcp_direction_and_context_recreation() {
         )
         .await
         .unwrap();
+    assert_relationship_wire(&removed, &second_dependent, &prerequisite_a);
     let records = std::fs::read_to_string(issues_path).unwrap();
     let second_record: Value = records
         .lines()
@@ -3807,6 +3879,21 @@ async fn test_closing_blocker_unblocks_dependent() {
         ready.iter().any(|i| i.id == dependent.id),
         "Dependent should be ready after blocker is closed"
     );
+
+    let restarted = create_tools();
+    set_context(&restarted, workspace.path()).await;
+    let retained = restarted
+        .blocking_dependency_list(
+            &BlockingDependencyListQuery::PrerequisitesOf {
+                dependent_id: dependent.id.to_string(),
+            },
+            None,
+        )
+        .await
+        .expect("closed prerequisite relationship should reload");
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].dependent_id(), &dependent.id);
+    assert_eq!(retained[0].prerequisite_id(), &blocker.id);
 }
 
 /// Test stats are accurate after various operations.
