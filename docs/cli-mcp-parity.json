@@ -40,7 +40,13 @@
     },
     {
       "id": "canonical-issue-id-input",
-      "contract": "Both adapters enforce the canonical prefix-suffix Issue ID grammar before lookup or mutation."
+      "contract": "Both adapters enforce the canonical prefix-suffix Issue ID grammar before lookup or mutation.",
+      "status": "conformant",
+      "evidence": [
+        "crates/rivets/src/cli/mod.rs::tests::all_issue_id_inputs_use_domain_parser",
+        "crates/rivets-mcp/tests/integration.rs::every_mcp_issue_id_operation_rejects_malformed_input_before_storage",
+        "crates/rivets-mcp/tests/integration.rs::cli_and_mcp_issue_id_parsing_have_the_same_semantics"
+      ]
     },
     {
       "id": "canonical-label-input",

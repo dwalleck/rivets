@@ -43,18 +43,18 @@ Interface Parity follows canonical domain language. `status` remains a current c
 
 ## Required cross-cutting contract
 
-| Rule | Contract |
-|---|---|
-| `explicit-query-limit` | List Issues, Ready Issues, and Stale Issues require an explicit limit in both adapters. |
-| `intent-specific-ordering` | List Issues orders newest-created first; Ready Issues uses Hybrid ordering; Stale Issues orders oldest-updated first. |
-| `stale-excludes-closed` | Stale Issues excludes Closed Issues unless the caller explicitly filters for Closed Workflow State. |
-| `canonical-issue-id-input` | Both adapters enforce the canonical prefix-suffix Issue ID grammar before lookup or mutation. |
-| `canonical-label-input` | Labels are 1-50 lowercase ASCII alphanumeric characters with internal hyphens or underscores, start and end alphanumeric, and contain no consecutive separators. |
-| `canonical-workflow` | Open, In Progress, and Closed are the only Workflow States; Blocked and Ready are derived conditions. |
-| `canonical-assignment` | Assignment changes through Claim and Release intents, not blind general update. Closing clears Assignment and reopening produces an unassigned Open Issue. |
-| `canonical-relationships` | Blocking Dependency, Parentage, Related Association, and Discovery Origin use dedicated intents and their ADR-0002 invariants; generic dependency operations are legacy. |
-| `show-complete-relationships` | Show Issue returns the Issue and complete canonical relationship views in both adapters; presentation and protocol envelopes may differ. |
-| `same-semantic-result` | Shared intents return the same domain information and error meaning even when adapter envelopes differ. |
+| Rule | Status | Contract | Evidence |
+|---|---|---|---|
+| `explicit-query-limit` | `pending` | List Issues, Ready Issues, and Stale Issues require an explicit limit in both adapters. | — |
+| `intent-specific-ordering` | `pending` | List Issues orders newest-created first; Ready Issues uses Hybrid ordering; Stale Issues orders oldest-updated first. | — |
+| `stale-excludes-closed` | `pending` | Stale Issues excludes Closed Issues unless the caller explicitly filters for Closed Workflow State. | — |
+| `canonical-issue-id-input` | `conformant` | Both adapters enforce the canonical prefix-suffix Issue ID grammar before lookup or mutation. | `crates/rivets/src/cli/mod.rs::tests::all_issue_id_inputs_use_domain_parser`; `crates/rivets-mcp/tests/integration.rs::every_mcp_issue_id_operation_rejects_malformed_input_before_storage`; `crates/rivets-mcp/tests/integration.rs::cli_and_mcp_issue_id_parsing_have_the_same_semantics` |
+| `canonical-label-input` | `pending` | Labels are 1-50 lowercase ASCII alphanumeric characters with internal hyphens or underscores, start and end alphanumeric, and contain no consecutive separators. | — |
+| `canonical-workflow` | `pending` | Open, In Progress, and Closed are the only Workflow States; Blocked and Ready are derived conditions. | — |
+| `canonical-assignment` | `pending` | Assignment changes through Claim and Release intents, not blind general update. Closing clears Assignment and reopening produces an unassigned Open Issue. | — |
+| `canonical-relationships` | `pending` | Blocking Dependency, Parentage, Related Association, and Discovery Origin use dedicated intents and their ADR-0002 invariants; generic dependency operations are legacy. | — |
+| `show-complete-relationships` | `pending` | Show Issue returns the Issue and complete canonical relationship views in both adapters; presentation and protocol envelopes may differ. | — |
+| `same-semantic-result` | `pending` | Shared intents return the same domain information and error meaning even when adapter envelopes differ. | — |
 
 ## Operation coverage matrix
 

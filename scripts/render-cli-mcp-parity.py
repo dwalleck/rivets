@@ -91,9 +91,21 @@ def render(registry: dict[str, Any]) -> str:
     lines.extend(["", "## Adapter mechanics", ""])
     lines.extend(f"- {item}" for item in registry["adapter_mechanics"])
 
-    lines.extend(["", "## Required cross-cutting contract", "", "| Rule | Contract |", "|---|---|"])
+    lines.extend(
+        [
+            "",
+            "## Required cross-cutting contract",
+            "",
+            "| Rule | Status | Contract | Evidence |",
+            "|---|---|---|---|",
+        ]
+    )
     for rule in registry["target_rules"]:
-        lines.append(f"| `{markdown(rule['id'])}` | {markdown(rule['contract'])} |")
+        evidence = "; ".join(f"`{markdown(item)}`" for item in rule.get("evidence", [])) or "—"
+        lines.append(
+            f"| `{markdown(rule['id'])}` | `{markdown(rule.get('status', 'pending'))}` | "
+            f"{markdown(rule['contract'])} | {evidence} |"
+        )
 
     lines.extend(
         [

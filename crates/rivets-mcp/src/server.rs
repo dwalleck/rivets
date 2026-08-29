@@ -801,6 +801,7 @@ mod tests {
         decision: ParityDecision,
         current_parity_values: BTreeMap<String, String>,
         target_status_values: BTreeMap<String, String>,
+        target_rules: Vec<ParityTargetRule>,
         operations: Vec<ParityOperation>,
         delivery_groups: Vec<ParityDeliveryGroup>,
     }
@@ -809,6 +810,16 @@ mod tests {
     struct ParityDecision {
         id: String,
         path: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ParityTargetRule {
+        id: String,
+        contract: String,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        evidence: Vec<String>,
     }
 
     #[derive(Debug, Deserialize)]
@@ -940,6 +951,58 @@ mod tests {
             "parity registry decision does not exist: {}",
             decision_path.display()
         );
+    }
+
+    fn validate_target_rules(registry: &ParityRegistry) {
+        let mut rule_ids = BTreeSet::new();
+        for rule in &registry.target_rules {
+            assert!(
+                rule_ids.insert(rule.id.as_str()),
+                "duplicate parity target rule: {}",
+                rule.id
+            );
+            assert!(
+                !rule.contract.trim().is_empty(),
+                "parity target rule must state its contract: {}",
+                rule.id
+            );
+            if let Some(status) = &rule.status {
+                assert!(
+                    ["pending", "conformant"].contains(&status.as_str()),
+                    "unknown parity target rule status for {}: {status}",
+                    rule.id
+                );
+                assert!(
+                    status != "conformant" || !rule.evidence.is_empty(),
+                    "conformant parity target rule must name behavioral evidence: {}",
+                    rule.id
+                );
+            }
+        }
+
+        let canonical_issue_id = registry
+            .target_rules
+            .iter()
+            .find(|rule| rule.id == "canonical-issue-id-input")
+            .expect("canonical Issue ID target rule must exist");
+        assert_eq!(
+            canonical_issue_id.status.as_deref(),
+            Some("conformant"),
+            "canonical Issue ID rule may be conformant only with cross-adapter fences"
+        );
+        for expected in [
+            "crates/rivets/src/cli/mod.rs::tests::all_issue_id_inputs_use_domain_parser",
+            "crates/rivets-mcp/tests/integration.rs::every_mcp_issue_id_operation_rejects_malformed_input_before_storage",
+            "crates/rivets-mcp/tests/integration.rs::cli_and_mcp_issue_id_parsing_have_the_same_semantics",
+        ] {
+            assert!(
+                canonical_issue_id
+                    .evidence
+                    .iter()
+                    .any(|evidence| evidence == expected),
+                "canonical Issue ID rule is missing behavioral evidence: {expected}"
+            );
+        }
     }
 
     fn classify_registry_operations(registry: &ParityRegistry) -> ClassifiedSurfaces {
@@ -1171,6 +1234,7 @@ mod tests {
     fn parity_registry_classifies_every_cli_leaf_and_mcp_tool() {
         let registry = parity_registry();
         validate_registry_header(&registry);
+        validate_target_rules(&registry);
         let classified = classify_registry_operations(&registry);
 
         assert_required_future_intents(&registry);
