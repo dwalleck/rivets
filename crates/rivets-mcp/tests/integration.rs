@@ -9,8 +9,8 @@
 
 use chrono::{DateTime, Utc};
 use rivets::domain::{
-    BlockingDependency, Issue, IssueKind, IssueStatus, ResourceTarget, StatusTransitionError,
-    WorkspacePath,
+    BlockingDependency, DiscoveryOrigin, Issue, IssueKind, IssueStatus, RelatedAssociation,
+    ResourceTarget, StatusTransitionError, WorkspacePath,
 };
 use rivets_mcp::context::Context;
 use rivets_mcp::error::Error;
@@ -1640,6 +1640,190 @@ async fn blocking_dependency_mcp_direction_and_context_recreation() {
     );
 
     assert_blocking_input_errors(&restarted, &dependent).await;
+}
+
+async fn assert_relationship_mcp_errors(
+    tools: &Tools,
+    workspace: &std::path::Path,
+    issue_a: &Issue,
+    issue_c: &Issue,
+) {
+    let issues_path = workspace.join(".rivets/issues.jsonl");
+    let before_errors = std::fs::read(&issues_path).unwrap();
+    assert!(matches!(
+        tools
+            .related_add(issue_a.id.as_str(), issue_a.id.as_str(), None)
+            .await,
+        Err(Error::InvalidRelatedAssociation(_))
+    ));
+    assert!(matches!(
+        tools
+            .discovery_add(issue_c.id.as_str(), issue_c.id.as_str(), None)
+            .await,
+        Err(Error::InvalidDiscoveryOrigin(_))
+    ));
+    assert!(matches!(
+        tools
+            .discovery_add(issue_c.id.as_str(), issue_a.id.as_str(), None)
+            .await,
+        Err(Error::DuplicateDiscoveryOrigin { .. })
+    ));
+    assert!(matches!(
+        tools
+            .discovery_add(issue_a.id.as_str(), issue_c.id.as_str(), None)
+            .await,
+        Err(Error::CircularDiscoveryOrigin { .. })
+    ));
+    assert!(matches!(
+        tools
+            .related_add(issue_a.id.as_str(), "test-missing", None)
+            .await,
+        Err(Error::IssueNotFound(issue_id)) if issue_id == "test-missing"
+    ));
+    assert_eq!(std::fs::read(&issues_path).unwrap(), before_errors);
+}
+
+async fn assert_relationship_restart_and_removal(
+    workspace: &std::path::Path,
+    issue_a: &Issue,
+    issue_b: &Issue,
+    issue_c: &Issue,
+    related: RelatedAssociation,
+    discovery_a: DiscoveryOrigin,
+    discovery_b: DiscoveryOrigin,
+) {
+    let mut expected_discovery = vec![discovery_a.clone(), discovery_b.clone()];
+    expected_discovery.sort();
+    let restarted = create_tools();
+    set_context(&restarted, workspace).await;
+    assert_eq!(
+        restarted
+            .related_list(issue_a.id.as_str(), None)
+            .await
+            .unwrap(),
+        vec![related.clone()]
+    );
+    assert_eq!(
+        restarted
+            .discovery_list(issue_c.id.as_str(), None)
+            .await
+            .unwrap(),
+        expected_discovery
+    );
+    assert_eq!(
+        restarted
+            .related_remove(issue_b.id.as_str(), issue_a.id.as_str(), None)
+            .await
+            .unwrap(),
+        related
+    );
+    assert_eq!(
+        restarted
+            .discovery_remove(issue_c.id.as_str(), issue_a.id.as_str(), None)
+            .await
+            .unwrap(),
+        discovery_a
+    );
+    assert!(
+        restarted
+            .related_list(issue_a.id.as_str(), None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        restarted
+            .discovery_list(issue_c.id.as_str(), None)
+            .await
+            .unwrap(),
+        vec![discovery_b]
+    );
+}
+
+#[tokio::test]
+async fn related_and_discovery_mcp_direction_and_context_recreation() {
+    let workspace = create_temp_workspace();
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+    let issue_a = create_issue(&tools, "Issue A").await;
+    let issue_b = create_issue(&tools, "Issue B").await;
+    let issue_c = create_issue(&tools, "Issue C").await;
+
+    let related = tools
+        .related_add(
+            issue_b.id.as_str(),
+            issue_a.id.as_str(),
+            Some(workspace.path().to_str().unwrap()),
+        )
+        .await
+        .unwrap();
+    let mut expected_endpoints = [issue_a.id.clone(), issue_b.id.clone()];
+    expected_endpoints.sort();
+    assert_eq!(related.left_issue_id(), &expected_endpoints[0]);
+    assert_eq!(related.right_issue_id(), &expected_endpoints[1]);
+    assert_eq!(
+        serde_json::to_value(&related).unwrap(),
+        json!({
+            "left_issue_id": expected_endpoints[0],
+            "right_issue_id": expected_endpoints[1]
+        })
+    );
+
+    let duplicate_related = tools
+        .related_add(issue_a.id.as_str(), issue_b.id.as_str(), None)
+        .await
+        .unwrap();
+    assert_eq!(duplicate_related, related);
+    let related_from_right = tools
+        .related_list(expected_endpoints[1].as_str(), None)
+        .await
+        .unwrap();
+    assert_eq!(related_from_right, vec![related.clone()]);
+    let restarted_after_related = create_tools();
+    set_context(&restarted_after_related, workspace.path()).await;
+    assert_eq!(
+        restarted_after_related
+            .related_list(expected_endpoints[1].as_str(), None)
+            .await
+            .unwrap(),
+        vec![related.clone()],
+        "a fresh MCP context must observe the persisted Related mutation"
+    );
+
+    let discovery_a = tools
+        .discovery_add(issue_c.id.as_str(), issue_a.id.as_str(), None)
+        .await
+        .unwrap();
+    let discovery_b = tools
+        .discovery_add(issue_c.id.as_str(), issue_b.id.as_str(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&discovery_a).unwrap(),
+        json!({
+            "discovered_issue_id": issue_c.id,
+            "source_issue_id": issue_a.id
+        })
+    );
+    let listed_discovery = tools
+        .discovery_list(issue_c.id.as_str(), None)
+        .await
+        .unwrap();
+    let mut expected_discovery = vec![discovery_a.clone(), discovery_b.clone()];
+    expected_discovery.sort();
+    assert_eq!(listed_discovery, expected_discovery);
+
+    assert_relationship_mcp_errors(&tools, workspace.path(), &issue_a, &issue_c).await;
+    assert_relationship_restart_and_removal(
+        workspace.path(),
+        &issue_a,
+        &issue_b,
+        &issue_c,
+        related,
+        discovery_a,
+        discovery_b,
+    )
+    .await;
 }
 
 /// Test ready-to-work excludes blocked issues.

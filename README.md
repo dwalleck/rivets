@@ -119,6 +119,10 @@ change their identity. Discovery Origins are directed from the discovered Issue
 to a source Issue, may record multiple sources, and reject duplicates and
 Discovery-only cycles. Neither relationship affects Blocked or Ready status.
 
+The MCP equivalents are `related_add`, `related_remove`, `related_list`,
+`discovery_add`, `discovery_remove`, and `discovery_list`, with the same
+endpoint names and semantics.
+
 ### Labels
 
 ```bash
