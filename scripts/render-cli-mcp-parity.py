@@ -19,11 +19,6 @@ def markdown(value: object) -> str:
     return str(value).replace("|", "\\|").replace("\n", "<br>")
 
 
-def label(value: str) -> str:
-    """Turn a registry identifier into a display label."""
-    return value.replace("_", " ").title()
-
-
 def surfaces(adapter: dict[str, Any]) -> str:
     """Render current adapter surfaces, including non-leaf forms."""
     values = [f"`{value}`" for value in adapter.get("surfaces", [])]
@@ -115,8 +110,8 @@ def render(registry: dict[str, Any]) -> str:
                 title=markdown(operation["title"]),
                 identifier=markdown(operation["id"]),
                 requirement=markdown(operation["requirement"]),
-                cli=surfaces(operation["cli"]),
-                mcp=surfaces(operation["mcp"]),
+                cli=markdown(surfaces(operation["cli"])),
+                mcp=markdown(surfaces(operation["mcp"])),
                 current=markdown(operation["current_parity"]),
                 target=markdown(operation["target_status"]),
             )
@@ -186,8 +181,8 @@ def render(registry: dict[str, Any]) -> str:
                 title=markdown(group["title"]),
                 identifier=markdown(group["id"]),
                 issue=markdown(group["tracking_issue"]),
-                intents=intents,
-                blocked_by=blocked_by,
+                intents=markdown(intents),
+                blocked_by=markdown(blocked_by),
             )
         )
 
