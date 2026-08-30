@@ -415,35 +415,32 @@ fn test_cli_list_with_filters(initialized_dir: TempDir) {
 }
 
 #[rstest]
-#[case::open("open")]
-#[case::in_progress("in_progress")]
-#[case::in_progress_alias("in-progress")]
-#[case::blocked("blocked")]
-#[case::closed("closed")]
-fn test_cli_list_status_filter_parsing(initialized_dir: TempDir, #[case] status: &str) {
-    // Verify all status filter values are accepted by the CLI parser
-    let output = run_rivets_in_dir(initialized_dir.path(), &["list", "--status", status]);
-    assert!(
-        output.status.success(),
-        "Status filter '{}' should be valid. Stderr: {}",
-        status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
+fn canonical_workflow_state_inputs(initialized_dir: TempDir) {
+    for status in ["open", "in_progress", "in-progress", "closed"] {
+        let output = run_rivets_in_dir(initialized_dir.path(), &["list", "--status", status]);
+        assert!(
+            output.status.success(),
+            "Workflow State '{status}' should be valid. Stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
-#[test]
-fn test_cli_list_invalid_status_rejected() {
-    // Regression fence: invalid enum strings must fail with clap's exit-2
-    // "invalid value" error, listing the possible values.
-    let dir = tempfile::tempdir().expect("tempdir");
-    let output = run_rivets_in_dir(dir.path(), &["list", "--status", "bogus"]);
-    assert_eq!(output.status.code(), Some(2));
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("invalid value 'bogus' for '--status <STATUS>'"),
-        "stderr: {stderr}"
-    );
-    assert!(stderr.contains("possible values: open, in_progress, blocked, closed"));
+    for rejected in ["blocked", "bogus"] {
+        let output = run_rivets_in_dir(initialized_dir.path(), &["list", "--status", rejected]);
+        assert_eq!(output.status.code(), Some(2));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!(
+                "invalid value '{rejected}' for '--status <STATUS>'"
+            )),
+            "stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("possible values: open, in_progress, closed"),
+            "stderr: {stderr}"
+        );
+        assert!(!stderr.contains("possible values: open, in_progress, blocked"));
+    }
 }
 
 #[rstest]
@@ -1281,6 +1278,74 @@ fn test_cli_stats_with_issues(initialized_dir: TempDir) {
     assert!(stdout.contains("By Priority:"));
 }
 
+#[rstest]
+fn stats_and_frontier_output_separate_lifecycle_from_blocked(initialized_dir: TempDir) {
+    let prerequisite = create_issue(initialized_dir.path(), "Prerequisite", &[]);
+    let dependent = create_issue(initialized_dir.path(), "Dependent", &[]);
+    let in_progress = create_issue(initialized_dir.path(), "In progress", &[]);
+    let closed = create_issue(initialized_dir.path(), "Closed", &[]);
+    run_rivets_in_dir(
+        initialized_dir.path(),
+        &["update", &in_progress, "--status", "in_progress"],
+    );
+    run_rivets_in_dir(initialized_dir.path(), &["close", &closed]);
+    let add = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "blocking-dependency",
+            "add",
+            "--dependent",
+            &dependent,
+            "--prerequisite",
+            &prerequisite,
+        ],
+    );
+    assert!(add.status.success());
+
+    let text = run_rivets_in_dir(initialized_dir.path(), &["stats"]);
+    assert!(text.status.success());
+    let stdout = String::from_utf8_lossy(&text.stdout);
+    assert!(!stdout.contains("  Blocked:"));
+    assert!(stdout.contains("Blocked by Dependencies: 1"));
+
+    let json = run_rivets_in_dir(initialized_dir.path(), &["--json", "stats"]);
+    assert!(json.status.success());
+    let json: serde_json::Value =
+        serde_json::from_slice(&json.stdout).expect("stats output is JSON");
+    let by_status = json["by_status"]
+        .as_object()
+        .expect("by_status is an object");
+    let mut keys = by_status.keys().map(String::as_str).collect::<Vec<_>>();
+    keys.sort_unstable();
+    assert_eq!(keys, ["closed", "in_progress", "open"]);
+    assert_eq!(by_status["open"], 2);
+    assert_eq!(by_status["in_progress"], 1);
+    assert_eq!(by_status["closed"], 1);
+    assert_eq!(json["blocked_by_dependencies"], 1);
+
+    let blocked = run_rivets_in_dir(initialized_dir.path(), &["--json", "blocked"]);
+    assert!(blocked.status.success());
+    let blocked: serde_json::Value =
+        serde_json::from_slice(&blocked.stdout).expect("blocked output is JSON");
+    assert_eq!(blocked[0]["issue"]["status"], "open");
+    assert_eq!(blocked[0]["blocked_by"][0]["status"], "open");
+
+    let ready = run_rivets_in_dir(initialized_dir.path(), &["--json", "ready"]);
+    assert!(ready.status.success());
+    let ready: serde_json::Value =
+        serde_json::from_slice(&ready.stdout).expect("ready output is JSON");
+    assert!(
+        ready
+            .as_array()
+            .expect("ready output is an array")
+            .iter()
+            .all(|issue| matches!(
+                issue["status"].as_str(),
+                Some("open" | "in_progress" | "closed")
+            ))
+    );
+}
+
 // ============================================================================
 // JSON Output Tests
 // ============================================================================
@@ -1465,56 +1530,45 @@ fn test_cli_info_json_output(initialized_dir: TempDir) {
 }
 
 #[rstest]
-fn test_cli_info_with_blocked_status(initialized_dir: TempDir) {
-    // Create issues with all statuses including blocked
+fn test_cli_info_with_canonical_states(initialized_dir: TempDir) {
     create_issue(initialized_dir.path(), "Open issue", &[]);
-    let id2 = create_issue(initialized_dir.path(), "In progress issue", &[]);
-    let id3 = create_issue(initialized_dir.path(), "Blocked issue", &[]);
-    let id4 = create_issue(initialized_dir.path(), "Closed issue", &[]);
+    let in_progress_id = create_issue(initialized_dir.path(), "In progress issue", &[]);
+    let closed_id = create_issue(initialized_dir.path(), "Closed issue", &[]);
 
     run_rivets_in_dir(
         initialized_dir.path(),
-        &["update", &id2, "--status", "in_progress"],
+        &["update", &in_progress_id, "--status", "in_progress"],
     );
-    run_rivets_in_dir(
-        initialized_dir.path(),
-        &["update", &id3, "--status", "blocked"],
-    );
-    run_rivets_in_dir(initialized_dir.path(), &["close", &id4]);
+    run_rivets_in_dir(initialized_dir.path(), &["close", &closed_id]);
 
     let output = run_rivets_in_dir(initialized_dir.path(), &["info"]);
-
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("4 total"));
+    assert!(stdout.contains("3 total"));
     assert!(stdout.contains("1 open"));
     assert!(stdout.contains("1 in progress"));
-    assert!(stdout.contains("1 blocked"));
     assert!(stdout.contains("1 closed"));
+    assert!(!stdout.contains("blocked"));
 }
 
 #[rstest]
-fn test_cli_info_json_includes_blocked_count(initialized_dir: TempDir) {
-    // Create issues with all statuses
+fn test_cli_info_json_has_only_canonical_state_counts(initialized_dir: TempDir) {
     create_issue(initialized_dir.path(), "Open issue", &[]);
-    let id2 = create_issue(initialized_dir.path(), "Blocked issue", &[]);
-
-    run_rivets_in_dir(
-        initialized_dir.path(),
-        &["update", &id2, "--status", "blocked"],
-    );
+    let closed_id = create_issue(initialized_dir.path(), "Closed issue", &[]);
+    run_rivets_in_dir(initialized_dir.path(), &["close", &closed_id]);
 
     let output = run_rivets_in_dir(initialized_dir.path(), &["--json", "info"]);
-
     assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
     let json: serde_json::Value =
-        serde_json::from_str(&stdout).expect("Output should be valid JSON");
-    assert_eq!(json["issues"]["total"], 2, "Should have 2 total issues");
-    assert_eq!(json["issues"]["open"], 1, "Should have 1 open issue");
-    assert_eq!(json["issues"]["blocked"], 1, "Should have 1 blocked issue");
-    assert_eq!(json["issues"]["closed"], 0, "Should have 0 closed issues");
+        serde_json::from_slice(&output.stdout).expect("Output should be valid JSON");
+    let issues = json["issues"].as_object().expect("issues is an object");
+    let mut keys = issues.keys().map(String::as_str).collect::<Vec<_>>();
+    keys.sort_unstable();
+    assert_eq!(keys, ["closed", "in_progress", "open", "total"]);
+    assert_eq!(issues["total"], 2);
+    assert_eq!(issues["open"], 1);
+    assert_eq!(issues["in_progress"], 0);
+    assert_eq!(issues["closed"], 1);
 }
 
 // ============================================================================

@@ -874,7 +874,6 @@ mod tests {
     #[rstest]
     #[case::open("open", IssueStatus::Open)]
     #[case::in_progress("in_progress", IssueStatus::InProgress)]
-    #[case::blocked("blocked", IssueStatus::Blocked)]
     #[case::closed("closed", IssueStatus::Closed)]
     fn validate_status_accepts_canonical(#[case] input: &str, #[case] expected: IssueStatus) {
         assert_eq!(validate_status(input).expect("canonical status"), expected);
@@ -883,6 +882,7 @@ mod tests {
     #[rstest]
     #[case::uppercase("OPEN")]
     #[case::cli_alias("in-progress")]
+    #[case::blocked("blocked")]
     #[case::unknown("bogus")]
     #[case::empty("")]
     fn validate_status_rejects_lenient(#[case] lenient: &str) {
@@ -897,7 +897,7 @@ mod tests {
             } => {
                 assert_eq!(field, "status");
                 assert_eq!(value, lenient);
-                assert_eq!(valid_values, "open, in_progress, blocked, closed");
+                assert_eq!(valid_values, "open, in_progress, closed");
             }
             other => panic!("expected InvalidArgument, got: {other:?}"),
         }

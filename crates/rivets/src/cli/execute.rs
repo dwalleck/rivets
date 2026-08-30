@@ -97,7 +97,6 @@ pub async fn execute_info(
                     "total": counts.total,
                     "open": counts.open,
                     "in_progress": counts.in_progress,
-                    "blocked": counts.blocked,
                     "closed": counts.closed
                 }
             }))?;
@@ -110,8 +109,8 @@ pub async fn execute_info(
             println!("Issue prefix: {}", issue_prefix);
             println!();
             println!(
-                "Issues: {} total ({} open, {} in progress, {} blocked, {} closed)",
-                counts.total, counts.open, counts.in_progress, counts.blocked, counts.closed
+                "Issues: {} total ({} open, {} in progress, {} closed)",
+                counts.total, counts.open, counts.in_progress, counts.closed
             );
         }
     }
@@ -476,7 +475,6 @@ struct StatusCounts {
     total: usize,
     open: usize,
     in_progress: usize,
-    blocked: usize,
     closed: usize,
 }
 
@@ -491,7 +489,6 @@ fn count_by_status(issues: &[crate::domain::Issue]) -> StatusCounts {
             match issue.status {
                 IssueStatus::Open => counts.open += 1,
                 IssueStatus::InProgress => counts.in_progress += 1,
-                IssueStatus::Blocked => counts.blocked += 1,
                 IssueStatus::Closed => counts.closed += 1,
             }
             counts
@@ -1333,7 +1330,6 @@ pub async fn execute_stats(
                 "by_status": {
                     "open": counts.open,
                     "in_progress": counts.in_progress,
-                    "blocked": counts.blocked,
                     "closed": counts.closed
                 },
                 "ready": ready,
@@ -1366,7 +1362,6 @@ pub async fn execute_stats(
             println!("By Status:");
             println!("  Open:        {}", counts.open);
             println!("  In Progress: {}", counts.in_progress);
-            println!("  Blocked:     {}", counts.blocked);
             println!("  Closed:      {}", counts.closed);
             println!();
             println!("Ready to Work: {}", ready);
@@ -1607,7 +1602,6 @@ mod tests {
             assert_eq!(counts.total, 0);
             assert_eq!(counts.open, 0);
             assert_eq!(counts.in_progress, 0);
-            assert_eq!(counts.blocked, 0);
             assert_eq!(counts.closed, 0);
         }
 
@@ -1619,7 +1613,6 @@ mod tests {
             assert_eq!(counts.total, 1);
             assert_eq!(counts.open, 0);
             assert_eq!(counts.in_progress, 1);
-            assert_eq!(counts.blocked, 0);
             assert_eq!(counts.closed, 0);
         }
 
@@ -1636,15 +1629,14 @@ mod tests {
             issues[0].status = IssueStatus::Open;
             issues[1].status = IssueStatus::Open;
             issues[2].status = IssueStatus::InProgress;
-            issues[3].status = IssueStatus::Blocked;
+            issues[3].status = IssueStatus::InProgress;
             issues[4].status = IssueStatus::Closed;
             issues[5].status = IssueStatus::Closed;
 
             let counts = count_by_status(&issues);
             assert_eq!(counts.total, 6);
             assert_eq!(counts.open, 2);
-            assert_eq!(counts.in_progress, 1);
-            assert_eq!(counts.blocked, 1);
+            assert_eq!(counts.in_progress, 2);
             assert_eq!(counts.closed, 2);
         }
 
@@ -1653,7 +1645,7 @@ mod tests {
             let issues: Vec<_> = (1..=5)
                 .map(|i| {
                     let mut issue = create_test_issue(&format!("test-{}", i));
-                    issue.status = IssueStatus::Blocked;
+                    issue.status = IssueStatus::InProgress;
                     issue
                 })
                 .collect();
@@ -1661,8 +1653,7 @@ mod tests {
             let counts = count_by_status(&issues);
             assert_eq!(counts.total, 5);
             assert_eq!(counts.open, 0);
-            assert_eq!(counts.in_progress, 0);
-            assert_eq!(counts.blocked, 5);
+            assert_eq!(counts.in_progress, 5);
             assert_eq!(counts.closed, 0);
         }
     }

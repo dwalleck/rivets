@@ -671,7 +671,6 @@ async fn close_rejects_already_closed_issue_without_mutation() {
 #[rstest]
 #[case::open(None, IssueStatus::Open)]
 #[case::in_progress(Some("in_progress"), IssueStatus::InProgress)]
-#[case::blocked(Some("blocked"), IssueStatus::Blocked)]
 #[tokio::test]
 async fn reopen_rejects_non_closed_issue_without_mutation(
     #[case] setup_status: Option<&str>,
@@ -3065,22 +3064,7 @@ async fn test_invalid_status_values(#[case] invalid_value: &str, #[case] expecte
         } => {
             assert_eq!(field, expected_field);
             assert_eq!(value, invalid_value);
-            assert!(
-                valid_values.contains("open"),
-                "Error should mention valid status 'open'"
-            );
-            assert!(
-                valid_values.contains("closed"),
-                "Error should mention valid status 'closed'"
-            );
-            assert!(
-                valid_values.contains("in_progress"),
-                "Error should mention valid status 'in_progress'"
-            );
-            assert!(
-                valid_values.contains("blocked"),
-                "Error should mention valid status 'blocked'"
-            );
+            assert_eq!(valid_values, "open, in_progress, closed");
         }
         e => panic!("Expected InvalidArgument error, got: {e:?}"),
     }
@@ -3229,7 +3213,7 @@ async fn test_error_message_format() {
 
 /// Test complete issue lifecycle through multiple state transitions.
 #[tokio::test]
-async fn test_complete_issue_lifecycle_all_states() {
+async fn canonical_workflow_state_inputs() {
     let workspace = create_temp_workspace();
     let tools = create_tools();
     set_context(&tools, workspace.path()).await;
@@ -3252,6 +3236,42 @@ async fn test_complete_issue_lifecycle_all_states() {
 
     assert_eq!(created.status, IssueStatus::Open);
     assert!(created.closed_at.is_none());
+    let rejected = tools
+        .update(update_params(
+            created.id.as_str(),
+            None,
+            None,
+            Some("blocked"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ))
+        .await
+        .expect_err("Blocked is derived and must not be accepted as Workflow State");
+    match rejected {
+        Error::InvalidArgument {
+            field,
+            value,
+            valid_values,
+        } => {
+            assert_eq!(field, "status");
+            assert_eq!(value, "blocked");
+            assert_eq!(valid_values, "open, in_progress, closed");
+        }
+        other => panic!("expected InvalidArgument, got {other:?}"),
+    }
+    assert_eq!(
+        tools
+            .show(created.id.as_str(), None)
+            .await
+            .expect("rejected update preserves Issue")
+            .status,
+        IssueStatus::Open
+    );
 
     // Transition to in_progress
     let in_progress = tools
@@ -3272,51 +3292,6 @@ async fn test_complete_issue_lifecycle_all_states() {
         .expect("update to in_progress should succeed");
 
     assert_eq!(in_progress.status, IssueStatus::InProgress);
-
-    // Transition to blocked
-    let blocked = tools
-        .update(update_params(
-            created.id.as_str(),
-            None,
-            None,
-            Some("blocked"),
-            None,
-            None, // issue_kind
-            None,
-            None,
-            None,
-            None, // labels
-            None, // workspace_root
-        ))
-        .await
-        .expect("update to blocked should succeed");
-
-    assert_eq!(blocked.status, IssueStatus::Blocked);
-
-    // Verify it appears in blocked list
-    let _blocked_issues = tools.blocked(None).await.expect("blocked should succeed");
-    // Note: Issue is blocked by status, not by dependency, so it may or may not appear
-    // in blocked_issues depending on implementation
-
-    // Back to in_progress
-    let resumed = tools
-        .update(update_params(
-            created.id.as_str(),
-            None,
-            None,
-            Some("in_progress"),
-            None,
-            None, // issue_kind
-            None,
-            None,
-            None,
-            None, // labels
-            None, // workspace_root
-        ))
-        .await
-        .expect("update back to in_progress should succeed");
-
-    assert_eq!(resumed.status, IssueStatus::InProgress);
 
     // Close the issue
     let closed = tools

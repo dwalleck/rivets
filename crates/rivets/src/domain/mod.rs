@@ -435,9 +435,6 @@ pub enum IssueStatus {
     #[value(name = "in_progress", alias = "in-progress")]
     InProgress,
 
-    /// Issue is blocked by dependencies
-    Blocked,
-
     /// Issue has been completed
     Closed,
 }
@@ -447,7 +444,6 @@ impl fmt::Display for IssueStatus {
         match self {
             Self::Open => write!(f, "open"),
             Self::InProgress => write!(f, "in_progress"),
-            Self::Blocked => write!(f, "blocked"),
             Self::Closed => write!(f, "closed"),
         }
     }
@@ -529,7 +525,6 @@ impl FromStr for IssueStatus {
         match s {
             "open" => Ok(Self::Open),
             "in_progress" => Ok(Self::InProgress),
-            "blocked" => Ok(Self::Blocked),
             "closed" => Ok(Self::Closed),
             _ => Err(IssueStatusError::UnknownStatus {
                 status: s.to_string(),
@@ -1194,7 +1189,6 @@ mod tests {
     fn test_issue_status_display() {
         assert_eq!(format!("{}", IssueStatus::Open), "open");
         assert_eq!(format!("{}", IssueStatus::InProgress), "in_progress");
-        assert_eq!(format!("{}", IssueStatus::Blocked), "blocked");
         assert_eq!(format!("{}", IssueStatus::Closed), "closed");
     }
 
@@ -1229,7 +1223,6 @@ mod tests {
         for status in [
             IssueStatus::Open,
             IssueStatus::InProgress,
-            IssueStatus::Blocked,
             IssueStatus::Closed,
         ] {
             assert_eq!(status.to_string().parse::<IssueStatus>(), Ok(status));
@@ -1238,7 +1231,14 @@ mod tests {
 
     #[test]
     fn test_issue_status_from_str_rejects_noncanonical() {
-        for invalid in ["", "OPEN", "in-progress", "in_progress ", "bogus"] {
+        for invalid in [
+            "",
+            "OPEN",
+            "blocked",
+            "in-progress",
+            "in_progress ",
+            "bogus",
+        ] {
             let error = invalid.parse::<IssueStatus>().unwrap_err();
             assert!(matches!(
                 error,
@@ -1305,7 +1305,6 @@ mod tests {
         for status in [
             IssueStatus::Open,
             IssueStatus::InProgress,
-            IssueStatus::Blocked,
             IssueStatus::Closed,
         ] {
             let json = serde_json::to_string(&status).expect("status serializes");
@@ -1348,14 +1347,22 @@ mod tests {
     }
 
     // ===== Valid-Values Fence Tests =====
+    #[test]
+    fn issue_status_canonical_vocabulary() {
+        let actual = IssueStatus::value_variants()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+
+        assert_eq!(actual, ["open", "in_progress", "closed"]);
+        assert!("blocked".parse::<IssueStatus>().is_err());
+        assert!(serde_json::from_str::<IssueStatus>("\"blocked\"").is_err());
+    }
 
     #[test]
     fn test_valid_values_list_every_canonical_name() {
         // Pins the derived error-message lists to the shipped wording.
-        assert_eq!(
-            IssueStatus::valid_values(),
-            "open, in_progress, blocked, closed"
-        );
+        assert_eq!(IssueStatus::valid_values(), "open, in_progress, closed");
         assert_eq!(
             DependencyType::valid_values(),
             "blocks, related, parent-child, discovered-from"
@@ -1373,7 +1380,6 @@ mod tests {
         for status in [
             IssueStatus::Open,
             IssueStatus::InProgress,
-            IssueStatus::Blocked,
             IssueStatus::Closed,
         ] {
             let possible = status.to_possible_value().expect("possible value");
@@ -2128,18 +2134,12 @@ mod tests {
         #[rstest]
         #[case::open_to_closed(IssueStatus::Open, IssueStatus::Closed, true)]
         #[case::in_progress_to_closed(IssueStatus::InProgress, IssueStatus::Closed, true)]
-        #[case::blocked_to_closed(IssueStatus::Blocked, IssueStatus::Closed, true)]
         #[case::closed_to_closed(IssueStatus::Closed, IssueStatus::Closed, false)]
         #[case::closed_to_open(IssueStatus::Closed, IssueStatus::Open, true)]
         #[case::closed_to_in_progress(IssueStatus::Closed, IssueStatus::InProgress, true)]
-        #[case::closed_to_blocked(IssueStatus::Closed, IssueStatus::Blocked, true)]
         #[case::open_to_open(IssueStatus::Open, IssueStatus::Open, false)]
         #[case::in_progress_to_open(IssueStatus::InProgress, IssueStatus::Open, false)]
-        #[case::blocked_to_open(IssueStatus::Blocked, IssueStatus::Open, false)]
         #[case::open_to_in_progress(IssueStatus::Open, IssueStatus::InProgress, true)]
-        #[case::open_to_blocked(IssueStatus::Open, IssueStatus::Blocked, true)]
-        #[case::in_progress_to_blocked(IssueStatus::InProgress, IssueStatus::Blocked, true)]
-        #[case::blocked_to_in_progress(IssueStatus::Blocked, IssueStatus::InProgress, true)]
         fn transition_matrix(
             #[case] current: IssueStatus,
             #[case] target: IssueStatus,
@@ -2173,7 +2173,6 @@ mod tests {
         #[rstest]
         #[case::open(IssueStatus::Open)]
         #[case::in_progress(IssueStatus::InProgress)]
-        #[case::blocked(IssueStatus::Blocked)]
         fn reopening_a_non_closed_issue_yields_not_closed(#[case] current: IssueStatus) {
             let error = current
                 .validate_transition(IssueStatus::Open)
