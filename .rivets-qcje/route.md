@@ -37,3 +37,17 @@ falsifiable-design → budgeted-plan → checkpointed-build
 ## Terminal criterion
 
 Structural — every downstream artifact satisfies its owning stage's completion criterion, ending with no FAIL in checkpointed-build's recorded gate.
+
+## Terminal disposition
+
+Complete. Slice gates for C1-C11 recorded no FAIL:
+
+- `29039e1` — typed Parentage, atomic storage operations, persistence, and C1-C5/C9 falsifiers.
+- `f85ddb3` — Epic lifecycle invariants, Parentage-independent readiness, and C6-C8 falsifiers.
+- `2f7b5d6` — role-safe CLI commands, real-process restart contract, and C10 falsifier.
+- `7cbaef3` — guarded MCP tools, router/error/lock/cache contracts, and C11 falsifier.
+
+Final proof: `cargo fmt --all -- --check`, Clippy with all targets/features and
+warnings denied, and `cargo test -p rivets -p rivets-mcp` passed with 861 tests
+and 5 ignored production-scale fences. Both Parentage production-scale fences
+were run explicitly and passed their 100 ms assertions.
