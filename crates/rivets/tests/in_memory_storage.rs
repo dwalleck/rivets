@@ -841,6 +841,315 @@ async fn parentage_jsonl_restart_round_trip() {
 }
 
 #[tokio::test]
+async fn epic_close_reports_active_direct_children_without_cascade() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let parent = storage.create(epic("Parent")).await.unwrap();
+    let open_child = storage.create(create_test_issue("Open")).await.unwrap();
+    let mut in_progress_input = create_test_issue("In progress");
+    in_progress_input.assignee = Some("active-owner".to_string());
+    let in_progress_child = storage.create(in_progress_input).await.unwrap();
+    let closed_child = storage.create(create_test_issue("Closed")).await.unwrap();
+    storage
+        .update(
+            &in_progress_child.id,
+            IssueUpdate {
+                status: Some(IssueStatus::InProgress),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    storage
+        .update(
+            &closed_child.id,
+            IssueUpdate {
+                status: Some(IssueStatus::Closed),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    for child_id in [&open_child.id, &in_progress_child.id, &closed_child.id] {
+        storage
+            .set_parent(Parentage::new(child_id.clone(), parent.id.clone()).unwrap())
+            .await
+            .unwrap();
+    }
+
+    let mut expected = vec![open_child.id.clone(), in_progress_child.id.clone()];
+    expected.sort();
+    let error = storage
+        .update(
+            &parent.id,
+            IssueUpdate {
+                status: Some(IssueStatus::Closed),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::InvalidParentage(ParentageError::ActiveChildren {
+            epic_id,
+            child_ids
+        }) if epic_id == parent.id && child_ids == expected
+    ));
+    assert_eq!(
+        storage.get(&parent.id).await.unwrap().unwrap().status,
+        IssueStatus::Open
+    );
+    assert_eq!(
+        storage.get(&open_child.id).await.unwrap().unwrap().status,
+        IssueStatus::Open
+    );
+    assert_eq!(
+        storage
+            .get(&in_progress_child.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        IssueStatus::InProgress
+    );
+
+    for child_id in [&open_child.id, &in_progress_child.id] {
+        storage
+            .update(
+                child_id,
+                IssueUpdate {
+                    status: Some(IssueStatus::Closed),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        storage
+            .update(
+                &parent.id,
+                IssueUpdate {
+                    status: Some(IssueStatus::Closed),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .status,
+        IssueStatus::Closed
+    );
+}
+
+#[tokio::test]
+async fn closed_parent_attachment_and_reopen_truth_table() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let closed_parent = storage.create(epic("Closed parent")).await.unwrap();
+    let open_parent = storage.create(epic("Open parent")).await.unwrap();
+    storage
+        .update(
+            &closed_parent.id,
+            IssueUpdate {
+                status: Some(IssueStatus::Closed),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let open_child = storage
+        .create(create_test_issue("Open child"))
+        .await
+        .unwrap();
+    let mut in_progress_input = create_test_issue("In progress child");
+    in_progress_input.assignee = Some("active-owner".to_string());
+    let in_progress_child = storage.create(in_progress_input).await.unwrap();
+    storage
+        .update(
+            &in_progress_child.id,
+            IssueUpdate {
+                status: Some(IssueStatus::InProgress),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let closed_child = storage
+        .create(create_test_issue("Closed child"))
+        .await
+        .unwrap();
+    storage
+        .update(
+            &closed_child.id,
+            IssueUpdate {
+                status: Some(IssueStatus::Closed),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    for child in [&open_child, &in_progress_child] {
+        let error = storage
+            .set_parent(Parentage::new(child.id.clone(), closed_parent.id.clone()).unwrap())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::InvalidParentage(ParentageError::ClosedParent {
+                child_id,
+                parent_id
+            }) if child_id == child.id && parent_id == closed_parent.id
+        ));
+    }
+
+    let closed_parentage =
+        Parentage::new(closed_child.id.clone(), closed_parent.id.clone()).unwrap();
+    assert_eq!(
+        storage.set_parent(closed_parentage.clone()).await.unwrap(),
+        closed_parentage
+    );
+    let error = storage
+        .update(
+            &closed_child.id,
+            IssueUpdate {
+                status: Some(IssueStatus::Open),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::InvalidParentage(ParentageError::ClosedParent {
+            child_id,
+            parent_id
+        }) if child_id == closed_child.id && parent_id == closed_parent.id
+    ));
+    assert_eq!(
+        storage.get(&closed_child.id).await.unwrap().unwrap().status,
+        IssueStatus::Closed
+    );
+
+    let original = Parentage::new(open_child.id.clone(), open_parent.id.clone()).unwrap();
+    storage.set_parent(original.clone()).await.unwrap();
+    let rejected = Parentage::new(open_child.id.clone(), closed_parent.id.clone()).unwrap();
+    let error = storage.move_parent(rejected).await.unwrap_err();
+    assert!(matches!(
+        error,
+        Error::InvalidParentage(ParentageError::ClosedParent {
+            child_id,
+            parent_id
+        }) if child_id == open_child.id && parent_id == closed_parent.id
+    ));
+    assert_eq!(
+        storage.parent_of(&open_child.id).await.unwrap(),
+        Some(original)
+    );
+}
+
+#[tokio::test]
+#[ignore = "production-scale lifecycle budget"]
+async fn epic_close_10k_direct_children_budget() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let parent = storage.create(epic("Parent")).await.unwrap();
+    let mut active_child_ids = Vec::with_capacity(6_667);
+
+    for index in 0..10_000 {
+        let mut child_input = create_test_issue(&format!("Child {index}"));
+        if index % 3 == 1 {
+            child_input.assignee = Some("active-owner".to_string());
+        }
+        let child = storage.create(child_input).await.unwrap();
+        storage
+            .set_parent(Parentage::new(child.id.clone(), parent.id.clone()).unwrap())
+            .await
+            .unwrap();
+        match index % 3 {
+            0 => active_child_ids.push(child.id),
+            1 => {
+                storage
+                    .update(
+                        &child.id,
+                        IssueUpdate {
+                            status: Some(IssueStatus::InProgress),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                active_child_ids.push(child.id);
+            }
+            2 => {
+                storage
+                    .update(
+                        &child.id,
+                        IssueUpdate {
+                            status: Some(IssueStatus::Closed),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+    }
+    active_child_ids.sort();
+
+    let started = Instant::now();
+    let error = storage
+        .update(
+            &parent.id,
+            IssueUpdate {
+                status: Some(IssueStatus::Closed),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    let elapsed = started.elapsed();
+    assert!(matches!(
+        error,
+        Error::InvalidParentage(ParentageError::ActiveChildren {
+            epic_id,
+            child_ids
+        }) if epic_id == parent.id && child_ids == active_child_ids
+    ));
+    assert!(
+        elapsed <= Duration::from_millis(100),
+        "direct-child validation took {elapsed:?}"
+    );
+
+    for child_id in active_child_ids {
+        storage
+            .update(
+                &child_id,
+                IssueUpdate {
+                    status: Some(IssueStatus::Closed),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        storage
+            .update(
+                &parent.id,
+                IssueUpdate {
+                    status: Some(IssueStatus::Closed),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .status,
+        IssueStatus::Closed
+    );
+}
+
+#[tokio::test]
 async fn legacy_parentage_never_propagates_blockedness() {
     let mut storage = new_in_memory_storage("test".to_string());
     let blocker = storage.create(create_test_issue("Blocker")).await.unwrap();

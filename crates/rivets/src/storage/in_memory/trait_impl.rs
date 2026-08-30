@@ -25,9 +25,10 @@ use std::collections::HashSet;
 fn validate_parent_candidate(inner: &InMemoryStorageInner, parentage: &Parentage) -> Result<()> {
     let child_id = parentage.child_id();
     let parent_id = parentage.parent_id();
-    if !inner.issues.contains_key(child_id) {
-        return Err(Error::IssueNotFound(child_id.clone()));
-    }
+    let child = inner
+        .issues
+        .get(child_id)
+        .ok_or_else(|| Error::IssueNotFound(child_id.clone()))?;
     let parent = inner
         .issues
         .get(parent_id)
@@ -36,6 +37,13 @@ fn validate_parent_candidate(inner: &InMemoryStorageInner, parentage: &Parentage
         return Err(ParentageError::ParentNotEpic {
             parent_id: parent_id.clone(),
             actual_kind: parent.issue_kind,
+        }
+        .into());
+    }
+    if parent.status == IssueStatus::Closed && child.status != IssueStatus::Closed {
+        return Err(ParentageError::ClosedParent {
+            child_id: child_id.clone(),
+            parent_id: parent_id.clone(),
         }
         .into());
     }
@@ -49,6 +57,23 @@ fn validate_parent_candidate(inner: &InMemoryStorageInner, parentage: &Parentage
     Ok(())
 }
 
+fn active_parentage_child_ids(
+    inner: &InMemoryStorageInner,
+    parent_id: &IssueId,
+) -> Result<Vec<IssueId>> {
+    let mut active_child_ids = Vec::new();
+    for parentage in parentage_children_impl(&inner.graph, &inner.node_map, parent_id)? {
+        let child_id = parentage.child_id();
+        let child = inner
+            .issues
+            .get(child_id)
+            .ok_or_else(|| Error::IssueNotFound(child_id.clone()))?;
+        if child.status != IssueStatus::Closed {
+            active_child_ids.push(child_id.clone());
+        }
+    }
+    Ok(active_child_ids)
+}
 /// Check whether an Issue matches every common list or Ready criterion.
 fn matches_common_filter(
     issue: &Issue,
@@ -216,6 +241,34 @@ impl IssueStorage for InMemoryStorage {
             candidate.description = description;
         }
         let status = updates.status;
+        if let Some(status) = status {
+            if status == IssueStatus::Closed && candidate.issue_kind == IssueKind::Epic {
+                let child_ids = active_parentage_child_ids(&inner, id)?;
+                if !child_ids.is_empty() {
+                    return Err(ParentageError::ActiveChildren {
+                        epic_id: id.clone(),
+                        child_ids,
+                    }
+                    .into());
+                }
+            }
+            if candidate.status == IssueStatus::Closed
+                && status != IssueStatus::Closed
+                && let Some(parentage) = parentage_of_impl(&inner.graph, &inner.node_map, id)?
+            {
+                let parent = inner
+                    .issues
+                    .get(parentage.parent_id())
+                    .ok_or_else(|| Error::IssueNotFound(parentage.parent_id().clone()))?;
+                if parent.status == IssueStatus::Closed {
+                    return Err(ParentageError::ClosedParent {
+                        child_id: id.clone(),
+                        parent_id: parent.id.clone(),
+                    }
+                    .into());
+                }
+            }
+        }
         if let Some(priority) = updates.priority {
             if priority > MAX_PRIORITY {
                 return Err(Error::InvalidPriority(priority));
