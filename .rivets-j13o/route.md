@@ -37,3 +37,10 @@ prove-it-prototype → falsifiable-design → budgeted-plan → checkpointed-bui
 ## Terminal criterion
 
 Empirical — prove-it-prototype records PASS for every filesystem-lock premise, every later artifact satisfies its owning stage's completion criterion, and checkpointed-build records no FAIL.
+
+Result: 2026-08-30 — **PASS**
+
+- Evidence: Rust 1.94 probe and independent Python `fcntl.flock` oracle agree item-for-item on same-Workspace Busy, different-Workspace acquisition, killed-holder release, and same-process descriptor contention.
+- Slice 1 `b61312b`: all eight checkpoint items PASS for C0/C1/C5/C8. Four named mutations turned their exact fences red and were restored green. Contended acquisition measured 65.15 µs against the 50 ms budget; 32 distinct Workspaces acquired independently.
+- Slice 2 `555b756`: all eight checkpoint items PASS for C2/C3/C4/C6/C7/C9. Six public named mutations turned CLI/MCP/error/record fences red and were restored green. The guarded 10,000-record MCP mutation preserved every record and completed in 89.13 ms against the 2 s budget.
+- Final integration: `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test` PASS; 1,127 tests passed and 3 ignored. Core/CLI/MCP process fences, synchronized Busy→retry, stale-source protection, and every empirical oracle PASS.
