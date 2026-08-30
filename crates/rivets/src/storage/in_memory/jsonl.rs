@@ -298,6 +298,13 @@ pub async fn load_from_jsonl(
                 });
                 continue;
             }
+            if issue.id == dep.depends_on_id {
+                warnings.push(LoadWarning::CircularDependency {
+                    from: issue.id.clone(),
+                    to: dep.depends_on_id.clone(),
+                });
+                continue;
+            }
 
             let creates_cycle = match dep.dep_type {
                 DependencyType::Blocks

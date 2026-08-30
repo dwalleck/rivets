@@ -1824,6 +1824,37 @@ async fn relationship_cycles_are_scoped_by_kind() {
         "a non-Blocking path must not reject a valid Blocking edge"
     );
 }
+#[tokio::test]
+async fn related_self_reference_warns_and_is_skipped_on_load() {
+    let content = concat!(
+        r#"{"id":"test-a","title":"A","description":"Test","status":"open","priority":2,"issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":null,"dependencies":[{"depends_on_id":"test-a","dep_type":"related"},{"depends_on_id":"test-b","dep_type":"related"}],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#,
+        "\n",
+        r#"{"id":"test-b","title":"B","description":"Test","status":"open","priority":2,"issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":null,"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#,
+        "\n",
+    );
+    let file = create_temp_jsonl_file(content);
+
+    let (storage, warnings) = load_from_jsonl(file.path(), "test".to_string())
+        .await
+        .expect("self-referential Related fixture should load resiliently");
+
+    assert_eq!(warnings.len(), 1);
+    assert!(matches!(
+        &warnings[0],
+        LoadWarning::CircularDependency { from, to }
+            if from == &IssueId::new("test-a") && to == &IssueId::new("test-a")
+    ));
+    assert_eq!(
+        storage
+            .related_associations(&IssueId::new("test-a"))
+            .await
+            .expect("valid Related pair should remain queryable"),
+        vec![
+            RelatedAssociation::new(IssueId::new("test-a"), IssueId::new("test-b"))
+                .expect("fixture endpoints are distinct"),
+        ]
+    );
+}
 
 #[tokio::test]
 async fn related_and_discovery_persist_deterministically_across_restart() {

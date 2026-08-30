@@ -953,7 +953,7 @@ impl IssueStorage for MockStorage {
     }
 
     async fn import_issues(&mut self, _issues: Vec<Issue>) -> Result<()> {
-        Self::unsupported("MockStorage::import_issues")
+        Ok(())
     }
 
     async fn export_all(&self) -> Result<Vec<Issue>> {
@@ -961,11 +961,11 @@ impl IssueStorage for MockStorage {
     }
 
     async fn save(&self) -> Result<()> {
-        Self::unsupported("MockStorage::save")
+        Ok(())
     }
 
     async fn reload(&mut self) -> Result<()> {
-        Self::unsupported("MockStorage::reload")
+        Ok(())
     }
 }
 
@@ -1028,6 +1028,24 @@ mod tests {
         let _copy1 = mock;
         let _copy2 = mock; // Still usable - Copy semantics work
         let _: Box<dyn IssueStorage> = Box::new(mock);
+    }
+    #[tokio::test]
+    async fn mock_storage_persistence_methods_are_no_ops() {
+        let mut storage = MockStorage::new();
+        let imported = MockStorage::create_test_issue(IssueId::new("test-import"));
+
+        storage
+            .import_issues(vec![imported])
+            .await
+            .expect("MockStorage import should remain a no-op");
+        storage
+            .save()
+            .await
+            .expect("MockStorage save should remain a no-op");
+        storage
+            .reload()
+            .await
+            .expect("MockStorage reload should remain a no-op");
     }
 
     #[tokio::test]

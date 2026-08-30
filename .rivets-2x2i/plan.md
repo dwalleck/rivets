@@ -5,13 +5,13 @@
 - Route: Structural (`.rivets-2x2i/route.md`).
 - Approved design: `.rivets-2x2i/design.md`, requester approval “I approve this design” on 2026-08-29.
 - Upstream default branch: `origin/main`, discovered with `git symbolic-ref --short refs/remotes/origin/HEAD`.
-- Estimated changed lines: Slice 1 = 320; Slice 2 = 1,200; Slice 3 = 420; Slice 4 = 780; Slice 5 = 1,100; sum = 3,820.
-- Churn margin: 20% = 764 lines. This additive cross-crate change touches exhaustive trait implementations, generated parity output, and integration fixtures whose exact assertion churn is hard to predict.
-- Projected total: 4,584 changed lines. Because this exceeds 4,000, the work is partitioned into two independently mergeable PR increments.
+- Estimated changed lines: Slice 1 = 320; Slice 2 = 1,200; Slice 3 = 420; Slice 4 = 780; Slice 5 = 1,100; review-fix Slice R1 = 100; sum = 3,920.
+- Churn margin: 20% = 784 lines. This additive cross-crate change touches exhaustive trait implementations, generated parity output, integration fixtures, and a review-driven compatibility fence whose exact assertion churn is hard to predict.
+- Projected total: 4,704 changed lines. Because this exceeds 4,000, the work remains partitioned into two independently mergeable PR increments.
 
 ### PR increment: core-relationships
 
-Slices 1–3. Mergeable definition: domain values, public storage interface, in-memory semantics, compatibility persistence, and restart tests compile and pass against `origin/main` without any CLI or MCP caller. Existing Blocking interfaces remain unchanged.
+Slices 1–3 plus review-fix Slice R1. Mergeable definition: domain values, public storage interface, in-memory semantics, compatibility persistence, review-discovered invalid-record and test-utility compatibility fences, and restart tests compile and pass against `origin/main` without any CLI or MCP caller. Existing Blocking interfaces remain unchanged.
 
 ### PR increment: relationship-adapters
 
@@ -180,6 +180,38 @@ Slices 4–5. Mergeable definition: dedicated CLI and MCP add/remove/list operat
 - Apply the C8 lock-bypass mutation and rerun the lock test → the Related add case turns red; restore and green. Apply the C9 router/registry mutation and rerun schema/parity checks → `discovery_list` is named missing; restore and green.
 - `cargo test -p rivets-mcp` → the adapter increment remains independently green over core-relationships.
 
+## Review-fix Slice R1: Reject persisted Related self-reference and preserve MockStorage compatibility
+
+**Claim IDs:** C6. F2 restores an existing test-utility contract and introduces no new design claim; F5 hardens C6.
+
+**Expected behavior:** Loading a persisted self-referential Related record emits one warning and skips the edge while valid Related cycles remain accepted. `MockStorage::import_issues`, `save`, and `reload` retain their pre-PR successful no-op behavior.
+
+**Oracle:** A literal one-record JSONL fixture independently identifies equal owner/target IDs and expects no Related Associations after load; direct calls to the three pre-existing MockStorage methods expect `Ok(())` without inspecting implementation internals.
+
+**Stress fixture:** Load one self-referential Related record beside a valid two-Issue Related pair. Expected: exactly one warning for the self-reference, the self edge is absent, and the valid pair remains queryable. MockStorage receives a non-empty import vector before save/reload and all three operations remain successful no-ops.
+
+**Regression fence:** `crates/rivets/tests/in_memory_resilient_loading.rs::related_self_reference_warns_and_is_skipped_on_load` and `crates/rivets/src/storage/mod.rs::tests::mock_storage_persistence_methods_are_no_ops`.
+
+**Named mutation:** F5: remove the loader's owner/target equality guard; the resilient-loading fence must lose its warning and observe the invalid edge path. F2: return `UnsupportedOperation` from the three MockStorage methods; the compatibility fence must fail.
+
+**Complexity/production scale:** The loader adds one O(1) IssueId equality comparison per compatibility edge, preserving the existing O(E(V+E)) reconstruction bound and the Slice 3 one-second audited-scale maximum. Restored MockStorage methods are O(1) and allocate nothing.
+
+**Wall budget/phase:** N/A — JSONL reconstruction is a one-off Workspace load phase, and MockStorage is a test utility rather than an always-on production phase.
+
+**Files:** `crates/rivets/src/storage/in_memory/jsonl.rs`; `crates/rivets/tests/in_memory_resilient_loading.rs`; `crates/rivets/src/storage/mod.rs`; `.rivets-2x2i/{design.md,plan.md,review-decisions.md}`.
+
+**Estimate:** 30 minutes.
+
+**Diff estimate:** 100 changed lines including workflow records and regression tests.
+
+**PR increment:** core-relationships.
+
+**Commands and expected results:**
+- `cargo test -p rivets --test in_memory_resilient_loading related_self_reference_warns_and_is_skipped_on_load` → one self-reference warning, no self Association, and the valid Related pair remains queryable.
+- `cargo test -p rivets storage::tests::mock_storage_persistence_methods_are_no_ops` → non-empty import, save, and reload all return success.
+- Apply each named mutation and rerun its named fence → the corresponding warning/empty-query or success assertion turns red; restore each mutation and both fences return green.
+- `cargo test -p rivets` → the core increment remains green with compatibility behavior restored.
+
 ## Tracker taxonomy
 
 - Final canonical relationship migration remains assigned to verified Task `rivets-vio8`.
@@ -189,10 +221,10 @@ Slices 4–5. Mergeable definition: dedicated CLI and MCP add/remove/list operat
 
 ## Self-review
 
-- [x] C0–C9 are assigned exactly once; every PENDING falsifier is discharged by its owning slice.
+- [x] C0–C9 remain owned by their original slices; review-fix Slice R1 is explicitly traceable to F2/F5 and hardens C6 without reassigning its implementation ownership.
 - [x] Every slice has all thirteen mandatory fields and every conditional field has an explicit `N/A — reason`.
 - [x] Every claim's permanent fence and named mutation are created in the same slice.
 - [x] Every new loop records asymptotic cost, audited/stress sizes, a maximum accepted cost, and every always-on phase has a wall budget.
-- [x] The 3,820 + 764 = 4,584 review-size projection is partitioned into two independently mergeable increments.
+- [x] The 3,920 + 784 = 4,704 review-size projection remains partitioned into two independently mergeable increments.
 - [x] Tracker taxonomy is applied with verified IDs.
 - [x] No slice is declared complete; checkpointed-build exclusively judges completion.
