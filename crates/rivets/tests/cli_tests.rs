@@ -1300,6 +1300,231 @@ fn blocking_dependency_cli_direction_and_restart(initialized_dir: TempDir) {
 }
 
 #[rstest]
+fn parent_cli_contract_and_restart(initialized_dir: TempDir) {
+    let child = create_issue(initialized_dir.path(), "Child with spaces Ω", &[]);
+    let first_parent = create_issue(initialized_dir.path(), "First Epic", &["--kind", "epic"]);
+    let second_parent = create_issue(initialized_dir.path(), "Second Epic", &["--kind", "epic"]);
+    let non_epic = create_issue(initialized_dir.path(), "Not an Epic", &[]);
+    let blocking = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "blocking-dependency",
+            "add",
+            "--dependent",
+            &child,
+            "--prerequisite",
+            &first_parent,
+        ],
+    );
+    assert!(blocking.status.success());
+
+    let set = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "parent",
+            "set",
+            "--child",
+            &child,
+            "--parent",
+            &first_parent,
+        ],
+    );
+    assert!(
+        set.status.success(),
+        "parent set failed: {}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&set.stdout).trim(),
+        format!("Set parent: {child} -> {first_parent}")
+    );
+
+    let set_retry = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "--json",
+            "parent",
+            "set",
+            "--child",
+            &child,
+            "--parent",
+            &first_parent,
+        ],
+    );
+    let set_retry: serde_json::Value =
+        serde_json::from_slice(&set_retry.stdout).expect("set should return JSON");
+    assert_eq!(
+        set_retry,
+        serde_json::json!({
+            "action": "set",
+            "relationship": "parentage",
+            "child_id": child,
+            "parent_id": first_parent,
+            "status": "success"
+        })
+    );
+
+    let show = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["parent", "show", "--child", &child],
+    );
+    assert!(show.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&show.stdout).trim(),
+        format!("{child} has parent {first_parent}")
+    );
+    let show_json = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["--json", "parent", "show", "--child", &child],
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&show_json.stdout).unwrap(),
+        serde_json::json!({
+            "relationship": "parentage",
+            "child_id": child,
+            "parent_id": first_parent
+        })
+    );
+
+    let before_failed_move =
+        std::fs::read(initialized_dir.path().join(".rivets/issues.jsonl")).unwrap();
+    let failed_move = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["parent", "move", "--child", &child, "--parent", &non_epic],
+    );
+    assert!(!failed_move.status.success());
+    assert!(
+        String::from_utf8_lossy(&failed_move.stderr).contains(&format!(
+            "Issue {non_epic} cannot be a parent because its kind is task, not epic"
+        ))
+    );
+    assert_eq!(
+        std::fs::read(initialized_dir.path().join(".rivets/issues.jsonl")).unwrap(),
+        before_failed_move
+    );
+    let after_failed_move = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["--json", "parent", "show", "--child", &child],
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&after_failed_move.stdout).unwrap()["parent_id"],
+        first_parent
+    );
+
+    let moved = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "parent",
+            "move",
+            "--child",
+            &child,
+            "--parent",
+            &second_parent,
+        ],
+    );
+    assert!(moved.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&moved.stdout).trim(),
+        format!("Moved parent: {child} from {first_parent} to {second_parent}")
+    );
+    let moved_retry = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "--json",
+            "parent",
+            "move",
+            "--child",
+            &child,
+            "--parent",
+            &second_parent,
+        ],
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&moved_retry.stdout).unwrap(),
+        serde_json::json!({
+            "action": "move",
+            "relationship": "parentage",
+            "child_id": child,
+            "previous_parent_id": second_parent,
+            "parent_id": second_parent,
+            "status": "success"
+        })
+    );
+
+    let cleared = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["parent", "clear", "--child", &child],
+    );
+    assert!(cleared.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&cleared.stdout).trim(),
+        format!("Cleared parent: {child} was owned by {second_parent}")
+    );
+    let reset = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "--json",
+            "parent",
+            "set",
+            "--child",
+            &child,
+            "--parent",
+            &first_parent,
+        ],
+    );
+    assert!(reset.status.success());
+    let cleared_json = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["--json", "parent", "clear", "--child", &child],
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&cleared_json.stdout).unwrap(),
+        serde_json::json!({
+            "action": "clear",
+            "relationship": "parentage",
+            "child_id": child,
+            "parent_id": first_parent,
+            "status": "success"
+        })
+    );
+
+    let no_parent = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["parent", "show", "--child", &child],
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&no_parent.stdout).trim(),
+        format!("{child} has no parent")
+    );
+    let no_parent_json = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["--json", "parent", "show", "--child", &child],
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&no_parent_json.stdout).unwrap(),
+        serde_json::json!({
+            "relationship": "parentage",
+            "child_id": child,
+            "parent_id": null
+        })
+    );
+
+    let records = std::fs::read_to_string(initialized_dir.path().join(".rivets/issues.jsonl"))
+        .expect("Issue records should remain readable");
+    let child_record: serde_json::Value = records
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .find(|record: &serde_json::Value| record["id"] == child)
+        .unwrap();
+    assert_eq!(
+        child_record["dependencies"],
+        serde_json::json!([
+            {"depends_on_id": first_parent, "dep_type": "blocks"}
+        ])
+    );
+}
+
+#[rstest]
 fn create_with_prerequisites_is_atomic(initialized_dir: TempDir) {
     let prerequisite = create_issue(initialized_dir.path(), "Prerequisite", &[]);
     let issues_path = initialized_dir.path().join(".rivets/issues.jsonl");

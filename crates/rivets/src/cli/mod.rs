@@ -42,8 +42,9 @@ use crate::app::App;
 pub use args::{
     AssignmentArgs, BlockedArgs, BlockingDependencyAction, BlockingDependencyArgs,
     BlockingDependencyListArgs, CloseArgs, CreateArgs, DeleteArgs, DiscoveryAction, DiscoveryArgs,
-    InfoArgs, InitArgs, LabelAction, LabelArgs, ListArgs, ReadyArgs, RelatedAction, RelatedArgs,
-    ReopenArgs, ResourceAction, ResourceArgs, ShowArgs, StaleArgs, StatsArgs, UpdateArgs,
+    InfoArgs, InitArgs, LabelAction, LabelArgs, ListArgs, ParentAction, ParentArgs, ReadyArgs,
+    RelatedAction, RelatedArgs, ReopenArgs, ResourceAction, ResourceArgs, ShowArgs, StaleArgs,
+    StatsArgs, UpdateArgs,
 };
 
 // Re-export types
@@ -150,6 +151,9 @@ pub enum Commands {
     /// Manage directed, non-blocking Discovery Origins.
     Discovery(DiscoveryArgs),
 
+    /// Manage single-Epic Parentage with explicit child and parent roles.
+    Parent(ParentArgs),
+
     /// Manage issue labels
     ///
     /// Add, remove, or list labels on issues.
@@ -189,6 +193,10 @@ impl Commands {
             Self::BlockingDependency(args) => args.action.mutates_workspace(),
             Self::Related(args) => args.action.mutates_workspace(),
             Self::Discovery(args) => args.action.mutates_workspace(),
+            Self::Parent(args) => matches!(
+                args.action,
+                ParentAction::Set { .. } | ParentAction::Clear { .. } | ParentAction::Move { .. }
+            ),
             Self::Label(args) => args.action.mutates_workspace(),
             Self::Resource(args) => args.action.mutates_workspace(),
             Self::Init(_)
@@ -317,6 +325,9 @@ impl Cli {
             Some(Commands::Discovery(args)) => {
                 let mut app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_discovery(&mut app, args, output_mode).await
+            Some(Commands::Parent(args)) => {
+                let mut app = load_app_from_cwd(mutates_workspace).await?;
+                execute::execute_parent(&mut app, args, output_mode).await
             }
             Some(Commands::Label(args)) => {
                 let mut app = load_app_from_cwd(mutates_workspace).await?;
@@ -421,6 +432,18 @@ mod tests {
                 "--source",
                 "test-def",
             ],
+            &[
+                "parent",
+                "set",
+                "--child",
+                "test-abc",
+                "--parent",
+                "test-def",
+            ],
+            &["parent", "clear", "--child", "test-abc"],
+            &[
+                "parent", "move", "--child", "test-abc", "--parent", "test-def",
+            ],
             &["label", "add", "urgent", "test-abc"],
             &["label", "remove", "urgent", "test-abc"],
             &[
@@ -456,6 +479,7 @@ mod tests {
             &["blocking-dependency", "tree", "--dependent", "test-abc"],
             &["related", "list", "--issue", "test-abc"],
             &["discovery", "list", "--discovered", "test-abc"],
+            &["parent", "show", "--child", "test-abc"],
             &["label", "list", "test-abc"],
             &["label", "list-all"],
             &["resource", "list", "test-abc"],
@@ -465,6 +489,61 @@ mod tests {
         ] {
             assert!(!parses_as_mutation(args), "should not lock read: {args:?}");
         }
+    }
+
+    #[test]
+    fn parent_leaves_parse_explicit_endpoint_roles() {
+        let set = Cli::try_parse_from([
+            "rivets", "parent", "set", "--child", "test-abc", "--parent", "test-def",
+        ])
+        .unwrap();
+        assert!(matches!(
+            set.command,
+            Some(Commands::Parent(ParentArgs {
+                action: ParentAction::Set { child, parent }
+            })) if child == "test-abc" && parent == "test-def"
+        ));
+
+        let clear =
+            Cli::try_parse_from(["rivets", "parent", "clear", "--child", "test-abc"]).unwrap();
+        assert!(matches!(
+            clear.command,
+            Some(Commands::Parent(ParentArgs {
+                action: ParentAction::Clear { child }
+            })) if child == "test-abc"
+        ));
+
+        let moved = Cli::try_parse_from([
+            "rivets", "parent", "move", "--child", "test-abc", "--parent", "test-def",
+        ])
+        .unwrap();
+        assert!(matches!(
+            moved.command,
+            Some(Commands::Parent(ParentArgs {
+                action: ParentAction::Move { child, parent }
+            })) if child == "test-abc" && parent == "test-def"
+        ));
+
+        let show =
+            Cli::try_parse_from(["rivets", "parent", "show", "--child", "test-abc"]).unwrap();
+        assert!(matches!(
+            show.command,
+            Some(Commands::Parent(ParentArgs {
+                action: ParentAction::Show { child }
+            })) if child == "test-abc"
+        ));
+    }
+
+    #[test]
+    fn parent_leaves_reject_missing_or_positional_roles() {
+        assert!(Cli::try_parse_from(["rivets", "parent", "set", "--child", "test-abc"]).is_err());
+        assert!(Cli::try_parse_from(["rivets", "parent", "show", "test-abc"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "rivets", "parent", "clear", "--child", "test-abc", "--parent", "test-def"
+            ])
+            .is_err()
+        );
     }
 
     // ========== CLI Parsing Tests ==========

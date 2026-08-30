@@ -11,6 +11,7 @@ use super::args::{
     CreateArgs, DeleteArgs, DiscoveryAction, DiscoveryArgs, InfoArgs, InitArgs, LabelAction,
     LabelArgs, ListArgs, ReadyArgs, RelatedAction, RelatedArgs, ReopenArgs, ResourceAction,
     ResourceArgs, ShowArgs, StaleArgs, StatsArgs, UpdateArgs,
+    ParentAction, ParentArgs,
 };
 use super::types::{SortOrderArg, SortPolicyArg};
 use crate::output::OutputMode;
@@ -1063,6 +1064,102 @@ pub async fn execute_discovery(
                         );
                     }
                 }
+/// Execute one canonical Parentage operation.
+pub async fn execute_parent(
+    app: &mut crate::app::App,
+    args: &ParentArgs,
+    output_mode: OutputMode,
+) -> Result<()> {
+    use crate::domain::{IssueId, Parentage, ParentageError};
+    use crate::output;
+
+    match &args.action {
+        ParentAction::Set { child, parent } => {
+            let parentage = Parentage::new(IssueId::new(child), IssueId::new(parent))?;
+            app.storage_mut().set_parent(parentage.clone()).await?;
+            app.save().await?;
+            match output_mode {
+                OutputMode::Json => output::print_json(&serde_json::json!({
+                    "action": "set",
+                    "relationship": "parentage",
+                    "child_id": parentage.child_id(),
+                    "parent_id": parentage.parent_id(),
+                    "status": "success"
+                }))?,
+                OutputMode::Text => println!(
+                    "Set parent: {} -> {}",
+                    parentage.child_id(),
+                    parentage.parent_id()
+                ),
+            }
+        }
+        ParentAction::Clear { child } => {
+            let removed = app.storage_mut().clear_parent(&IssueId::new(child)).await?;
+            app.save().await?;
+            match output_mode {
+                OutputMode::Json => output::print_json(&serde_json::json!({
+                    "action": "clear",
+                    "relationship": "parentage",
+                    "child_id": removed.child_id(),
+                    "parent_id": removed.parent_id(),
+                    "status": "success"
+                }))?,
+                OutputMode::Text => println!(
+                    "Cleared parent: {} was owned by {}",
+                    removed.child_id(),
+                    removed.parent_id()
+                ),
+            }
+        }
+        ParentAction::Move { child, parent } => {
+            let child_id = IssueId::new(child);
+            let previous = app.storage().parent_of(&child_id).await?.ok_or_else(|| {
+                ParentageError::NoParent {
+                    child_id: child_id.clone(),
+                }
+            })?;
+            let parentage = Parentage::new(child_id, IssueId::new(parent))?;
+            app.storage_mut().move_parent(parentage.clone()).await?;
+            app.save().await?;
+            match output_mode {
+                OutputMode::Json => output::print_json(&serde_json::json!({
+                    "action": "move",
+                    "relationship": "parentage",
+                    "child_id": parentage.child_id(),
+                    "previous_parent_id": previous.parent_id(),
+                    "parent_id": parentage.parent_id(),
+                    "status": "success"
+                }))?,
+                OutputMode::Text => println!(
+                    "Moved parent: {} from {} to {}",
+                    parentage.child_id(),
+                    previous.parent_id(),
+                    parentage.parent_id()
+                ),
+            }
+        }
+        ParentAction::Show { child } => {
+            let child_id = IssueId::new(child);
+            let parentage = app.storage().parent_of(&child_id).await?;
+            match (output_mode, parentage) {
+                (OutputMode::Json, Some(parentage)) => {
+                    output::print_json(&serde_json::json!({
+                        "relationship": "parentage",
+                        "child_id": parentage.child_id(),
+                        "parent_id": parentage.parent_id()
+                    }))?;
+                }
+                (OutputMode::Json, None) => output::print_json(&serde_json::json!({
+                    "relationship": "parentage",
+                    "child_id": child_id,
+                    "parent_id": null
+                }))?,
+                (OutputMode::Text, Some(parentage)) => println!(
+                    "{} has parent {}",
+                    parentage.child_id(),
+                    parentage.parent_id()
+                ),
+                (OutputMode::Text, None) => println!("{child_id} has no parent"),
             }
         }
     }

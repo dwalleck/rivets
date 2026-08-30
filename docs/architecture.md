@@ -27,7 +27,7 @@ graph TB
     subgraph "CLI Layer (rivets)"
         CLI[CLI Entry Point<br/>main.rs]
         Args[Argument Parser<br/>clap]
-        Commands[Command Handlers<br/>20 top-level commands]
+        Commands[Command Handlers<br/>21 top-level commands]
     end
 
     subgraph "MCP Layer (rivets-mcp)"
@@ -79,8 +79,8 @@ graph TB
 
 - **Entry Point**: `main.rs` with `#[tokio::main(flavor = "current_thread")]`
 - **Argument Parsing**: Clap derive API for type-safe CLI arguments
-- **Commands** (20 top-level): init, info, create, list, show, update, claim, release, close, reopen, delete, ready, blocking-dependency, related, discovery, label, resource, stale, blocked, stats
-- **Validation**: Priority 0-4, enum types (status, kind), explicit Blocking endpoint roles, ID format validation, prefix validation (2-20 alphanumeric characters)
+- **Commands** (21 top-level): init, info, create, list, show, update, claim, release, close, reopen, delete, ready, blocking-dependency, related, discovery, parent, label, resource, stale, blocked, stats
+- **Validation**: Priority 0-4, enum types (status, kind), explicit Blocking and Parentage endpoint roles, ID format validation, prefix validation (2-20 alphanumeric characters)
 
 ### 2. Application Layer (`rivets`)
 

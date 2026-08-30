@@ -17,6 +17,7 @@ Before adding or changing a CLI command, MCP tool, argument, default, validation
 - **Close or reopen**: use `close` / `reopen`, or the corresponding CLI commands, with a concise reason.
 - **Add a Blocking Dependency**: the dependent Issue depends on the prerequisite. Use MCP `blocking_dependency_add`, or `rivets blocking-dependency add --dependent <issue> --prerequisite <issue>`.
 - **Inspect or remove Blocking Dependencies**: use the matching MCP `blocking_dependency_list` / `blocking_dependency_tree` / `blocking_dependency_remove` tools or CLI `blocking-dependency` subcommands. Never reverse dependent and prerequisite wording.
+- **Manage Parentage**: use `rivets parent set|move --child <issue> --parent <epic>`, `rivets parent clear --child <issue>`, or `rivets parent show --child <issue>`. Parentage groups Issues but never makes a child Blocked.
 
 ## When a skill says "publish to the issue tracker"
 
@@ -28,12 +29,11 @@ Load it with `show` so its description, notes, labels, dependencies, and depende
 
 ## Wayfinding operations
 
-Used by `/wayfinder`. The map is one Rivets Epic; until canonical Parentage
-lands in `rivets-qcje`, map membership is represented by `wayfinder:<type>`
-labels rather than a relationship.
+Used by `/wayfinder`. The map is one Rivets Epic; map membership uses canonical
+Parentage rather than labels or generic dependencies.
 
 - **Map**: create an `epic` labelled `wayfinder:map`. Store Destination, Notes, Decisions-so-far, Not-yet-specified, and Out-of-scope in its description.
-- **Child ticket**: create a `task` labelled `wayfinder:<type>`, with its question in the description. Do not create a legacy `parent-child` dependency; canonical set/clear/move/show Parentage is tracked at `rivets-qcje`.
+- **Child ticket**: create a `task` labelled `wayfinder:<type>`, with its question in the description, then set its parent to the map Epic with `rivets parent set --child <ticket> --parent <map>`.
 - **Blocking**: use MCP `blocking_dependency_add`, or `rivets blocking-dependency add --dependent <blocked-ticket> --prerequisite <blocker>`.
 - **Frontier query**: query `ready` with the map's `wayfinder:<type>` label. The default Assignment selector already restricts the result to unassigned Ready Issues. Use the tracker result order because Rivets has no explicit sub-issue order.
 - **Claim**: as the first write, atomically claim the ticket for the driving developer. The Assignment is the claim; status alone is not a claim.
