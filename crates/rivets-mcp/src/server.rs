@@ -1144,7 +1144,6 @@ mod tests {
         let list_schema = serde_json::to_string(&list_tool.input_schema).unwrap();
         assert!(list_schema.contains("prerequisites_of"));
         assert!(list_schema.contains("dependents_of"));
-
     }
 
     #[test]
