@@ -13,7 +13,8 @@
 
 use chrono::Utc;
 use rivets::domain::{
-    BlockingDependency, IssueId, IssueKind, IssueStatus, NewIssue, ResourceError, ResourceRole,
+    BlockingDependency, DiscoveryOrigin, IssueId, IssueKind, IssueStatus, NewIssue,
+    RelatedAssociation, ResourceError, ResourceRole,
 };
 use rivets::storage::in_memory::{
     LoadWarning, MigrationField, load_from_jsonl, new_in_memory_storage, save_to_jsonl,
@@ -1758,4 +1759,199 @@ async fn legacy_relationships_survive_blocking_mutations() {
             {"depends_on_id": "test-prerequisite", "dep_type": "related"}
         ])
     );
+}
+
+#[tokio::test]
+async fn relationship_cycles_are_scoped_by_kind() {
+    let content = concat!(
+        r#"{"id":"test-a","title":"A","description":"Test","status":"open","priority":2,"issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":null,"dependencies":[{"depends_on_id":"test-b","dep_type":"related"},{"depends_on_id":"test-b","dep_type":"discovered-from"}],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#,
+        "\n",
+        r#"{"id":"test-b","title":"B","description":"Test","status":"open","priority":2,"issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":null,"dependencies":[{"depends_on_id":"test-c","dep_type":"related"},{"depends_on_id":"test-c","dep_type":"discovered-from"}],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#,
+        "\n",
+        r#"{"id":"test-c","title":"C","description":"Test","status":"open","priority":2,"issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":null,"dependencies":[{"depends_on_id":"test-a","dep_type":"related"},{"depends_on_id":"test-a","dep_type":"blocks"},{"depends_on_id":"test-a","dep_type":"discovered-from"}],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#,
+        "\n",
+    );
+    let file = create_temp_jsonl_file(content);
+    let (storage, warnings) = load_from_jsonl(file.path(), "test".to_string())
+        .await
+        .expect("mixed relationship fixture should load");
+    assert_eq!(warnings.len(), 1);
+    assert!(matches!(
+        &warnings[0],
+        LoadWarning::CircularDependency { from, to }
+            if from == &IssueId::new("test-c") && to == &IssueId::new("test-a")
+    ));
+
+    let expected_a = vec![
+        RelatedAssociation::new(IssueId::new("test-a"), IssueId::new("test-b")).unwrap(),
+        RelatedAssociation::new(IssueId::new("test-a"), IssueId::new("test-c")).unwrap(),
+    ];
+    assert_eq!(
+        storage
+            .related_associations(&IssueId::new("test-a"))
+            .await
+            .unwrap(),
+        expected_a
+    );
+    assert_eq!(
+        storage
+            .discovery_origins(&IssueId::new("test-a"))
+            .await
+            .unwrap(),
+        vec![DiscoveryOrigin::new(IssueId::new("test-a"), IssueId::new("test-b")).unwrap()]
+    );
+    assert_eq!(
+        storage
+            .discovery_origins(&IssueId::new("test-b"))
+            .await
+            .unwrap(),
+        vec![DiscoveryOrigin::new(IssueId::new("test-b"), IssueId::new("test-c")).unwrap()]
+    );
+    assert!(
+        storage
+            .discovery_origins(&IssueId::new("test-c"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        storage
+            .blocking_prerequisites(&IssueId::new("test-c"))
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "a non-Blocking path must not reject a valid Blocking edge"
+    );
+}
+#[tokio::test]
+async fn related_self_reference_warns_and_is_skipped_on_load() {
+    let content = concat!(
+        r#"{"id":"test-a","title":"A","description":"Test","status":"open","priority":2,"issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":null,"dependencies":[{"depends_on_id":"test-a","dep_type":"related"},{"depends_on_id":"test-b","dep_type":"related"}],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#,
+        "\n",
+        r#"{"id":"test-b","title":"B","description":"Test","status":"open","priority":2,"issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":null,"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#,
+        "\n",
+    );
+    let file = create_temp_jsonl_file(content);
+
+    let (storage, warnings) = load_from_jsonl(file.path(), "test".to_string())
+        .await
+        .expect("self-referential Related fixture should load resiliently");
+
+    assert_eq!(warnings.len(), 1);
+    assert!(matches!(
+        &warnings[0],
+        LoadWarning::CircularDependency { from, to }
+            if from == &IssueId::new("test-a") && to == &IssueId::new("test-a")
+    ));
+    assert_eq!(
+        storage
+            .related_associations(&IssueId::new("test-a"))
+            .await
+            .expect("valid Related pair should remain queryable"),
+        vec![
+            RelatedAssociation::new(IssueId::new("test-a"), IssueId::new("test-b"))
+                .expect("fixture endpoints are distinct"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn related_and_discovery_persist_deterministically_across_restart() {
+    let content = concat!(
+        r#"{"id":"test-a","title":"A","description":"Test","status":"open","priority":2,"issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":null,"dependencies":[{"depends_on_id":"test-b","dep_type":"parent-child"}],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#,
+        "\n",
+        r#"{"id":"test-b","title":"B","description":"Test","status":"open","priority":2,"issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":null,"dependencies":[{"depends_on_id":"test-a","dep_type":"related"}],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#,
+        "\n",
+        r#"{"id":"test-c","title":"C","description":"Test","status":"open","priority":2,"issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":null,"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#,
+        "\n",
+    );
+    let file = create_temp_jsonl_file(content);
+    let (mut storage, warnings) = load_from_jsonl(file.path(), "test".to_string())
+        .await
+        .expect("compatibility relationship fixture should load");
+    assert!(warnings.is_empty());
+
+    let added_related =
+        RelatedAssociation::new(IssueId::new("test-c"), IssueId::new("test-a")).unwrap();
+    let added_discovery =
+        DiscoveryOrigin::new(IssueId::new("test-c"), IssueId::new("test-b")).unwrap();
+    storage
+        .add_related_association(added_related.clone())
+        .await
+        .unwrap();
+    storage
+        .add_discovery_origin(added_discovery.clone())
+        .await
+        .unwrap();
+    save_to_jsonl(storage.as_ref(), file.path()).await.unwrap();
+    let first_bytes = std::fs::read(file.path()).unwrap();
+    let records = first_bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let record_a = records
+        .iter()
+        .find(|record| record["id"] == "test-a")
+        .unwrap();
+    let record_b = records
+        .iter()
+        .find(|record| record["id"] == "test-b")
+        .unwrap();
+    let record_c = records
+        .iter()
+        .find(|record| record["id"] == "test-c")
+        .unwrap();
+    assert_eq!(
+        record_a["dependencies"],
+        serde_json::json!([
+            {"depends_on_id": "test-b", "dep_type": "parent-child"},
+            {"depends_on_id": "test-c", "dep_type": "related"}
+        ])
+    );
+    assert_eq!(
+        record_b["dependencies"],
+        serde_json::json!([
+            {"depends_on_id": "test-a", "dep_type": "related"}
+        ]),
+        "legacy reverse ownership remains compatibility input until rivets-vio8 canonical migration"
+    );
+    assert_eq!(
+        record_c["dependencies"],
+        serde_json::json!([
+            {"depends_on_id": "test-b", "dep_type": "discovered-from"}
+        ])
+    );
+
+    let (reloaded, warnings) = load_from_jsonl(file.path(), "test".to_string())
+        .await
+        .expect("typed relationship records should reload");
+    assert!(warnings.is_empty());
+    assert_eq!(
+        reloaded
+            .related_associations(&IssueId::new("test-a"))
+            .await
+            .unwrap(),
+        vec![
+            RelatedAssociation::new(IssueId::new("test-a"), IssueId::new("test-b")).unwrap(),
+            added_related,
+        ]
+    );
+    assert_eq!(
+        reloaded
+            .discovery_origins(&IssueId::new("test-c"))
+            .await
+            .unwrap(),
+        vec![added_discovery]
+    );
+    save_to_jsonl(reloaded.as_ref(), file.path()).await.unwrap();
+    assert_eq!(std::fs::read(file.path()).unwrap(), first_bytes);
+
+    let kinds = records
+        .iter()
+        .flat_map(|record| record["dependencies"].as_array().unwrap())
+        .map(|dependency| dependency["dep_type"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(kinds.contains(&"parent-child"));
 }

@@ -70,8 +70,8 @@
 //! ```
 
 use crate::domain::{
-    BlockingDependency, Issue, IssueFilter, IssueId, IssueUpdate, NewIssue, NewResource,
-    ResourceId, ResourceUpdate, SortPolicy,
+    BlockingDependency, DiscoveryOrigin, Issue, IssueFilter, IssueId, IssueUpdate, NewIssue,
+    NewResource, RelatedAssociation, ResourceId, ResourceUpdate, SortPolicy,
 };
 use crate::error::{PartialLoadError, Result, SkippedIssueRecordCause, StorageError};
 use async_trait::async_trait;
@@ -88,8 +88,8 @@ pub mod in_memory;
 /// # Method Categories
 ///
 /// - **CRUD**: `create`, `get`, `update`, `delete`
-/// - **Blocking Dependencies**: role-safe add/remove/prerequisite/dependent/tree operations
-/// - **Queries**: `list`, `ready_to_work`, `blocked_issues`
+/// - **Relationships**: typed Blocking, Related, and Discovery operations
+/// - **Queries**: `list`, `ready_to_work`, `blocked_issues`, and relationship lists
 /// - **Batch Operations**: `import_issues`, `export_all`
 /// - **Persistence**: `save`
 ///
@@ -181,6 +181,34 @@ pub trait IssueStorage: Send + Sync {
         dependent_id: &IssueId,
         max_depth: Option<usize>,
     ) -> Result<Vec<(BlockingDependency, usize)>>;
+
+    // ========== Related Association Operations ==========
+
+    /// Add a symmetric, non-blocking Related Association.
+    ///
+    /// Endpoint order is canonicalized by [`RelatedAssociation`]. Re-adding
+    /// an existing association in either order is idempotent.
+    async fn add_related_association(&mut self, association: RelatedAssociation) -> Result<()>;
+
+    /// Remove a Related Association, accepting either endpoint order.
+    async fn remove_related_association(&mut self, association: &RelatedAssociation) -> Result<()>;
+
+    /// List Related Associations touching an Issue in deterministic order.
+    async fn related_associations(&self, issue_id: &IssueId) -> Result<Vec<RelatedAssociation>>;
+
+    // ========== Discovery Origin Operations ==========
+
+    /// Add directed provenance from a discovered Issue to its source Issue.
+    async fn add_discovery_origin(&mut self, origin: DiscoveryOrigin) -> Result<()>;
+
+    /// Remove directed provenance with the exact discovered/source roles.
+    async fn remove_discovery_origin(&mut self, origin: &DiscoveryOrigin) -> Result<()>;
+
+    /// List provenance origins for an Issue in its discovered role.
+    async fn discovery_origins(
+        &self,
+        discovered_issue_id: &IssueId,
+    ) -> Result<Vec<DiscoveryOrigin>>;
 
     // ========== Queries ==========
 
@@ -494,6 +522,37 @@ impl IssueStorage for JsonlBackedStorage {
             .await
     }
 
+    async fn add_related_association(&mut self, association: RelatedAssociation) -> Result<()> {
+        self.ensure_writable()?;
+        self.inner.add_related_association(association).await
+    }
+
+    async fn remove_related_association(&mut self, association: &RelatedAssociation) -> Result<()> {
+        self.ensure_writable()?;
+        self.inner.remove_related_association(association).await
+    }
+
+    async fn related_associations(&self, issue_id: &IssueId) -> Result<Vec<RelatedAssociation>> {
+        self.inner.related_associations(issue_id).await
+    }
+
+    async fn add_discovery_origin(&mut self, origin: DiscoveryOrigin) -> Result<()> {
+        self.ensure_writable()?;
+        self.inner.add_discovery_origin(origin).await
+    }
+
+    async fn remove_discovery_origin(&mut self, origin: &DiscoveryOrigin) -> Result<()> {
+        self.ensure_writable()?;
+        self.inner.remove_discovery_origin(origin).await
+    }
+
+    async fn discovery_origins(
+        &self,
+        discovered_issue_id: &IssueId,
+    ) -> Result<Vec<DiscoveryOrigin>> {
+        self.inner.discovery_origins(discovered_issue_id).await
+    }
+
     async fn list(&self, filter: &IssueFilter) -> Result<Vec<Issue>> {
         self.inner.list(filter).await
     }
@@ -679,7 +738,8 @@ pub const MOCK_ISSUE_ID: &str = "test-1";
 /// - `get`: Returns `Some` only for ID "test-1", `None` otherwise
 /// - `list`, `ready_to_work`, `blocked_issues`: Return empty vectors
 /// - Blocking prerequisite/dependent/tree queries: Return empty vectors
-/// - Other methods: Unimplemented (will panic if called)
+/// - Mutations that require state: Return a typed unsupported-operation error
+/// - Related and Discovery queries: Return empty vectors
 ///
 /// # When to Use MockStorage vs In-Memory Storage
 ///
@@ -706,6 +766,10 @@ pub struct MockStorage;
 
 #[cfg(any(test, feature = "test-util"))]
 impl MockStorage {
+    fn unsupported<T>(operation: &'static str) -> Result<T> {
+        Err(StorageError::UnsupportedOperation { operation }.into())
+    }
+
     /// Create a new MockStorage instance.
     ///
     /// # Example
@@ -781,26 +845,18 @@ impl IssueStorage for MockStorage {
     }
 
     async fn update(&mut self, _id: &IssueId, _updates: IssueUpdate) -> Result<Issue> {
-        unimplemented!(
-            "MockStorage::update() is not implemented. Use in_memory::new_in_memory_storage() for full CRUD."
-        )
+        Self::unsupported("MockStorage::update")
     }
 
     async fn delete(&mut self, _id: &IssueId) -> Result<()> {
-        unimplemented!(
-            "MockStorage::delete() is not implemented. Use in_memory::new_in_memory_storage() for full CRUD."
-        )
+        Self::unsupported("MockStorage::delete")
     }
     async fn add_blocking_dependency(&mut self, _dependency: BlockingDependency) -> Result<()> {
-        unimplemented!(
-            "MockStorage::add_blocking_dependency() is not implemented. Use in_memory::new_in_memory_storage() for full CRUD."
-        )
+        Self::unsupported("MockStorage::add_blocking_dependency")
     }
 
     async fn remove_blocking_dependency(&mut self, _dependency: &BlockingDependency) -> Result<()> {
-        unimplemented!(
-            "MockStorage::remove_blocking_dependency() is not implemented. Use in_memory::new_in_memory_storage() for full CRUD."
-        )
+        Self::unsupported("MockStorage::remove_blocking_dependency")
     }
 
     async fn blocking_prerequisites(
@@ -825,6 +881,36 @@ impl IssueStorage for MockStorage {
         Ok(vec![])
     }
 
+    async fn add_related_association(&mut self, _association: RelatedAssociation) -> Result<()> {
+        Self::unsupported("MockStorage::add_related_association")
+    }
+
+    async fn remove_related_association(
+        &mut self,
+        _association: &RelatedAssociation,
+    ) -> Result<()> {
+        Self::unsupported("MockStorage::remove_related_association")
+    }
+
+    async fn related_associations(&self, _issue_id: &IssueId) -> Result<Vec<RelatedAssociation>> {
+        Ok(vec![])
+    }
+
+    async fn add_discovery_origin(&mut self, _origin: DiscoveryOrigin) -> Result<()> {
+        Self::unsupported("MockStorage::add_discovery_origin")
+    }
+
+    async fn remove_discovery_origin(&mut self, _origin: &DiscoveryOrigin) -> Result<()> {
+        Self::unsupported("MockStorage::remove_discovery_origin")
+    }
+
+    async fn discovery_origins(
+        &self,
+        _discovered_issue_id: &IssueId,
+    ) -> Result<Vec<DiscoveryOrigin>> {
+        Ok(vec![])
+    }
+
     async fn list(&self, _filter: &IssueFilter) -> Result<Vec<Issue>> {
         Ok(vec![])
     }
@@ -842,21 +928,15 @@ impl IssueStorage for MockStorage {
     }
 
     async fn add_label(&mut self, _id: &IssueId, _label: &str) -> Result<Issue> {
-        unimplemented!(
-            "MockStorage::add_label() is not implemented. Use in_memory::new_in_memory_storage() for full CRUD."
-        )
+        Self::unsupported("MockStorage::add_label")
     }
 
     async fn remove_label(&mut self, _id: &IssueId, _label: &str) -> Result<Issue> {
-        unimplemented!(
-            "MockStorage::remove_label() is not implemented. Use in_memory::new_in_memory_storage() for full CRUD."
-        )
+        Self::unsupported("MockStorage::remove_label")
     }
 
     async fn add_resource(&mut self, _id: &IssueId, _resource: NewResource) -> Result<Issue> {
-        unimplemented!(
-            "MockStorage::add_resource() is not implemented. Use in_memory::new_in_memory_storage() for full CRUD."
-        )
+        Self::unsupported("MockStorage::add_resource")
     }
 
     async fn update_resource(
@@ -865,15 +945,11 @@ impl IssueStorage for MockStorage {
         _resource_id: &ResourceId,
         _update: ResourceUpdate,
     ) -> Result<Issue> {
-        unimplemented!(
-            "MockStorage::update_resource() is not implemented. Use in_memory::new_in_memory_storage() for full CRUD."
-        )
+        Self::unsupported("MockStorage::update_resource")
     }
 
     async fn remove_resource(&mut self, _id: &IssueId, _resource_id: &ResourceId) -> Result<Issue> {
-        unimplemented!(
-            "MockStorage::remove_resource() is not implemented. Use in_memory::new_in_memory_storage() for full CRUD."
-        )
+        Self::unsupported("MockStorage::remove_resource")
     }
 
     async fn import_issues(&mut self, _issues: Vec<Issue>) -> Result<()> {
@@ -889,7 +965,6 @@ impl IssueStorage for MockStorage {
     }
 
     async fn reload(&mut self) -> Result<()> {
-        // MockStorage has no backing store, so reload is a no-op
         Ok(())
     }
 }
@@ -953,6 +1028,24 @@ mod tests {
         let _copy1 = mock;
         let _copy2 = mock; // Still usable - Copy semantics work
         let _: Box<dyn IssueStorage> = Box::new(mock);
+    }
+    #[tokio::test]
+    async fn mock_storage_persistence_methods_are_no_ops() {
+        let mut storage = MockStorage::new();
+        let imported = MockStorage::create_test_issue(IssueId::new("test-import"));
+
+        storage
+            .import_issues(vec![imported])
+            .await
+            .expect("MockStorage import should remain a no-op");
+        storage
+            .save()
+            .await
+            .expect("MockStorage save should remain a no-op");
+        storage
+            .reload()
+            .await
+            .expect("MockStorage reload should remain a no-op");
     }
 
     #[tokio::test]

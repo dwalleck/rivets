@@ -2,12 +2,14 @@
 
 use super::InMemoryStorage;
 use super::graph::{
-    blocking_dependency_tree_impl, find_blocked_issues, find_blocking_edge, has_blocking_cycle_impl,
+    blocking_dependency_tree_impl, discovery_origins_impl, find_blocked_issues, find_blocking_edge,
+    find_edge, has_blocking_cycle_impl, has_cycle_for_type_impl, related_associations_impl,
 };
 use super::sorting::sort_by_policy;
 use crate::domain::{
-    BlockingDependency, Dependency, DependencyType, Issue, IssueFilter, IssueId, IssueStatus,
-    IssueUpdate, MAX_PRIORITY, NewIssue, NewResource, Note, ResourceId, ResourceUpdate, SortPolicy,
+    BlockingDependency, Dependency, DependencyType, DiscoveryOrigin, Issue, IssueFilter, IssueId,
+    IssueStatus, IssueUpdate, MAX_PRIORITY, NewIssue, NewResource, Note, RelatedAssociation,
+    ResourceId, ResourceUpdate, SortPolicy,
 };
 use crate::error::{Error, Result, StorageError};
 use crate::storage::IssueStorage;
@@ -416,6 +418,185 @@ impl IssueStorage for InMemoryStorage {
     ) -> Result<Vec<(BlockingDependency, usize)>> {
         let inner = self.lock().await;
         blocking_dependency_tree_impl(&inner.graph, &inner.node_map, dependent_id, max_depth)
+    }
+
+    async fn add_related_association(&mut self, association: RelatedAssociation) -> Result<()> {
+        let mut inner = self.lock().await;
+        let left_id = association.left_issue_id();
+        let right_id = association.right_issue_id();
+        let left_node = *inner
+            .node_map
+            .get(left_id)
+            .ok_or_else(|| Error::IssueNotFound(left_id.clone()))?;
+        let right_node = *inner
+            .node_map
+            .get(right_id)
+            .ok_or_else(|| Error::IssueNotFound(right_id.clone()))?;
+        if find_edge(&inner.graph, left_node, right_node, DependencyType::Related)
+            .or_else(|| find_edge(&inner.graph, right_node, left_node, DependencyType::Related))
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        // Validate the compatibility owner before changing either representation.
+        let owner = inner
+            .issues
+            .get_mut(left_id)
+            .ok_or_else(|| Error::IssueNotFound(left_id.clone()))?;
+        owner.dependencies.push(Dependency {
+            depends_on_id: right_id.clone(),
+            dep_type: DependencyType::Related,
+        });
+        inner
+            .graph
+            .add_edge(left_node, right_node, DependencyType::Related);
+        Ok(())
+    }
+
+    async fn remove_related_association(&mut self, association: &RelatedAssociation) -> Result<()> {
+        let mut inner = self.lock().await;
+        let left_id = association.left_issue_id();
+        let right_id = association.right_issue_id();
+        let left_node = *inner
+            .node_map
+            .get(left_id)
+            .ok_or_else(|| Error::IssueNotFound(left_id.clone()))?;
+        let right_node = *inner
+            .node_map
+            .get(right_id)
+            .ok_or_else(|| Error::IssueNotFound(right_id.clone()))?;
+        let mut edge_ids = inner
+            .graph
+            .edges_connecting(left_node, right_node)
+            .chain(inner.graph.edges_connecting(right_node, left_node))
+            .filter(|edge| *edge.weight() == DependencyType::Related)
+            .map(|edge| edge.id())
+            .collect::<Vec<_>>();
+        if edge_ids.is_empty() {
+            return Err(Error::RelatedAssociationNotFound {
+                left_issue_id: left_id.clone(),
+                right_issue_id: right_id.clone(),
+            });
+        }
+        edge_ids.sort_unstable_by_key(|edge_id| std::cmp::Reverse(edge_id.index()));
+        for edge_id in edge_ids {
+            inner.graph.remove_edge(edge_id);
+        }
+        if let Some(owner) = inner.issues.get_mut(left_id) {
+            owner.dependencies.retain(|record| {
+                record.dep_type != DependencyType::Related || record.depends_on_id != *right_id
+            });
+        }
+        if let Some(reverse_owner) = inner.issues.get_mut(right_id) {
+            reverse_owner.dependencies.retain(|record| {
+                record.dep_type != DependencyType::Related || record.depends_on_id != *left_id
+            });
+        }
+        Ok(())
+    }
+
+    async fn related_associations(&self, issue_id: &IssueId) -> Result<Vec<RelatedAssociation>> {
+        let inner = self.lock().await;
+        related_associations_impl(&inner.graph, &inner.node_map, issue_id)
+    }
+
+    async fn add_discovery_origin(&mut self, origin: DiscoveryOrigin) -> Result<()> {
+        let mut inner = self.lock().await;
+        let discovered_id = origin.discovered_issue_id();
+        let source_id = origin.source_issue_id();
+        let discovered_node = *inner
+            .node_map
+            .get(discovered_id)
+            .ok_or_else(|| Error::IssueNotFound(discovered_id.clone()))?;
+        let source_node = *inner
+            .node_map
+            .get(source_id)
+            .ok_or_else(|| Error::IssueNotFound(source_id.clone()))?;
+        if find_edge(
+            &inner.graph,
+            discovered_node,
+            source_node,
+            DependencyType::DiscoveredFrom,
+        )
+        .is_some()
+        {
+            return Err(Error::DuplicateDiscoveryOrigin {
+                discovered_issue_id: discovered_id.clone(),
+                source_issue_id: source_id.clone(),
+            });
+        }
+        if has_cycle_for_type_impl(
+            &inner.graph,
+            &inner.node_map,
+            discovered_id,
+            source_id,
+            DependencyType::DiscoveredFrom,
+        )? {
+            return Err(Error::CircularDiscoveryOrigin {
+                discovered_issue_id: discovered_id.clone(),
+                source_issue_id: source_id.clone(),
+            });
+        }
+
+        // The cycle check is complete before either graph or compatibility state changes.
+        let owner = inner
+            .issues
+            .get_mut(discovered_id)
+            .ok_or_else(|| Error::IssueNotFound(discovered_id.clone()))?;
+        owner.dependencies.push(Dependency {
+            depends_on_id: source_id.clone(),
+            dep_type: DependencyType::DiscoveredFrom,
+        });
+        inner
+            .graph
+            .add_edge(discovered_node, source_node, DependencyType::DiscoveredFrom);
+        Ok(())
+    }
+
+    async fn remove_discovery_origin(&mut self, origin: &DiscoveryOrigin) -> Result<()> {
+        let mut inner = self.lock().await;
+        let discovered_id = origin.discovered_issue_id();
+        let source_id = origin.source_issue_id();
+        let discovered_node = *inner
+            .node_map
+            .get(discovered_id)
+            .ok_or_else(|| Error::IssueNotFound(discovered_id.clone()))?;
+        let source_node = *inner
+            .node_map
+            .get(source_id)
+            .ok_or_else(|| Error::IssueNotFound(source_id.clone()))?;
+        let mut edge_ids = inner
+            .graph
+            .edges_connecting(discovered_node, source_node)
+            .filter(|edge| *edge.weight() == DependencyType::DiscoveredFrom)
+            .map(|edge| edge.id())
+            .collect::<Vec<_>>();
+        if edge_ids.is_empty() {
+            return Err(Error::DiscoveryOriginNotFound {
+                discovered_issue_id: discovered_id.clone(),
+                source_issue_id: source_id.clone(),
+            });
+        }
+        edge_ids.sort_unstable_by_key(|edge_id| std::cmp::Reverse(edge_id.index()));
+        for edge_id in edge_ids {
+            inner.graph.remove_edge(edge_id);
+        }
+        if let Some(owner) = inner.issues.get_mut(discovered_id) {
+            owner.dependencies.retain(|record| {
+                record.dep_type != DependencyType::DiscoveredFrom
+                    || record.depends_on_id != *source_id
+            });
+        }
+        Ok(())
+    }
+
+    async fn discovery_origins(
+        &self,
+        discovered_issue_id: &IssueId,
+    ) -> Result<Vec<DiscoveryOrigin>> {
+        let inner = self.lock().await;
+        discovery_origins_impl(&inner.graph, &inner.node_map, discovered_issue_id)
     }
 
     async fn list(&self, filter: &IssueFilter) -> Result<Vec<Issue>> {

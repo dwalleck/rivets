@@ -222,6 +222,13 @@ pub enum StorageError {
     /// (ADR-0005).
     #[error(transparent)]
     InvalidStatusTransition(#[from] StatusTransitionError),
+
+    /// A test-only or otherwise deliberately unsupported storage operation.
+    #[error("Storage operation is unsupported: {operation}")]
+    UnsupportedOperation {
+        /// The stable name of the unsupported operation.
+        operation: &'static str,
+    },
 }
 
 impl StorageError {
@@ -245,7 +252,8 @@ impl StorageError {
             | Self::InvalidFormat(_)
             | Self::UnsafePartialLoad(_)
             | Self::Serialization(_)
-            | Self::InvalidStatusTransition(_)) => Err(error),
+            | Self::InvalidStatusTransition(_)
+            | Self::UnsupportedOperation { .. }) => Err(error),
         }
     }
 
@@ -271,7 +279,8 @@ impl StorageError {
             | Self::InvalidFormat(_)
             | Self::UnsafePartialLoad(_)
             | Self::Serialization(_)
-            | Self::Resource(_)) => Err(error),
+            | Self::Resource(_)
+            | Self::UnsupportedOperation { .. }) => Err(error),
         }
     }
 }
@@ -353,6 +362,44 @@ pub enum Error {
     /// Issue already exists.
     #[error("Issue already exists: {0}")]
     IssueAlreadyExists(IssueId),
+
+    /// A requested Related Association does not exist.
+    #[error("Related association not found: {left_issue_id} <-> {right_issue_id}")]
+    RelatedAssociationNotFound {
+        /// The canonical left endpoint.
+        left_issue_id: IssueId,
+        /// The canonical right endpoint.
+        right_issue_id: IssueId,
+    },
+
+    /// A requested Discovery Origin already exists.
+    #[error("Discovery origin already exists: {discovered_issue_id} -> {source_issue_id}")]
+    DuplicateDiscoveryOrigin {
+        /// The Issue that was discovered.
+        discovered_issue_id: IssueId,
+        /// The Issue whose work surfaced it.
+        source_issue_id: IssueId,
+    },
+
+    /// A requested Discovery Origin does not exist.
+    #[error("Discovery origin not found: {discovered_issue_id} -> {source_issue_id}")]
+    DiscoveryOriginNotFound {
+        /// The Issue that was discovered.
+        discovered_issue_id: IssueId,
+        /// The Issue whose work surfaced it.
+        source_issue_id: IssueId,
+    },
+
+    /// A Discovery Origin would create a cycle in the provenance graph.
+    #[error(
+        "Discovery origin cycle detected: adding origin from {discovered_issue_id} to {source_issue_id} would create a cycle"
+    )]
+    CircularDiscoveryOrigin {
+        /// The Issue that was discovered.
+        discovered_issue_id: IssueId,
+        /// The Issue whose work surfaced it.
+        source_issue_id: IssueId,
+    },
 
     /// JSON parsing error (e.g., loading corrupt JSONL files).
     ///
