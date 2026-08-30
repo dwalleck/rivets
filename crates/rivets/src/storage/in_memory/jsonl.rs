@@ -3,12 +3,12 @@
 //! This module provides functions to load and save the in-memory storage
 //! to JSONL (JSON Lines) files.
 
-use super::graph::has_cycle_impl;
+use super::graph::has_cycle_for_type_impl;
 use super::inner::InMemoryStorageInner;
 use super::issue_record::{
     CanonicalIssueRecord, IssueRecord, IssueRecordConversion, IssueRecordError, MigrationField,
 };
-use crate::domain::{IssueId, ResourceError};
+use crate::domain::{DependencyType, IssueId, ResourceError};
 use crate::error::{Error, Result, StorageError};
 use crate::storage::IssueStorage;
 use rivets_jsonl::{Warning as JsonlWarning, read_jsonl_resilient_with_line_numbers};
@@ -299,8 +299,19 @@ pub async fn load_from_jsonl(
                 continue;
             }
 
-            // Check for cycles before adding edge
-            if has_cycle_impl(&inner.graph, &inner.node_map, &issue.id, &dep.depends_on_id)? {
+            let creates_cycle = match dep.dep_type {
+                DependencyType::Blocks
+                | DependencyType::ParentChild
+                | DependencyType::DiscoveredFrom => has_cycle_for_type_impl(
+                    &inner.graph,
+                    &inner.node_map,
+                    &issue.id,
+                    &dep.depends_on_id,
+                    dep.dep_type,
+                )?,
+                DependencyType::Related => false,
+            };
+            if creates_cycle {
                 warnings.push(LoadWarning::CircularDependency {
                     from: issue.id.clone(),
                     to: dep.depends_on_id.clone(),

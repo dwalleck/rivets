@@ -11,7 +11,6 @@ use crate::domain::{
 };
 use crate::error::{Error, Result};
 use petgraph::Direction;
-use petgraph::algo;
 use petgraph::graph::{DiGraph, EdgeIndex, NodeIndex};
 use petgraph::visit::EdgeRef;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -213,28 +212,6 @@ pub(super) fn discovery_origins_impl(
     origins.sort();
     origins.dedup();
     Ok(origins)
-}
-
-/// Internal implementation of cycle detection.
-///
-/// Uses petgraph's `has_path_connecting` to check if adding
-/// an edge from `from` to `to` would create a cycle.
-pub(super) fn has_cycle_impl(
-    graph: &DiGraph<IssueId, DependencyType>,
-    node_map: &HashMap<IssueId, NodeIndex>,
-    from: &IssueId,
-    to: &IssueId,
-) -> Result<bool> {
-    let from_node = node_map
-        .get(from)
-        .ok_or_else(|| Error::IssueNotFound(from.clone()))?;
-    let to_node = node_map
-        .get(to)
-        .ok_or_else(|| Error::IssueNotFound(to.clone()))?;
-
-    // Check if there's already a path from `to` to `from`
-    // If so, adding `from -> to` would create a cycle
-    Ok(algo::has_path_connecting(graph, *to_node, *from_node, None))
 }
 
 /// Find all blocked issues using BFS traversal.
