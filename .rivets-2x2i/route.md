@@ -37,3 +37,22 @@ falsifiable-design → budgeted-plan → checkpointed-build
 ## Terminal criterion
 
 Structural — every downstream artifact satisfies its owning stage's completion criterion, ending with no FAIL in checkpointed-build's recorded gate.
+
+## Result
+
+Structural route completed with no failed gate.
+
+- Core increment: `638b32c`, `5ac72b6`, `2536e28`; draft PR #99.
+- Adapter increment: `040b188`, `e0360f8`; stacked branch
+  `work/2x2i-adapters`.
+- Focused domain/storage/loader/CLI/MCP oracles passed, including every named
+  mutation's red-to-green check.
+- Final seam check found graph mutations only under `storage::in_memory`.
+- Final Rust gate: `cargo fmt --check`, workspace clippy with warnings denied,
+  and 1,106 tests passed with one ignored.
+- Real CLI smoke: Related and Discovery add/list/remove passed across separate
+  processes in a temporary Workspace.
+- Approved-design base assumptions about a delivered Workspace lock and parity
+  registry were corrected explicitly in `design.md`; verified Task
+  `rivets-j13o` owns the lock, and no `rivets-2x2i` acceptance criterion was
+  reduced.
