@@ -104,6 +104,10 @@ impl From<RivetsError> for Error {
             | RivetsError::Validation { .. }
             | RivetsError::HasDependents { .. }
             | RivetsError::CircularDependency { .. }
+            | RivetsError::RelatedAssociationNotFound { .. }
+            | RivetsError::DuplicateDiscoveryOrigin { .. }
+            | RivetsError::DiscoveryOriginNotFound { .. }
+            | RivetsError::CircularDiscoveryOrigin { .. }
             | RivetsError::InvalidIssueId(_)
             | RivetsError::InvalidPriority(_)
             | RivetsError::DependencyNotFound { .. }
