@@ -8,9 +8,10 @@ use crate::models::{
     AddNoteParams, AssignmentParams, BlockedParams, BlockingDependencyListParams,
     BlockingDependencyPairParams, BlockingDependencyTreeParams, CloseParams, CreateParams,
     DiscoveryListParams, DiscoveryPairParams, LabelAddParams, LabelListAllParams, LabelListParams,
-    LabelRemoveParams, ListParams, ReadyParams, RelatedListParams, RelatedPairParams, ReopenParams,
-    ResourceAddParams, ResourceListParams, ResourceRemoveParams, ResourceUpdateParams,
-    SetContextParams, ShowParams, StaleParams, UpdateParams,
+    LabelRemoveParams, ListParams, ParentChildParams, ParentPairParams, ReadyParams,
+    RelatedListParams, RelatedPairParams, ReopenParams, ResourceAddParams, ResourceListParams,
+    ResourceRemoveParams, ResourceUpdateParams, SetContextParams, ShowParams, StaleParams,
+    UpdateParams,
 };
 use crate::tools::Tools;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -532,6 +533,83 @@ impl RivetsMcpServer {
             .await
         {
             Ok(origins) => Ok(CallToolResult::success(vec![Content::json(origins)?])),
+}
+    /// Attach an unparented child to an Epic.
+    #[tool(
+        description = "Set single-Epic Parentage using explicit child_id and parent_id roles. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn parent_set(
+        &self,
+        Parameters(params): Parameters<ParentPairParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .tools
+            .parent_set(
+                &params.child_id,
+                &params.parent_id,
+                params.workspace_root.as_deref(),
+            )
+            .await
+        {
+            Ok(parentage) => Ok(CallToolResult::success(vec![Content::json(parentage)?])),
+            Err(error) => Err(to_mcp_error(&error)),
+        }
+    }
+
+    /// Remove one child's Parentage.
+    #[tool(
+        description = "Clear one child's Parentage without changing Workflow State or Blocking Dependencies. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn parent_clear(
+        &self,
+        Parameters(params): Parameters<ParentChildParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .tools
+            .parent_clear(&params.child_id, params.workspace_root.as_deref())
+            .await
+        {
+            Ok(parentage) => Ok(CallToolResult::success(vec![Content::json(parentage)?])),
+            Err(error) => Err(to_mcp_error(&error)),
+        }
+    }
+
+    /// Replace one child's existing Epic parent.
+    #[tool(
+        description = "Move one child from its existing Epic parent to parent_id. The candidate is validated before replacement. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn parent_move(
+        &self,
+        Parameters(params): Parameters<ParentPairParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .tools
+            .parent_move(
+                &params.child_id,
+                &params.parent_id,
+                params.workspace_root.as_deref(),
+            )
+            .await
+        {
+            Ok(parentage) => Ok(CallToolResult::success(vec![Content::json(parentage)?])),
+            Err(error) => Err(to_mcp_error(&error)),
+        }
+    }
+
+    /// Show one child's current Parentage.
+    #[tool(
+        description = "Show one child's current Epic parent, or null when the child is unparented. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn parent_show(
+        &self,
+        Parameters(params): Parameters<ParentChildParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .tools
+            .parent_show(&params.child_id, params.workspace_root.as_deref())
+            .await
+        {
+            Ok(parentage) => Ok(CallToolResult::success(vec![Content::json(parentage)?])),
             Err(error) => Err(to_mcp_error(&error)),
         }
     }
@@ -1156,6 +1234,10 @@ mod tests {
         assert!(tool_names.contains(&"discovery_add"));
         assert!(tool_names.contains(&"discovery_remove"));
         assert!(tool_names.contains(&"discovery_list"));
+        assert!(tool_names.contains(&"parent_set"));
+        assert!(tool_names.contains(&"parent_clear"));
+        assert!(tool_names.contains(&"parent_move"));
+        assert!(tool_names.contains(&"parent_show"));
         let input_properties = |name: &str| {
             tools
                 .iter()
@@ -1185,6 +1267,18 @@ mod tests {
             assert!(properties.contains_key("prerequisite_id"));
             assert!(!properties.contains_key("issue_id"));
             assert!(!properties.contains_key("depends_on_id"));
+        }
+        for tool_name in ["parent_set", "parent_move"] {
+            let properties = input_properties(tool_name);
+            assert!(properties.contains_key("child_id"));
+            assert!(properties.contains_key("parent_id"));
+            assert!(!properties.contains_key("issue_id"));
+        }
+        for tool_name in ["parent_clear", "parent_show"] {
+            let properties = input_properties(tool_name);
+            assert!(properties.contains_key("child_id"));
+            assert!(!properties.contains_key("parent_id"));
+            assert!(!properties.contains_key("issue_id"));
         }
         assert!(input_properties("blocking_dependency_list").contains_key("query"));
         let tree = input_properties("blocking_dependency_tree");
@@ -1219,6 +1313,34 @@ mod tests {
         assert!(discovery_list.contains_key("discovered_issue_id"));
         assert!(!discovery_list.contains_key("source_issue_id"));
         assert_eq!(tools.len(), 32);
+}
+        assert_eq!(tools.len(), 28);
+    }
+
+    #[test]
+    fn parentage_tool_router_and_schemas() {
+        let tools = RivetsMcpServer::new().tool_router.list_all();
+        for (tool_name, has_parent_id) in [
+            ("parent_set", true),
+            ("parent_clear", false),
+            ("parent_move", true),
+            ("parent_show", false),
+        ] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool.name == tool_name)
+                .expect("Parentage tool should be registered");
+            let properties = tool
+                .input_schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+                .expect("Parentage schema should expose properties");
+            assert!(properties.contains_key("child_id"));
+            assert_eq!(properties.contains_key("parent_id"), has_parent_id);
+            assert!(properties.contains_key("workspace_root"));
+            assert!(!properties.contains_key("issue_id"));
+            assert!(!properties.contains_key("depends_on_id"));
+        }
     }
 
     #[test]

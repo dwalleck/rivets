@@ -110,6 +110,23 @@ async fn create_issue(tools: &Tools, title: &str) -> Issue {
         .await
         .expect("create should succeed")
 }
+
+async fn create_epic(tools: &Tools, title: &str) -> Issue {
+    tools
+        .create(create_params(
+            title.to_string(),
+            Some(format!("Description for {title}")),
+            Some(2),
+            Some("epic"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        ))
+        .await
+        .expect("create Epic should succeed")
+}
 fn write_external_label(path: &std::path::Path, issue_id: &str, label: &str) {
     let source = std::fs::read_to_string(path).expect("JSONL source should be readable");
     let mut found = false;
@@ -167,6 +184,8 @@ struct MutationFixture {
     lifecycle_target: Issue,
     dependent: Issue,
     prerequisite: Issue,
+    parent_a: Issue,
+    parent_b: Issue,
 }
 
 impl MutationFixture {
@@ -182,6 +201,8 @@ impl MutationFixture {
         let lifecycle_target = create_issue(&tools, "Lifecycle target").await;
         let dependent = create_issue(&tools, "Dependent target").await;
         let prerequisite = create_issue(&tools, "Prerequisite target").await;
+        let parent_a = create_epic(&tools, "Parent A").await;
+        let parent_b = create_epic(&tools, "Parent B").await;
         Self {
             _workspace: workspace,
             issues_path,
@@ -193,6 +214,8 @@ impl MutationFixture {
             lifecycle_target,
             dependent,
             prerequisite,
+            parent_a,
+            parent_b,
         }
     }
 
@@ -348,6 +371,38 @@ async fn exercise_relationship_and_label_mutations(fixture: &MutationFixture) {
         .await
         .expect("blocking_dependency_remove should refresh stale JSONL");
     fixture.assert_external_edit("external-dependency-remove");
+
+    fixture.external_edit("external-parent-set");
+    fixture
+        .tools
+        .parent_set(
+            fixture.dependent.id.as_str(),
+            fixture.parent_a.id.as_str(),
+            None,
+        )
+        .await
+        .expect("parent_set should refresh stale JSONL");
+    fixture.assert_external_edit("external-parent-set");
+
+    fixture.external_edit("external-parent-move");
+    fixture
+        .tools
+        .parent_move(
+            fixture.dependent.id.as_str(),
+            fixture.parent_b.id.as_str(),
+            Some(&fixture.workspace_root),
+        )
+        .await
+        .expect("parent_move should refresh stale JSONL");
+    fixture.assert_external_edit("external-parent-move");
+
+    fixture.external_edit("external-parent-clear");
+    fixture
+        .tools
+        .parent_clear(fixture.dependent.id.as_str(), None)
+        .await
+        .expect("parent_clear should refresh stale JSONL");
+    fixture.assert_external_edit("external-parent-clear");
 
     fixture.external_edit("external-label-add");
     fixture

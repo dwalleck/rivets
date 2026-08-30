@@ -16,7 +16,7 @@ The current implementation is a three-crate Cargo workspace:
 
 - **`rivets`**: CLI application, domain model, and storage layer (the `crates/rivets` crate)
 - **`rivets-jsonl`**: Generic JSON Lines (JSONL) library providing resilient, line-numbered parsing and atomic writes (the `crates/rivets-jsonl` crate)
-- **`rivets-mcp`**: MCP (Model Context Protocol) server exposing the tracker as 32 tools (the `crates/rivets-mcp` crate)
+- **`rivets-mcp`**: MCP (Model Context Protocol) server exposing the tracker as 36 tools (the `crates/rivets-mcp` crate)
 
 Earlier design research (rivets-fk9 for JSONL library design, rivets-kr3 for workspace structure) informed the original two-crate layout; the workspace has since grown to three crates with the addition of `rivets-mcp`.
 
@@ -31,7 +31,7 @@ graph TB
     end
 
     subgraph "MCP Layer (rivets-mcp)"
-        Mcp[rivets-mcp server<br/>32 tools]
+        Mcp[rivets-mcp server<br/>36 tools]
     end
 
     subgraph "Application Layer (rivets)"
@@ -253,14 +253,14 @@ sequenceDiagram
 
 - ✅ JSONL persistence as the default backend with atomic writes
 - ✅ Three-stage resilient JSONL load (parse compatibility records → import Issues → rebuild relationships)
-- ✅ 16-command CLI surface
-- ✅ Blocking Dependency system with Blocking-only cycle detection, removal, and prerequisite/dependent/tree queries
+- ✅ 17-command CLI surface
+- ✅ Blocking Dependencies plus single-Epic Parentage with relationship-specific cycle detection and role-named CLI/MCP operations
 - ✅ Graph-derived `ready` and `blocked` queries
 - ✅ Hash-based IDs (prefix + adaptive-length hash over content, timestamp, and nonce)
 - ✅ Single-source YAML configuration (`.rivets/config.yaml`)
 - ✅ Labels (add/remove, atomic), immutable Notes, Associated Resources (add/update/remove with typed roles), mutable Issue Kind
 - ✅ `stats`, `stale`, `info` commands
-- ✅ MCP server (`rivets-mcp`) with 32 tools and per-call `workspace_root` overrides / `set_context` default workspace
+- ✅ MCP server (`rivets-mcp`) with 36 tools and per-call `workspace_root` overrides / `set_context` default workspace
 - ✅ Auto-save after mutations with reload-on-save-failure recovery
 
 ### Not Implemented

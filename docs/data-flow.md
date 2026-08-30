@@ -321,6 +321,25 @@ The MCP tools `blocking_dependency_add`, `blocking_dependency_remove`,
 `blocking_dependency_list`, and `blocking_dependency_tree` delegate to the same
 storage operations and return role-named structured values.
 
+## Parentage Mutation and Query Flow
+
+```bash
+rivets parent set --child rivets-a3f8 --parent rivets-e7p1
+rivets parent move --child rivets-a3f8 --parent rivets-e9q4
+rivets parent show --child rivets-a3f8
+rivets parent clear --child rivets-a3f8
+```
+
+The storage aggregate enforces one Epic parent, Parentage-only acyclicity,
+validation-before-move, and Epic lifecycle rules. It persists valid Parentage
+through the compatibility `parent-child` record; `rivets-vio8` owns the
+canonical relationship persistence migration. Parentage never participates in
+Blocked or Ready.
+
+MCP `parent_set`, `parent_clear`, `parent_move`, and `parent_show` delegate to
+the same storage operations. Mutations acquire the durable Workspace lock and
+reload cached JSONL before changing state; `parent_show` remains read-only.
+
 ## Delete with Safety Checks Flow
 
 ```mermaid

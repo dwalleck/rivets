@@ -113,6 +113,15 @@ async fn create_issue(tools: &Tools, title: &str) -> Issue {
         .expect("setup Issue should be created")
 }
 
+async fn create_epic(tools: &Tools, title: &str) -> Issue {
+    let mut params = create_params(title, None);
+    params.kind = IssueKindInput::canonical(Some(rivets::domain::IssueKind::Epic));
+    tools
+        .create(params)
+        .await
+        .expect("setup Epic should be created")
+}
+
 fn assert_busy<T>(result: Result<T, Error>, workspace_root: &Path) {
     match result {
         Err(Error::WorkspaceBusy {
@@ -133,6 +142,8 @@ struct MutationFixture {
     lifecycle_target: Issue,
     dependent: Issue,
     prerequisite: Issue,
+    parent_a: Issue,
+    parent_b: Issue,
 }
 
 impl MutationFixture {
@@ -150,6 +161,12 @@ impl MutationFixture {
         let lifecycle_target = create_issue(&tools, "Lifecycle target").await;
         let dependent = create_issue(&tools, "Dependent target").await;
         let prerequisite = create_issue(&tools, "Prerequisite target").await;
+        let parent_a = create_epic(&tools, "Parent A").await;
+        let parent_b = create_epic(&tools, "Parent B").await;
+        tools
+            .parent_set(lifecycle_target.id.as_str(), parent_a.id.as_str(), None)
+            .await
+            .expect("setup Parentage should be added");
         tools
             .resource_add(
                 resource_target.id.as_str(),
@@ -171,6 +188,8 @@ impl MutationFixture {
             lifecycle_target,
             dependent,
             prerequisite,
+            parent_a,
+            parent_b,
         }
     }
 }
@@ -294,6 +313,38 @@ async fn assert_lifecycle_relationship_and_label_mutators_busy(fixture: &Mutatio
     assert_busy(
         fixture
             .tools
+            .parent_set(
+                fixture.update_target.id.as_str(),
+                fixture.parent_a.id.as_str(),
+                None,
+            )
+            .await,
+        &fixture.root,
+    );
+    assert_busy(
+        fixture
+            .tools
+            .parent_clear(
+                fixture.lifecycle_target.id.as_str(),
+                Some(&fixture.root_string),
+            )
+            .await,
+        &fixture.root,
+    );
+    assert_busy(
+        fixture
+            .tools
+            .parent_move(
+                fixture.lifecycle_target.id.as_str(),
+                fixture.parent_b.id.as_str(),
+                None,
+            )
+            .await,
+        &fixture.root,
+    );
+    assert_busy(
+        fixture
+            .tools
             .label_add(fixture.update_target.id.as_str(), "blocked-label", None)
             .await,
         &fixture.root,
@@ -324,17 +375,26 @@ async fn workspace_lock_blocks_every_mcp_mutator_but_not_queries() {
     assert_resource_mutators_busy(&fixture).await;
     assert_lifecycle_relationship_and_label_mutators_busy(&fixture).await;
     assert_eq!(
+        fixture
+            .tools
+            .parent_show(
+                fixture.lifecycle_target.id.as_str(),
+                Some(&fixture.root_string),
+            )
+            .await
+            .unwrap()
+            .expect("setup child should remain parented")
+            .parent_id(),
+        &fixture.parent_a.id
+    );
+    assert_eq!(std::fs::read(&source_path).unwrap(), before);
+    assert_eq!(
         std::fs::read(&source_path).expect("source file should remain readable"),
         before
     );
     assert_eq!(
-        fixture
-            .tools
-            .list(list_params(None))
-            .await
-            .expect("query should remain available while mutation lock is held")
-            .len(),
-        5
+        fixture.tools.list(list_params(None)).await.unwrap().len(),
+        7
     );
     drop(holder);
 }

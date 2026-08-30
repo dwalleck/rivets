@@ -2127,6 +2127,163 @@ async fn related_and_discovery_mcp_direction_and_context_recreation() {
     )
     .await;
 }
+async fn create_epic(tools: &Tools, title: &str) -> Issue {
+    tools
+        .create(create_params(
+            title.to_string(),
+            None,
+            None,
+            Some("epic"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        ))
+        .await
+        .expect("Epic creation should succeed")
+}
+
+async fn assert_parentage_restart_and_clear(
+    workspace: &TempDir,
+    child: &Issue,
+    first_parent: &Issue,
+    second_parent: &Issue,
+    moved: &rivets::domain::Parentage,
+) {
+    let workspace_root = workspace.path().to_str().unwrap();
+    let issues_path = workspace.path().join(".rivets/issues.jsonl");
+    let restarted = create_tools();
+    set_context(&restarted, workspace.path()).await;
+    assert_eq!(
+        restarted
+            .parent_show(child.id.as_str(), Some(workspace_root))
+            .await
+            .unwrap(),
+        Some(moved.clone())
+    );
+    let records = std::fs::read_to_string(&issues_path).unwrap();
+    let child_record: Value = records
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .find(|record: &Value| record["id"] == child.id.as_str())
+        .unwrap();
+    let dependencies = child_record["dependencies"].as_array().unwrap();
+    assert!(dependencies.contains(&json!({
+        "depends_on_id": first_parent.id,
+        "dep_type": "blocks"
+    })));
+    assert!(dependencies.contains(&json!({
+        "depends_on_id": second_parent.id,
+        "dep_type": "parent-child"
+    })));
+
+    assert_eq!(
+        restarted
+            .parent_clear(child.id.as_str(), Some(workspace_root))
+            .await
+            .unwrap(),
+        moved.clone()
+    );
+    assert_eq!(
+        restarted
+            .parent_show(child.id.as_str(), Some(workspace_root))
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        restarted
+            .blocking_dependency_list(
+                &BlockingDependencyListQuery::PrerequisitesOf {
+                    dependent_id: child.id.to_string(),
+                },
+                Some(workspace_root),
+            )
+            .await
+            .unwrap(),
+        vec![BlockingDependency::new(child.id.clone(), first_parent.id.clone()).unwrap()]
+    );
+}
+
+#[tokio::test]
+async fn parentage_mcp_contract_context_recreation_and_locking() {
+    let workspace = create_temp_workspace();
+    let workspace_root = workspace.path().to_str().unwrap();
+    let issues_path = workspace.path().join(".rivets/issues.jsonl");
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+    let child = create_issue(&tools, "Child with spaces Ω").await;
+    let non_epic = create_issue(&tools, "Not an Epic").await;
+    let first_parent = create_epic(&tools, "First Epic").await;
+    let second_parent = create_epic(&tools, "Second Epic").await;
+    tools
+        .blocking_dependency_add(child.id.as_str(), first_parent.id.as_str(), None)
+        .await
+        .unwrap();
+
+    let set = tools
+        .parent_set(child.id.as_str(), first_parent.id.as_str(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&set).unwrap(),
+        json!({
+            "child_id": child.id,
+            "parent_id": first_parent.id
+        })
+    );
+    assert_eq!(
+        tools
+            .parent_set(child.id.as_str(), first_parent.id.as_str(), None)
+            .await
+            .unwrap(),
+        set
+    );
+    assert_eq!(
+        tools.parent_show(child.id.as_str(), None).await.unwrap(),
+        Some(set.clone())
+    );
+
+    let before_failed_move = std::fs::read(&issues_path).unwrap();
+    let failed_move = tools
+        .parent_move(
+            child.id.as_str(),
+            non_epic.id.as_str(),
+            Some(workspace_root),
+        )
+        .await;
+    assert!(matches!(
+        failed_move,
+        Err(Error::InvalidParentage(
+            rivets::domain::ParentageError::ParentNotEpic { parent_id, .. }
+        )) if parent_id == non_epic.id
+    ));
+    assert_eq!(std::fs::read(&issues_path).unwrap(), before_failed_move);
+    assert_eq!(
+        tools.parent_show(child.id.as_str(), None).await.unwrap(),
+        Some(set)
+    );
+
+    let moved = tools
+        .parent_move(
+            child.id.as_str(),
+            second_parent.id.as_str(),
+            Some(workspace_root),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&moved).unwrap(),
+        json!({
+            "child_id": child.id,
+            "parent_id": second_parent.id
+        })
+    );
+
+    assert_parentage_restart_and_clear(&workspace, &child, &first_parent, &second_parent, &moved)
+        .await;
+}
 
 #[tokio::test]
 async fn ready_assignment_visibility() {

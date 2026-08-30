@@ -17,7 +17,7 @@ Before adding or changing a CLI command, MCP tool, argument, default, validation
 - **Close or reopen**: use `close` / `reopen`, or the corresponding CLI commands, with a concise reason.
 - **Add a Blocking Dependency**: the dependent Issue depends on the prerequisite. Use MCP `blocking_dependency_add`, or `rivets blocking-dependency add --dependent <issue> --prerequisite <issue>`.
 - **Inspect or remove Blocking Dependencies**: use the matching MCP `blocking_dependency_list` / `blocking_dependency_tree` / `blocking_dependency_remove` tools or CLI `blocking-dependency` subcommands. Never reverse dependent and prerequisite wording.
-- **Manage Parentage**: use `rivets parent set|move --child <issue> --parent <epic>`, `rivets parent clear --child <issue>`, or `rivets parent show --child <issue>`. Parentage groups Issues but never makes a child Blocked.
+- **Manage Parentage**: use MCP `parent_set` / `parent_move` / `parent_clear` / `parent_show`, or CLI `rivets parent set|move --child <issue> --parent <epic>` and `rivets parent clear|show --child <issue>`. Parentage groups Issues but never makes a child Blocked.
 
 ## When a skill says "publish to the issue tracker"
 

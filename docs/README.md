@@ -6,7 +6,7 @@ Rivets is a Rust issue tracker (edition 2024, MSRV 1.94.0) that stores Issues as
 
 - `rivets` — CLI application and core issue-tracking domain
 - `rivets-jsonl` — JSONL reading/writing library
-- `rivets-mcp` — MCP server for AI assistants (32 tools)
+- `rivets-mcp` — MCP server for AI assistants (36 tools)
 
 The CLI exposes 21 top-level commands: `init`, `info`, `create`, `list`, `show`, `update`, `claim`, `release`, `close`, `reopen`, `delete`, `ready`, `blocking-dependency`, `related`, `discovery`, `parent`, `label`, `resource`, `stale`, `blocked`, and `stats`.
 
@@ -17,7 +17,7 @@ The CLI exposes 21 top-level commands: `init`, `info`, `create`, `list`, `show`,
 - JSONL loading has three stages: parse compatibility records, import Issues, then rebuild relationships.
 - Issue IDs combine a prefix with an adaptive hash whose inputs include a timestamp and nonce; they are not content-addressed.
 - `blocking-dependency add/remove/list/tree` uses explicit dependent and prerequisite roles. The same typed storage interface backs equivalent MCP tools; relationship changes never auto-mutate Issue status.
-- `parent set/clear/move/show` uses explicit child and Epic-parent roles, enforces one acyclic parent per child, and never changes Blocked or Ready.
+- `parent set/clear/move/show` and MCP `parent_set`/`parent_clear`/`parent_move`/`parent_show` use explicit child and Epic-parent roles, enforce one acyclic parent per child, and never change Blocked or Ready.
 - Implemented surfaces include atomic Assignment Claim/Release, canonical Blocking Dependencies, single-Epic Parentage, symmetric Related Associations, directed Discovery Origins, Associated Resources, immutable Notes, mutable Issue Kind, labels, `stats`/`stale`/`info`, and MCP multi-workspace support. Most MCP issue operations accept an optional `workspace_root`; otherwise they use the context selected by `set_context`.
 
 This index separates **current reference documentation** (describes the implemented system) from **accepted decisions** (ADRs, some of which the implementation intentionally lags) and **historical artifacts** (pre-implementation plans and research, not the work frontier).

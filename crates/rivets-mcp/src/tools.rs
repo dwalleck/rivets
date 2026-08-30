@@ -24,9 +24,9 @@ use crate::models::{
 };
 use rivets::domain::{
     AssignmentError, AssociatedResource, BlockingDependency, DiscoveryOrigin, Issue, IssueFilter,
-    IssueId, IssueKind, IssueStatus, IssueUpdate, NewIssue, NewResource, NoteContent,
-    ReadyAssignmentFilter, ReadyFilter, RelatedAssociation, ResourceId, ResourceLabel,
-    ResourceRole, ResourceTarget, ResourceUpdate, WebUrl, WorkspacePath,
+    IssueId, IssueKind, IssueStatus, IssueUpdate, NewIssue, NewResource, NoteContent, Parentage,
+    ReadyAssignmentFilter, ReadyFilter, RelatedAssociation, ResourceId, ResourceLabel, ResourceRole,
+    ResourceTarget, ResourceUpdate, WebUrl, WorkspacePath,
 };
 use rivets::storage::IssueStorage;
 use rivets::workspace_lock::WorkspaceMutationLock;
@@ -914,6 +914,78 @@ impl Tools {
         Ok(storage
             .discovery_origins(&IssueId::new(discovered_issue_id))
             .await?)
+}
+    /// Attach one unparented child to an Epic.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid Parentage, missing context, contention, or
+    /// persistence failure.
+    #[instrument(skip(self), fields(%child_id, %parent_id))]
+    pub async fn parent_set(
+        &self,
+        child_id: &str,
+        parent_id: &str,
+        workspace_root: Option<&str>,
+    ) -> Result<Parentage> {
+        let parentage = Parentage::new(IssueId::new(child_id), IssueId::new(parent_id))?;
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
+        let parentage = storage.set_parent(parentage).await?;
+        save_or_reload(storage.as_mut()).await?;
+        Ok(parentage)
+    }
+
+    /// Remove one child's current Parentage.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a missing child or Parentage, missing context,
+    /// contention, or persistence failure.
+    #[instrument(skip(self), fields(%child_id))]
+    pub async fn parent_clear(
+        &self,
+        child_id: &str,
+        workspace_root: Option<&str>,
+    ) -> Result<Parentage> {
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
+        let parentage = storage.clear_parent(&IssueId::new(child_id)).await?;
+        save_or_reload(storage.as_mut()).await?;
+        Ok(parentage)
+    }
+
+    /// Replace one child's existing Epic parent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid Parentage, missing context, contention, or
+    /// persistence failure. Validation completes before the old edge changes.
+    #[instrument(skip(self), fields(%child_id, %parent_id))]
+    pub async fn parent_move(
+        &self,
+        child_id: &str,
+        parent_id: &str,
+        workspace_root: Option<&str>,
+    ) -> Result<Parentage> {
+        let parentage = Parentage::new(IssueId::new(child_id), IssueId::new(parent_id))?;
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
+        let parentage = storage.move_parent(parentage).await?;
+        save_or_reload(storage.as_mut()).await?;
+        Ok(parentage)
+    }
+
+    /// Show one child's current Parentage.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a missing child or Workspace, or a storage failure.
+    pub async fn parent_show(
+        &self,
+        child_id: &str,
+        workspace_root: Option<&str>,
+    ) -> Result<Option<Parentage>> {
+        let storage = self.storage_for(workspace_root).await?;
+        let storage = storage.read().await;
+        Ok(storage.parent_of(&IssueId::new(child_id)).await?)
     }
 
     /// Reopen a closed issue.
