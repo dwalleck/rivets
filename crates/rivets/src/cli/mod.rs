@@ -128,10 +128,10 @@ pub enum Commands {
     /// Use `--force` to skip confirmation.
     Delete(DeleteArgs),
 
-    /// Show issues ready to work on
+    /// Show Open, unblocked Issues matching Assignment visibility
     ///
-    /// Lists issues that are not blocked by dependencies. Issues are sorted
-    /// by priority (hybrid by default) to help you pick what to work on next.
+    /// Defaults to unassigned Issues. Use `--assignee` for one assignee or
+    /// `--all-assignees` to include every Assignment.
     Ready(ReadyArgs),
 
     /// Manage directed Blocking Dependencies with explicit endpoint roles.
@@ -794,6 +794,7 @@ mod tests {
         match cli.command {
             Some(Commands::Ready(args)) => {
                 assert!(args.assignee.is_none());
+                assert!(!args.all_assignees);
                 assert_eq!(args.limit, 10); // default
                 assert_eq!(args.sort, SortPolicyArg::Hybrid); // default
             }
@@ -818,11 +819,30 @@ mod tests {
         match cli.command {
             Some(Commands::Ready(args)) => {
                 assert_eq!(args.assignee, Some("alice".to_string()));
+                assert!(!args.all_assignees);
                 assert_eq!(args.limit, 5);
                 assert_eq!(args.sort, SortPolicyArg::Priority);
             }
             _ => panic!("Expected Ready command"),
         }
+    }
+
+    #[test]
+    fn ready_assignment_selectors_are_mutually_exclusive() {
+        let cli = Cli::try_parse_from(["rivets", "ready", "--all-assignees"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Ready(ReadyArgs {
+                all_assignees: true,
+                assignee: None,
+                ..
+            }))
+        ));
+
+        assert!(
+            Cli::try_parse_from(["rivets", "ready", "--assignee", "alice", "--all-assignees"])
+                .is_err()
+        );
     }
 
     #[test]

@@ -427,7 +427,7 @@ pub(crate) fn join_canonical_names<T: ValueEnum + fmt::Display>() -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum IssueStatus {
-    /// Issue is open and ready to work on
+    /// Issue is open; Ready is derived separately
     Open,
 
     /// Issue is currently being worked on
@@ -936,6 +936,46 @@ pub struct IssueUpdate {
 
     /// New labels (if updating) - replaces existing labels
     pub labels: Option<Vec<String>>,
+}
+
+/// Assignment visibility for a Ready query.
+///
+/// Ready defaults to unassigned Issues so concurrent workers do not take an
+/// Issue already claimed by another assignee.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ReadyAssignmentFilter {
+    /// Include only Issues without an assignee.
+    #[default]
+    Unassigned,
+    /// Include only Issues assigned to this exact assignee.
+    Assignee(String),
+    /// Include Issues regardless of Assignment.
+    All,
+}
+
+impl ReadyAssignmentFilter {
+    pub(crate) fn allows(&self, assignee: Option<&str>) -> bool {
+        match self {
+            Self::Unassigned => assignee.is_none(),
+            Self::Assignee(expected) => assignee == Some(expected.as_str()),
+            Self::All => true,
+        }
+    }
+}
+
+/// Filter applied after an Issue satisfies the canonical Ready predicate.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ReadyFilter {
+    /// Filter by priority.
+    pub priority: Option<u8>,
+    /// Filter by Issue Kind.
+    pub issue_kind: Option<IssueKind>,
+    /// Select Assignment visibility.
+    pub assignment: ReadyAssignmentFilter,
+    /// Filter by label.
+    pub label: Option<String>,
+    /// Limit the ordered result set.
+    pub limit: Option<usize>,
 }
 
 /// Filter for querying issues

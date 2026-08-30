@@ -8,7 +8,7 @@ Issues and planning artifacts for this repo live in Rivets. The checked-in `.riv
 - **Create an issue**: use `create`, or `rivets create --title "..." --kind <kind> --priority <0-4>`.
 - **Read an issue**: use `show`, or `rivets show <issue-id>`.
 - **List issues**: use `list`, or `rivets list`, with status, label, kind, priority, or assignee filters as needed.
-- **Find unblocked work**: use `ready`, or `rivets ready`.
+- **Find Ready work**: use `ready`, or `rivets ready`. Omitted Assignment selectors return only unassigned Open Issues without unresolved direct Blocking Dependencies; use `--assignee` or `--all-assignees` when that visibility is intentional.
 - **Update an issue**: use `update`, or `rivets update <issue-id>`. Prefer atomic label add/remove operations over replacing the full label set.
 - **Record discussion or resolution**: Rivets has no authored comment history. Use MCP `add_note` or CLI `rivets update <issue-id> --notes "..."`; each operation appends one immutable, system-timestamped Note.
 - **Close or reopen**: use `close` / `reopen`, or the corresponding CLI commands, with a concise reason.
@@ -32,7 +32,7 @@ labels rather than a relationship.
 - **Map**: create an `epic` labelled `wayfinder:map`. Store Destination, Notes, Decisions-so-far, Not-yet-specified, and Out-of-scope in its description.
 - **Child ticket**: create a `task` labelled `wayfinder:<type>`, with its question in the description. Do not create a legacy `parent-child` dependency; canonical set/clear/move/show Parentage is tracked at `rivets-qcje`.
 - **Blocking**: use MCP `blocking_dependency_add`, or `rivets blocking-dependency add --dependent <blocked-ticket> --prerequisite <blocker>`.
-- **Frontier query**: get unblocked issues with `ready`, then retain the map's open, unassigned tickets by their `wayfinder:<type>` labels. Use the tracker result order because Rivets has no explicit sub-issue order.
+- **Frontier query**: query `ready` with the map's `wayfinder:<type>` label. The default Assignment selector already restricts the result to unassigned Ready Issues. Use the tracker result order because Rivets has no explicit sub-issue order.
 - **Claim**: as the first write, set the ticket assignee to the driving developer. The assignee is the claim; status alone is not a claim.
 - **Resolve**: append the answer with `add_note`, close the ticket with a concise reason, then append a one-line title-first context pointer with the issue id to the map's Decisions-so-far.
 - **Concurrent edits**: reload the map and affected tickets immediately before updating them. Preserve unrelated labels, notes, description sections, and dependencies.

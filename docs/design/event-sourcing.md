@@ -653,9 +653,9 @@ impl WorkspaceProjection {
             .collect()
     }
 
-    pub fn ready_to_work(&self, filter: Option<&IssueFilter>) -> Vec<Issue> {
-        // Same logic as current InMemoryStorageInner
-        // Uses graph to find issues with no blocking dependencies
+    pub fn ready_to_work(&self, filter: &ReadyFilter) -> Vec<Issue> {
+        // Open + no unresolved direct Blocking prerequisite + Assignment mode,
+        // then secondary filters, ordering, and limit.
     }
 
     pub fn blocked_issues(&self) -> Vec<(Issue, Vec<Issue>)> {

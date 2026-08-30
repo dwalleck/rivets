@@ -106,6 +106,10 @@ pub struct ReadyParams {
     /// Filter by assignee.
     pub assignee: Option<String>,
 
+    /// Include Issues regardless of Assignment.
+    #[serde(default)]
+    pub all_assignees: bool,
+
     /// Filter by label.
     pub label: Option<String>,
 
@@ -530,6 +534,19 @@ mod tests {
         .expect("legacy issue_type should deserialize");
 
         assert_eq!(params.kind.resolve("ready"), Some(IssueKind::Bug));
+    }
+
+    #[test]
+    fn ready_params_default_and_explicit_all_assignees() {
+        let default: ReadyParams =
+            serde_json::from_value(serde_json::json!({})).expect("empty Ready input should parse");
+        assert!(!default.all_assignees);
+
+        let all: ReadyParams = serde_json::from_value(serde_json::json!({
+            "all_assignees": true
+        }))
+        .expect("explicit all_assignees should parse");
+        assert!(all.all_assignees);
     }
 
     #[test]

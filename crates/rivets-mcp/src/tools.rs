@@ -24,8 +24,8 @@ use crate::models::{
 };
 use rivets::domain::{
     AssociatedResource, BlockingDependency, Issue, IssueFilter, IssueId, IssueKind, IssueStatus,
-    IssueUpdate, NewIssue, NewResource, NoteContent, ResourceId, ResourceLabel, ResourceRole,
-    ResourceTarget, ResourceUpdate, WebUrl, WorkspacePath,
+    IssueUpdate, NewIssue, NewResource, NoteContent, ReadyAssignmentFilter, ReadyFilter,
+    ResourceId, ResourceLabel, ResourceRole, ResourceTarget, ResourceUpdate, WebUrl, WorkspacePath,
 };
 use rivets::storage::IssueStorage;
 use rivets::workspace_lock::WorkspaceMutationLock;
@@ -243,26 +243,37 @@ impl Tools {
     ///
     /// # Errors
     ///
-    /// Returns an error if no context is set or storage operations fail.
+    /// Returns an error if no context is set, both Assignment selectors are
+    /// provided, or storage operations fail.
     #[instrument(skip(self, params), fields(limit = params.limit, priority = params.priority))]
     pub async fn ready(&self, params: ReadyParams) -> Result<Vec<Issue>> {
         debug!("Finding ready issues");
         let issue_kind = params.kind.resolve("ready");
+        let assignment = match (params.assignee, params.all_assignees) {
+            (Some(_), true) => {
+                return Err(Error::InvalidArgument {
+                    field: "assignment selector",
+                    value: "assignee and all_assignees".to_string(),
+                    valid_values: "unassigned, assignee, all_assignees",
+                });
+            }
+            (Some(assignee), false) => ReadyAssignmentFilter::Assignee(assignee),
+            (None, true) => ReadyAssignmentFilter::All,
+            (None, false) => ReadyAssignmentFilter::Unassigned,
+        };
 
         // Release context lock before acquiring storage lock to prevent deadlocks
         let storage = self.storage_for(params.workspace_root.as_deref()).await?;
         let storage = storage.read().await;
-
-        let filter = IssueFilter {
+        let filter = ReadyFilter {
             priority: params.priority,
             issue_kind,
-            assignee: params.assignee,
+            assignment,
             label: params.label,
             limit: Some(params.limit.unwrap_or(DEFAULT_QUERY_LIMIT)),
-            ..Default::default()
         };
 
-        let issues = storage.ready_to_work(Some(&filter), None).await?;
+        let issues = storage.ready_to_work(&filter, None).await?;
         debug!(count = issues.len(), "Found ready issues");
         Ok(issues)
     }
@@ -862,6 +873,7 @@ mod tests {
     use super::*;
     use rivets::storage::in_memory::new_in_memory_storage;
     use rstest::{fixture, rstest};
+    use std::collections::BTreeSet;
     use std::path::PathBuf;
 
     fn kind_input(value: Option<&str>) -> crate::models::IssueKindInput {
@@ -916,6 +928,7 @@ mod tests {
             priority,
             kind: kind_input(issue_kind),
             assignee,
+            all_assignees: false,
             label,
             workspace_root: workspace_root.map(str::to_string),
         }
@@ -1143,16 +1156,84 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    async fn test_ready_to_work(#[future] tools: Tools) {
+    async fn ready_assignment_selectors(#[future] tools: Tools) {
         let tools = tools.await;
-
-        create_issue(&tools, "Ready Issue").await;
-
-        let ready = tools
-            .ready(ready_params(None, None, None, None, None, None))
+        let unassigned = create_issue(&tools, "Unassigned").await;
+        let alice = tools
+            .create(create_params(
+                "Alice".to_string(),
+                None,
+                None,
+                None,
+                Some("alice".to_string()),
+                None,
+                None,
+                None,
+                None,
+            ))
             .await
-            .unwrap();
-        assert!(!ready.is_empty());
+            .expect("assigned Issue creation should succeed");
+
+        let ready_ids = |issues: Vec<Issue>| {
+            issues
+                .into_iter()
+                .map(|issue| issue.id)
+                .collect::<BTreeSet<_>>()
+        };
+        assert_eq!(
+            ready_ids(
+                tools
+                    .ready(ready_params(None, None, None, None, None, None))
+                    .await
+                    .unwrap()
+            ),
+            BTreeSet::from([unassigned.id.clone()])
+        );
+        assert_eq!(
+            ready_ids(
+                tools
+                    .ready(ready_params(
+                        None,
+                        None,
+                        None,
+                        Some("alice".to_string()),
+                        None,
+                        None,
+                    ))
+                    .await
+                    .unwrap()
+            ),
+            BTreeSet::from([alice.id.clone()])
+        );
+        assert_eq!(
+            ready_ids(
+                tools
+                    .ready(ReadyParams {
+                        all_assignees: true,
+                        ..ready_params(None, None, None, None, None, None)
+                    })
+                    .await
+                    .unwrap()
+            ),
+            BTreeSet::from([unassigned.id, alice.id])
+        );
+
+        let error = tools
+            .ready(ReadyParams {
+                assignee: Some("alice".to_string()),
+                all_assignees: true,
+                ..ready_params(None, None, None, None, None, None)
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::InvalidArgument {
+                field: "assignment selector",
+                value,
+                valid_values: "unassigned, assignee, all_assignees",
+            } if value == "assignee and all_assignees"
+        ));
     }
 
     #[rstest]

@@ -43,7 +43,7 @@ Query Parameters:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `status` | string | Filter by status: `open`, `in_progress`, `blocked`, `closed` |
+| `status` | string | Filter by Workflow State: `open`, `in_progress`, `closed` |
 | `priority` | integer | Filter by priority (1-5) |
 | `issue_type` | string | Filter by type: `bug`, `feature`, `task`, `epic`, `chore` |
 | `assignee` | string | Filter by assignee |
@@ -424,9 +424,8 @@ Response:
 {
   "total": 42,
   "by_status": {
-    "open": 15,
+    "open": 18,
     "in_progress": 8,
-    "blocked": 3,
     "closed": 16
   },
   "by_priority": {
@@ -443,7 +442,7 @@ Response:
     "chore": 2
   },
   "ready_count": 12,
-  "blocked_count": 3
+  "blocked_by_dependencies": 3
 }
 ```
 

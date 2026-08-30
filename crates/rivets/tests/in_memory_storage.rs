@@ -5,9 +5,10 @@
 //! semantics, and sort policies.
 
 use rivets::domain::{
-    BlockingDependency, Dependency, DependencyType, IssueFilter, IssueId, IssueKind, IssueStatus,
-    IssueUpdate, MAX_PRIORITY, NewIssue, NewResource, NoteContent, ResourceId, ResourceLabel,
-    ResourceRole, ResourceTarget, ResourceUpdate, SortPolicy, WebUrl, WorkspacePath,
+    BlockingDependency, Dependency, DependencyType, IssueId, IssueKind, IssueStatus, IssueUpdate,
+    MAX_PRIORITY, NewIssue, NewResource, NoteContent, ReadyAssignmentFilter, ReadyFilter,
+    ResourceId, ResourceLabel, ResourceRole, ResourceTarget, ResourceUpdate, SortPolicy, WebUrl,
+    WorkspacePath,
 };
 use rivets::error::Error;
 use rivets::storage::IssueStorage;
@@ -295,7 +296,7 @@ async fn test_delete_with_dependents() {
 
 // ========== Dependency Tests ==========
 #[tokio::test]
-async fn blocking_dependency_coexists_with_legacy_kind() {
+async fn blocking_dependency_round_trip_rebuilds_readiness() {
     let mut storage = new_in_memory_storage("test".to_string());
     let prerequisite = storage
         .create(create_test_issue("Prerequisite"))
@@ -336,6 +337,24 @@ async fn blocking_dependency_coexists_with_legacy_kind() {
             .len(),
         2
     );
+    assert_eq!(
+        storage
+            .blocked_issues()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(issue, _)| issue.id)
+            .collect::<HashSet<_>>(),
+        HashSet::from([dependent.id.clone()])
+    );
+    assert!(
+        !storage
+            .ready_to_work(&ReadyFilter::default(), None)
+            .await
+            .unwrap()
+            .iter()
+            .any(|issue| issue.id == dependent.id)
+    );
 
     let directory = tempdir().unwrap();
     let path = directory.path().join("issues.jsonl");
@@ -348,6 +367,24 @@ async fn blocking_dependency_coexists_with_legacy_kind() {
             .await
             .unwrap(),
         vec![blocking.clone()]
+    );
+    assert_eq!(
+        reloaded
+            .blocked_issues()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(issue, _)| issue.id)
+            .collect::<HashSet<_>>(),
+        HashSet::from([dependent.id.clone()])
+    );
+    assert!(
+        !reloaded
+            .ready_to_work(&ReadyFilter::default(), None)
+            .await
+            .unwrap()
+            .iter()
+            .any(|issue| issue.id == dependent.id)
     );
 
     reloaded
@@ -537,7 +574,7 @@ async fn closed_prerequisite_stays_recorded_without_blocking() {
     );
     assert!(
         !storage
-            .ready_to_work(None, None)
+            .ready_to_work(&ReadyFilter::default(), None)
             .await
             .unwrap()
             .iter()
@@ -563,7 +600,7 @@ async fn closed_prerequisite_stays_recorded_without_blocking() {
     );
     assert!(
         storage
-            .ready_to_work(None, None)
+            .ready_to_work(&ReadyFilter::default(), None)
             .await
             .unwrap()
             .iter()
@@ -576,6 +613,231 @@ async fn closed_prerequisite_stays_recorded_without_blocking() {
 }
 
 // ========== Ready to Work Tests ==========
+#[tokio::test]
+async fn ready_truth_table_covers_state_blocking_and_assignment() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let unassigned = storage
+        .create(create_test_issue("Unassigned"))
+        .await
+        .unwrap();
+
+    let mut alice_issue = create_test_issue("Alice");
+    alice_issue.assignee = Some("alice".to_string());
+    let alice = storage.create(alice_issue).await.unwrap();
+
+    let in_progress = storage
+        .create(create_test_issue("In Progress"))
+        .await
+        .unwrap();
+    storage
+        .update(
+            &in_progress.id,
+            IssueUpdate {
+                status: Some(IssueStatus::InProgress),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let closed = storage.create(create_test_issue("Closed")).await.unwrap();
+    storage
+        .update(
+            &closed.id,
+            IssueUpdate {
+                status: Some(IssueStatus::Closed),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let prerequisite = storage
+        .create(create_test_issue("Prerequisite"))
+        .await
+        .unwrap();
+    let blocked = storage.create(create_test_issue("Blocked")).await.unwrap();
+    storage
+        .add_blocking_dependency(
+            BlockingDependency::new(blocked.id.clone(), prerequisite.id.clone()).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let default_ids = storage
+        .ready_to_work(&ReadyFilter::default(), None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|issue| issue.id)
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        default_ids,
+        HashSet::from([unassigned.id.clone(), prerequisite.id.clone()])
+    );
+
+    let alice_ids = storage
+        .ready_to_work(
+            &ReadyFilter {
+                assignment: ReadyAssignmentFilter::Assignee("alice".to_string()),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|issue| issue.id)
+        .collect::<HashSet<_>>();
+    assert_eq!(alice_ids, HashSet::from([alice.id.clone()]));
+
+    let all_ids = storage
+        .ready_to_work(
+            &ReadyFilter {
+                assignment: ReadyAssignmentFilter::All,
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|issue| issue.id)
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        all_ids,
+        HashSet::from([unassigned.id, alice.id, prerequisite.id])
+    );
+}
+
+#[tokio::test]
+async fn non_blocking_relationships_never_change_readiness() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let prerequisite = storage
+        .create(create_test_issue("Prerequisite"))
+        .await
+        .unwrap();
+    let directly_blocked = storage
+        .create(create_test_issue("Directly Blocked"))
+        .await
+        .unwrap();
+    let blocked_parent = storage
+        .create(create_test_issue("Blocked Parent"))
+        .await
+        .unwrap();
+    let child = storage.create(create_test_issue("Child")).await.unwrap();
+    let related = storage.create(create_test_issue("Related")).await.unwrap();
+    let discovered = storage
+        .create(create_test_issue("Discovered"))
+        .await
+        .unwrap();
+
+    for dependent in [&directly_blocked, &blocked_parent] {
+        storage
+            .add_blocking_dependency(
+                BlockingDependency::new(dependent.id.clone(), prerequisite.id.clone()).unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    seed_legacy_relationship(
+        &mut storage,
+        &child.id,
+        &blocked_parent.id,
+        DependencyType::ParentChild,
+    )
+    .await;
+    seed_legacy_relationship(
+        &mut storage,
+        &related.id,
+        &prerequisite.id,
+        DependencyType::Related,
+    )
+    .await;
+    seed_legacy_relationship(
+        &mut storage,
+        &discovered.id,
+        &prerequisite.id,
+        DependencyType::DiscoveredFrom,
+    )
+    .await;
+
+    let blocked_ids = storage
+        .blocked_issues()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(issue, _)| issue.id)
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        blocked_ids,
+        HashSet::from([directly_blocked.id, blocked_parent.id])
+    );
+
+    let ready_ids = storage
+        .ready_to_work(&ReadyFilter::default(), None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|issue| issue.id)
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        ready_ids,
+        HashSet::from([prerequisite.id, child.id, related.id, discovered.id])
+    );
+}
+
+#[tokio::test]
+async fn ready_filters_sort_and_limit_after_eligibility() {
+    let mut storage = new_in_memory_storage("test".to_string());
+
+    let mut unlabelled = create_test_issue_with_priority("Unlabelled P0", 0);
+    unlabelled.issue_kind = IssueKind::Task;
+    storage.create(unlabelled).await.unwrap();
+
+    let mut wrong_kind = create_test_issue_with_priority("Focused Bug P0", 0);
+    wrong_kind.issue_kind = IssueKind::Bug;
+    wrong_kind.labels = vec!["focus".to_string()];
+    storage.create(wrong_kind).await.unwrap();
+
+    let prerequisite = storage
+        .create(create_test_issue("Prerequisite"))
+        .await
+        .unwrap();
+    let mut blocked = create_test_issue_with_priority("Blocked Focused Task P0", 0);
+    blocked.labels = vec!["focus".to_string()];
+    let blocked = storage.create(blocked).await.unwrap();
+    storage
+        .add_blocking_dependency(
+            BlockingDependency::new(blocked.id.clone(), prerequisite.id.clone()).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let mut first = create_test_issue_with_priority("Focused Task P1", 1);
+    first.labels = vec!["focus".to_string()];
+    let first = storage.create(first).await.unwrap();
+
+    let mut second = create_test_issue_with_priority("Focused Task P2", 2);
+    second.labels = vec!["focus".to_string()];
+    storage.create(second).await.unwrap();
+
+    let ready = storage
+        .ready_to_work(
+            &ReadyFilter {
+                issue_kind: Some(IssueKind::Task),
+                label: Some("focus".to_string()),
+                limit: Some(1),
+                ..Default::default()
+            },
+            Some(SortPolicy::Priority),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].id, first.id);
+}
 
 #[tokio::test]
 async fn test_ready_to_work() {
@@ -594,7 +856,10 @@ async fn test_ready_to_work() {
         .unwrap();
 
     // Get ready issues
-    let ready = storage.ready_to_work(None, None).await.unwrap();
+    let ready = storage
+        .ready_to_work(&ReadyFilter::default(), None)
+        .await
+        .unwrap();
 
     // issue3 and issue1 should be ready, issue2 should be blocked
     assert_eq!(ready.len(), 2);
@@ -625,7 +890,10 @@ async fn test_ready_to_work_closed_blocker_unblocks() {
         .unwrap();
 
     // Initially blocked should not be ready
-    let ready = storage.ready_to_work(None, None).await.unwrap();
+    let ready = storage
+        .ready_to_work(&ReadyFilter::default(), None)
+        .await
+        .unwrap();
     assert_eq!(ready.len(), 1);
     assert_eq!(ready[0].id, blocker.id);
 
@@ -642,7 +910,10 @@ async fn test_ready_to_work_closed_blocker_unblocks() {
         .unwrap();
 
     // Now blocked should be ready
-    let ready = storage.ready_to_work(None, None).await.unwrap();
+    let ready = storage
+        .ready_to_work(&ReadyFilter::default(), None)
+        .await
+        .unwrap();
     assert_eq!(ready.len(), 1);
     assert_eq!(ready[0].id, blocked.id);
 }
@@ -671,7 +942,7 @@ async fn test_sort_policy_priority() {
         .unwrap();
 
     let ready = storage
-        .ready_to_work(None, Some(SortPolicy::Priority))
+        .ready_to_work(&ReadyFilter::default(), Some(SortPolicy::Priority))
         .await
         .unwrap();
 
@@ -700,7 +971,7 @@ async fn test_sort_policy_oldest() {
         .unwrap();
 
     let ready = storage
-        .ready_to_work(None, Some(SortPolicy::Oldest))
+        .ready_to_work(&ReadyFilter::default(), Some(SortPolicy::Oldest))
         .await
         .unwrap();
 
@@ -722,12 +993,12 @@ async fn test_ready_to_work_with_assignee_filter() {
     bob_issue.assignee = Some("bob".to_string());
     let _bob = storage.create(bob_issue).await.unwrap();
 
-    let filter = IssueFilter {
-        assignee: Some("alice".to_string()),
+    let filter = ReadyFilter {
+        assignment: ReadyAssignmentFilter::Assignee("alice".to_string()),
         ..Default::default()
     };
 
-    let ready = storage.ready_to_work(Some(&filter), None).await.unwrap();
+    let ready = storage.ready_to_work(&filter, None).await.unwrap();
 
     assert_eq!(ready.len(), 1);
     assert_eq!(ready[0].id, alice.id);
@@ -887,7 +1158,10 @@ async fn test_dependency_on_nonexistent_issue() {
 async fn test_ready_to_work_empty_storage() {
     let storage = new_in_memory_storage("test".to_string());
 
-    let ready = storage.ready_to_work(None, None).await.unwrap();
+    let ready = storage
+        .ready_to_work(&ReadyFilter::default(), None)
+        .await
+        .unwrap();
     assert!(
         ready.is_empty(),
         "Empty storage should return no ready issues"
@@ -923,7 +1197,10 @@ async fn test_ready_to_work_all_closed() {
         .await
         .unwrap();
 
-    let ready = storage.ready_to_work(None, None).await.unwrap();
+    let ready = storage
+        .ready_to_work(&ReadyFilter::default(), None)
+        .await
+        .unwrap();
     assert!(
         ready.is_empty(),
         "All closed issues should return no ready issues"

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Canonicalized Workflow State to Open/In Progress/Closed and made Ready an Open, direct-unblocked, Assignment-aware query that defaults to unassigned Issues across CLI and MCP.
 - Replaced Issue Type with mutable Issue Kind across domain, CLI, MCP, output, and canonical JSONL contracts while retaining legacy `issue_type` loading.
 - Renamed `MigrationField` persistence accessors to reflect emitted and migration-only JSONL field names.
 - Upgraded `rmcp` to 1.8.0 to clear RUSTSEC-2026-0189 while preserving stdio transport.

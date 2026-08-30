@@ -78,10 +78,10 @@ RUST_LOG=debug rivets-mcp
 
 | Tool | Description |
 |------|-------------|
-| `ready` | Find tasks with no blockers, ready to work on |
-| `list` | List issues with optional filters (status, priority, type, assignee, label) |
-| `show` | Show detailed information about a specific issue |
-| `blocked` | Get blocked issues and what's blocking them |
+| `ready` | Find Open Issues without unresolved direct Blocking Dependencies; defaults to unassigned |
+| `list` | List Issues with optional filters (Workflow State, priority, Kind, assignee, label) |
+| `show` | Show detailed information about a specific Issue |
+| `blocked` | Get Issues with direct unresolved Blocking Dependencies and their prerequisites |
 
 ### Modification Tools
 
@@ -117,7 +117,7 @@ independently writable.
 
 ```json
 {
-  "status": "open",           // optional: open, in_progress, blocked, closed
+  "status": "open",           // optional: open, in_progress, closed
   "priority": 1,              // optional: 0-4
   "issue_kind": "bug",        // optional: bug, feature, task, epic, chore
   "assignee": "alice",        // optional
@@ -126,6 +126,23 @@ independently writable.
   "workspace_root": "/path"   // optional, uses current context if omitted
 }
 ```
+
+### ready
+
+```json
+{
+  "assignee": "alice",        // optional exact selector
+  "all_assignees": false,     // optional; conflicts with assignee
+  "priority": 1,              // optional: 0-4
+  "issue_kind": "task",       // optional
+  "label": "ready-for-agent", // optional
+  "limit": 20,                // optional, default 100
+  "workspace_root": "/path"   // optional
+}
+```
+
+Omit both Assignment selectors for unassigned Ready Issues. Set
+`all_assignees` to `true` only when every Assignment should be visible.
 
 ### create
 
@@ -200,7 +217,7 @@ Logs are written to stderr (stdout is reserved for MCP protocol).
    set_context(workspace_root: "/home/user/myproject")
    ```
 
-2. **Find ready work**:
+2. **Find unassigned Ready work**:
    ```
    ready(limit: 5, priority: 1)
    ```

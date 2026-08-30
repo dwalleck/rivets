@@ -211,66 +211,47 @@ flowchart TD
     style Display fill:#90EE90
 ```
 
-`--priority` takes a single value 0–4 (not a range); `--status` accepts the
-status vocabulary `open`, `in_progress`, `blocked`, `closed`; `--kind` accepts
-`bug`, `feature`, `task`, `epic`, `chore`.
+`--priority` takes a single value 0–4 (not a range); `--status` accepts exactly
+`open`, `in_progress`, or `closed`; `--kind` accepts `bug`, `feature`, `task`,
+`epic`, or `chore`.
 
 ## Ready Work Algorithm Flow
 
-`ready` is a **graph-derived query**: it computes blocked issues from the
-dependency graph and never consults or writes the `blocked` status value.
+`ready` derives eligibility at query time. It never reads or writes a persisted
+Ready or Blocked flag.
 
 ```mermaid
 flowchart TD
-    Start[rivets ready<br/>--assignee alice] --> InitBlocked[blocked = empty set]
+    Start[rivets ready] --> Open{Workflow State Open?}
+    Open -->|No| Skip[Exclude]
+    Open -->|Yes| Direct{Direct Blocks edge to<br/>a non-Closed prerequisite?}
+    Direct -->|Yes| Skip
+    Direct -->|No| Assignment{Assignment selector}
+    Assignment -->|Default| Unassigned{Unassigned?}
+    Assignment -->|--assignee alice| Alice{Assigned exactly alice?}
+    Assignment -->|--all-assignees| Include[Eligible]
+    Unassigned -->|Yes| Include
+    Unassigned -->|No| Skip
+    Alice -->|Yes| Include
+    Alice -->|No| Skip
+    Include --> Filters[Apply priority, Kind, and label filters]
+    Filters --> Sort[Sort: hybrid / priority / oldest]
+    Sort --> Limit[Apply --limit]
+    Limit --> Display[Display Ready Issues]
 
-    InitBlocked --> Phase1[Phase 1: Direct Blocks]
-    Phase1 --> Iterate1{For each non-closed issue}
-
-    Iterate1 --> CheckDeps{Has outgoing<br/>dependency edges?}
-    CheckDeps -->|Yes| FilterBlocking{Edge type == 'blocks'?}
-    FilterBlocking -->|Yes| CheckBlockerStatus{Blocker is<br/>not closed?}
-    CheckBlockerStatus -->|Yes| AddBlocked[blocked.insert issue]
-    CheckBlockerStatus -->|No| Iterate1
-    FilterBlocking -->|No| Iterate1
-    CheckDeps -->|No| Iterate1
-
-    Iterate1 -->|Done| Phase2[Phase 2: Transitive Blocking]
-
-    Phase2 --> InitQueue[BFS queue = blocked issues]
-    InitQueue --> ProcessQueue{Queue<br/>not empty?}
-
-    ProcessQueue -->|Yes| PopIssue[Pop issue, depth]
-    PopIssue --> CheckDepth{depth < 50?}
-    CheckDepth -->|No| ProcessQueue
-    CheckDepth -->|Yes| FindChildren[Find children via<br/>parent-child edges]
-
-    FindChildren --> MarkChildren[blocked.insert children<br/>queue.push children, depth+1]
-    MarkChildren --> ProcessQueue
-
-    ProcessQueue -->|No| FilterResults[Filter: status ≠ closed<br/>AND id ∉ blocked]
-
-    FilterResults --> ApplyUserFilter{Additional<br/>filters?}
-    ApplyUserFilter -->|Yes| FilterAssignee{assignee == alice?}
-    FilterAssignee -->|Yes| Include[Include in ready]
-    FilterAssignee -->|No| Skip[Skip]
-    ApplyUserFilter -->|No| Include
-
-    Include --> SortResults[Sort by policy<br/>--sort hybrid/priority/oldest]
-    SortResults --> Limit[Truncate to --limit<br/>default 10]
-    Limit --> Display[Display: Ready to work (N issue(s))]
-
+    style Skip fill:#FFB6C1
     style Display fill:#90EE90
 ```
 
-Edge direction reminder: edges point from **dependent → dependency**. For
-`blocks`, the target of the edge is the blocker. Only `blocks` edges block
-directly; `parent-child` edges propagate a blocked parent's result to its children.
+Edges point from **dependent → prerequisite**. Only a direct `blocks` edge to a
+non-Closed prerequisite derives Blocked. Parentage, Related Associations, and
+Discovery Origins never affect Blocked or Ready. Filters, sorting, and limits
+operate only after Open/Blocked/Assignment eligibility.
 
 ## Blocked Query Flow
 
-`rivets blocked` reports issues that are blocked **by the graph**, pairing each
-blocked issue with its direct blockers:
+`rivets blocked` reports Issues with direct unresolved explicit Blocking
+Dependencies, pairing each blocked Issue with its direct prerequisites:
 
 ```mermaid
 flowchart TD
@@ -420,45 +401,32 @@ reviewable diffs) to a `.tmp` file, flushed, then renamed over `issues.jsonl`.
 ## State Transitions
 
 Status changes are **explicit only** — via `update --status`, `close`, or
-`reopen`. Dependency operations never change status, and nothing in the system
-auto-transitions an issue to `blocked`.
+`reopen`. Dependency operations never change Workflow State. Open, In Progress,
+and Closed are the only states; Blocked and Ready are derived and never
+serialized on Issue records.
 
 The transition rules are owned by the domain (`IssueStatus::validate_transition`,
 ADR-0005) and enforced at the single storage update site. Only two transitions
 are rejected:
 
-- `closed → closed` (an issue cannot be closed twice)
-- anything non-closed → `open` (only a closed issue can be reopened)
+- `closed → closed` (an Issue cannot be closed twice)
+- anything non-Closed → `open` (only a Closed Issue can be reopened)
 
-Every other transition is allowed, including setting the status explicitly.
+Every other transition among the three states is allowed.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Open: create
     Open --> InProgress: update --status in_progress
-    Open --> Blocked: update --status blocked (explicit)
-    InProgress --> Blocked: update --status blocked (explicit)
     Open --> Closed: close
     InProgress --> Closed: close
-    Blocked --> Closed: close
     Closed --> Open: reopen
-
-    note right of Blocked
-        'blocked' is a legacy status value that can
-        still be set explicitly, but nothing sets it
-        automatically. Blocked-ness for queries is
-        derived from the dependency graph instead.
-    end note
-
-    note right of Closed
-        Any status can be closed via 'close';
-        only Closed can be reopened.
-    end note
 ```
 
-The `ready` and `blocked` queries are graph-derived. In `stats`, the `ready` and
-`blocked_by_dependencies` fields use those queries, while `by_status.blocked`
-counts the separately stored legacy status value.
+The `ready` and `blocked` queries derive their conditions from current Workflow
+State, Assignment, and explicit Blocking Dependencies. `stats.by_status`
+contains exactly the three Workflow States; `ready` and
+`blocked_by_dependencies` are separate derived counts.
 
 ## Data Persistence Points
 

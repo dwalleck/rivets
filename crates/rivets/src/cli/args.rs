@@ -257,9 +257,13 @@ pub struct DeleteArgs {
 /// Arguments for the `ready` command
 #[derive(Parser, Debug, Clone)]
 pub struct ReadyArgs {
-    /// Filter by assignee
-    #[arg(short, long)]
+    /// Include only Issues assigned to this exact assignee
+    #[arg(short, long, conflicts_with = "all_assignees")]
     pub assignee: Option<String>,
+
+    /// Include Issues regardless of Assignment
+    #[arg(long, conflicts_with = "assignee")]
+    pub all_assignees: bool,
 
     /// Filter by priority
     #[arg(short, long, value_parser = clap::value_parser!(u8).range(MIN_PRIORITY as i64..=MAX_PRIORITY as i64))]

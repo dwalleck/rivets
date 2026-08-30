@@ -71,7 +71,7 @@
 
 use crate::domain::{
     BlockingDependency, Issue, IssueFilter, IssueId, IssueUpdate, NewIssue, NewResource,
-    ResourceId, ResourceUpdate, SortPolicy,
+    ReadyFilter, ResourceId, ResourceUpdate, SortPolicy,
 };
 use crate::error::{PartialLoadError, Result, SkippedIssueRecordCause, StorageError};
 use async_trait::async_trait;
@@ -195,10 +195,14 @@ pub trait IssueStorage: Send + Sync {
 
     /// Find issues ready to work on.
     ///
-    /// Returns issues that are:
-    /// - Not closed
-    /// - Not blocked by dependencies
-    /// - Not blocked transitively through parent-child relationships
+    /// An Issue is Ready when all of these conditions hold:
+    ///
+    /// - Workflow State is `Open`
+    /// - No explicit Blocking Dependency points to an unresolved prerequisite
+    /// - Assignment matches the query's [`ReadyFilter`]
+    ///
+    /// Priority, Issue Kind, label, ordering, and limit are applied only after
+    /// eligibility is established.
     ///
     /// # Sort Policies
     ///
@@ -209,11 +213,11 @@ pub trait IssueStorage: Send + Sync {
     ///
     /// # Arguments
     ///
-    /// * `filter` - Optional filter to narrow results by status, priority, kind, assignee, or label
+    /// * `filter` - Ready-specific Assignment, priority, Kind, label, and limit criteria
     /// * `sort_policy` - Sort order for results (defaults to Hybrid if None)
     async fn ready_to_work(
         &self,
-        filter: Option<&IssueFilter>,
+        filter: &ReadyFilter,
         sort_policy: Option<SortPolicy>,
     ) -> Result<Vec<Issue>>;
 
@@ -557,7 +561,7 @@ impl IssueStorage for JsonlBackedStorage {
 
     async fn ready_to_work(
         &self,
-        filter: Option<&IssueFilter>,
+        filter: &ReadyFilter,
         sort_policy: Option<SortPolicy>,
     ) -> Result<Vec<Issue>> {
         self.inner.ready_to_work(filter, sort_policy).await
@@ -909,7 +913,7 @@ impl IssueStorage for MockStorage {
 
     async fn ready_to_work(
         &self,
-        _filter: Option<&IssueFilter>,
+        _filter: &ReadyFilter,
         _sort_policy: Option<SortPolicy>,
     ) -> Result<Vec<Issue>> {
         Ok(vec![])
@@ -1027,7 +1031,13 @@ mod tests {
         // Test that query methods return empty results
         let filter = IssueFilter::default();
         assert!(storage.list(&filter).await.unwrap().is_empty());
-        assert!(storage.ready_to_work(None, None).await.unwrap().is_empty());
+        assert!(
+            storage
+                .ready_to_work(&ReadyFilter::default(), None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert!(storage.blocked_issues().await.unwrap().is_empty());
     }
 

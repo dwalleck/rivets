@@ -13,6 +13,12 @@
 
 Slices 1-2 in dependency order. Mergeable definition: the repository accepts and emits only three Workflow States; storage derives Blocked only from explicit unresolved Blocking Dependencies; Ready uses the assignee-aware canonical predicate through CLI and MCP; canonical restart behavior and output contracts pass without later work. Verification: the domain, storage, real CLI process, MCP integration, restart, stress, wire/parity registry, and workspace gates named below all pass within this increment.
 
+### Actual cumulative-size tripwire after Slice 1
+
+The inherited stack is 5,300 insertions and 3,036 deletions from `origin/main`, so the repository-level cumulative tripwire exceeds 4,000 before rivets-brai is complete. The prior work is already partitioned by Issue/commit stack. `work/brai` is therefore its own stacked increment on `work/gf4j-session-hold` at `e85f2e2`; the base pointer remains at that commit. Slice 1 contributes 473 insertions and 161 deletions in this increment, below the 2,188-line planned budget. Slice 2 remains in `canonical-readiness`; review and CI target the stacked branch rather than the entire inherited diff.
+
+After Slice 2 the complete staged increment is 1,609 insertions and 499 deletions (2,108 changed lines), 80 lines below the projected total and below the 4,000-line tripwire. The stronger-than-planned 10,000-Issue/50,000-edge oracle fixture was offset by smaller production changes; synchronized architecture and design references are included. Pre-existing untracked parity and agent-summary references were also synchronized locally but are excluded from commit size and ownership. The behavior remains one independently mergeable readiness increment, so repartitioning would split tests and documentation from the seam they enforce.
+
 ## Slice 1: Remove Blocked from lifecycle vocabulary and output
 
 **Claim IDs:** C1, C8
@@ -71,24 +77,24 @@ Slices 1-2 in dependency order. Mergeable definition: the repository accepts and
 
 **Oracle:** Test-local truth tables over fixture metadata, raw JSONL records, and role-named relationship endpoints compute `state == Open && no non-Closed Blocking prerequisite && assignment_mode.matches(assignee)` independently of graph traversal, Ready filtering, and adapter result comparison.
 
-**Stress fixture:** 10,000 Issues with 50,000 seeded relationship edges spanning all four legacy kinds, mixed prerequisite states, mixed assignments, and at least one eligible positive control per assignment mode. Expected: only direct `Blocks` edges to non-Closed prerequisites exclude Open Issues; a test-local oracle matches every returned ID; a timed Ready query completes within 2 seconds. This is over 40× the audited 224-Issue Workspace and over 600× its 75 Blocking edges.
+**Stress fixture:** 10,000 Issues with 50,000 seeded relationship edges spanning all four legacy kinds, mixed prerequisite states, mixed assignments, and a positive control per assignment mode. Expected IDs come from a test-local scan of raw endpoint/status/assignee tuples rather than the production graph traversal; each Assignment mode matches item-for-item and each timed Ready query completes within 2 seconds. This is over 40× the audited 224-Issue Workspace and over 600× its 75 Blocking edges.
 
 **Regression fence:**
 - `crates/rivets/tests/in_memory_storage.rs::closed_prerequisite_stays_recorded_without_blocking`
 - `crates/rivets/tests/in_memory_storage.rs::non_blocking_relationships_never_change_readiness`
 - `crates/rivets/tests/in_memory_storage.rs::ready_truth_table_covers_state_blocking_and_assignment`
 - `crates/rivets/tests/in_memory_storage.rs::ready_filters_sort_and_limit_after_eligibility`
-- `crates/rivets/tests/in_memory_storage.rs::ready_stress_fixture_matches_oracle_within_budget`
+- `crates/rivets/src/storage/in_memory/trait_impl.rs::ready_stress_fixture_matches_oracle_within_budget`
 - `crates/rivets/tests/cli_tests.rs::ready_assignment_visibility`
 - `crates/rivets-mcp/tests/integration.rs::ready_assignment_visibility`
 - CLI parser and MCP model conflict tests
 - CLI process restart test and `crates/rivets-mcp/tests/integration.rs::ready_and_blocked_survive_context_recreation`
 
 **Named mutation:**
-- C2: in `storage/in_memory/trait_impl.rs`, include Closed prerequisites unconditionally; the close/unblock fence turns red.
-- C3: restore ParentChild propagation in `storage/in_memory/graph.rs`; the parent-only child disappears from Ready and the non-blocking relationship fence turns red.
+- C2: in `storage/in_memory/graph.rs`, treat every Blocking prerequisite as unresolved even when Closed; the close/unblock fence turns red.
+- C3: in `storage/in_memory/graph.rs`, treat `ParentChild` edges as blocking; the parent-only child disappears from Ready and the non-blocking relationship fence turns red.
 - C4: replace `status == Open` with `status != Closed`; the paired In Progress Issue appears and the truth-table fence turns red.
-- C5: map omitted MCP selector to `All`; the MCP default expected-ID fence turns red while explicit All remains the positive control.
+- C5: map an omitted MCP selector to `All`; the MCP default expected-ID fence turns red while explicit All remains the positive control.
 - C6: skip rebuilding `Blocks` edges in `storage/in_memory/jsonl.rs`; fresh process/context output disagrees with the raw-record oracle.
 - C7: delete the Label comparison from the Ready-specific filter; the label-mismatched eligible control appears in the exact sequence.
 
@@ -127,7 +133,7 @@ Slices 1-2 in dependency order. Mergeable definition: the repository accepts and
 
 **Commands and expected results:**
 - `cargo test -p rivets --test in_memory_storage` → every storage fence in this slice agrees item-by-item with the direct-edge, lifecycle, assignment, and secondary-filter oracle; closing the last prerequisite preserves its edge and admits the dependent.
-- `cargo test -p rivets --test in_memory_storage ready_stress_fixture_matches_oracle_within_budget` → all 10,000-Issue fixture IDs agree with the independent oracle and measured Ready query time is ≤2 seconds.
+- `cargo test -p rivets ready_stress_fixture_matches_oracle_within_budget` → all three Assignment modes in the 10,000-Issue/50,000-edge fixture agree item-for-item with the independent raw-tuple oracle and each measured Ready query is ≤2 seconds.
 - `cargo test -p rivets --test cli_tests ready_assignment_visibility` → default returns only unassigned eligible IDs; named returns only that Assignee's eligible IDs; all returns both; conflicting selectors fail; blocked/In Progress/Closed controls never appear.
 - `cargo test -p rivets-mcp --test integration ready_assignment_visibility` → the same literal expected-ID sets and conflict meaning hold through MCP Tools.
 - `cargo test -p rivets --test cli_tests ready_and_blocked_survive_restart` → two fresh CLI processes return the same literal Ready/Blocked sets derived from raw JSONL.

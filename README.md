@@ -57,8 +57,8 @@ rivets close "$ID"
 | `close` | Close one or more issues, optionally `--reason` |
 | `reopen` | Reopen a closed issue, optionally `--reason` |
 | `delete` | Delete an issue permanently (`--force` skips the confirmation prompt) |
-| `ready` | Issues with no blockers, hybrid-sorted by priority |
-| `blocked` | Issues blocked by open Blocking prerequisites, along with those prerequisites |
+| `ready` | Open Issues without unresolved direct Blocking Dependencies; defaults to unassigned, with `--assignee` and `--all-assignees` selectors |
+| `blocked` | Issues with direct Blocking Dependencies to non-Closed prerequisites, along with those prerequisites |
 | `blocking-dependency` | Blocking Dependencies: `add`/`remove --dependent <id> --prerequisite <id>`, `list --dependent|--prerequisite <id>`, `tree --dependent <id> [--depth N]` |
 | `label` | Labels: `add <label> [<issue-id>]`, `remove`, `list <issue-id>`, `list-all`; use `--ids` for batches |
 | `resource` | Associated Resources: `add`, `list`, `update`, `remove` (see below) |
@@ -76,7 +76,7 @@ Replace them with IDs printed by `rivets create` in your repository.
 
 ```bash
 rivets create --title "Fix login bug" --kind bug --priority 1
-rivets list                              # All issues, open and closed (priority-sorted, max 50)
+rivets list                              # All Workflow States (priority-sorted, max 50)
 rivets list --status open                # Filter to open issues
 rivets list --status in_progress         # Filter by status
 rivets show demo-a3f8                    # View issue details
@@ -93,12 +93,17 @@ rivets blocking-dependency list --dependent demo-a3f8       # Its prerequisites
 rivets blocking-dependency list --prerequisite demo-b2c9    # Issues that depend on it
 rivets blocking-dependency tree --dependent demo-a3f8 --depth 3
 rivets blocked
-rivets ready
+rivets ready                             # Unassigned Ready Issues
+rivets ready --assignee alice            # Ready Issues claimed by alice
+rivets ready --all-assignees             # Ready Issues regardless of Assignment
 ```
 
 A Blocking Dependency always points from the dependent Issue to its
 prerequisite. Self-dependencies and Blocking-only cycles are rejected. Closing
 a prerequisite leaves the relationship recorded but stops it from blocking.
+Ready requires Workflow State Open. Parentage, Related Associations, and
+Discovery Origins never affect Blocked or Ready, and neither condition is
+serialized on Issue records.
 Legacy non-blocking relationship records remain readable; their dedicated
 interfaces land in separate ADR-0002 slices.
 

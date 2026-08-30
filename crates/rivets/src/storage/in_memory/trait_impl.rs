@@ -7,7 +7,8 @@ use super::graph::{
 use super::sorting::sort_by_policy;
 use crate::domain::{
     BlockingDependency, Dependency, DependencyType, Issue, IssueFilter, IssueId, IssueStatus,
-    IssueUpdate, MAX_PRIORITY, NewIssue, NewResource, Note, ResourceId, ResourceUpdate, SortPolicy,
+    IssueUpdate, MAX_PRIORITY, NewIssue, NewResource, Note, ReadyFilter, ResourceId,
+    ResourceUpdate, SortPolicy,
 };
 use crate::error::{Error, Result, StorageError};
 use crate::storage::IssueStorage;
@@ -17,10 +18,7 @@ use petgraph::Direction;
 use petgraph::visit::EdgeRef;
 use std::collections::HashSet;
 
-/// Check if an issue matches all criteria in the filter.
-///
-/// This is shared logic used by both `list()` and `ready_to_work()` to apply
-/// optional filters for status, priority, kind, assignee, and label.
+/// Check whether an Issue matches every generic list criterion.
 fn matches_filter(issue: &Issue, filter: &IssueFilter) -> bool {
     filter
         .status
@@ -37,6 +35,22 @@ fn matches_filter(issue: &Issue, filter: &IssueFilter) -> bool {
             .assignee
             .as_ref()
             .is_none_or(|assignee| issue.assignee.as_ref() == Some(assignee))
+        && filter
+            .label
+            .as_ref()
+            .is_none_or(|label| issue.labels.contains(label))
+}
+
+/// Check post-eligibility Ready query criteria.
+fn matches_ready_filter(issue: &Issue, filter: &ReadyFilter) -> bool {
+    filter.assignment.allows(issue.assignee.as_deref())
+        && filter
+            .priority
+            .is_none_or(|priority| issue.priority == priority)
+        && filter
+            .issue_kind
+            .as_ref()
+            .is_none_or(|issue_kind| &issue.issue_kind == issue_kind)
         && filter
             .label
             .as_ref()
@@ -441,35 +455,25 @@ impl IssueStorage for InMemoryStorage {
 
     async fn ready_to_work(
         &self,
-        filter: Option<&IssueFilter>,
+        filter: &ReadyFilter,
         sort_policy: Option<SortPolicy>,
     ) -> Result<Vec<Issue>> {
         let inner = self.lock().await;
-
-        // Find all blocked issues using BFS traversal
         let blocked = find_blocked_issues(&inner.graph, &inner.node_map, &inner.issues);
 
-        // Filter out blocked and closed issues
-        let mut ready: Vec<Issue> = inner
+        let mut ready = inner
             .issues
             .values()
-            .filter(|issue| issue.status != IssueStatus::Closed && !blocked.contains(&issue.id))
+            .filter(|issue| {
+                issue.status == IssueStatus::Open
+                    && !blocked.contains(&issue.id)
+                    && matches_ready_filter(issue, filter)
+            })
             .cloned()
-            .collect();
+            .collect::<Vec<_>>();
 
-        // Apply additional filter if provided
-        if let Some(filter) = filter {
-            ready.retain(|issue| matches_filter(issue, filter));
-        }
-
-        // Apply sort policy
-        let policy = sort_policy.unwrap_or_default();
-        sort_by_policy(&mut ready, policy);
-
-        // Apply limit if specified
-        if let Some(filter) = filter
-            && let Some(limit) = filter.limit
-        {
+        sort_by_policy(&mut ready, sort_policy.unwrap_or_default());
+        if let Some(limit) = filter.limit {
             ready.truncate(limit);
         }
 
@@ -604,8 +608,13 @@ impl IssueStorage for InMemoryStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{IssueFilter, IssueKind, IssueStatus};
+    use crate::domain::{IssueFilter, IssueKind, IssueStatus, ReadyAssignmentFilter};
+    use crate::storage::in_memory::inner::InMemoryStorageInner;
     use rstest::rstest;
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use tokio::sync::Mutex;
 
     fn create_test_issue() -> Issue {
         Issue {
@@ -721,5 +730,160 @@ mod tests {
             ..Default::default()
         };
         assert!(!matches_filter(&issue, &filter));
+    }
+
+    #[tokio::test]
+    async fn ready_stress_fixture_matches_oracle_within_budget() {
+        const ISSUE_COUNT: usize = 10_000;
+        const EDGE_COUNT: usize = 50_000;
+
+        let mut inner = InMemoryStorageInner::new("test".to_string());
+        let timestamp = chrono::Utc::now();
+        for index in 0..ISSUE_COUNT {
+            let id = IssueId::new(format!("stress-{index:05}"));
+            let node = inner.graph.add_node(id.clone());
+            inner.node_map.insert(id.clone(), node);
+            let status = if index < 3 {
+                IssueStatus::Open
+            } else {
+                match index % 10 {
+                    0 => IssueStatus::InProgress,
+                    1 => IssueStatus::Closed,
+                    _ => IssueStatus::Open,
+                }
+            };
+            let assignee = match index % 3 {
+                0 => None,
+                1 => Some("alice".to_string()),
+                _ => Some("bob".to_string()),
+            };
+            inner.issues.insert(
+                id.clone(),
+                Issue {
+                    id,
+                    title: format!("Stress Issue {index}"),
+                    description: String::new(),
+                    status,
+                    priority: (index % 5) as u8,
+                    issue_kind: if index % 2 == 0 {
+                        IssueKind::Task
+                    } else {
+                        IssueKind::Bug
+                    },
+                    assignee,
+                    labels: if index % 2 == 0 {
+                        vec!["even".to_string()]
+                    } else {
+                        vec!["odd".to_string()]
+                    },
+                    design: None,
+                    acceptance_criteria: None,
+                    notes: Vec::new(),
+                    resources: Vec::new(),
+                    next_resource_id: 1,
+                    dependencies: Vec::new(),
+                    created_at: timestamp,
+                    updated_at: timestamp,
+                    closed_at: None,
+                },
+            );
+        }
+
+        let mut blocking_edges = Vec::with_capacity(EDGE_COUNT / 4);
+        for edge_index in 0..EDGE_COUNT {
+            let source_index = 3 + edge_index % (ISSUE_COUNT - 3);
+            let mut target_index = (edge_index * 37 + 11) % ISSUE_COUNT;
+            if target_index == source_index {
+                target_index = (target_index + 1) % ISSUE_COUNT;
+            }
+            let source_id = IssueId::new(format!("stress-{source_index:05}"));
+            let target_id = IssueId::new(format!("stress-{target_index:05}"));
+            let kind = match edge_index % 4 {
+                0 => DependencyType::Blocks,
+                1 => DependencyType::Related,
+                2 => DependencyType::ParentChild,
+                _ => DependencyType::DiscoveredFrom,
+            };
+            inner
+                .graph
+                .add_edge(inner.node_map[&source_id], inner.node_map[&target_id], kind);
+            if kind == DependencyType::Blocks {
+                blocking_edges.push((source_id, target_id));
+            }
+        }
+        assert_eq!(inner.graph.edge_count(), EDGE_COUNT);
+
+        let unresolved = blocking_edges
+            .iter()
+            .filter(|(_, prerequisite_id)| {
+                inner.issues[prerequisite_id].status != IssueStatus::Closed
+            })
+            .map(|(dependent_id, _)| dependent_id.clone())
+            .collect::<HashSet<_>>();
+        let oracle_issues = inner
+            .issues
+            .values()
+            .map(|issue| (issue.id.clone(), issue.status, issue.assignee.clone()))
+            .collect::<Vec<_>>();
+        let storage: InMemoryStorage = Arc::new(Mutex::new(inner));
+
+        enum OracleAssignment {
+            Unassigned,
+            Assignee(&'static str),
+            All,
+        }
+
+        for (assignment, oracle_assignment) in [
+            (
+                ReadyAssignmentFilter::Unassigned,
+                OracleAssignment::Unassigned,
+            ),
+            (
+                ReadyAssignmentFilter::Assignee("alice".to_string()),
+                OracleAssignment::Assignee("alice"),
+            ),
+            (ReadyAssignmentFilter::All, OracleAssignment::All),
+        ] {
+            let expected = oracle_issues
+                .iter()
+                .filter(|(id, status, assignee)| {
+                    *status == IssueStatus::Open
+                        && !unresolved.contains(id)
+                        && match oracle_assignment {
+                            OracleAssignment::Unassigned => assignee.is_none(),
+                            OracleAssignment::Assignee(expected) => {
+                                assignee.as_deref() == Some(expected)
+                            }
+                            OracleAssignment::All => true,
+                        }
+                })
+                .map(|(id, _, _)| id.clone())
+                .collect::<BTreeSet<_>>();
+            assert!(
+                !expected.is_empty(),
+                "each Assignment mode needs a positive control"
+            );
+
+            let started = Instant::now();
+            let actual = storage
+                .ready_to_work(
+                    &ReadyFilter {
+                        assignment,
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|issue| issue.id)
+                .collect::<BTreeSet<_>>();
+            let elapsed = started.elapsed();
+            assert_eq!(actual, expected);
+            assert!(
+                elapsed <= Duration::from_secs(2),
+                "Ready query took {elapsed:?}"
+            );
+        }
     }
 }

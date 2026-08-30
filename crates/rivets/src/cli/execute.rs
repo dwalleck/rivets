@@ -680,24 +680,22 @@ pub async fn execute_ready(
     args: &ReadyArgs,
     output_mode: OutputMode,
 ) -> Result<()> {
-    use crate::domain::{IssueFilter, SortPolicy};
+    use crate::domain::{ReadyAssignmentFilter, ReadyFilter, SortPolicy};
     use crate::output;
 
-    // Only create filter if we have filtering criteria; limit is applied after via truncate
-    let filter = if args.assignee.is_some()
-        || args.priority.is_some()
-        || args.issue_kind.is_some()
-        || args.label.is_some()
-    {
-        Some(IssueFilter {
-            assignee: args.assignee.clone(),
-            priority: args.priority,
-            issue_kind: args.issue_kind,
-            label: args.label.clone(),
-            ..Default::default()
-        })
+    let assignment = if args.all_assignees {
+        ReadyAssignmentFilter::All
+    } else if let Some(assignee) = &args.assignee {
+        ReadyAssignmentFilter::Assignee(assignee.clone())
     } else {
-        None
+        ReadyAssignmentFilter::Unassigned
+    };
+    let filter = ReadyFilter {
+        priority: args.priority,
+        issue_kind: args.issue_kind,
+        assignment,
+        label: args.label.clone(),
+        limit: Some(args.limit),
     };
 
     let sort_policy = match args.sort {
@@ -706,13 +704,10 @@ pub async fn execute_ready(
         SortPolicyArg::Oldest => SortPolicy::Oldest,
     };
 
-    let mut issues = app
+    let issues = app
         .storage()
-        .ready_to_work(filter.as_ref(), Some(sort_policy))
+        .ready_to_work(&filter, Some(sort_policy))
         .await?;
-
-    // Apply limit
-    issues.truncate(args.limit);
 
     match output_mode {
         output::OutputMode::Json => {
@@ -1310,15 +1305,19 @@ pub async fn execute_stats(
     args: &StatsArgs,
     output_mode: OutputMode,
 ) -> Result<()> {
-    use crate::domain::IssueFilter;
+    use crate::domain::{IssueFilter, ReadyFilter};
     use crate::output;
 
     // Get all issues and count by status
     let all_issues = app.storage().list(&IssueFilter::default()).await?;
     let counts = count_by_status(&all_issues);
 
-    // Ready issues (not blocked by dependencies)
-    let ready = app.storage().ready_to_work(None, None).await?.len();
+    // Ready defaults to unassigned Issues.
+    let ready = app
+        .storage()
+        .ready_to_work(&ReadyFilter::default(), None)
+        .await?
+        .len();
 
     // Blocked issues (by dependencies)
     let blocked_by_deps = app.storage().blocked_issues().await?.len();

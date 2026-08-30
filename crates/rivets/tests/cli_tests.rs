@@ -3,6 +3,7 @@
 //! These tests verify the end-to-end behavior of all CLI commands.
 
 use rstest::{fixture, rstest};
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
@@ -987,6 +988,112 @@ fn test_cli_ready_filters_by_kind_and_label(initialized_dir: TempDir) {
         serde_json::from_slice(&output.stdout).expect("Ready output should be valid JSON");
     assert_eq!(issues.len(), 1);
     assert_eq!(issues[0]["id"], expected_id);
+}
+
+#[rstest]
+fn ready_assignment_visibility(initialized_dir: TempDir) {
+    let unassigned = create_issue(initialized_dir.path(), "Unassigned", &[]);
+    let alice = create_issue(initialized_dir.path(), "Alice", &["--assignee", "alice"]);
+    let prerequisite = create_issue(
+        initialized_dir.path(),
+        "Bob prerequisite",
+        &["--assignee", "bob"],
+    );
+    let blocked = create_issue(
+        initialized_dir.path(),
+        "Blocked",
+        &["--prerequisite", &prerequisite],
+    );
+    let in_progress = create_issue(initialized_dir.path(), "In Progress", &[]);
+    let update = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["update", &in_progress, "--status", "in_progress"],
+    );
+    assert!(
+        update.status.success(),
+        "status update failed: {}",
+        String::from_utf8_lossy(&update.stderr)
+    );
+    let closed = create_issue(initialized_dir.path(), "Closed", &[]);
+    let close = run_rivets_in_dir(initialized_dir.path(), &["close", &closed]);
+    assert!(
+        close.status.success(),
+        "close failed: {}",
+        String::from_utf8_lossy(&close.stderr)
+    );
+
+    let ready_ids = |selector: &[&str]| {
+        let mut args = vec!["--json", "ready"];
+        args.extend_from_slice(selector);
+        let output = run_rivets_in_dir(initialized_dir.path(), &args);
+        assert!(
+            output.status.success(),
+            "ready failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout)
+            .expect("Ready output should be valid JSON")
+            .into_iter()
+            .map(|issue| issue["id"].as_str().unwrap().to_string())
+            .collect::<BTreeSet<_>>()
+    };
+
+    assert_eq!(ready_ids(&[]), BTreeSet::from([unassigned.clone()]));
+    assert_eq!(
+        ready_ids(&["--assignee", "alice"]),
+        BTreeSet::from([alice.clone()])
+    );
+    assert_eq!(
+        ready_ids(&["--all-assignees"]),
+        BTreeSet::from([unassigned, alice, prerequisite])
+    );
+
+    let conflict = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["ready", "--assignee", "alice", "--all-assignees"],
+    );
+    assert_eq!(conflict.status.code(), Some(2));
+
+    assert!(!ready_ids(&["--all-assignees"]).contains(&blocked));
+    assert!(!ready_ids(&["--all-assignees"]).contains(&in_progress));
+    assert!(!ready_ids(&["--all-assignees"]).contains(&closed));
+}
+
+#[rstest]
+fn ready_and_blocked_survive_restart(initialized_dir: TempDir) {
+    let prerequisite = create_issue(initialized_dir.path(), "Prerequisite", &[]);
+    let dependent = create_issue(
+        initialized_dir.path(),
+        "Dependent",
+        &["--prerequisite", &prerequisite],
+    );
+
+    let snapshot = || {
+        let ready = run_rivets_in_dir(
+            initialized_dir.path(),
+            &["--json", "ready", "--all-assignees"],
+        );
+        assert!(ready.status.success());
+        let ready_ids = serde_json::from_slice::<Vec<serde_json::Value>>(&ready.stdout)
+            .expect("Ready output should be JSON")
+            .into_iter()
+            .map(|issue| issue["id"].as_str().unwrap().to_string())
+            .collect::<BTreeSet<_>>();
+
+        let blocked = run_rivets_in_dir(initialized_dir.path(), &["--json", "blocked"]);
+        assert!(blocked.status.success());
+        let blocked_ids = serde_json::from_slice::<Vec<serde_json::Value>>(&blocked.stdout)
+            .expect("Blocked output should be JSON")
+            .into_iter()
+            .map(|entry| entry["issue"]["id"].as_str().unwrap().to_string())
+            .collect::<BTreeSet<_>>();
+
+        (ready_ids, blocked_ids)
+    };
+
+    let expected = (BTreeSet::from([prerequisite]), BTreeSet::from([dependent]));
+    assert_eq!(snapshot(), expected);
+    assert_eq!(snapshot(), expected);
 }
 
 // ============================================================================

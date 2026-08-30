@@ -22,6 +22,7 @@ use rivets_mcp::tools::Tools;
 use rmcp::model::Content;
 use rstest::rstest;
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::RwLock;
@@ -46,6 +47,7 @@ fn ready_params(
         priority,
         kind: kind_input(issue_kind),
         assignee,
+        all_assignees: false,
         label,
         workspace_root: workspace_root.map(str::to_string),
     }
@@ -1647,6 +1649,93 @@ async fn blocking_dependency_mcp_direction_and_context_recreation() {
         self_reference,
         Err(Error::InvalidBlockingDependency(_))
     ));
+}
+
+#[tokio::test]
+async fn ready_assignment_visibility() {
+    let workspace = create_temp_workspace();
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+    let unassigned = create_issue(&tools, "Unassigned").await;
+    let alice = tools
+        .create(create_params(
+            "Alice".to_string(),
+            None,
+            None,
+            Some("task"),
+            Some("alice".to_string()),
+            None,
+            None,
+            None,
+            None,
+        ))
+        .await
+        .expect("assigned Issue creation should succeed");
+
+    let ready_ids = |issues: Vec<Issue>| {
+        issues
+            .into_iter()
+            .map(|issue| issue.id)
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(
+        ready_ids(
+            tools
+                .ready(ready_params(None, None, None, None, None, None))
+                .await
+                .unwrap()
+        ),
+        BTreeSet::from([unassigned.id.clone()])
+    );
+    assert_eq!(
+        ready_ids(
+            tools
+                .ready(ready_params(
+                    None,
+                    None,
+                    None,
+                    Some("alice".to_string()),
+                    None,
+                    None,
+                ))
+                .await
+                .unwrap()
+        ),
+        BTreeSet::from([alice.id.clone()])
+    );
+
+    let all = ReadyParams {
+        all_assignees: true,
+        ..ready_params(None, None, None, None, None, None)
+    };
+    assert_eq!(
+        ready_ids(tools.ready(all.clone()).await.unwrap()),
+        BTreeSet::from([unassigned.id.clone(), alice.id.clone()])
+    );
+    let conflict = tools
+        .ready(ReadyParams {
+            assignee: Some("alice".to_string()),
+            all_assignees: true,
+            ..ready_params(None, None, None, None, None, None)
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        conflict,
+        Error::InvalidArgument {
+            field: "assignment selector",
+            value,
+            valid_values: "unassigned, assignee, all_assignees",
+        } if value == "assignee and all_assignees"
+    ));
+
+    drop(tools);
+    let restarted = create_tools();
+    set_context(&restarted, workspace.path()).await;
+    assert_eq!(
+        ready_ids(restarted.ready(all).await.unwrap()),
+        BTreeSet::from([unassigned.id, alice.id])
+    );
 }
 
 /// Test ready-to-work excludes blocked issues.
@@ -3505,12 +3594,20 @@ async fn test_all_tools_with_storage_backend() {
         .expect("list should succeed");
     assert!(!listed.is_empty());
 
-    // 6. ready
+    // 6. ready (the created Issue is assigned to tester)
     let ready = tools
-        .ready(ready_params(None, None, None, None, None, None))
+        .ready(ready_params(
+            None,
+            None,
+            None,
+            Some("tester".to_string()),
+            None,
+            None,
+        ))
         .await
         .expect("ready should succeed");
-    assert!(!ready.is_empty());
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].id, created.id);
 
     // 7. update
     let updated = tools
@@ -3634,7 +3731,7 @@ async fn test_dependency_chain() {
 
 /// Test closing a blocker unblocks dependent issues.
 #[tokio::test]
-async fn test_closing_blocker_unblocks_dependent() {
+async fn ready_and_blocked_survive_context_recreation() {
     let workspace = create_temp_workspace();
     let tools = create_tools();
     set_context(&tools, workspace.path()).await;
@@ -3693,6 +3790,26 @@ async fn test_closing_blocker_unblocks_dependent() {
     assert_eq!(retained.len(), 1);
     assert_eq!(retained[0].dependent_id(), &dependent.id);
     assert_eq!(retained[0].prerequisite_id(), &blocker.id);
+    let ready_after_restart = restarted
+        .ready(ready_params(None, None, None, None, None, None))
+        .await
+        .expect("Ready should be re-derived after context restart");
+    assert!(
+        ready_after_restart
+            .iter()
+            .any(|issue| issue.id == dependent.id),
+        "Dependent should remain Ready after context restart"
+    );
+    let blocked_after_restart = restarted
+        .blocked(None)
+        .await
+        .expect("Blocked should be re-derived after context restart");
+    assert!(
+        !blocked_after_restart
+            .iter()
+            .any(|entry| entry.issue.id == dependent.id),
+        "Closed prerequisite must remain resolved after context restart"
+    );
 }
 
 /// Test stats are accurate after various operations.

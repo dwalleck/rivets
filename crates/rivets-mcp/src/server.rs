@@ -69,9 +69,9 @@ impl RivetsMcpServer {
         }
     }
 
-    /// Find issues ready to work on.
+    /// Find Ready Issues.
     #[tool(
-        description = "Find tasks that have no blockers and are ready to be worked on. Returns up to 100 results by default if no limit specified. Uses workspace_root if provided, otherwise uses current context."
+        description = "Find Open Issues without unresolved direct Blocking Dependencies. Omitting assignee and all_assignees returns unassigned Issues; assignee selects one exact assignee, and all_assignees includes every Assignment. Returns up to 100 results by default if no limit is specified. Uses workspace_root if provided, otherwise uses current context."
     )]
     async fn ready(
         &self,

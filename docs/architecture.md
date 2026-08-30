@@ -110,7 +110,7 @@ pub trait IssueStorage: Send + Sync {
 
     // Queries
     async fn list(&self, filter: &IssueFilter) -> Result<Vec<Issue>>;
-    async fn ready_to_work(&self, filter: Option<&IssueFilter>, sort_policy: Option<SortPolicy>) -> Result<Vec<Issue>>;
+    async fn ready_to_work(&self, filter: &ReadyFilter, sort_policy: Option<SortPolicy>) -> Result<Vec<Issue>>;
     async fn blocked_issues(&self) -> Result<Vec<(Issue, Vec<Issue>)>>;
 
     // Atomic label operations
@@ -132,10 +132,10 @@ pub trait IssueStorage: Send + Sync {
 
 ### 4. Domain Layer (`rivets`)
 
-- **Core Types**: Issue, NewIssue, IssueUpdate, IssueFilter, BlockingDependency, Note, AssociatedResource, ResourceId
+- **Core Types**: Issue, NewIssue, IssueUpdate, IssueFilter, ReadyFilter, ReadyAssignmentFilter, BlockingDependency, Note, AssociatedResource, ResourceId
 - **Issue fields**: id, title, description, status, priority (0-4), issue_kind, assignee, labels, design notes, acceptance criteria, ordered append-only Notes, ordered Associated Resources, legacy relationship records for persistence, and creation/update/close timestamps
 - **Enums**:
-  - `IssueStatus`: `open`, `in_progress`, `blocked` (legacy), `closed`. The stored `blocked` status is a legacy field: the `ready`/`blocked` queries are **graph-derived** and do not read it. Status transitions are validated by the domain.
+  - `IssueStatus`: exactly `open`, `in_progress`, `closed`. Blocked and Ready are derived conditions and are never serialized on Issue records. Status transitions are validated by the domain.
   - `IssueKind`: `bug`, `feature`, `task`, `epic`, `chore` — mutable via `update`
   - `DependencyType`: compatibility-only persisted kinds until canonical relationship migration
   - `ResourceRole`: `implementation`, `documentation`, `evidence`, `successor`, `reference` — resources are URL or path targets with a stable, never-reused identifier
@@ -207,20 +207,25 @@ results.
 
 ```mermaid
 graph TD
-    Start[All non-closed Issues] --> Direct[Directly blocked?<br/>unclosed blocks edge to blocker]
-    Direct --> Transitive[Propagate blocked down<br/>parent-child chains<br/>BFS with depth limit 50]
-    Transitive --> Filter[Exclude blocked issues]
+    Start[All Issues] --> Open{Workflow State Open?}
+    Open -->|No| Exclude[Exclude]
+    Open -->|Yes| Blocked{Direct Blocks edge to<br/>a non-Closed prerequisite?}
+    Blocked -->|Yes| Exclude
+    Blocked -->|No| Assignment{Assignment selector matches?<br/>Unassigned / Assignee / All}
+    Assignment -->|No| Exclude
+    Assignment -->|Yes| Filter[Priority, Kind, and label filters]
     Filter --> Sort[Sort by policy<br/>hybrid/priority/oldest]
-    Sort --> Result[Ready Issues]
+    Sort --> Limit[Apply limit]
+    Limit --> Result[Ready Issues]
 ```
 
 `ready_to_work` semantics:
 
-1. **Directly blocked**: an issue with a `blocks` edge to an unclosed issue
-2. **Transitively blocked**: children of a blocked parent (via `parent-child`) are blocked, propagated breadth-first with a depth limit of 50
-3. **Ready** = not closed and not blocked
-4. Optional filter by status, priority, kind, assignee, or label; optional limit
-5. Sort policies: **hybrid** (default; issues created within 48h sorted by priority, older issues by age), **priority** (strict P0→P1→P2→P3→P4), **oldest** (creation date ascending)
+1. **Blocked**: an Issue with a direct `blocks` edge to a prerequisite whose Workflow State is not Closed
+2. Parentage, Related Associations, and Discovery Origins never affect Blocked or Ready
+3. **Ready eligibility**: Workflow State Open, not Blocked, and selected by `Unassigned` (default), exact `Assignee`, or `All`
+4. Apply optional priority, Issue Kind, and label filters only after eligibility
+5. Sort by **hybrid** (default), **priority**, or **oldest**, then apply the result limit
 
 ## Data Flow
 
@@ -411,9 +416,9 @@ graph TD
 **Decision**: Support `blocks`, `related`, `parent-child`, `discovered-from`
 
 **Rationale**:
-- **blocks**: Essential for the graph-derived "ready work" algorithm
+- **blocks**: The only relationship that affects the graph-derived Blocked condition
 - **related**: Informational links (soft, doesn't block)
-- **parent-child**: Hierarchical organization (epics → tasks); children of blocked parents are blocked transitively
+- **parent-child**: Hierarchical organization (epics → tasks); never affects Blocked or Ready
 - **discovered-from**: Captures work discovery process
 
 **Alternative considered**: Only "blocks"

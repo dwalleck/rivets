@@ -1,22 +1,15 @@
 //! Dependency graph operations using petgraph.
 //!
 //! This module provides graph algorithms for the in-memory storage:
-//! - Cycle detection
 //! - Dependency tree traversal (BFS)
-//! - Blocked issue detection with transitive parent-child propagation
+//! - Direct blocked issue detection
 
 use crate::domain::{BlockingDependency, DependencyType, Issue, IssueId, IssueStatus};
 use crate::error::{Error, Result};
-use petgraph::Direction;
 use petgraph::algo;
 use petgraph::graph::{DiGraph, EdgeIndex, NodeIndex};
 use petgraph::visit::EdgeRef;
 use std::collections::{HashMap, HashSet, VecDeque};
-
-/// Maximum depth for BFS traversal in blocking detection.
-///
-/// This limit prevents infinite loops and handles extremely deep hierarchies gracefully.
-const MAX_BLOCKING_DEPTH: usize = 50;
 
 /// Find the Blocking edge for one endpoint pair, ignoring parallel other kinds.
 pub(super) fn find_blocking_edge(
@@ -130,32 +123,15 @@ pub(super) fn has_cycle_impl(
     Ok(algo::has_path_connecting(graph, *to_node, *from_node, None))
 }
 
-/// Find all blocked issues using BFS traversal.
+/// Find Issues blocked by direct unresolved Blocking Dependencies.
 ///
-/// This method identifies issues that are blocked either:
-/// 1. Directly: via `Blocks` dependencies to open/in_progress issues
-/// 2. Transitively: via `ParentChild` relationships (if parent is blocked, children are too)
+/// Closed Issues are not candidates. For every other Issue, only outgoing
+/// `Blocks` edges participate: the dependent is blocked while the target
+/// prerequisite is not Closed. Parentage, Related Associations, and Discovery
+/// Origins never affect blockedness.
 ///
-/// The BFS traversal has a depth limit of 50 to prevent infinite loops in
-/// malformed dependency graphs.
-///
-/// # Algorithm
-///
-/// 1. Pre-filter to only consider non-closed issues (optimization)
-/// 2. Find all issues with direct `Blocks` dependencies to unclosed issues
-/// 3. Use BFS to propagate blocking through parent-child relationships
-/// 4. Return the set of all blocked issue IDs
-///
-/// # Edge Direction Reminder
-///
-/// - Edges point from **dependent -> dependency** (source depends on target)
-/// - For `Blocks`: blocked_issue -> blocker, so `edge.target()` is the blocker
-/// - For `ParentChild`: child -> parent, so `Direction::Incoming` finds children
-///
-/// # Non-Blocking Dependency Types
-///
-/// - `Related`: Informational only, does not block
-/// - `DiscoveredFrom`: Provenance only, does not block
+/// Edges point from dependent to prerequisite, so `edge.target()` is the
+/// prerequisite whose Workflow State determines whether the edge is resolved.
 pub(super) fn find_blocked_issues(
     graph: &DiGraph<IssueId, DependencyType>,
     node_map: &HashMap<IssueId, NodeIndex>,
@@ -163,13 +139,10 @@ pub(super) fn find_blocked_issues(
 ) -> HashSet<IssueId> {
     let mut blocked = HashSet::new();
 
-    // Phase 1: Find directly blocked issues (only check non-closed issues for performance)
-    // An issue is directly blocked if it has a 'Blocks' dependency on an unclosed issue.
-    //
-    // Edge direction: blocked_issue -> blocker (dependent -> dependency)
-    // So we iterate outgoing edges and check if the target (blocker) is unclosed.
+    // Edge direction: dependent -> prerequisite. Scan outgoing Blocks edges
+    // and resolve each one solely from the prerequisite's Workflow State.
     for (id, issue) in issues {
-        // Skip closed issues - they cannot be "ready to work" anyway
+        // Closed Issues cannot be Ready and are not reported as Blocked.
         if issue.status == IssueStatus::Closed {
             continue;
         }
@@ -192,56 +165,51 @@ pub(super) fn find_blocked_issues(
         }
     }
 
-    // Phase 2: Propagate blocking through parent-child relationships
-    // If a parent issue is blocked, all its children are also blocked.
-    //
-    // Edge direction for ParentChild: child -> parent (child depends on parent)
-    // To find children of a blocked parent, we look for INCOMING edges to that parent,
-    // where the edge type is ParentChild. The edge.source() gives us the child.
-    let mut to_process: VecDeque<(IssueId, usize)> =
-        blocked.iter().map(|id| (id.clone(), 0)).collect();
-
-    while let Some((id, depth)) = to_process.pop_front() {
-        if depth >= MAX_BLOCKING_DEPTH {
-            continue;
-        }
-
-        // Defensive: skip if node_map is somehow inconsistent
-        let Some(&node) = node_map.get(&id) else {
-            continue;
-        };
-
-        // Find children: issues that have ParentChild edges pointing TO this issue
-        // Since edge direction is child -> parent, incoming edges to 'node' come from children
-        for edge in graph.edges_directed(node, Direction::Incoming) {
-            if edge.weight() == &DependencyType::ParentChild {
-                let child_id = &graph[edge.source()];
-                if blocked.insert(child_id.clone()) {
-                    to_process.push_back((child_id.clone(), depth + 1));
-                }
-            }
-        }
-    }
-
     blocked
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::IssueKind;
+    use chrono::Utc;
     use std::time::{Duration, Instant};
 
     #[test]
-    fn blocking_graph_stays_within_scale_budget() {
+    fn blocking_graph_and_ready_derivation_stay_within_scale_budget() {
         const ISSUE_COUNT: usize = 10_000;
         const EDGE_COUNT: usize = 50_000;
         let mut graph = DiGraph::new();
         let mut node_map = HashMap::with_capacity(ISSUE_COUNT);
+        let mut issues = HashMap::with_capacity(ISSUE_COUNT);
+        let timestamp = Utc::now();
         let nodes = (0..ISSUE_COUNT)
             .map(|index| {
                 let issue_id = IssueId::new(format!("test-{index:05}"));
                 let node = graph.add_node(issue_id.clone());
-                node_map.insert(issue_id, node);
+                node_map.insert(issue_id.clone(), node);
+                issues.insert(
+                    issue_id.clone(),
+                    Issue {
+                        id: issue_id,
+                        title: format!("Issue {index}"),
+                        description: String::new(),
+                        status: IssueStatus::Open,
+                        priority: 2,
+                        issue_kind: IssueKind::Task,
+                        assignee: None,
+                        labels: Vec::new(),
+                        design: None,
+                        acceptance_criteria: None,
+                        notes: Vec::new(),
+                        resources: Vec::new(),
+                        next_resource_id: 1,
+                        dependencies: Vec::new(),
+                        created_at: timestamp,
+                        updated_at: timestamp,
+                        closed_at: None,
+                    },
+                );
                 node
             })
             .collect::<Vec<_>>();
@@ -291,6 +259,24 @@ mod tests {
         assert!(
             cycle_elapsed <= Duration::from_millis(50),
             "Blocking cycle query took {cycle_elapsed:?}"
+        );
+
+        let started = Instant::now();
+        let blocked = find_blocked_issues(&graph, &node_map, &issues);
+        let ready_count = issues
+            .values()
+            .filter(|issue| {
+                issue.status == IssueStatus::Open
+                    && issue.assignee.is_none()
+                    && !blocked.contains(&issue.id)
+            })
+            .count();
+        let ready_elapsed = started.elapsed();
+        assert_eq!(blocked.len(), ISSUE_COUNT - 1);
+        assert_eq!(ready_count, 1);
+        assert!(
+            ready_elapsed <= Duration::from_secs(2),
+            "Ready derivation took {ready_elapsed:?}"
         );
     }
 }
