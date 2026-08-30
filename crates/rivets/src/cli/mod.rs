@@ -163,13 +163,54 @@ pub enum Commands {
     Stats(StatsArgs),
 }
 
+impl Commands {
+    const fn mutates_workspace(&self) -> bool {
+        match self {
+            Self::Create(_)
+            | Self::Update(_)
+            | Self::Close(_)
+            | Self::Reopen(_)
+            | Self::Delete(_) => true,
+            Self::BlockingDependency(args) => matches!(
+                args.action,
+                BlockingDependencyAction::Add { .. } | BlockingDependencyAction::Remove { .. }
+            ),
+            Self::Label(args) => {
+                matches!(
+                    args.action,
+                    LabelAction::Add { .. } | LabelAction::Remove { .. }
+                )
+            }
+            Self::Resource(args) => matches!(
+                args.action,
+                ResourceAction::Add { .. }
+                    | ResourceAction::Update { .. }
+                    | ResourceAction::Remove { .. }
+            ),
+            Self::Init(_)
+            | Self::Info(_)
+            | Self::List(_)
+            | Self::Show(_)
+            | Self::Ready(_)
+            | Self::Stale(_)
+            | Self::Blocked(_)
+            | Self::Stats(_) => false,
+        }
+    }
+}
+
 /// Load the App from the current working directory.
 ///
 /// This helper centralizes the common pattern of initializing the App
 /// from `std::env::current_dir()`, reducing duplication in command handlers.
-async fn load_app_from_cwd() -> Result<App> {
-    // Ok(...?) pattern converts crate::error::Error to anyhow::Error
-    Ok(App::from_directory(&std::env::current_dir()?).await?)
+async fn load_app_from_cwd(for_mutation: bool) -> Result<App> {
+    let current_dir = std::env::current_dir()?;
+    let app = if for_mutation {
+        App::from_directory_for_mutation(&current_dir).await?
+    } else {
+        App::from_directory(&current_dir).await?
+    };
+    Ok(app)
 }
 
 impl Cli {
@@ -197,66 +238,71 @@ impl Cli {
             OutputMode::Text
         };
 
+        let mutates_workspace = self
+            .command
+            .as_ref()
+            .is_some_and(Commands::mutates_workspace);
+
         match &self.command {
             Some(Commands::Init(args)) => execute::execute_init(args).await,
             Some(Commands::Info(args)) => {
-                let app = load_app_from_cwd().await?;
+                let app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_info(&app, args, output_mode).await
             }
             Some(Commands::Create(args)) => {
-                let mut app = load_app_from_cwd().await?;
+                let mut app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_create(&mut app, args, output_mode).await
             }
             Some(Commands::List(args)) => {
-                let app = load_app_from_cwd().await?;
+                let app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_list(&app, args, output_mode).await
             }
             Some(Commands::Show(args)) => {
-                let app = load_app_from_cwd().await?;
+                let app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_show(&app, args, output_mode).await
             }
             Some(Commands::Update(args)) => {
-                let mut app = load_app_from_cwd().await?;
+                let mut app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_update(&mut app, args, output_mode).await
             }
             Some(Commands::Close(args)) => {
-                let mut app = load_app_from_cwd().await?;
+                let mut app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_close(&mut app, args, output_mode, self.yes).await
             }
             Some(Commands::Reopen(args)) => {
-                let mut app = load_app_from_cwd().await?;
+                let mut app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_reopen(&mut app, args, output_mode, self.yes).await
             }
             Some(Commands::Delete(args)) => {
-                let mut app = load_app_from_cwd().await?;
+                let mut app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_delete(&mut app, args, output_mode, self.yes).await
             }
             Some(Commands::Ready(args)) => {
-                let app = load_app_from_cwd().await?;
+                let app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_ready(&app, args, output_mode).await
             }
             Some(Commands::BlockingDependency(args)) => {
-                let mut app = load_app_from_cwd().await?;
+                let mut app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_blocking_dependency(&mut app, args, output_mode).await
             }
             Some(Commands::Label(args)) => {
-                let mut app = load_app_from_cwd().await?;
+                let mut app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_label(&mut app, args, output_mode).await
             }
             Some(Commands::Resource(args)) => {
-                let mut app = load_app_from_cwd().await?;
+                let mut app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_resource(&mut app, args, output_mode).await
             }
             Some(Commands::Stale(args)) => {
-                let app = load_app_from_cwd().await?;
+                let app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_stale(&app, args, output_mode).await
             }
             Some(Commands::Blocked(args)) => {
-                let app = load_app_from_cwd().await?;
+                let app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_blocked(&app, args, output_mode).await
             }
             Some(Commands::Stats(args)) => {
-                let app = load_app_from_cwd().await?;
+                let app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_stats(&app, args, output_mode).await
             }
             None => {
@@ -272,6 +318,85 @@ impl Cli {
 mod tests {
     use super::*;
     use crate::domain::{IssueKind, IssueStatus};
+
+    fn parses_as_mutation(args: &[&str]) -> bool {
+        let argv: Vec<_> = std::iter::once("rivets")
+            .chain(args.iter().copied())
+            .collect();
+        Cli::try_parse_from(argv)
+            .expect("classification fixture should parse")
+            .command
+            .as_ref()
+            .is_some_and(Commands::mutates_workspace)
+    }
+
+    #[test]
+    fn workspace_mutation_lock_classification_is_exhaustive() {
+        for args in [
+            &["create", "--title", "Issue"][..],
+            &["update", "test-abc", "--title", "Updated"],
+            &["close", "test-abc"],
+            &["reopen", "test-abc"],
+            &["delete", "test-abc", "--force"],
+            &[
+                "blocking-dependency",
+                "add",
+                "--dependent",
+                "test-abc",
+                "--prerequisite",
+                "test-def",
+            ],
+            &[
+                "blocking-dependency",
+                "remove",
+                "--dependent",
+                "test-abc",
+                "--prerequisite",
+                "test-def",
+            ],
+            &["label", "add", "urgent", "test-abc"],
+            &["label", "remove", "urgent", "test-abc"],
+            &[
+                "resource",
+                "add",
+                "test-abc",
+                "--url",
+                "https://example.com",
+                "--role",
+                "reference",
+            ],
+            &[
+                "resource",
+                "update",
+                "test-abc",
+                "--resource",
+                "r1",
+                "--label",
+                "Updated",
+            ],
+            &["resource", "remove", "test-abc", "--resource", "r1"],
+        ] {
+            assert!(parses_as_mutation(args), "should lock mutation: {args:?}");
+        }
+
+        for args in [
+            &["init"][..],
+            &["info"],
+            &["list"],
+            &["show", "test-abc"],
+            &["ready"],
+            &["blocking-dependency", "list", "--dependent", "test-abc"],
+            &["blocking-dependency", "tree", "--dependent", "test-abc"],
+            &["label", "list", "test-abc"],
+            &["label", "list-all"],
+            &["resource", "list", "test-abc"],
+            &["stale"],
+            &["blocked"],
+            &["stats"],
+        ] {
+            assert!(!parses_as_mutation(args), "should not lock read: {args:?}");
+        }
+    }
 
     // ========== CLI Parsing Tests ==========
 

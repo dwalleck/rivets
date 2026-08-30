@@ -28,9 +28,10 @@ use rivets::domain::{
     ResourceTarget, ResourceUpdate, WebUrl, WorkspacePath,
 };
 use rivets::storage::IssueStorage;
+use rivets::workspace_lock::WorkspaceMutationLock;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{OwnedRwLockWriteGuard, RwLock};
 use tracing::{debug, instrument};
 
 /// Default limit for list/ready queries when none is specified.
@@ -97,6 +98,31 @@ async fn save_or_reload(storage: &mut dyn IssueStorage) -> Result<()> {
     Ok(())
 }
 
+struct MutationStorage {
+    storage: OwnedRwLockWriteGuard<Box<dyn IssueStorage>>,
+    _workspace_lock: Option<WorkspaceMutationLock>,
+}
+
+impl MutationStorage {
+    fn as_mut(&mut self) -> &mut dyn IssueStorage {
+        self.storage.as_mut()
+    }
+}
+
+impl std::ops::Deref for MutationStorage {
+    type Target = dyn IssueStorage;
+
+    fn deref(&self) -> &Self::Target {
+        self.storage.as_ref()
+    }
+}
+
+impl std::ops::DerefMut for MutationStorage {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.storage.as_mut()
+    }
+}
+
 /// Tool implementations for the rivets MCP server.
 pub struct Tools {
     context: Arc<RwLock<Context>>,
@@ -126,6 +152,26 @@ impl Tools {
 
         let mut context = self.context.write().await;
         context.storage_for_or_init(workspace_path).await
+    }
+
+    /// Resolve, durably lock, and authoritatively reload mutation storage.
+    async fn mutation_storage_for(&self, workspace_root: Option<&str>) -> Result<MutationStorage> {
+        let workspace_path = workspace_root.map(Path::new);
+        let lock_root = {
+            let context = self.context.read().await;
+            context.mutation_lock_root(workspace_path)?
+        };
+        let workspace_lock = lock_root
+            .as_deref()
+            .map(WorkspaceMutationLock::try_acquire)
+            .transpose()?;
+        let storage = self.storage_for(workspace_root).await?;
+        let mut storage = storage.write_owned().await;
+        storage.reload().await?;
+        Ok(MutationStorage {
+            storage,
+            _workspace_lock: workspace_lock,
+        })
     }
 
     /// Set the workspace context.
@@ -298,8 +344,9 @@ impl Tools {
         let issue_kind = params.kind.resolve("create").unwrap_or(IssueKind::Task);
         let initial_note = params.initial_note.map(NoteContent::new).transpose()?;
 
-        let storage = self.storage_for(params.workspace_root.as_deref()).await?;
-        let mut storage = storage.write().await;
+        let mut storage = self
+            .mutation_storage_for(params.workspace_root.as_deref())
+            .await?;
 
         let new_issue = NewIssue {
             title: params.title,
@@ -333,8 +380,9 @@ impl Tools {
             .assignee
             .map(|value| if value.is_empty() { None } else { Some(value) });
 
-        let storage = self.storage_for(params.workspace_root.as_deref()).await?;
-        let mut storage = storage.write().await;
+        let mut storage = self
+            .mutation_storage_for(params.workspace_root.as_deref())
+            .await?;
 
         let id = IssueId::new(&params.issue_id);
         let updates = IssueUpdate {
@@ -370,8 +418,7 @@ impl Tools {
         workspace_root: Option<&str>,
     ) -> Result<Issue> {
         let note = NoteContent::new(content)?;
-        let storage = self.storage_for(workspace_root).await?;
-        let mut storage = storage.write().await;
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
 
         let issue = storage
             .update(
@@ -409,8 +456,7 @@ impl Tools {
             role: validate_resource_role(role)?,
             label: label.map(ResourceLabel::new).transpose()?,
         };
-        let storage = self.storage_for(workspace_root).await?;
-        let mut storage = storage.write().await;
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
 
         let issue = storage
             .add_resource(&IssueId::new(issue_id), resource)
@@ -459,8 +505,7 @@ impl Tools {
             role: role.as_deref().map(validate_resource_role).transpose()?,
             label,
         };
-        let storage = self.storage_for(workspace_root.as_deref()).await?;
-        let mut storage = storage.write().await;
+        let mut storage = self.mutation_storage_for(workspace_root.as_deref()).await?;
 
         let issue = storage
             .update_resource(
@@ -488,8 +533,7 @@ impl Tools {
         resource_id: &str,
         workspace_root: Option<&str>,
     ) -> Result<Issue> {
-        let storage = self.storage_for(workspace_root).await?;
-        let mut storage = storage.write().await;
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
 
         let issue = storage
             .remove_resource(&IssueId::new(issue_id), &ResourceId::new(resource_id)?)
@@ -533,8 +577,7 @@ impl Tools {
     ) -> Result<Issue> {
         debug!("Closing issue");
         let note = reason.map(NoteContent::closing_reason).transpose()?;
-        let storage = self.storage_for(workspace_root).await?;
-        let mut storage = storage.write().await;
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
 
         let id = IssueId::new(issue_id);
         let updates = IssueUpdate {
@@ -564,8 +607,7 @@ impl Tools {
     ) -> Result<BlockingDependency> {
         let dependency =
             BlockingDependency::new(IssueId::new(dependent_id), IssueId::new(prerequisite_id))?;
-        let storage = self.storage_for(workspace_root).await?;
-        let mut storage = storage.write().await;
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
         storage.add_blocking_dependency(dependency.clone()).await?;
         save_or_reload(storage.as_mut()).await?;
         Ok(dependency)
@@ -586,8 +628,7 @@ impl Tools {
     ) -> Result<BlockingDependency> {
         let dependency =
             BlockingDependency::new(IssueId::new(dependent_id), IssueId::new(prerequisite_id))?;
-        let storage = self.storage_for(workspace_root).await?;
-        let mut storage = storage.write().await;
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
         storage.remove_blocking_dependency(&dependency).await?;
         save_or_reload(storage.as_mut()).await?;
         Ok(dependency)
@@ -662,8 +703,7 @@ impl Tools {
     ) -> Result<Issue> {
         debug!("Reopening issue");
         let note = reason.map(NoteContent::reopening_reason).transpose()?;
-        let storage = self.storage_for(workspace_root).await?;
-        let mut storage = storage.write().await;
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
 
         let id = IssueId::new(issue_id);
         let updates = IssueUpdate {
@@ -738,8 +778,7 @@ impl Tools {
         workspace_root: Option<&str>,
     ) -> Result<Issue> {
         debug!("Adding label to issue");
-        let storage = self.storage_for(workspace_root).await?;
-        let mut storage = storage.write().await;
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
 
         let id = IssueId::new(issue_id);
         let issue = storage.add_label(&id, label).await?;
@@ -761,8 +800,7 @@ impl Tools {
         workspace_root: Option<&str>,
     ) -> Result<Issue> {
         debug!("Removing label from issue");
-        let storage = self.storage_for(workspace_root).await?;
-        let mut storage = storage.write().await;
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
 
         let id = IssueId::new(issue_id);
         let issue = storage.remove_label(&id, label).await?;

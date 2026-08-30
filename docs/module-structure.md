@@ -171,8 +171,10 @@ Argument parsing and command dispatch, split by responsibility:
 
 ### app.rs
 
-Application context for CLI command execution: locates the workspace, loads
-configuration, and constructs the storage backend commands operate on.
+Application context for CLI command execution: locates the Workspace and
+constructs its storage. Read-only construction remains unlocked; mutation
+construction owns `WorkspaceMutationLock` before configuration/storage load and
+retains it for the App lifetime.
 
 ### workspace_lock.rs
 

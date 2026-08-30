@@ -1298,39 +1298,58 @@ async fn test_workspace_root_initializes_without_context() {
     assert!(!context.context_set);
 }
 
-/// Test concurrent first use shares one initialized workspace storage.
+/// Test concurrent first use yields one durable winner and one retryable loser.
 #[tokio::test]
 async fn test_concurrent_workspace_root_initialization() {
     let workspace = create_temp_workspace();
     let tools = create_tools();
     let workspace_root = workspace.path().display().to_string();
-    let first_params = create_params(
-        "First concurrent issue".to_string(),
-        None,
-        None,
-        Some("task"),
-        None,
-        None,
-        None,
-        None,
-        Some(&workspace_root),
-    );
-    let second_params = create_params(
-        "Second concurrent issue".to_string(),
-        None,
-        None,
-        Some("task"),
-        None,
-        None,
-        None,
-        None,
-        Some(&workspace_root),
-    );
+    let params = |title: &str| {
+        create_params(
+            title.to_string(),
+            None,
+            None,
+            Some("task"),
+            None,
+            None,
+            None,
+            None,
+            Some(&workspace_root),
+        )
+    };
 
-    let (first, second) = tokio::join!(tools.create(first_params), tools.create(second_params));
-    let first = first.expect("first concurrent create should succeed");
-    let second = second.expect("second concurrent create should succeed");
-    assert_ne!(first.id, second.id);
+    let (first, second) = tokio::join!(
+        tools.create(params("First concurrent issue")),
+        tools.create(params("Second concurrent issue"))
+    );
+    let (winner, retry_title) = match (first, second) {
+        (
+            Ok(winner),
+            Err(Error::WorkspaceBusy {
+                workspace_root: busy,
+            }),
+        ) => {
+            assert_eq!(busy, workspace.path().canonicalize().unwrap());
+            (winner, "Second concurrent issue")
+        }
+        (
+            Err(Error::WorkspaceBusy {
+                workspace_root: busy,
+            }),
+            Ok(winner),
+        ) => {
+            assert_eq!(busy, workspace.path().canonicalize().unwrap());
+            (winner, "First concurrent issue")
+        }
+        (first, second) => {
+            panic!("expected one success and one WorkspaceBusy, got {first:?} and {second:?}")
+        }
+    };
+    let retried = tools
+        .create(params(retry_title))
+        .await
+        .expect("retry should succeed after the winner releases");
+    assert_ne!(winner.id, retried.id);
 
     let issues = tools
         .list(list_params(

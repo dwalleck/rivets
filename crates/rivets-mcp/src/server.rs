@@ -23,22 +23,12 @@ use rmcp::{
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Maps error types to appropriate MCP error codes:
-/// - `NoContext`, `InvalidArgument`, `InvalidNote`, `InvalidResource`,
-///   `InvalidStatusTransition` -> `invalid_params` (user needs to fix their request)
-/// - `IssueNotFound` -> `invalid_params` (requested resource doesn't exist)
-/// - Other errors -> `internal_error`
-fn to_mcp_error(e: &Error) -> McpError {
-    match e {
-        Error::NoContext
-        | Error::InvalidArgument { .. }
-        | Error::InvalidNote(_)
-        | Error::InvalidResource(_)
-        | Error::InvalidBlockingDependency(_)
-        | Error::InvalidStatusTransition(_)
-        | Error::IssueNotFound(_) => McpError::invalid_params(e.to_string(), None),
-        _ => McpError::internal_error(e.to_string(), None),
-    }
+/// Maps typed errors to MCP protocol errors:
+/// - Invalid user inputs and missing Issues -> `invalid_params`
+/// - Workspace contention -> retryable `internal_error` data
+/// - Other failures -> `internal_error`
+fn to_mcp_error(error: &Error) -> McpError {
+    error.to_mcp_error()
 }
 
 /// The rivets MCP server.

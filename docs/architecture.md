@@ -84,10 +84,11 @@ graph TB
 
 ### 2. Application Layer (`rivets`)
 
-- **App Struct**: Manages storage lifecycle and command execution; `App::from_directory` searches upward (max depth 256) for the `.rivets/` directory, loads configuration, and creates storage from it
-- **Configuration**: `.rivets/config.yaml` is the **single** configuration source: `issue-prefix` plus a `storage` section (`backend` and `data_file`). There is no config layering, no environment-variable merge, and no user-level config. Defaults (prefix `proj`, backend `jsonl`, data file `.rivets/issues.jsonl`) are baked into `init`
-- **Auto-save**: Mutating commands persist after execution. Batch `update`/`close`/`reopen` and label mutations reload storage after a failed save; `create`, `delete`, Blocking Dependency mutations, and resource mutations return the save error without reloading that process's in-memory state
-- **Async Runtime**: Tokio current-thread for sequential CLI operations
+- **App Struct**: Manages storage lifecycle and command execution. `App::from_directory` is read-only; `App::from_directory_for_mutation` acquires the canonical Workspace sidecar before configuration/storage load and retains it through save.
+- **Configuration**: `.rivets/config.yaml` is the **single** configuration source: `issue-prefix` plus a `storage` section (`backend` and `data_file`). There is no config layering, no environment-variable merge, and no user-level config. Defaults (prefix `proj`, backend `jsonl`, data file `.rivets/issues.jsonl`) are baked into `init`.
+- **Durable mutation ownership**: Existing-Workspace CLI and MCP writers use nonblocking `.rivets/workspace.lock`. Contention returns typed retryable Workspace Busy; different canonical Workspace roots lock independently.
+- **Auto-save**: Mutating commands persist after execution while retaining durable ownership. Batch `update`/`close`/`reopen` and label mutations reload storage after a failed save; `create`, `delete`, Blocking Dependency mutations, and resource mutations return the save error without reusing that process's App.
+- **Async Runtime**: Tokio current-thread for sequential CLI operations.
 
 ### 3. Storage Abstraction (`rivets`)
 
@@ -307,23 +308,24 @@ sequenceDiagram
 
 - **Delete with dependents**: fails with a clear error listing the dependent issues
 - **Cycle creation**: pre-checked before adding a dependency
-- **Concurrent access**: `Arc<Mutex<>>` prevents data races
-- **Failed saves**: storage `reload()`s from disk so in-memory state never drifts from the on-disk truth
+- **Concurrent access**: process-local Tokio locks protect in-memory values; the persistent Workspace sidecar serializes cooperating CLI/MCP writers across processes from load/reload through atomic save.
+- **Failed saves**: MCP reloads while still holding durable ownership so cached state returns to the on-disk truth; one-shot CLI Apps terminate and release ownership.
 
 ## Thread Safety
 
 ```mermaid
 graph TD
-    CLI1[CLI Command 1] --> Lock[Arc&lt;tokio::sync::Mutex&lt;Storage&gt;&gt;]
-    CLI2[CLI Command 2] --> Lock
-    Lock --> Inner[InMemoryStorageInner<br/>Single-threaded access]
+    CLI1[CLI process] --> Durable[.rivets/workspace.lock]
+    MCP1[MCP process] --> Durable
+    Durable --> Cache[Per-process storage RwLock]
+    Cache --> Inner[InMemoryStorageInner<br/>Tokio Mutex]
 ```
 
-- **Pattern**: `Arc<tokio::sync::Mutex<InMemoryStorageInner>>`
-- **Guarantee**: Only one operation at a time modifies storage
-- **Async**: `tokio::sync::Mutex` for async-compatible locking
-- **MCP server**: workspace context guarded by `tokio::sync::RwLock`
-- **Rationale**: Simple, correct, sufficient for the CLI and MCP use cases
+- **Cross-process pattern**: persistent sidecar plus nonblocking exclusive standard-library file lock
+- **Process-local pattern**: MCP cache `RwLock` and in-memory `tokio::sync::Mutex`
+- **Guarantee**: one cooperating writer owns load/reload→mutation→atomic save for a canonical Workspace
+- **Async behavior**: acquisition never waits; contention returns retryable Workspace Busy
+- **Scope**: different Workspaces remain independent; reads and context selection remain unlocked
 
 ## Design Decisions and Rationale
 
@@ -432,15 +434,17 @@ graph TD
 
 ### 9. Auto-Save After Mutations
 
-**Decision**: Automatically persist to JSONL after every mutating CLI command. Batch `update`/`close`/`reopen` and label mutations reload from disk after a failed save; other CLI mutation paths return the save error without reloading.
+**Decision**: Automatically persist to JSONL after every mutating CLI command under one durable Workspace mutation lock. MCP uses the same sidecar and reloads its cached storage after acquisition. Batch `update`/`close`/`reopen` and label mutations reload from disk after a failed save; other CLI mutation paths return the save error and terminate.
 
 **Rationale**:
 - **Data safety**: No manual save command needed
+- **Cross-process serialization**: cooperating CLI/MCP writers cannot load the same revision and overwrite one another
+- **Retryable contention**: a second writer receives immediate Workspace Busy rather than waiting
 - **Simplicity**: User can't forget to save
-- **Crash resistance**: Latest state always on disk
-- **Atomic writes**: Temp file + rename prevents corruption
+- **Crash resistance**: Latest successful state is on disk; process exit releases the OS lock
+- **Atomic writes**: Temp file + rename prevents readers from observing partial target content
 - **Partial-load guard**: Auto-save is disabled when resilient loading omitted an Issue record
-- **Consistency**: The reload-enabled batch and label paths restore on-disk state after a save failure. Other CLI paths terminate with the save error; a library caller that keeps the storage alive must call `reload()` before reuse.
+- **Consistency**: MCP save recovery reloads before releasing the durable guard; CLI Apps are not reused after command failure.
 
 **Alternative considered**: Manual save command
 **Why rejected**: Easy to forget, data loss risk

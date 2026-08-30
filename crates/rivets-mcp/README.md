@@ -106,6 +106,13 @@ Every issue tool also accepts an optional `workspace_root`. Supplying it loads a
 caches that Workspace directly; `set_context` is not required first and the default
 context is not changed.
 
+Mutating tools acquire the same persistent Workspace lock as the CLI before
+initializing or reloading cached storage. If another writer owns that Workspace,
+the JSON-RPC server returns an internal error with
+`{"retryable": true, "workspace_root": "..."}` and writes no Issue bytes.
+Queries and context inspection remain unlocked; different Workspaces remain
+independently writable.
+
 ### list
 
 ```json

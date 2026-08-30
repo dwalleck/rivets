@@ -11,6 +11,7 @@ sequenceDiagram
     participant CLI Parser
     participant App
     participant Command
+    participant WorkspaceLock
     participant Storage Trait
     participant Factory
     participant InMemoryStorage
@@ -23,10 +24,14 @@ sequenceDiagram
     main.rs->>CLI Parser: Cli::parse_args()
     CLI Parser-->>main.rs: Commands::Create(args)
 
-    main.rs->>App: App::from_directory(current_dir)
+    main.rs->>App: App::from_directory_for_mutation(current_dir)
     App->>App: find_rivets_root (walk up, max 256 levels)
-    App->>App: RivetsConfig::load(.rivets/config.yaml)
-    App->>Factory: create_storage(config.storage.to_backend(root), prefix)
+    App->>WorkspaceLock: try_lock(.rivets/workspace.lock)
+    alt Another writer owns the Workspace
+        WorkspaceLock-->>User: Workspace Busy (retryable, no load/write)
+    else Lock acquired
+        App->>App: RivetsConfig::load(.rivets/config.yaml)
+        App->>Factory: create_storage(config.storage.to_backend(root), prefix)
     Factory->>InMemoryStorage: load_from_jsonl(path).await
     InMemoryStorage->>JSONL: Open file, read lines
     Note over InMemoryStorage,JSONL: Pass 1: parse compatibility records<br/>Pass 2: import Issues + graph nodes<br/>Pass 3: rebuild dependency edges
@@ -58,8 +63,15 @@ sequenceDiagram
     InMemoryStorage-->>Storage Trait: Ok(())
 
     Storage Trait-->>Command: Ok(())
+    App->>WorkspaceLock: Drop guard after command/save recovery
+    end
     Command-->>User: Created issue: rivets-a3f8
 ```
+
+MCP mutations resolve the same canonical Workspace, acquire the same sidecar
+before lazy cache initialization or cached `reload()`, and retain it through
+`save_or_reload`. MCP queries and context selection do not acquire the mutation
+lock.
 
 ## Configuration Loading (single source)
 

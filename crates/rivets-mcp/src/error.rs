@@ -1,6 +1,8 @@
 //! Error types for the rivets MCP server.
 
 use rivets::error::Error as RivetsError;
+use rmcp::ErrorData as McpError;
+use std::path::PathBuf;
 use thiserror::Error;
 
 /// Errors that can occur in the rivets MCP server.
@@ -9,6 +11,16 @@ pub enum Error {
     /// No workspace context has been set.
     #[error("No workspace context set. Provide workspace_root or call set_context.")]
     NoContext,
+
+    /// Another writer currently owns the Workspace mutation transaction.
+    #[error(
+        "Workspace is busy: '{}'; retry the operation",
+        workspace_root.display()
+    )]
+    WorkspaceBusy {
+        /// Canonical root of the contended Workspace.
+        workspace_root: PathBuf,
+    },
 
     /// Invalid argument value provided.
     #[error("Invalid {field}: '{value}'. Valid values: {valid_values}")]
@@ -85,6 +97,34 @@ pub enum Error {
     Json(#[from] serde_json::Error),
 }
 
+impl Error {
+    pub(crate) fn to_mcp_error(&self) -> McpError {
+        match self {
+            Self::WorkspaceBusy { workspace_root } => McpError::internal_error(
+                self.to_string(),
+                Some(serde_json::json!({
+                    "retryable": true,
+                    "workspace_root": workspace_root,
+                })),
+            ),
+            Self::NoContext
+            | Self::InvalidArgument { .. }
+            | Self::InvalidNote(_)
+            | Self::InvalidResource(_)
+            | Self::InvalidBlockingDependency(_)
+            | Self::InvalidStatusTransition(_)
+            | Self::IssueNotFound(_) => McpError::invalid_params(self.to_string(), None),
+            Self::WorkspaceNotFound { .. }
+            | Self::WorkspaceNotInitialized(_)
+            | Self::NoRivetsDirectory(_)
+            | Self::ConfigLoad { .. }
+            | Self::Storage(_)
+            | Self::Io(_)
+            | Self::Json(_) => McpError::internal_error(self.to_string(), None),
+        }
+    }
+}
+
 /// Result type for rivets MCP operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -92,6 +132,7 @@ impl From<RivetsError> for Error {
     fn from(error: RivetsError) -> Self {
         match error {
             RivetsError::IssueNotFound(issue_id) => Self::IssueNotFound(issue_id.to_string()),
+            RivetsError::WorkspaceBusy { workspace_root } => Self::WorkspaceBusy { workspace_root },
             RivetsError::Storage(storage_error) => match storage_error.try_into_resource_error() {
                 Ok(source) => Self::InvalidResource(source),
                 Err(storage_error) => match storage_error.try_into_status_transition_error() {
@@ -100,7 +141,6 @@ impl From<RivetsError> for Error {
                 },
             },
             error @ (RivetsError::Io(_)
-            | RivetsError::WorkspaceBusy { .. }
             | RivetsError::WorkspaceLock { .. }
             | RivetsError::Config(_)
             | RivetsError::Validation { .. }
@@ -128,6 +168,38 @@ mod tests {
             error,
             Error::IssueNotFound(issue_id) if issue_id == "test-missing"
         ));
+    }
+
+    #[test]
+    fn core_workspace_busy_maps_to_retryable_mcp_variant() {
+        let workspace_root = PathBuf::from("/tmp/workspace");
+        let error = Error::from(RivetsError::WorkspaceBusy {
+            workspace_root: workspace_root.clone(),
+        });
+        assert!(matches!(
+            error,
+            Error::WorkspaceBusy {
+                workspace_root: actual
+            } if actual == workspace_root
+        ));
+    }
+
+    #[test]
+    fn workspace_busy_protocol_error_is_retryable() {
+        use rmcp::model::ErrorCode;
+
+        let error = Error::WorkspaceBusy {
+            workspace_root: PathBuf::from("/tmp/workspace"),
+        }
+        .to_mcp_error();
+        assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({
+                "retryable": true,
+                "workspace_root": "/tmp/workspace",
+            }))
+        );
     }
 
     #[test]

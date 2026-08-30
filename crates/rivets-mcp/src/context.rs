@@ -7,16 +7,18 @@
 //!
 //! # Lock Ordering
 //!
-//! When using `Context` with `Tools`, locks must be acquired in this order:
-//! 1. `Context` read/write lock (via `Arc<RwLock<Context>>`)
-//! 2. Storage read/write lock (via `Arc<RwLock<Box<dyn IssueStorage>>>`)
-//!
-//! Never attempt to acquire a context lock while holding a storage lock.
-//! This prevents potential deadlocks in concurrent scenarios.
+//! Queries resolve under the `Context` lock, release it, then acquire storage.
+//! Mutations resolve and release `Context`, acquire the durable Workspace lock,
+//! then may reacquire `Context` for lazy cache initialization and finally take
+//! the storage write lock. Never attempt the durable lock while holding a
+//! Context or storage lock, and never reacquire Context while holding storage.
 
 use crate::error::{Error, Result};
 use rivets::commands::init::RivetsConfig;
 use rivets::storage::{IssueStorage, create_storage};
+use rivets::workspace_lock::RIVETS_DIR_NAME;
+#[cfg(test)]
+use std::collections::HashSet;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -43,6 +45,10 @@ pub struct Context {
 
     /// Insertion order for FIFO cache eviction.
     cache_order: VecDeque<PathBuf>,
+
+    /// Ephemeral injected Workspaces that deliberately have no durable sidecar.
+    #[cfg(test)]
+    test_workspaces: HashSet<PathBuf>,
 }
 
 impl Context {
@@ -54,6 +60,8 @@ impl Context {
             storage_cache: HashMap::new(),
             database_paths: HashMap::new(),
             cache_order: VecDeque::new(),
+            #[cfg(test)]
+            test_workspaces: HashSet::new(),
         }
     }
 
@@ -87,23 +95,8 @@ impl Context {
         workspace_root: &Path,
         protected_workspace: Option<&Path>,
     ) -> Result<WorkspaceInfo> {
-        // Canonicalize to resolve symlinks and `..` (prevents path traversal)
-        let canonical = workspace_root
-            .canonicalize()
-            .map_err(|e| Error::WorkspaceNotFound {
-                path: workspace_root.display().to_string(),
-                source: Some(e),
-            })?;
-
-        // Validate path is safe
-        validate_path(&canonical)?;
-
-        // Verify .rivets directory exists
-        let rivets_dir = canonical.join(".rivets");
-        if !rivets_dir.exists() {
-            debug!(path = %rivets_dir.display(), "No .rivets directory found");
-            return Err(Error::NoRivetsDirectory(canonical.display().to_string()));
-        }
+        let canonical = canonicalize_workspace(workspace_root)?;
+        let rivets_dir = canonical.join(RIVETS_DIR_NAME);
 
         // Load config to get storage settings
         let config_path = rivets_dir.join("config.yaml");
@@ -219,18 +212,33 @@ impl Context {
         &self,
         workspace_root: Option<&Path>,
     ) -> Result<Arc<RwLock<Box<dyn IssueStorage>>>> {
-        let workspace = match workspace_root {
-            Some(path) => path.canonicalize().map_err(|e| Error::WorkspaceNotFound {
-                path: path.display().to_string(),
-                source: Some(e),
-            })?,
-            None => self.current_workspace.clone().ok_or(Error::NoContext)?,
-        };
+        let workspace = self.resolve_workspace_root(workspace_root)?;
 
         self.storage_cache
             .get(&workspace)
             .cloned()
             .ok_or_else(|| Error::WorkspaceNotInitialized(workspace.display().to_string()))
+    }
+
+    /// Resolve one canonical Workspace without loading its configuration or storage.
+    pub(crate) fn resolve_workspace_root(&self, workspace_root: Option<&Path>) -> Result<PathBuf> {
+        match workspace_root {
+            Some(path) => canonicalize_workspace(path),
+            None => self.current_workspace.clone().ok_or(Error::NoContext),
+        }
+    }
+
+    /// Resolve the durable-lock root, or the explicit ephemeral unit-test bypass.
+    pub(crate) fn mutation_lock_root(
+        &self,
+        workspace_root: Option<&Path>,
+    ) -> Result<Option<PathBuf>> {
+        let workspace = self.resolve_workspace_root(workspace_root)?;
+        #[cfg(test)]
+        if self.test_workspaces.contains(&workspace) {
+            return Ok(None);
+        }
+        Ok(Some(workspace))
     }
 
     /// Get storage for a workspace, initializing an uncached workspace on first use.
@@ -295,6 +303,7 @@ impl Context {
             .insert(workspace_root.clone(), PathBuf::from("test://memory"));
         self.storage_cache
             .insert(workspace_root.clone(), Arc::new(RwLock::new(storage)));
+        self.test_workspaces.insert(workspace_root.clone());
         self.cache_order.push_back(workspace_root);
     }
 
@@ -320,6 +329,22 @@ pub struct WorkspaceInfo {
 
     /// The path to the database file.
     pub database_path: PathBuf,
+}
+
+fn canonicalize_workspace(workspace_root: &Path) -> Result<PathBuf> {
+    let canonical = workspace_root
+        .canonicalize()
+        .map_err(|source| Error::WorkspaceNotFound {
+            path: workspace_root.display().to_string(),
+            source: Some(source),
+        })?;
+    validate_path(&canonical)?;
+    let rivets_dir = canonical.join(RIVETS_DIR_NAME);
+    if !rivets_dir.exists() {
+        debug!(path = %rivets_dir.display(), "No .rivets directory found");
+        return Err(Error::NoRivetsDirectory(canonical.display().to_string()));
+    }
+    Ok(canonical)
 }
 
 /// Validate that a path is safe to use as a workspace.
@@ -373,7 +398,7 @@ pub fn discover_workspace(start: &Path) -> Result<PathBuf> {
     let mut current = start.to_path_buf();
 
     loop {
-        let rivets_dir = current.join(".rivets");
+        let rivets_dir = current.join(RIVETS_DIR_NAME);
         if rivets_dir.exists() && rivets_dir.is_dir() {
             // Canonicalize to resolve symlinks (e.g., /var -> /private/var on macOS)
             return current

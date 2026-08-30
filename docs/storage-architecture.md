@@ -250,6 +250,13 @@ Each line is a canonical record written by `CanonicalIssueRecord` (the persisted
 
 The loader is resilient: a bad line never aborts the whole load. Every problem becomes a typed `LoadWarning` and the affected record or edge is skipped. Reads are served from the successfully loaded issues; the warnings are returned alongside the storage.
 
+#### Durable Workspace Mutation Ownership
+
+- **Sidecar**: `.rivets/workspace.lock` is persistent and ignored. Its file handle owns a standard-library nonblocking exclusive lock; file existence is not ownership.
+- **Scope**: existing-Workspace CLI and MCP mutations acquire before storage load/reload and hold through validation, mutation, save, and save-failure recovery.
+- **Contention**: `WorkspaceBusy` is typed and retryable; no Issue bytes are read for authoritative mutation or written by the contender.
+- **Independence and release**: canonical Workspace roots use distinct sidecars; dropping or terminating the holder releases the OS lock without deleting the file.
+
 #### Skipped Issue Record
 ```
 Line 42: Invalid JSON, skipping: expected ',' at line 1 column 234
@@ -264,7 +271,7 @@ Warning: Loaded with 1 errors. 99 issues available for read-only access.
 
 - **Before mutation**: a changed SHA-256 source revision triggers `reload()` while the caller still holds the storage write lock; the mutation then runs against the latest complete state.
 - **After mutation, before save**: a changed revision returns typed `StorageError::ExternalChange` before the temporary output is opened. MCP save recovery reloads the external state, and the source bytes remain unchanged.
-- **Scope**: this prevents a long-lived cache from overwriting a completed external edit. Full cross-process load/mutate/save serialization is tracked separately by `rivets-j13o`.
+- **Scope**: source revisions protect completed non-cooperating edits; the durable Workspace sidecar additionally serializes cooperating CLI/MCP load→mutate→save transactions.
 
 #### Migration Conflict (warning-only)
 ```
