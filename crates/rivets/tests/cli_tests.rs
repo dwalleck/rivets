@@ -1215,10 +1215,12 @@ fn blocking_dependency_cli_direction_and_restart(initialized_dir: TempDir) {
 }
 
 #[rstest]
-fn related_and_discovery_cli_are_explicit_and_persistent(initialized_dir: TempDir) {
+fn related_and_discovery_cli_are_structured_symmetric_and_persistent(initialized_dir: TempDir) {
     let issue_a = create_issue(initialized_dir.path(), "Issue A", &[]);
     let issue_b = create_issue(initialized_dir.path(), "Issue B", &[]);
     let issue_c = create_issue(initialized_dir.path(), "Issue C", &[]);
+    let mut expected_related_endpoints = [issue_a.as_str(), issue_b.as_str()];
+    expected_related_endpoints.sort_unstable();
 
     for command in ["related", "discovery"] {
         let help = run_rivets_in_dir(initialized_dir.path(), &[command, "--help"]);
@@ -1239,9 +1241,9 @@ fn related_and_discovery_cli_are_explicit_and_persistent(initialized_dir: TempDi
             "related",
             "add",
             "--issue",
-            &issue_b,
+            expected_related_endpoints[1],
             "--related",
-            &issue_a,
+            expected_related_endpoints[0],
         ],
     );
     assert!(
@@ -1254,19 +1256,31 @@ fn related_and_discovery_cli_are_explicit_and_persistent(initialized_dir: TempDi
     assert_eq!(related_add["action"], "add");
     assert_eq!(related_add["relationship"], "related");
     assert_eq!(related_add["status"], "success");
+    assert_eq!(related_add["left_issue_id"], expected_related_endpoints[0]);
+    assert_eq!(related_add["right_issue_id"], expected_related_endpoints[1]);
+    assert!(related_add.get("issue_id").is_none());
+    assert!(related_add.get("related_issue_id").is_none());
 
     let related_duplicate = run_rivets_in_dir(
         initialized_dir.path(),
-        &["related", "add", "--issue", &issue_a, "--related", &issue_b],
+        &[
+            "related",
+            "add",
+            "--issue",
+            expected_related_endpoints[1],
+            "--related",
+            expected_related_endpoints[0],
+        ],
     );
     assert!(related_duplicate.status.success());
     assert_eq!(
         String::from_utf8_lossy(&related_duplicate.stdout).trim(),
-        format!("{issue_a} is related to {issue_b}")
+        format!(
+            "{} is related to {}",
+            expected_related_endpoints[0], expected_related_endpoints[1]
+        )
     );
 
-    let mut expected_related_endpoints = [issue_a.as_str(), issue_b.as_str()];
-    expected_related_endpoints.sort_unstable();
     let related_list = run_rivets_in_dir(
         initialized_dir.path(),
         &[
@@ -1446,15 +1460,29 @@ fn related_and_discovery_cli_are_explicit_and_persistent(initialized_dir: TempDi
     let related_remove = run_rivets_in_dir(
         initialized_dir.path(),
         &[
+            "--json",
             "related",
             "remove",
             "--issue",
-            &issue_b,
+            expected_related_endpoints[1],
             "--related",
-            &issue_a,
+            expected_related_endpoints[0],
         ],
     );
     assert!(related_remove.status.success());
+    let related_remove: serde_json::Value =
+        serde_json::from_slice(&related_remove.stdout).expect("Related remove should be JSON");
+    assert_eq!(related_remove["action"], "remove");
+    assert_eq!(related_remove["relationship"], "related");
+    assert_eq!(
+        related_remove["left_issue_id"],
+        expected_related_endpoints[0]
+    );
+    assert_eq!(
+        related_remove["right_issue_id"],
+        expected_related_endpoints[1]
+    );
+    assert_eq!(related_remove["status"], "success");
     let related_empty = run_rivets_in_dir(
         initialized_dir.path(),
         &["--json", "related", "list", "--issue", &issue_a],

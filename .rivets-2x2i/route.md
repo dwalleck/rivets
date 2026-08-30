@@ -42,16 +42,17 @@ Structural — every downstream artifact satisfies its owning stage's completion
 
 Structural route completed with no failed gate.
 
-- Core increment: `638b32c`, `5ac72b6`, `2536e28`; draft PR #99.
-- Adapter increment: `040b188`, `e0360f8`; stacked branch
-  `work/2x2i-adapters`.
+- Core increment merged to `main` through PR #99 at merge commit `046d477`.
+- Adapter increment is PR #100 on `work/2x2i-adapters`, rebased directly onto
+  the merged core.
 - Focused domain/storage/loader/CLI/MCP oracles passed, including every named
-  mutation's red-to-green check.
+  mutation's red-to-green check and the review-fix fence for canonical Related
+  mutation results.
 - Final seam check found graph mutations only under `storage::in_memory`.
 - Final Rust gate: `cargo fmt --check`, workspace clippy with warnings denied,
-  and 1,106 tests passed with one ignored.
-- Real CLI smoke: Related and Discovery add/list/remove passed across separate
-  processes in a temporary Workspace.
+  and 1,109 tests passed with one ignored.
+- Real CLI smoke and the permanent process fence cover Related and Discovery
+  add/list/remove, restart persistence, and canonical Related JSON/text results.
 - Approved-design base assumptions about a delivered Workspace lock and parity
   registry were corrected explicitly in `design.md`; verified Task
   `rivets-j13o` owns the lock, and no `rivets-2x2i` acceptance criterion was

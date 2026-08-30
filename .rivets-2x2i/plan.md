@@ -5,9 +5,9 @@
 - Route: Structural (`.rivets-2x2i/route.md`).
 - Approved design: `.rivets-2x2i/design.md`, requester approval “I approve this design” on 2026-08-29.
 - Upstream default branch: `origin/main`, discovered with `git symbolic-ref --short refs/remotes/origin/HEAD`.
-- Estimated changed lines: Slice 1 = 320; Slice 2 = 1,200; Slice 3 = 420; Slice 4 = 780; Slice 5 = 1,100; review-fix Slice R1 = 100; sum = 3,920.
-- Churn margin: 20% = 784 lines. This additive cross-crate change touches exhaustive trait implementations, generated parity output, integration fixtures, and a review-driven compatibility fence whose exact assertion churn is hard to predict.
-- Projected total: 4,704 changed lines. Because this exceeds 4,000, the work remains partitioned into two independently mergeable PR increments.
+- Estimated changed lines: Slice 1 = 320; Slice 2 = 1,200; Slice 3 = 420; Slice 4 = 780; Slice 5 = 1,100; review-fix Slice R1 = 100; review-fix Slice R2 = 80; sum = 4,000.
+- Churn margin: 20% = 800 lines. This additive cross-crate change touches exhaustive trait implementations, generated parity output, integration fixtures, and review-driven compatibility and adapter-result fences whose exact assertion churn is hard to predict.
+- Projected total: 4,800 changed lines. Because this exceeds 4,000, the work remains partitioned into two independently mergeable PR increments.
 
 ### PR increment: core-relationships
 
@@ -15,7 +15,7 @@ Slices 1–3 plus review-fix Slice R1. Mergeable definition: domain values, publ
 
 ### PR increment: relationship-adapters
 
-Slices 4–5. Mergeable definition: dedicated CLI and MCP add/remove/list operations consume the core interface, update parity/documentation, and pass real-process/context, locking, stale-cache, schema, and restart checks. It depends only on `core-relationships`.
+Slices 4–5 plus review-fix Slice R2. Mergeable definition: dedicated CLI and MCP add/remove/list operations consume the core interface, update parity/documentation, and pass real-process/context, canonical-result, locking, stale-cache, schema, and restart checks. It depends only on `core-relationships`.
 
 ## Slice 1: Add invariant-preserving domain relationship values
 
@@ -212,6 +212,37 @@ Slices 4–5. Mergeable definition: dedicated CLI and MCP add/remove/list operat
 - Apply each named mutation and rerun its named fence → the corresponding warning/empty-query or success assertion turns red; restore each mutation and both fences return green.
 - `cargo test -p rivets` → the core increment remains green with compatibility behavior restored.
 
+## Review-fix Slice R2: Canonicalize Related CLI mutation results and synchronize completion records
+
+**Claim IDs:** C7. F9 hardens C7; F10 and F11 synchronize non-behavioral route and tracker records with the completed adapter increment.
+
+**Expected behavior:** `related add` and `related remove` emit canonical lexical `left_issue_id`/`right_issue_id` JSON fields and canonical endpoint order in text regardless of caller order. The route names the merged core/current adapter history and current gate evidence, and the closed tracker record marks every completed acceptance criterion.
+
+**Oracle:** Independently sort the two requested Issue ID strings and compare the add/remove JSON and text output to literal canonical objects and phrases; compare route/tracker records directly to the current PR topology and checked acceptance list.
+
+**Stress fixture:** Invoke Related add with the lexically larger endpoint first, re-add in canonical order, and remove with the larger endpoint first. Expected: every mutation result uses the same canonical endpoints and fields while storage remains idempotent and removable.
+
+**Regression fence:** `crates/rivets/tests/cli_tests.rs::related_and_discovery_cli_are_structured_symmetric_and_persistent`.
+
+**Named mutation:** Restore raw caller-order `issue_id`/`related_issue_id` output in either Related mutation branch; the reversed-order JSON/text assertions must turn red.
+
+**Complexity/production scale:** N/A — the fix performs only the existing O(1) endpoint access and serialization; it adds no loop or scale-dependent work.
+
+**Wall budget/phase:** N/A — each CLI invocation is a one-off process event and this fix adds no always-on phase.
+
+**Files:** `crates/rivets/src/cli/execute.rs`; `crates/rivets/tests/cli_tests.rs`; `.rivets-2x2i/{plan.md,route.md,review-decisions.md}`; `.rivets/issues.jsonl`.
+
+**Estimate:** 30 minutes.
+
+**Diff estimate:** 80 changed lines including workflow records and regression assertions.
+
+**PR increment:** relationship-adapters.
+
+**Commands and expected results:**
+- `cargo test -p rivets --test cli_tests related_and_discovery_cli_are_structured_symmetric_and_persistent` → reversed Related add/remove JSON and text use the independently sorted left/right endpoints, while list, persistence, and Discovery assertions remain green.
+- Restore raw caller-order output in either mutation branch and rerun the fence → the corresponding reversed-order JSON/text assertion turns red; restore canonical output and the fence returns green.
+- `cargo test -p rivets` → the adapter increment remains green with canonical CLI result behavior.
+
 ## Tracker taxonomy
 
 - Final canonical relationship migration remains assigned to verified Task `rivets-vio8`.
@@ -221,10 +252,10 @@ Slices 4–5. Mergeable definition: dedicated CLI and MCP add/remove/list operat
 
 ## Self-review
 
-- [x] C0–C9 remain owned by their original slices; review-fix Slice R1 is explicitly traceable to F2/F5 and hardens C6 without reassigning its implementation ownership.
+- [x] C0–C9 remain owned by their original slices; review-fix Slice R1 is traceable to F2/F5 and hardens C6, while review-fix Slice R2 is traceable to F9–F11 and hardens C7 without reassigning implementation ownership.
 - [x] Every slice has all thirteen mandatory fields and every conditional field has an explicit `N/A — reason`.
 - [x] Every claim's permanent fence and named mutation are created in the same slice.
 - [x] Every new loop records asymptotic cost, audited/stress sizes, a maximum accepted cost, and every always-on phase has a wall budget.
-- [x] The 3,920 + 784 = 4,704 review-size projection remains partitioned into two independently mergeable increments.
+- [x] The 4,000 + 800 = 4,800 review-size projection remains partitioned into two independently mergeable increments.
 - [x] Tracker taxonomy is applied with verified IDs.
 - [x] No slice is declared complete; checkpointed-build exclusively judges completion.

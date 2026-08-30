@@ -887,18 +887,22 @@ pub async fn execute_related(
         RelatedAction::Add { issue, related } => {
             let association = RelatedAssociation::new(IssueId::new(issue), IssueId::new(related))?;
             app.storage_mut()
-                .add_related_association(association)
+                .add_related_association(association.clone())
                 .await?;
             app.save().await?;
             match output_mode {
                 OutputMode::Json => output::print_json(&serde_json::json!({
                     "action": "add",
                     "relationship": "related",
-                    "issue_id": issue,
-                    "related_issue_id": related,
+                    "left_issue_id": association.left_issue_id(),
+                    "right_issue_id": association.right_issue_id(),
                     "status": "success"
                 }))?,
-                OutputMode::Text => println!("{issue} is related to {related}"),
+                OutputMode::Text => println!(
+                    "{} is related to {}",
+                    association.left_issue_id(),
+                    association.right_issue_id()
+                ),
             }
         }
         RelatedAction::Remove { issue, related } => {
@@ -911,11 +915,15 @@ pub async fn execute_related(
                 OutputMode::Json => output::print_json(&serde_json::json!({
                     "action": "remove",
                     "relationship": "related",
-                    "issue_id": issue,
-                    "related_issue_id": related,
+                    "left_issue_id": association.left_issue_id(),
+                    "right_issue_id": association.right_issue_id(),
                     "status": "success"
                 }))?,
-                OutputMode::Text => println!("Removed: {issue} is no longer related to {related}"),
+                OutputMode::Text => println!(
+                    "Removed: {} is no longer related to {}",
+                    association.left_issue_id(),
+                    association.right_issue_id()
+                ),
             }
         }
         RelatedAction::List { issue } => {
