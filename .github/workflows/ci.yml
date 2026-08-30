@@ -18,6 +18,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Check generated CLI/MCP parity documentation
+        run: python3 scripts/render-cli-mcp-parity.py --check
+
+      - name: Test CLI/MCP parity renderer
+        run: python3 scripts/test_render_cli_mcp_parity.py
+
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

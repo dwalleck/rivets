@@ -28,6 +28,7 @@ This index separates **current reference documentation** (describes the implemen
 - [Storage Architecture](./storage-architecture.md) — storage trait hierarchy, in-memory representation, JSONL persistence and error recovery, cycle detection, and readiness queries.
 - [Data Flow](./data-flow.md) — end-to-end flows: command lifecycle, init, CRUD, Blocking Dependency mutation/query, JSONL load, and state transitions.
 - [Terminology Reference](./terminology.md) — implementation vocabulary for storage layers, data structures, and operations.
+- [CLI and MCP Interface Parity](./cli-mcp-parity.md) — normative operation, argument, validation, ordering, and result contract; current gaps and intentional adapter mechanics.
 - [CONTEXT.md](../CONTEXT.md) — canonical domain glossary (Workspace, Issue, Workflow State, Ready, Blocked, Issue Relationships, Associated Resources). Authoritative for domain meaning; ADRs record why load-bearing decisions were made.
 - [AGENTS.md](../AGENTS.md) — current engineering and navigation rules for AI assistants working in the repo.
 - [README.md](../README.md) — user-facing overview of the CLI.
@@ -40,6 +41,7 @@ This index separates **current reference documentation** (describes the implemen
 - [ADR-0003: Model related material as Associated Resources](./adr/0003-associated-resources.md) — typed resources with explicit targets (Web URL or Workspace Path) and standard roles replace the singular untyped External Reference.
 - [ADR-0004: One wire vocabulary for Issue records](./adr/0004-one-wire-vocabulary.md) — MCP tool responses and CLI `--json` serialize the domain `Issue` directly; timestamps normalize to RFC-3339 `Z` form.
 - [ADR-0005: The domain owns status-transition rules](./adr/0005-domain-owned-status-transitions.md) — close/reopen rules live in the domain and fire at the single update site; "status" is the code-and-wire name for Workflow State.
+- [ADR-0006: CLI and MCP share semantic Interface Parity](./adr/0006-semantic-interface-parity.md) — shared intents preserve observable domain behavior while adapter-specific invocation and presentation mechanics remain explicit.
 
 **Implementation lags some accepted decisions.** Blocking Dependency mutation and queries now use canonical typed interfaces, but Parentage, Related Association, Discovery Origin, Workflow State/Ready alignment, and canonical `relationships` persistence remain in their tracked ADR-0002 slices. A legacy `blocked` status vocabulary and parent-blocking readiness behavior still exist until those slices land. Issue Kind is mutable (Bug, Feature, Task, Epic, Chore); “Issue type” is legacy vocabulary. Legacy singular Notes, External References, and generic relationship records are accepted only at compatibility seams; do not document them as canonical.
 
