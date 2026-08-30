@@ -71,7 +71,8 @@
 
 use crate::domain::{
     BlockingDependency, DiscoveryOrigin, Issue, IssueFilter, IssueId, IssueUpdate, NewIssue,
-    NewResource, ReadyFilter, RelatedAssociation, ResourceId, ResourceUpdate, SortPolicy,
+    NewResource, Parentage, ReadyFilter, RelatedAssociation, ResourceId, ResourceUpdate,
+    SortPolicy,
 };
 use crate::error::{PartialLoadError, Result, SkippedIssueRecordCause, StorageError};
 use async_trait::async_trait;
@@ -225,6 +226,22 @@ pub trait IssueStorage: Send + Sync {
         &self,
         discovered_issue_id: &IssueId,
     ) -> Result<Vec<DiscoveryOrigin>>;
+    // ========== Parentage Management ==========
+
+    /// Attach an unparented child to one Epic parent.
+    ///
+    /// Repeating the same Parentage is idempotent. A different existing parent
+    /// must be replaced through [`move_parent`](Self::move_parent).
+    async fn set_parent(&mut self, parentage: Parentage) -> Result<Parentage>;
+
+    /// Remove and return one child's Parentage.
+    async fn clear_parent(&mut self, child_id: &IssueId) -> Result<Parentage>;
+
+    /// Atomically validate and replace one child's existing Parentage.
+    async fn move_parent(&mut self, parentage: Parentage) -> Result<Parentage>;
+
+    /// Return one child's Parentage, or `None` when the existing child is unparented.
+    async fn parent_of(&self, child_id: &IssueId) -> Result<Option<Parentage>>;
     // ========== Queries ==========
 
     /// List issues matching the given filter.
@@ -656,6 +673,24 @@ impl IssueStorage for JsonlBackedStorage {
     ) -> Result<Vec<DiscoveryOrigin>> {
         self.inner.discovery_origins(discovered_issue_id).await
     }
+    async fn set_parent(&mut self, parentage: Parentage) -> Result<Parentage> {
+        self.prepare_mutation().await?;
+        self.inner.set_parent(parentage).await
+    }
+
+    async fn clear_parent(&mut self, child_id: &IssueId) -> Result<Parentage> {
+        self.prepare_mutation().await?;
+        self.inner.clear_parent(child_id).await
+    }
+
+    async fn move_parent(&mut self, parentage: Parentage) -> Result<Parentage> {
+        self.prepare_mutation().await?;
+        self.inner.move_parent(parentage).await
+    }
+
+    async fn parent_of(&self, child_id: &IssueId) -> Result<Option<Parentage>> {
+        self.inner.parent_of(child_id).await
+    }
     async fn list(&self, filter: &IssueFilter) -> Result<Vec<Issue>> {
         self.inner.list(filter).await
     }
@@ -1030,6 +1065,27 @@ impl IssueStorage for MockStorage {
         _discovered_issue_id: &IssueId,
     ) -> Result<Vec<DiscoveryOrigin>> {
         Ok(vec![])
+    }
+    async fn set_parent(&mut self, _parentage: Parentage) -> Result<Parentage> {
+        unimplemented!(
+            "MockStorage::set_parent() is not implemented. Use in_memory::new_in_memory_storage() for Parentage."
+        )
+    }
+
+    async fn clear_parent(&mut self, _child_id: &IssueId) -> Result<Parentage> {
+        unimplemented!(
+            "MockStorage::clear_parent() is not implemented. Use in_memory::new_in_memory_storage() for Parentage."
+        )
+    }
+
+    async fn move_parent(&mut self, _parentage: Parentage) -> Result<Parentage> {
+        unimplemented!(
+            "MockStorage::move_parent() is not implemented. Use in_memory::new_in_memory_storage() for Parentage."
+        )
+    }
+
+    async fn parent_of(&self, _child_id: &IssueId) -> Result<Option<Parentage>> {
+        Ok(None)
     }
     async fn list(&self, _filter: &IssueFilter) -> Result<Vec<Issue>> {
         Ok(vec![])

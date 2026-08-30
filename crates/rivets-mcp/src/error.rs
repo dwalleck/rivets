@@ -134,6 +134,10 @@ pub enum Error {
         source_issue_id: String,
     },
 
+    /// A Parentage invariant or transition was rejected.
+    #[error(transparent)]
+    InvalidParentage(#[from] rivets::domain::ParentageError),
+
     /// An error from the rivets storage layer.
     #[error("Storage error: {0}")]
     Storage(#[source] RivetsError),
@@ -162,6 +166,7 @@ impl Error {
             | Self::InvalidNote(_)
             | Self::InvalidResource(_)
             | Self::InvalidBlockingDependency(_)
+            | Self::InvalidParentage(_)
             | Self::InvalidStatusTransition(_)
             | Self::Assignment(_)
             | Self::InvalidRelatedAssociation(_)
@@ -228,6 +233,7 @@ impl From<RivetsError> for Error {
                     },
                 },
             },
+            RivetsError::InvalidParentage(source) => Self::InvalidParentage(source),
             error @ (RivetsError::Io(_)
             | RivetsError::WorkspaceLock { .. }
             | RivetsError::Config(_)

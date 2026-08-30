@@ -16,7 +16,7 @@ mod workspace_path_corpus;
 
 pub use relationship::{
     BlockingDependency, BlockingDependencyError, DiscoveryOrigin, DiscoveryOriginError,
-    RelatedAssociation, RelatedAssociationError,
+    Parentage, ParentageError, RelatedAssociation, RelatedAssociationError,
 };
 pub use resource::{
     AssociatedResource, NewResource, ResourceError, ResourceId, ResourceLabel, ResourceRole,

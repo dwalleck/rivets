@@ -1,16 +1,18 @@
 //! IssueStorage trait implementation for in-memory storage.
 
-use super::InMemoryStorage;
 use super::graph::{
     blocking_dependency_tree_impl, discovery_origins_impl, find_blocked_issues, find_blocking_edge,
-    find_edge, has_blocking_cycle_impl, has_cycle_for_type_impl,
-    has_unresolved_blocking_dependency, related_associations_impl,
+    find_edge, find_parentage_edge, has_blocking_cycle_impl, has_cycle_for_type_impl,
+    has_parentage_cycle_impl, has_unresolved_blocking_dependency, parentage_children_impl,
+    parentage_of_impl, related_associations_impl,
 };
 use super::sorting::sort_by_policy;
+use super::{InMemoryStorage, InMemoryStorageInner};
 use crate::domain::{
     AssignmentError, BlockingDependency, Dependency, DependencyType, DiscoveryOrigin, Issue,
     IssueFilter, IssueId, IssueKind, IssueStatus, IssueUpdate, MAX_PRIORITY, NewIssue, NewResource,
-    Note, ReadyFilter, RelatedAssociation, ResourceId, ResourceUpdate, SortPolicy,
+    Note, Parentage, ParentageError, ReadyFilter, RelatedAssociation, ResourceId, ResourceUpdate,
+    SortPolicy,
 };
 use crate::error::{Error, Result, StorageError};
 use crate::storage::IssueStorage;
@@ -19,6 +21,33 @@ use chrono::Utc;
 use petgraph::Direction;
 use petgraph::visit::EdgeRef;
 use std::collections::HashSet;
+
+fn validate_parent_candidate(inner: &InMemoryStorageInner, parentage: &Parentage) -> Result<()> {
+    let child_id = parentage.child_id();
+    let parent_id = parentage.parent_id();
+    if !inner.issues.contains_key(child_id) {
+        return Err(Error::IssueNotFound(child_id.clone()));
+    }
+    let parent = inner
+        .issues
+        .get(parent_id)
+        .ok_or_else(|| Error::IssueNotFound(parent_id.clone()))?;
+    if parent.issue_kind != IssueKind::Epic {
+        return Err(ParentageError::ParentNotEpic {
+            parent_id: parent_id.clone(),
+            actual_kind: parent.issue_kind,
+        }
+        .into());
+    }
+    if has_parentage_cycle_impl(&inner.graph, &inner.node_map, child_id, parent_id)? {
+        return Err(ParentageError::Cycle {
+            child_id: child_id.clone(),
+            parent_id: parent_id.clone(),
+        }
+        .into());
+    }
+    Ok(())
+}
 
 /// Check whether an Issue matches every common list or Ready criterion.
 fn matches_common_filter(
@@ -173,11 +202,11 @@ impl IssueStorage for InMemoryStorage {
 
     async fn update(&mut self, id: &IssueId, updates: IssueUpdate) -> Result<Issue> {
         let mut inner = self.lock().await;
-        let stored = inner
+        let mut candidate = inner
             .issues
-            .get_mut(id)
+            .get(id)
+            .cloned()
             .ok_or_else(|| Error::IssueNotFound(id.clone()))?;
-        let mut candidate = stored.clone();
         let now = Utc::now();
 
         if let Some(title) = updates.title {
@@ -194,6 +223,19 @@ impl IssueStorage for InMemoryStorage {
             candidate.priority = priority;
         }
         if let Some(issue_kind) = updates.issue_kind {
+            if issue_kind != IssueKind::Epic {
+                let child_ids = parentage_children_impl(&inner.graph, &inner.node_map, id)?
+                    .into_iter()
+                    .map(|parentage| parentage.child_id().clone())
+                    .collect::<Vec<_>>();
+                if !child_ids.is_empty() {
+                    return Err(ParentageError::ParentHasChildren {
+                        parent_id: id.clone(),
+                        child_ids,
+                    }
+                    .into());
+                }
+            }
             candidate.issue_kind = issue_kind;
         }
         if let Some(status) = status {
@@ -222,7 +264,7 @@ impl IssueStorage for InMemoryStorage {
             .map_err(StorageError::Assignment)?;
         candidate.updated_at = now;
 
-        *stored = candidate.clone();
+        inner.issues.insert(id.clone(), candidate.clone());
         Ok(candidate)
     }
 
@@ -722,6 +764,116 @@ impl IssueStorage for InMemoryStorage {
     ) -> Result<Vec<DiscoveryOrigin>> {
         let inner = self.lock().await;
         discovery_origins_impl(&inner.graph, &inner.node_map, discovered_issue_id)
+    }
+    async fn set_parent(&mut self, parentage: Parentage) -> Result<Parentage> {
+        let mut inner = self.lock().await;
+        validate_parent_candidate(&inner, &parentage)?;
+        let child_id = parentage.child_id();
+        let parent_id = parentage.parent_id();
+
+        if let Some(existing) = parentage_of_impl(&inner.graph, &inner.node_map, child_id)? {
+            if existing == parentage {
+                return Ok(existing);
+            }
+            return Err(ParentageError::AlreadyParented {
+                child_id: child_id.clone(),
+                parent_id: existing.parent_id().clone(),
+            }
+            .into());
+        }
+
+        let child_node = inner.node_map[child_id];
+        let parent_node = inner.node_map[parent_id];
+        inner
+            .graph
+            .add_edge(child_node, parent_node, DependencyType::ParentChild);
+        inner
+            .issues
+            .get_mut(child_id)
+            .ok_or_else(|| Error::IssueNotFound(child_id.clone()))?
+            .dependencies
+            .push(Dependency {
+                depends_on_id: parent_id.clone(),
+                dep_type: DependencyType::ParentChild,
+            });
+        Ok(parentage)
+    }
+
+    async fn clear_parent(&mut self, child_id: &IssueId) -> Result<Parentage> {
+        let mut inner = self.lock().await;
+        let existing =
+            parentage_of_impl(&inner.graph, &inner.node_map, child_id)?.ok_or_else(|| {
+                ParentageError::NoParent {
+                    child_id: child_id.clone(),
+                }
+            })?;
+        let child_node = inner.node_map[child_id];
+        let parent_node = inner.node_map[existing.parent_id()];
+        let edge = find_parentage_edge(&inner.graph, child_node, parent_node).ok_or_else(|| {
+            ParentageError::NoParent {
+                child_id: child_id.clone(),
+            }
+        })?;
+
+        inner.graph.remove_edge(edge);
+        inner
+            .issues
+            .get_mut(child_id)
+            .ok_or_else(|| Error::IssueNotFound(child_id.clone()))?
+            .dependencies
+            .retain(|record| {
+                record.dep_type != DependencyType::ParentChild
+                    || record.depends_on_id != *existing.parent_id()
+            });
+        Ok(existing)
+    }
+
+    async fn move_parent(&mut self, parentage: Parentage) -> Result<Parentage> {
+        let mut inner = self.lock().await;
+        let child_id = parentage.child_id();
+        let existing =
+            parentage_of_impl(&inner.graph, &inner.node_map, child_id)?.ok_or_else(|| {
+                ParentageError::NoParent {
+                    child_id: child_id.clone(),
+                }
+            })?;
+        validate_parent_candidate(&inner, &parentage)?;
+        if existing == parentage {
+            return Ok(existing);
+        }
+
+        let child_node = inner.node_map[child_id];
+        let old_parent_node = inner.node_map[existing.parent_id()];
+        let new_parent_node = inner.node_map[parentage.parent_id()];
+        let old_edge =
+            find_parentage_edge(&inner.graph, child_node, old_parent_node).ok_or_else(|| {
+                ParentageError::NoParent {
+                    child_id: child_id.clone(),
+                }
+            })?;
+
+        inner.graph.remove_edge(old_edge);
+        inner
+            .graph
+            .add_edge(child_node, new_parent_node, DependencyType::ParentChild);
+        let child = inner
+            .issues
+            .get_mut(child_id)
+            .ok_or_else(|| Error::IssueNotFound(child_id.clone()))?;
+        child.dependencies.retain(|record| {
+            record.dep_type != DependencyType::ParentChild
+                || record.depends_on_id != *existing.parent_id()
+        });
+        child.dependencies.push(Dependency {
+            depends_on_id: parentage.parent_id().clone(),
+            dep_type: DependencyType::ParentChild,
+        });
+        Ok(parentage)
+    }
+
+    async fn parent_of(&self, child_id: &IssueId) -> Result<Option<Parentage>> {
+        let inner = self.lock().await;
+        parentage_of_impl(&inner.graph, &inner.node_map, child_id)
     }
     async fn list(&self, filter: &IssueFilter) -> Result<Vec<Issue>> {
         let inner = self.lock().await;
