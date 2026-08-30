@@ -14,7 +14,10 @@ mod resource;
 #[cfg(test)]
 mod workspace_path_corpus;
 
-pub use relationship::{BlockingDependency, BlockingDependencyError};
+pub use relationship::{
+    BlockingDependency, BlockingDependencyError, DiscoveryOrigin, DiscoveryOriginError,
+    RelatedAssociation, RelatedAssociationError,
+};
 pub use resource::{
     AssociatedResource, NewResource, ResourceError, ResourceId, ResourceLabel, ResourceRole,
     ResourceTarget, ResourceUpdate, WebUrl, WorkspacePath,
