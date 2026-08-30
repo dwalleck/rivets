@@ -147,3 +147,45 @@ Approved by the requester.
 - Date: 2026-08-29
 - Verbatim approval: “I approve this design”
 - Approved risk acceptances: None.
+
+## Post-implementation resolution
+
+The table's `PENDING` cells preserve the approved pre-build snapshot. These
+terminal statuses supersede them:
+
+| Claim | Status | Evidence |
+|---|---|---|
+| C0 | PASS | AST searches found every production `add_edge` and `remove_edge` under `storage::in_memory`; adapter searches found no direct compatibility-field access. |
+| C1 | PASS | Domain construction/serde tests passed; removing Related endpoint sorting turned the oracle red and restoration returned it green. |
+| C2 | PASS | Symmetric/idempotent storage tests passed; outgoing-only lookup and wrong duplicate-kind mutations each turned the oracle red. |
+| C3 | PASS | Directed multi-source/cycle tests passed; removing the Discovery kind filter and swapping adapter roles each turned their oracles red. |
+| C4 | PASS | Mixed-kind loader and storage matrices passed; enabling Related cycle rejection produced two warnings instead of the required one. |
+| C5 | PASS | Ready/Blocked snapshots and same-pair multi-kind tests passed; broadening blockedness and endpoint-only duplicate checks turned the oracle red. |
+| C6 | PASS | Raw JSONL ownership, unrelated-record retention, reload, and second-save byte equality passed; reversing canonical Related ownership turned the raw oracle red. |
+| C7 | PASS | Real CLI process tests and a separate temporary-Workspace smoke passed for all six operations; omitted save, directional Related filtering, and swapped Discovery roles turned the oracle red. |
+| C8 | PASS | All six MCP tools passed exact schema, typed error, explicit/current root, fresh-context restart, and persistence checks; omitted save, directional filtering, swapped roles, schema rename, and error reclassification turned their oracles red. |
+| C9 | PASS | Root/subcommand help and the 30-tool MCP registry enumerate the exact six operations and parameter roles; removing a tool/schema role turns the registry oracle red. |
+
+Post-approval base correction: `origin/main` contains neither a distinct CLI
+mutation classifier nor Workspace-lock implementation/tests, and it contains no
+CLI/MCP parity registry or renderer. Verified Task `rivets-j13o` exclusively
+owns the shared durable Workspace lock. Accordingly, C7's terminal evidence is
+observable no-save/save behavior, C8 excludes lock contention, and C9 uses the
+existing README/help/router documentation surfaces rather than inventing a new
+parity convention. This correction removes no `rivets-2x2i` acceptance
+criterion.
+
+## Falsifier completion log
+
+- 2026-08-29 — C1–C6: domain, storage, readiness, kind-isolation, and
+  persistence mutations each produced the designed red signal and were restored
+  green before commits `638b32c`, `5ac72b6`, and `2536e28`. **PASS**.
+- 2026-08-29 — C7: omitted CLI persistence, canonical-left-only Related list,
+  and swapped Discovery endpoints each failed
+  `related_and_discovery_cli_are_explicit_and_persistent`; restoration passed
+  the 91-test CLI suite before commit `040b188`. **PASS**.
+- 2026-08-29 — C8–C9: omitted MCP persistence, canonical-left-only Related
+  list, swapped Discovery endpoints, renamed `related_issue_id`, and internal
+  duplicate-error mapping each failed an independent integration/schema/error
+  oracle; restoration passed the 185-test MCP suite before commit `e0360f8`.
+  **PASS**.

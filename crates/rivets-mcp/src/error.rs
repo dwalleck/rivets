@@ -72,6 +72,52 @@ pub enum Error {
     #[error("Invalid Blocking Dependency: {0}")]
     InvalidBlockingDependency(#[from] rivets::domain::BlockingDependencyError),
 
+    /// Related Association endpoints failed domain validation.
+    #[error("Invalid Related Association: {0}")]
+    InvalidRelatedAssociation(#[from] rivets::domain::RelatedAssociationError),
+
+    /// Discovery Origin endpoint roles failed domain validation.
+    #[error("Invalid Discovery Origin: {0}")]
+    InvalidDiscoveryOrigin(#[from] rivets::domain::DiscoveryOriginError),
+
+    /// The requested Related Association does not exist.
+    #[error("Related association not found: {left_issue_id} <-> {right_issue_id}")]
+    RelatedAssociationNotFound {
+        /// Canonical left endpoint.
+        left_issue_id: String,
+        /// Canonical right endpoint.
+        right_issue_id: String,
+    },
+
+    /// The requested Discovery Origin already exists.
+    #[error("Discovery origin already exists: {discovered_issue_id} -> {source_issue_id}")]
+    DuplicateDiscoveryOrigin {
+        /// Discovered Issue.
+        discovered_issue_id: String,
+        /// Source Issue.
+        source_issue_id: String,
+    },
+
+    /// The requested Discovery Origin does not exist.
+    #[error("Discovery origin not found: {discovered_issue_id} -> {source_issue_id}")]
+    DiscoveryOriginNotFound {
+        /// Discovered Issue.
+        discovered_issue_id: String,
+        /// Source Issue.
+        source_issue_id: String,
+    },
+
+    /// Adding a Discovery Origin would create a cycle.
+    #[error(
+        "Discovery origin cycle detected: adding origin from {discovered_issue_id} to {source_issue_id} would create a cycle"
+    )]
+    CircularDiscoveryOrigin {
+        /// Discovered Issue.
+        discovered_issue_id: String,
+        /// Source Issue.
+        source_issue_id: String,
+    },
+
     /// An error from the rivets storage layer.
     #[error("Storage error: {0}")]
     Storage(#[source] RivetsError),
@@ -92,6 +138,34 @@ impl From<RivetsError> for Error {
     fn from(error: RivetsError) -> Self {
         match error {
             RivetsError::IssueNotFound(issue_id) => Self::IssueNotFound(issue_id.to_string()),
+            RivetsError::RelatedAssociationNotFound {
+                left_issue_id,
+                right_issue_id,
+            } => Self::RelatedAssociationNotFound {
+                left_issue_id: left_issue_id.to_string(),
+                right_issue_id: right_issue_id.to_string(),
+            },
+            RivetsError::DuplicateDiscoveryOrigin {
+                discovered_issue_id,
+                source_issue_id,
+            } => Self::DuplicateDiscoveryOrigin {
+                discovered_issue_id: discovered_issue_id.to_string(),
+                source_issue_id: source_issue_id.to_string(),
+            },
+            RivetsError::DiscoveryOriginNotFound {
+                discovered_issue_id,
+                source_issue_id,
+            } => Self::DiscoveryOriginNotFound {
+                discovered_issue_id: discovered_issue_id.to_string(),
+                source_issue_id: source_issue_id.to_string(),
+            },
+            RivetsError::CircularDiscoveryOrigin {
+                discovered_issue_id,
+                source_issue_id,
+            } => Self::CircularDiscoveryOrigin {
+                discovered_issue_id: discovered_issue_id.to_string(),
+                source_issue_id: source_issue_id.to_string(),
+            },
             RivetsError::Storage(storage_error) => match storage_error.try_into_resource_error() {
                 Ok(source) => Self::InvalidResource(source),
                 Err(storage_error) => match storage_error.try_into_status_transition_error() {
@@ -104,10 +178,6 @@ impl From<RivetsError> for Error {
             | RivetsError::Validation { .. }
             | RivetsError::HasDependents { .. }
             | RivetsError::CircularDependency { .. }
-            | RivetsError::RelatedAssociationNotFound { .. }
-            | RivetsError::DuplicateDiscoveryOrigin { .. }
-            | RivetsError::DiscoveryOriginNotFound { .. }
-            | RivetsError::CircularDiscoveryOrigin { .. }
             | RivetsError::InvalidIssueId(_)
             | RivetsError::InvalidPriority(_)
             | RivetsError::DependencyNotFound { .. }

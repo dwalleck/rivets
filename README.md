@@ -60,6 +60,8 @@ rivets close "$ID"
 | `ready` | Issues with no blockers, hybrid-sorted by priority |
 | `blocked` | Issues blocked by open Blocking prerequisites, along with those prerequisites |
 | `blocking-dependency` | Blocking Dependencies: `add`/`remove --dependent <id> --prerequisite <id>`, `list --dependent|--prerequisite <id>`, `tree --dependent <id> [--depth N]` |
+| `related` | Symmetric Related Associations: `add`/`remove --issue <id> --related <id>`, `list --issue <id>` |
+| `discovery` | Directed Discovery Origins: `add`/`remove --discovered <id> --source <id>`, `list --discovered <id>` |
 | `label` | Labels: `add <label> [<issue-id>]`, `remove`, `list <issue-id>`, `list-all`; use `--ids` for batches |
 | `resource` | Associated Resources: `add`, `list`, `update`, `remove` (see below) |
 | `stale` | Issues not updated in N days (`--days`, default 30) |
@@ -99,8 +101,27 @@ rivets ready
 A Blocking Dependency always points from the dependent Issue to its
 prerequisite. Self-dependencies and Blocking-only cycles are rejected. Closing
 a prerequisite leaves the relationship recorded but stops it from blocking.
-Legacy non-blocking relationship records remain readable; their dedicated
-interfaces land in separate ADR-0002 slices.
+
+### Non-blocking Relationships
+
+```bash
+rivets related add --issue demo-a3f8 --related demo-b2c9
+rivets related list --issue demo-b2c9
+rivets related remove --issue demo-b2c9 --related demo-a3f8
+
+rivets discovery add --discovered demo-a3f8 --source demo-b2c9
+rivets discovery list --discovered demo-a3f8
+rivets discovery remove --discovered demo-a3f8 --source demo-b2c9
+```
+
+Related Associations are symmetric and idempotent: endpoint order does not
+change their identity. Discovery Origins are directed from the discovered Issue
+to a source Issue, may record multiple sources, and reject duplicates and
+Discovery-only cycles. Neither relationship affects Blocked or Ready status.
+
+The MCP equivalents are `related_add`, `related_remove`, `related_list`,
+`discovery_add`, `discovery_remove`, and `discovery_list`, with the same
+endpoint names and semantics.
 
 ### Labels
 

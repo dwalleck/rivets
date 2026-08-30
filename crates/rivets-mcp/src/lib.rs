@@ -42,10 +42,12 @@
 //! - `blocked` - Get blocked issues with their blockers
 //!
 //! ## Issue Modification
-//! - `create` - Create a new issue
-//! - `update` - Update issue fields
-//! - `close` - Mark an issue as complete
-//! - `dep` - Add a dependency between issues
+//! - `create` - Create a new Issue
+//! - `update` - Update Issue fields
+//! - `close` - Mark an Issue as complete
+//! - `blocking_dependency_add` / `blocking_dependency_remove` - Manage Blocking Dependencies
+//! - `related_add` / `related_remove` - Manage symmetric Related Associations
+//! - `discovery_add` / `discovery_remove` - Manage directed Discovery Origins
 //!
 //! # Debugging
 //!

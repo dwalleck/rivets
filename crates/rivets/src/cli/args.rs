@@ -341,6 +341,80 @@ pub struct BlockingDependencyListArgs {
     pub prerequisite: Option<String>,
 }
 
+/// Arguments for Related Association operations.
+#[derive(Parser, Debug, Clone)]
+pub struct RelatedArgs {
+    /// Related Association subcommand.
+    #[command(subcommand)]
+    pub action: RelatedAction,
+}
+
+/// Related Association actions.
+#[derive(Subcommand, Debug, Clone)]
+pub enum RelatedAction {
+    /// Add a symmetric Related Association.
+    Add {
+        /// One endpoint of the association.
+        #[arg(long, value_parser = validate_issue_id)]
+        issue: String,
+        /// The other endpoint of the association.
+        #[arg(long, value_parser = validate_issue_id)]
+        related: String,
+    },
+    /// Remove a symmetric Related Association.
+    Remove {
+        /// One endpoint of the association.
+        #[arg(long, value_parser = validate_issue_id)]
+        issue: String,
+        /// The other endpoint of the association.
+        #[arg(long, value_parser = validate_issue_id)]
+        related: String,
+    },
+    /// List every Related Association containing an Issue.
+    List {
+        /// Issue whose Related Associations to list.
+        #[arg(long, value_parser = validate_issue_id)]
+        issue: String,
+    },
+}
+
+/// Arguments for Discovery Origin operations.
+#[derive(Parser, Debug, Clone)]
+pub struct DiscoveryArgs {
+    /// Discovery Origin subcommand.
+    #[command(subcommand)]
+    pub action: DiscoveryAction,
+}
+
+/// Discovery Origin actions.
+#[derive(Subcommand, Debug, Clone)]
+pub enum DiscoveryAction {
+    /// Add a directed Discovery Origin.
+    Add {
+        /// Issue discovered while working on the source.
+        #[arg(long, value_parser = validate_issue_id)]
+        discovered: String,
+        /// Issue whose work surfaced the discovered Issue.
+        #[arg(long, value_parser = validate_issue_id)]
+        source: String,
+    },
+    /// Remove a directed Discovery Origin.
+    Remove {
+        /// Issue discovered while working on the source.
+        #[arg(long, value_parser = validate_issue_id)]
+        discovered: String,
+        /// Issue whose work surfaced the discovered Issue.
+        #[arg(long, value_parser = validate_issue_id)]
+        source: String,
+    },
+    /// List every Discovery Origin for one discovered Issue.
+    List {
+        /// Discovered Issue whose sources to list.
+        #[arg(long, value_parser = validate_issue_id)]
+        discovered: String,
+    },
+}
+
 /// Arguments for the `blocked` command
 #[derive(Parser, Debug, Clone, Default)]
 pub struct BlockedArgs {

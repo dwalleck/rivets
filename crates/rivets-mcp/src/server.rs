@@ -6,8 +6,9 @@ use crate::context::Context;
 use crate::error::Error;
 use crate::models::{
     AddNoteParams, BlockedParams, BlockingDependencyListParams, BlockingDependencyPairParams,
-    BlockingDependencyTreeParams, CloseParams, CreateParams, LabelAddParams, LabelListAllParams,
-    LabelListParams, LabelRemoveParams, ListParams, ReadyParams, ReopenParams, ResourceAddParams,
+    BlockingDependencyTreeParams, CloseParams, CreateParams, DiscoveryListParams,
+    DiscoveryPairParams, LabelAddParams, LabelListAllParams, LabelListParams, LabelRemoveParams,
+    ListParams, ReadyParams, RelatedListParams, RelatedPairParams, ReopenParams, ResourceAddParams,
     ResourceListParams, ResourceRemoveParams, ResourceUpdateParams, SetContextParams, ShowParams,
     StaleParams, UpdateParams,
 };
@@ -23,11 +24,8 @@ use rmcp::{
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Maps error types to appropriate MCP error codes:
-/// - `NoContext`, `InvalidArgument`, `InvalidNote`, `InvalidResource`,
-///   `InvalidStatusTransition` -> `invalid_params` (user needs to fix their request)
-/// - `IssueNotFound` -> `invalid_params` (requested resource doesn't exist)
-/// - Other errors -> `internal_error`
+/// Maps user-correctable request and relationship errors to `invalid_params`;
+/// infrastructure and serialization failures remain `internal_error`.
 fn to_mcp_error(e: &Error) -> McpError {
     match e {
         Error::NoContext
@@ -35,6 +33,12 @@ fn to_mcp_error(e: &Error) -> McpError {
         | Error::InvalidNote(_)
         | Error::InvalidResource(_)
         | Error::InvalidBlockingDependency(_)
+        | Error::InvalidRelatedAssociation(_)
+        | Error::InvalidDiscoveryOrigin(_)
+        | Error::RelatedAssociationNotFound { .. }
+        | Error::DuplicateDiscoveryOrigin { .. }
+        | Error::DiscoveryOriginNotFound { .. }
+        | Error::CircularDiscoveryOrigin { .. }
         | Error::InvalidStatusTransition(_)
         | Error::IssueNotFound(_) => McpError::invalid_params(e.to_string(), None),
         _ => McpError::internal_error(e.to_string(), None),
@@ -370,6 +374,133 @@ impl RivetsMcpServer {
             .await
         {
             Ok(tree) => Ok(CallToolResult::success(vec![Content::json(tree)?])),
+            Err(error) => Err(to_mcp_error(&error)),
+        }
+    }
+
+    /// Add one symmetric Related Association.
+    #[tool(
+        description = "Add a symmetric, non-blocking Related Association between issue_id and related_issue_id. Reversed endpoint order identifies the same association. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn related_add(
+        &self,
+        Parameters(params): Parameters<RelatedPairParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .tools
+            .related_add(
+                &params.issue_id,
+                &params.related_issue_id,
+                params.workspace_root.as_deref(),
+            )
+            .await
+        {
+            Ok(association) => Ok(CallToolResult::success(vec![Content::json(association)?])),
+            Err(error) => Err(to_mcp_error(&error)),
+        }
+    }
+
+    /// Remove one symmetric Related Association.
+    #[tool(
+        description = "Remove a symmetric, non-blocking Related Association between issue_id and related_issue_id. Endpoint order does not matter. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn related_remove(
+        &self,
+        Parameters(params): Parameters<RelatedPairParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .tools
+            .related_remove(
+                &params.issue_id,
+                &params.related_issue_id,
+                params.workspace_root.as_deref(),
+            )
+            .await
+        {
+            Ok(association) => Ok(CallToolResult::success(vec![Content::json(association)?])),
+            Err(error) => Err(to_mcp_error(&error)),
+        }
+    }
+
+    /// List every Related Association containing one Issue.
+    #[tool(
+        description = "List symmetric, non-blocking Related Associations containing issue_id. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn related_list(
+        &self,
+        Parameters(params): Parameters<RelatedListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .tools
+            .related_list(&params.issue_id, params.workspace_root.as_deref())
+            .await
+        {
+            Ok(associations) => Ok(CallToolResult::success(vec![Content::json(associations)?])),
+            Err(error) => Err(to_mcp_error(&error)),
+        }
+    }
+
+    /// Add one directed Discovery Origin.
+    #[tool(
+        description = "Add a directed, non-blocking Discovery Origin from discovered_issue_id to source_issue_id. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn discovery_add(
+        &self,
+        Parameters(params): Parameters<DiscoveryPairParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .tools
+            .discovery_add(
+                &params.discovered_issue_id,
+                &params.source_issue_id,
+                params.workspace_root.as_deref(),
+            )
+            .await
+        {
+            Ok(origin) => Ok(CallToolResult::success(vec![Content::json(origin)?])),
+            Err(error) => Err(to_mcp_error(&error)),
+        }
+    }
+
+    /// Remove one directed Discovery Origin.
+    #[tool(
+        description = "Remove a directed, non-blocking Discovery Origin from discovered_issue_id to source_issue_id. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn discovery_remove(
+        &self,
+        Parameters(params): Parameters<DiscoveryPairParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .tools
+            .discovery_remove(
+                &params.discovered_issue_id,
+                &params.source_issue_id,
+                params.workspace_root.as_deref(),
+            )
+            .await
+        {
+            Ok(origin) => Ok(CallToolResult::success(vec![Content::json(origin)?])),
+            Err(error) => Err(to_mcp_error(&error)),
+        }
+    }
+
+    /// List every Discovery Origin for one discovered Issue.
+    #[tool(
+        description = "List directed, non-blocking Discovery Origins for discovered_issue_id. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn discovery_list(
+        &self,
+        Parameters(params): Parameters<DiscoveryListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .tools
+            .discovery_list(
+                &params.discovered_issue_id,
+                params.workspace_root.as_deref(),
+            )
+            .await
+        {
+            Ok(origins) => Ok(CallToolResult::success(vec![Content::json(origins)?])),
             Err(error) => Err(to_mcp_error(&error)),
         }
     }
@@ -958,6 +1089,7 @@ mod tests {
     fn test_tool_schemas_publish_expected_fields() {
         let server = RivetsMcpServer::new();
         let tools = server.tool_router.list_all();
+
         let input_properties = |name: &str| {
             tools
                 .iter()
@@ -981,6 +1113,26 @@ mod tests {
             assert!(!properties.contains_key("issue_id"));
             assert!(!properties.contains_key("depends_on_id"));
         }
+        for tool_name in ["related_add", "related_remove"] {
+            let properties = input_properties(tool_name);
+            assert!(properties.contains_key("issue_id"));
+            assert!(properties.contains_key("related_issue_id"));
+            assert!(!properties.contains_key("discovered_issue_id"));
+            assert!(!properties.contains_key("source_issue_id"));
+        }
+        let related_list = input_properties("related_list");
+        assert!(related_list.contains_key("issue_id"));
+        assert!(!related_list.contains_key("related_issue_id"));
+        for tool_name in ["discovery_add", "discovery_remove"] {
+            let properties = input_properties(tool_name);
+            assert!(properties.contains_key("discovered_issue_id"));
+            assert!(properties.contains_key("source_issue_id"));
+            assert!(!properties.contains_key("issue_id"));
+            assert!(!properties.contains_key("related_issue_id"));
+        }
+        let discovery_list = input_properties("discovery_list");
+        assert!(discovery_list.contains_key("discovered_issue_id"));
+        assert!(!discovery_list.contains_key("source_issue_id"));
         assert!(input_properties("blocking_dependency_list").contains_key("query"));
         let tree = input_properties("blocking_dependency_tree");
         assert!(tree.contains_key("dependent_id"));
@@ -1160,6 +1312,41 @@ mod tests {
         let err = to_mcp_error(&Error::IssueNotFound("test-123".to_string()));
         assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
         assert!(err.message.contains("Issue not found: test-123"));
+    }
+
+    #[test]
+    fn relationship_rejections_are_invalid_params() {
+        use rivets::domain::{DiscoveryOriginError, IssueId, RelatedAssociationError};
+        use rmcp::model::ErrorCode;
+
+        let errors = [
+            Error::InvalidRelatedAssociation(RelatedAssociationError::SelfReference {
+                issue_id: IssueId::new("test-a"),
+            }),
+            Error::InvalidDiscoveryOrigin(DiscoveryOriginError::SelfReference {
+                issue_id: IssueId::new("test-a"),
+            }),
+            Error::RelatedAssociationNotFound {
+                left_issue_id: "test-a".to_string(),
+                right_issue_id: "test-b".to_string(),
+            },
+            Error::DuplicateDiscoveryOrigin {
+                discovered_issue_id: "test-a".to_string(),
+                source_issue_id: "test-b".to_string(),
+            },
+            Error::DiscoveryOriginNotFound {
+                discovered_issue_id: "test-a".to_string(),
+                source_issue_id: "test-b".to_string(),
+            },
+            Error::CircularDiscoveryOrigin {
+                discovered_issue_id: "test-a".to_string(),
+                source_issue_id: "test-b".to_string(),
+            },
+        ];
+
+        for error in errors {
+            assert_eq!(to_mcp_error(&error).code, ErrorCode::INVALID_PARAMS);
+        }
     }
 
     #[test]

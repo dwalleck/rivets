@@ -41,9 +41,9 @@ use crate::app::App;
 // Re-export argument structs
 pub use args::{
     BlockedArgs, BlockingDependencyAction, BlockingDependencyArgs, BlockingDependencyListArgs,
-    CloseArgs, CreateArgs, DeleteArgs, InfoArgs, InitArgs, LabelAction, LabelArgs, ListArgs,
-    ReadyArgs, ReopenArgs, ResourceAction, ResourceArgs, ShowArgs, StaleArgs, StatsArgs,
-    UpdateArgs,
+    CloseArgs, CreateArgs, DeleteArgs, DiscoveryAction, DiscoveryArgs, InfoArgs, InitArgs,
+    LabelAction, LabelArgs, ListArgs, ReadyArgs, RelatedAction, RelatedArgs, ReopenArgs,
+    ResourceAction, ResourceArgs, ShowArgs, StaleArgs, StatsArgs, UpdateArgs,
 };
 
 // Re-export types
@@ -136,6 +136,12 @@ pub enum Commands {
 
     /// Manage directed Blocking Dependencies with explicit endpoint roles.
     BlockingDependency(BlockingDependencyArgs),
+
+    /// Manage symmetric, non-blocking Related Associations.
+    Related(RelatedArgs),
+
+    /// Manage directed, non-blocking Discovery Origins.
+    Discovery(DiscoveryArgs),
 
     /// Manage issue labels
     ///
@@ -238,6 +244,14 @@ impl Cli {
             Some(Commands::BlockingDependency(args)) => {
                 let mut app = load_app_from_cwd().await?;
                 execute::execute_blocking_dependency(&mut app, args, output_mode).await
+            }
+            Some(Commands::Related(args)) => {
+                let mut app = load_app_from_cwd().await?;
+                execute::execute_related(&mut app, args, output_mode).await
+            }
+            Some(Commands::Discovery(args)) => {
+                let mut app = load_app_from_cwd().await?;
+                execute::execute_discovery(&mut app, args, output_mode).await
             }
             Some(Commands::Label(args)) => {
                 let mut app = load_app_from_cwd().await?;

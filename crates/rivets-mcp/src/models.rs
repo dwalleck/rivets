@@ -380,6 +380,46 @@ pub struct BlockingDependencyTreeParams {
     pub workspace_root: Option<String>,
 }
 
+/// Parameters shared by Related Association add and remove tools.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RelatedPairParams {
+    /// One endpoint of the symmetric association.
+    pub issue_id: String,
+    /// The other endpoint of the symmetric association.
+    pub related_issue_id: String,
+    /// Optional workspace root (uses current context if not specified).
+    pub workspace_root: Option<String>,
+}
+
+/// Parameters for the Related Association list tool.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RelatedListParams {
+    /// Issue whose Related Associations to list.
+    pub issue_id: String,
+    /// Optional workspace root (uses current context if not specified).
+    pub workspace_root: Option<String>,
+}
+
+/// Parameters shared by Discovery Origin add and remove tools.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DiscoveryPairParams {
+    /// Issue discovered while working on the source.
+    pub discovered_issue_id: String,
+    /// Issue whose work surfaced the discovered Issue.
+    pub source_issue_id: String,
+    /// Optional workspace root (uses current context if not specified).
+    pub workspace_root: Option<String>,
+}
+
+/// Parameters for the Discovery Origin list tool.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DiscoveryListParams {
+    /// Discovered Issue whose sources to list.
+    pub discovered_issue_id: String,
+    /// Optional workspace root (uses current context if not specified).
+    pub workspace_root: Option<String>,
+}
+
 /// Parameters for the `reopen` tool.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ReopenParams {

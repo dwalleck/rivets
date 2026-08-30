@@ -1530,180 +1530,254 @@
       "id": "add_related_association",
       "title": "Add Related Association",
       "requirement": "future_shared",
-      "current_parity": "not_comparable",
-      "target_status": "gap_both",
+      "current_parity": "drift",
+      "target_status": "gap_mcp",
       "target": "Create one symmetric, non-blocking Related Association visible from either Issue.",
       "cli": {
-        "surfaces": [],
-        "arguments": {},
-        "result": "Only legacy directed related dependency exists."
+        "surfaces": [
+          "related add"
+        ],
+        "arguments": {
+          "issue": "one endpoint Issue ID",
+          "related": "other endpoint Issue ID"
+        },
+        "result": "Symmetric association mutation confirmation."
       },
       "mcp": {
-        "surfaces": [],
-        "arguments": {},
-        "result": "Only legacy generic dep exists."
+        "surfaces": [
+          "related_add"
+        ],
+        "arguments": {
+          "issue_id": "one endpoint Issue ID",
+          "related_issue_id": "other endpoint Issue ID",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Structured canonical Related Association."
       },
-      "risk": "Current direction and duplicate behavior conflict with ADR-0002.",
-      "required_resolution": "Add equivalent symmetric association intents.",
+      "risk": "MCP accepts endpoint IDs rejected by CLI, so equivalent malformed requests do not have the same validation/error meaning.",
+      "required_resolution": "Adopt canonical Issue ID parsing in MCP while retaining the shared symmetric storage operation.",
       "evidence": [
-        "docs/adr/0002-issue-relationships-and-readiness.md",
-        "crates/rivets/src/domain/mod.rs::DependencyType",
-        "crates/rivets/src/storage/in_memory/jsonl.rs::load_from_jsonl",
-        ".rivets/issues.jsonl::rivets-2x2i"
+        "crates/rivets/src/cli/args.rs::RelatedAction",
+        "crates/rivets/src/cli/execute.rs::execute_related",
+        "crates/rivets/src/domain/relationship.rs::RelatedAssociation",
+        "crates/rivets/src/storage/mod.rs::IssueStorage",
+        "crates/rivets-mcp/src/models.rs::RelatedPairParams",
+        "crates/rivets-mcp/src/tools.rs::related_add"
       ],
       "differences": [
-        "No canonical CLI or MCP surface exists; only legacy directed records are compatibility-loaded.",
-        "Legacy Related/DiscoveredFrom records share generic direction and cycle behavior instead of their canonical symmetric/provenance invariants."
+        "CLI validates both endpoint Issue IDs; MCP uses unconstrained strings.",
+        "Symmetry, canonical identity, idempotency, persistence, and semantic success result otherwise match."
       ]
     },
     {
       "id": "remove_related_association",
       "title": "Remove Related Association",
       "requirement": "future_shared",
-      "current_parity": "not_comparable",
-      "target_status": "gap_both",
+      "current_parity": "drift",
+      "target_status": "gap_mcp",
       "target": "Remove the symmetric association from either endpoint.",
       "cli": {
-        "surfaces": [],
-        "arguments": {},
-        "result": "No canonical intent."
+        "surfaces": [
+          "related remove"
+        ],
+        "arguments": {
+          "issue": "one endpoint Issue ID",
+          "related": "other endpoint Issue ID"
+        },
+        "result": "Symmetric association removal confirmation."
       },
       "mcp": {
-        "surfaces": [],
-        "arguments": {},
-        "result": "No canonical intent."
+        "surfaces": [
+          "related_remove"
+        ],
+        "arguments": {
+          "issue_id": "one endpoint Issue ID",
+          "related_issue_id": "other endpoint Issue ID",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Structured removed Related Association."
       },
-      "risk": "Association removal is unavailable through MCP and ambiguous in legacy storage.",
-      "required_resolution": "Add equivalent symmetric removal intents.",
+      "risk": "MCP accepts endpoint IDs rejected by CLI, so equivalent malformed requests do not have the same validation/error meaning.",
+      "required_resolution": "Adopt canonical Issue ID parsing in MCP while retaining the shared symmetric storage operation.",
       "evidence": [
-        "docs/adr/0002-issue-relationships-and-readiness.md",
-        "crates/rivets/src/domain/mod.rs::DependencyType",
-        "crates/rivets/src/storage/in_memory/jsonl.rs::load_from_jsonl",
-        ".rivets/issues.jsonl::rivets-2x2i"
+        "crates/rivets/src/cli/args.rs::RelatedAction",
+        "crates/rivets/src/cli/execute.rs::execute_related",
+        "crates/rivets/src/domain/relationship.rs::RelatedAssociation",
+        "crates/rivets/src/storage/mod.rs::IssueStorage",
+        "crates/rivets-mcp/src/models.rs::RelatedPairParams",
+        "crates/rivets-mcp/src/tools.rs::related_remove"
       ],
       "differences": [
-        "No canonical CLI or MCP surface exists; only legacy directed records are compatibility-loaded.",
-        "Legacy Related/DiscoveredFrom records share generic direction and cycle behavior instead of their canonical symmetric/provenance invariants."
+        "CLI validates both endpoint Issue IDs; MCP uses unconstrained strings.",
+        "Symmetric exact removal and semantic success result otherwise match."
       ]
     },
     {
       "id": "list_related_associations",
       "title": "List Related Associations",
       "requirement": "future_shared",
-      "current_parity": "not_comparable",
-      "target_status": "gap_both",
+      "current_parity": "drift",
+      "target_status": "gap_mcp",
       "target": "List symmetric Related Associations independent of endpoint order.",
       "cli": {
-        "surfaces": [],
-        "arguments": {},
-        "result": "No canonical intent."
+        "surfaces": [
+          "related list"
+        ],
+        "arguments": {
+          "issue": "Issue whose Related Associations to list"
+        },
+        "result": "Structured canonical Related Associations."
       },
       "mcp": {
-        "surfaces": [],
-        "arguments": {},
-        "result": "No canonical intent."
+        "surfaces": [
+          "related_list"
+        ],
+        "arguments": {
+          "issue_id": "Issue whose Related Associations to list",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Structured canonical Related Associations."
       },
-      "risk": "Callers cannot rely on symmetric visibility.",
-      "required_resolution": "Add equivalent association query intents.",
+      "risk": "MCP accepts an Issue ID rejected by CLI, so equivalent malformed requests do not have the same validation/error meaning.",
+      "required_resolution": "Adopt canonical Issue ID parsing in MCP while retaining the shared symmetric query.",
       "evidence": [
-        "docs/adr/0002-issue-relationships-and-readiness.md",
-        "crates/rivets/src/domain/mod.rs::DependencyType",
-        "crates/rivets/src/storage/in_memory/jsonl.rs::load_from_jsonl",
-        ".rivets/issues.jsonl::rivets-2x2i"
+        "crates/rivets/src/cli/args.rs::RelatedAction",
+        "crates/rivets/src/cli/execute.rs::execute_related",
+        "crates/rivets/src/domain/relationship.rs::RelatedAssociation",
+        "crates/rivets/src/storage/mod.rs::IssueStorage",
+        "crates/rivets-mcp/src/models.rs::RelatedListParams",
+        "crates/rivets-mcp/src/tools.rs::related_list"
       ],
       "differences": [
-        "No canonical CLI or MCP surface exists; only legacy directed records are compatibility-loaded.",
-        "Legacy Related/DiscoveredFrom records share generic direction and cycle behavior instead of their canonical symmetric/provenance invariants."
+        "CLI validates the selected Issue ID; MCP uses an unconstrained string.",
+        "Symmetric visibility, canonical ordering, and result meaning otherwise match."
       ]
     },
     {
       "id": "add_discovery_origin",
       "title": "Add Discovery Origin",
       "requirement": "future_shared",
-      "current_parity": "not_comparable",
-      "target_status": "gap_both",
+      "current_parity": "drift",
+      "target_status": "gap_mcp",
       "target": "Record directed provenance from discovered Issue to source Issue without affecting readiness.",
       "cli": {
-        "surfaces": [],
-        "arguments": {},
-        "result": "Only legacy discovered-from dependency exists."
+        "surfaces": [
+          "discovery add"
+        ],
+        "arguments": {
+          "discovered": "discovered Issue ID",
+          "source": "source Issue ID"
+        },
+        "result": "Role-named mutation confirmation."
       },
       "mcp": {
-        "surfaces": [],
-        "arguments": {},
-        "result": "Only legacy generic dep exists."
+        "surfaces": [
+          "discovery_add"
+        ],
+        "arguments": {
+          "discovered_issue_id": "discovered Issue ID",
+          "source_issue_id": "source Issue ID",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Structured Discovery Origin."
       },
-      "risk": "Provenance shares generic graph behavior and cycle rules with unrelated relationships.",
-      "required_resolution": "Add equivalent Discovery Origin intents.",
+      "risk": "MCP accepts endpoint IDs rejected by CLI, so equivalent malformed requests do not have the same validation/error meaning.",
+      "required_resolution": "Adopt canonical Issue ID parsing in MCP while retaining the shared directed provenance operation.",
       "evidence": [
-        "docs/adr/0002-issue-relationships-and-readiness.md",
-        "crates/rivets/src/domain/mod.rs::DependencyType",
-        "crates/rivets/src/storage/in_memory/jsonl.rs::load_from_jsonl",
-        ".rivets/issues.jsonl::rivets-2x2i"
+        "crates/rivets/src/cli/args.rs::DiscoveryAction",
+        "crates/rivets/src/cli/execute.rs::execute_discovery",
+        "crates/rivets/src/domain/relationship.rs::DiscoveryOrigin",
+        "crates/rivets/src/storage/mod.rs::IssueStorage",
+        "crates/rivets-mcp/src/models.rs::DiscoveryPairParams",
+        "crates/rivets-mcp/src/tools.rs::discovery_add"
       ],
       "differences": [
-        "No canonical CLI or MCP surface exists; only legacy directed records are compatibility-loaded.",
-        "Legacy Related/DiscoveredFrom records share generic direction and cycle behavior instead of their canonical symmetric/provenance invariants."
+        "CLI validates both endpoint Issue IDs; MCP uses unconstrained strings.",
+        "Direction, duplicate/cycle invariants, persistence, and semantic success result otherwise match."
       ]
     },
     {
       "id": "remove_discovery_origin",
       "title": "Remove Discovery Origin",
       "requirement": "future_shared",
-      "current_parity": "not_comparable",
-      "target_status": "gap_both",
+      "current_parity": "drift",
+      "target_status": "gap_mcp",
       "target": "Remove one directed Discovery Origin without other domain effects.",
       "cli": {
-        "surfaces": [],
-        "arguments": {},
-        "result": "No canonical intent."
+        "surfaces": [
+          "discovery remove"
+        ],
+        "arguments": {
+          "discovered": "discovered Issue ID",
+          "source": "source Issue ID"
+        },
+        "result": "Role-named mutation confirmation."
       },
       "mcp": {
-        "surfaces": [],
-        "arguments": {},
-        "result": "No canonical intent."
+        "surfaces": [
+          "discovery_remove"
+        ],
+        "arguments": {
+          "discovered_issue_id": "discovered Issue ID",
+          "source_issue_id": "source Issue ID",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Structured removed Discovery Origin."
       },
-      "risk": "MCP cannot remove current provenance and neither adapter exposes canonical roles.",
-      "required_resolution": "Add equivalent Discovery Origin removal intents.",
+      "risk": "MCP accepts endpoint IDs rejected by CLI, so equivalent malformed requests do not have the same validation/error meaning.",
+      "required_resolution": "Adopt canonical Issue ID parsing in MCP while retaining the shared directed provenance operation.",
       "evidence": [
-        "docs/adr/0002-issue-relationships-and-readiness.md",
-        "crates/rivets/src/domain/mod.rs::DependencyType",
-        "crates/rivets/src/storage/in_memory/jsonl.rs::load_from_jsonl",
-        ".rivets/issues.jsonl::rivets-2x2i"
+        "crates/rivets/src/cli/args.rs::DiscoveryAction",
+        "crates/rivets/src/cli/execute.rs::execute_discovery",
+        "crates/rivets/src/domain/relationship.rs::DiscoveryOrigin",
+        "crates/rivets/src/storage/mod.rs::IssueStorage",
+        "crates/rivets-mcp/src/models.rs::DiscoveryPairParams",
+        "crates/rivets-mcp/src/tools.rs::discovery_remove"
       ],
       "differences": [
-        "No canonical CLI or MCP surface exists; only legacy directed records are compatibility-loaded.",
-        "Legacy Related/DiscoveredFrom records share generic direction and cycle behavior instead of their canonical symmetric/provenance invariants."
+        "CLI validates both endpoint Issue IDs; MCP uses unconstrained strings.",
+        "Exact directed removal and semantic success result otherwise match."
       ]
     },
     {
       "id": "list_discovery_origins",
       "title": "List Discovery Origins",
       "requirement": "future_shared",
-      "current_parity": "not_comparable",
-      "target_status": "gap_both",
+      "current_parity": "drift",
+      "target_status": "gap_mcp",
       "target": "List source Issues for a discovered Issue with explicit provenance direction.",
       "cli": {
-        "surfaces": [],
-        "arguments": {},
-        "result": "No canonical intent."
+        "surfaces": [
+          "discovery list"
+        ],
+        "arguments": {
+          "discovered": "discovered Issue whose sources to list"
+        },
+        "result": "Structured directed Discovery Origins."
       },
       "mcp": {
-        "surfaces": [],
-        "arguments": {},
-        "result": "No canonical intent."
+        "surfaces": [
+          "discovery_list"
+        ],
+        "arguments": {
+          "discovered_issue_id": "discovered Issue whose sources to list",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Structured directed Discovery Origins."
       },
-      "risk": "Provenance direction must be inferred from legacy dependency records.",
-      "required_resolution": "Add equivalent Discovery Origin query intents.",
+      "risk": "MCP accepts an Issue ID rejected by CLI, so equivalent malformed requests do not have the same validation/error meaning.",
+      "required_resolution": "Adopt canonical Issue ID parsing in MCP while retaining the shared directed provenance query.",
       "evidence": [
-        "docs/adr/0002-issue-relationships-and-readiness.md",
-        "crates/rivets/src/domain/mod.rs::DependencyType",
-        "crates/rivets/src/storage/in_memory/jsonl.rs::load_from_jsonl",
-        ".rivets/issues.jsonl::rivets-2x2i"
+        "crates/rivets/src/cli/args.rs::DiscoveryAction",
+        "crates/rivets/src/cli/execute.rs::execute_discovery",
+        "crates/rivets/src/domain/relationship.rs::DiscoveryOrigin",
+        "crates/rivets/src/storage/mod.rs::IssueStorage",
+        "crates/rivets-mcp/src/models.rs::DiscoveryListParams",
+        "crates/rivets-mcp/src/tools.rs::discovery_list"
       ],
       "differences": [
-        "No canonical CLI or MCP surface exists; only legacy directed records are compatibility-loaded.",
-        "Legacy Related/DiscoveredFrom records share generic direction and cycle behavior instead of their canonical symmetric/provenance invariants."
+        "CLI validates the selected discovered Issue ID; MCP uses an unconstrained string.",
+        "Directed source-only query semantics, ordering, and result meaning otherwise match."
       ]
     }
   ],
@@ -1828,7 +1902,13 @@
         "add_blocking_dependency",
         "remove_blocking_dependency",
         "list_blocking_dependencies",
-        "show_blocking_dependency_tree"
+        "show_blocking_dependency_tree",
+        "add_related_association",
+        "remove_related_association",
+        "list_related_associations",
+        "add_discovery_origin",
+        "remove_discovery_origin",
+        "list_discovery_origins"
       ],
       "blocked_by": []
     },
