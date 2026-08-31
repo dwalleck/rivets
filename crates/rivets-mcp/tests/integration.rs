@@ -1502,7 +1502,7 @@ async fn test_workspace_root_initializes_without_context() {
     assert!(!context.context_set);
 }
 
-/// Test concurrent first use yields one durable winner and one retryable loser.
+/// Test concurrent first use serializes uncached writers and preserves both Issues.
 #[tokio::test]
 async fn test_concurrent_workspace_root_initialization() {
     let workspace = create_temp_workspace();
@@ -1526,35 +1526,42 @@ async fn test_concurrent_workspace_root_initialization() {
         tools.create(params("First concurrent issue")),
         tools.create(params("Second concurrent issue"))
     );
-    let (winner, retry_title) = match (first, second) {
-        (
-            Ok(winner),
-            Err(Error::WorkspaceBusy {
-                workspace_root: busy,
-            }),
-        ) => {
-            assert_eq!(busy, workspace.path().canonicalize().unwrap());
-            (winner, "Second concurrent issue")
+    let _ = match (first, second) {
+        (Ok(first), Ok(second)) => {
+            assert_ne!(first.id, second.id);
+            first
         }
         (
+            Ok(winner),
+            Err(Error::WorkspaceBusy {
+                workspace_root: busy,
+            }),
+        )
+        | (
             Err(Error::WorkspaceBusy {
                 workspace_root: busy,
             }),
             Ok(winner),
         ) => {
             assert_eq!(busy, workspace.path().canonicalize().unwrap());
-            (winner, "First concurrent issue")
+            let retry_title = if winner.title == "First concurrent issue" {
+                "Second concurrent issue"
+            } else {
+                "First concurrent issue"
+            };
+            let retried = tools
+                .create(params(retry_title))
+                .await
+                .expect("retry should succeed after the winner releases");
+            assert_ne!(winner.id, retried.id);
+            winner
         }
         (first, second) => {
-            panic!("expected one success and one WorkspaceBusy, got {first:?} and {second:?}")
+            panic!(
+                "expected two serialized creates or one WorkspaceBusy, got {first:?} and {second:?}"
+            )
         }
     };
-    let retried = tools
-        .create(params(retry_title))
-        .await
-        .expect("retry should succeed after the winner releases");
-    assert_ne!(winner.id, retried.id);
-
     let issues = tools
         .list(list_params(
             None,
