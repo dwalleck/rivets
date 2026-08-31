@@ -165,6 +165,18 @@ impl WorkspaceMutationLock {
         }
     }
 
+    async fn acquire_on_blocking_pool<F>(unresolved_lock_path: PathBuf, acquire: F) -> Result<Self>
+    where
+        F: FnOnce() -> Result<Self> + Send + 'static,
+    {
+        tokio::task::spawn_blocking(acquire)
+            .await
+            .map_err(|source| Error::WorkspaceLock {
+                lock_path: unresolved_lock_path,
+                source: join_error_to_io(source),
+            })?
+    }
+
     /// Try to acquire exclusive ownership on Tokio's blocking thread pool.
     ///
     /// This keeps canonicalization, sidecar creation, lock acquisition, and
@@ -178,12 +190,10 @@ impl WorkspaceMutationLock {
         let unresolved_lock_path = workspace_root
             .join(RIVETS_DIR_NAME)
             .join(WORKSPACE_LOCK_FILE_NAME);
-        tokio::task::spawn_blocking(move || Self::try_acquire(&workspace_root))
-            .await
-            .map_err(|source| Error::WorkspaceLock {
-                lock_path: unresolved_lock_path,
-                source: join_error_to_io(source),
-            })?
+        Self::acquire_on_blocking_pool(unresolved_lock_path, move || {
+            Self::try_acquire(&workspace_root)
+        })
+        .await
     }
 
     /// Canonical root whose mutation transaction this guard owns.
@@ -196,5 +206,66 @@ impl WorkspaceMutationLock {
     #[must_use]
     pub fn lock_path(&self) -> &Path {
         &self.lock_path
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+    use tempfile::TempDir;
+    use tokio::sync::oneshot;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocking_acquisition_leaves_current_thread_runtime_responsive() {
+        let workspace = TempDir::new().expect("temporary Workspace should be created");
+        std::fs::create_dir(workspace.path().join(RIVETS_DIR_NAME))
+            .expect("Rivets metadata directory should be created");
+        let root = workspace
+            .path()
+            .canonicalize()
+            .expect("Workspace root should canonicalize");
+        let lock_path = root.join(RIVETS_DIR_NAME).join(WORKSPACE_LOCK_FILE_NAME);
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let watchdog_tx = release_tx.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(1));
+            let _ = watchdog_tx.send(());
+        });
+
+        let operation_root = root.clone();
+        let started_at = Instant::now();
+        let acquisition = tokio::spawn(WorkspaceMutationLock::acquire_on_blocking_pool(
+            lock_path,
+            move || {
+                let _ = started_tx.send(());
+                release_rx
+                    .recv()
+                    .expect("test should release the blocking operation");
+                WorkspaceMutationLock::try_acquire(&operation_root)
+            },
+        ));
+
+        started_rx
+            .await
+            .expect("blocking operation should publish readiness");
+        assert!(
+            started_at.elapsed() < Duration::from_millis(500),
+            "blocking operation ran on the current-thread async runtime"
+        );
+        tokio::time::timeout(Duration::from_millis(100), tokio::task::yield_now())
+            .await
+            .expect("current-thread runtime should remain responsive");
+        release_tx
+            .send(())
+            .expect("blocking operation should still await release");
+        drop(
+            acquisition
+                .await
+                .expect("acquisition task should join")
+                .expect("Workspace lock should be acquired"),
+        );
     }
 }
