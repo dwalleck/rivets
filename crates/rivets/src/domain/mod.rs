@@ -527,6 +527,23 @@ impl IssueStatus {
             _ => Ok(()),
         }
     }
+
+    /// Validate the status precondition for reopening an Issue.
+    ///
+    /// Reopening is an intent-specific operation: only a closed Issue may be
+    /// reopened. In particular, an already-open or in-progress Issue is not
+    /// silently moved back to `Open`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StatusTransitionError::NotClosed`] when this status is
+    /// `Open` or `InProgress`.
+    pub const fn validate_reopen(self) -> Result<(), StatusTransitionError> {
+        match self {
+            Self::Closed => Ok(()),
+            current => Err(StatusTransitionError::NotClosed { current }),
+        }
+    }
 }
 
 /// A status change rejected by the domain transition rules.
@@ -2319,6 +2336,19 @@ mod tests {
             assert_eq!(
                 error.to_string(),
                 format!("Issue is not closed (status: {current})")
+            );
+        }
+
+        #[rstest]
+        #[case::closed(IssueStatus::Closed, true)]
+        #[case::open(IssueStatus::Open, false)]
+        #[case::in_progress(IssueStatus::InProgress, false)]
+        fn reopen_intent_matrix(#[case] current: IssueStatus, #[case] should_succeed: bool) {
+            let result = current.validate_reopen();
+            assert_eq!(
+                result.is_ok(),
+                should_succeed,
+                "Reopen from {current:?} expected success={should_succeed}, got {result:?}"
             );
         }
     }
