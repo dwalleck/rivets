@@ -5,12 +5,12 @@
 //! semantics, and sort policies.
 
 use rivets::domain::{
-    BlockingDependency, Dependency, DependencyType, IssueId, IssueKind, IssueStatus, IssueUpdate,
-    MAX_PRIORITY, NewIssue, NewResource, NoteContent, ReadyAssignmentFilter, ReadyFilter,
-    ResourceId, ResourceLabel, ResourceRole, ResourceTarget, ResourceUpdate, SortPolicy, WebUrl,
-    WorkspacePath,
+    AssignmentError, BlockingDependency, Dependency, DependencyType, Issue, IssueId, IssueKind,
+    IssueStatus, IssueUpdate, MAX_PRIORITY, NewIssue, NewResource, NoteContent,
+    ReadyAssignmentFilter, ReadyFilter, ResourceId, ResourceLabel, ResourceRole, ResourceTarget,
+    ResourceUpdate, SortPolicy, WebUrl, WorkspacePath,
 };
-use rivets::error::Error;
+use rivets::error::{Error, StorageError};
 use rivets::storage::IssueStorage;
 use rivets::storage::in_memory::{load_from_jsonl, new_in_memory_storage, save_to_jsonl};
 use std::collections::HashSet;
@@ -203,6 +203,7 @@ async fn test_update_issue() {
         title: Some("Updated Title".to_string()),
         status: Some(IssueStatus::InProgress),
         priority: Some(1),
+        assignee: Some(Some("active-owner".to_string())),
         ..Default::default()
     };
 
@@ -625,10 +626,9 @@ async fn ready_truth_table_covers_state_blocking_and_assignment() {
     alice_issue.assignee = Some("alice".to_string());
     let alice = storage.create(alice_issue).await.unwrap();
 
-    let in_progress = storage
-        .create(create_test_issue("In Progress"))
-        .await
-        .unwrap();
+    let mut in_progress_input = create_test_issue("In Progress");
+    in_progress_input.assignee = Some("active-owner".to_string());
+    let in_progress = storage.create(in_progress_input).await.unwrap();
     storage
         .update(
             &in_progress.id,
@@ -1455,4 +1455,463 @@ async fn resource_update_and_remove_round_trip_through_jsonl() {
         )))
     ));
     temp_dir.close().expect("temp dir should close cleanly");
+}
+
+fn issue_snapshot(issue: &Issue) -> serde_json::Value {
+    serde_json::to_value(issue).expect("Issue snapshot should serialize")
+}
+
+#[tokio::test]
+async fn claim_compare_and_set_matrix_changes_only_assignment() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let created = storage
+        .create(create_test_issue("Claim target"))
+        .await
+        .expect("target should be created");
+    let before = issue_snapshot(&created);
+    tokio::time::sleep(Duration::from_millis(1)).await;
+
+    let claimed = storage
+        .claim(&created.id, "alice")
+        .await
+        .expect("first Claim should succeed");
+    assert_eq!(claimed.assignee.as_deref(), Some("alice"));
+    assert!(claimed.updated_at > created.updated_at);
+    let mut expected = before;
+    expected["assignee"] = serde_json::json!("alice");
+    expected["updated_at"] =
+        serde_json::to_value(claimed.updated_at).expect("timestamp should serialize");
+    assert_eq!(issue_snapshot(&claimed), expected);
+
+    let retry = storage
+        .claim(&created.id, "alice")
+        .await
+        .expect("same claimant retry should be idempotent");
+    assert_eq!(issue_snapshot(&retry), issue_snapshot(&claimed));
+
+    let rejected = storage.claim(&created.id, "bob").await;
+    assert!(matches!(
+        rejected,
+        Err(Error::Storage(StorageError::Assignment(
+            AssignmentError::AlreadyClaimed {
+                ref issue_id,
+                ref assignee,
+            }
+        ))) if issue_id == &created.id && assignee == "alice"
+    ));
+    assert_eq!(
+        issue_snapshot(
+            &storage
+                .get(&created.id)
+                .await
+                .expect("get should succeed")
+                .expect("target should remain")
+        ),
+        issue_snapshot(&claimed)
+    );
+
+    let prerequisite = storage
+        .create(create_test_issue("Open prerequisite"))
+        .await
+        .expect("prerequisite should be created");
+    let blocked = storage
+        .create(create_test_issue("Blocked target"))
+        .await
+        .expect("blocked target should be created");
+    storage
+        .add_blocking_dependency(
+            BlockingDependency::new(blocked.id.clone(), prerequisite.id.clone())
+                .expect("dependency should be valid"),
+        )
+        .await
+        .expect("dependency should be added");
+    let blocked_before = issue_snapshot(&blocked);
+    assert!(matches!(
+        storage.claim(&blocked.id, "alice").await,
+        Err(Error::Storage(StorageError::Assignment(
+            AssignmentError::Blocked { ref issue_id }
+        ))) if issue_id == &blocked.id
+    ));
+    assert_eq!(
+        issue_snapshot(
+            &storage
+                .get(&blocked.id)
+                .await
+                .expect("get should succeed")
+                .expect("blocked target should remain")
+        ),
+        blocked_before
+    );
+
+    let mut active_input = create_test_issue("Active target");
+    active_input.assignee = Some("alice".to_string());
+    let active = storage
+        .create(active_input)
+        .await
+        .expect("active target should be created");
+    let active = storage
+        .update(
+            &active.id,
+            IssueUpdate {
+                status: Some(IssueStatus::InProgress),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("assigned Issue should enter In Progress");
+    assert!(matches!(
+        storage.claim(&active.id, "alice").await,
+        Err(Error::Storage(StorageError::Assignment(
+            AssignmentError::NotOpen {
+                ref issue_id,
+                status: IssueStatus::InProgress,
+            }
+        ))) if issue_id == &active.id
+    ));
+
+    let unicode = storage
+        .create(create_test_issue("Unicode claimant"))
+        .await
+        .expect("Unicode target should be created");
+    let unicode = storage
+        .claim(&unicode.id, " ál ice ")
+        .await
+        .expect("existing Assignee text contract should accept Unicode and spaces");
+    assert_eq!(unicode.assignee.as_deref(), Some(" ál ice "));
+
+    let invalid = storage
+        .create(create_test_issue("Invalid claimant"))
+        .await
+        .expect("invalid-text target should be created");
+    assert!(matches!(
+        storage.claim(&invalid.id, "bad\u{1b}name").await,
+        Err(Error::Storage(StorageError::Validation(_)))
+    ));
+    assert_eq!(
+        storage
+            .get(&invalid.id)
+            .await
+            .expect("get should succeed")
+            .expect("target should remain")
+            .assignee,
+        None
+    );
+    assert!(matches!(
+        storage.claim(&IssueId::new("test-missing"), "alice").await,
+        Err(Error::IssueNotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn release_compare_and_set_matrix_changes_only_assignment() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let mut assigned_input = create_test_issue("Release target");
+    assigned_input.assignee = Some("alice".to_string());
+    let assigned = storage
+        .create(assigned_input)
+        .await
+        .expect("assigned target should be created");
+
+    assert!(matches!(
+        storage.release(&assigned.id, "bob").await,
+        Err(Error::Storage(StorageError::Assignment(
+            AssignmentError::AssigneeMismatch {
+                ref issue_id,
+                ref expected,
+                ref actual,
+            }
+        ))) if issue_id == &assigned.id && expected == "bob" && actual == "alice"
+    ));
+    assert_eq!(
+        issue_snapshot(
+            &storage
+                .get(&assigned.id)
+                .await
+                .expect("get should succeed")
+                .expect("target should remain")
+        ),
+        issue_snapshot(&assigned)
+    );
+
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    let released = storage
+        .release(&assigned.id, "alice")
+        .await
+        .expect("owner should release");
+    assert_eq!(released.assignee, None);
+    assert!(released.updated_at > assigned.updated_at);
+    assert!(matches!(
+        storage.release(&assigned.id, "alice").await,
+        Err(Error::Storage(StorageError::Assignment(
+            AssignmentError::NotClaimed { ref issue_id }
+        ))) if issue_id == &assigned.id
+    ));
+
+    let prerequisite = storage
+        .create(create_test_issue("Release prerequisite"))
+        .await
+        .expect("prerequisite should be created");
+    let mut blocked_input = create_test_issue("Blocked assigned");
+    blocked_input.assignee = Some("alice".to_string());
+    let blocked = storage
+        .create(blocked_input)
+        .await
+        .expect("assigned target should initially be ready");
+    storage
+        .add_blocking_dependency(
+            BlockingDependency::new(blocked.id.clone(), prerequisite.id.clone())
+                .expect("dependency should be valid"),
+        )
+        .await
+        .expect("dependency should be added");
+    assert_eq!(
+        storage
+            .release(&blocked.id, "alice")
+            .await
+            .expect("blocked Open owner should release")
+            .assignee,
+        None
+    );
+
+    let mut active_input = create_test_issue("Active release");
+    active_input.assignee = Some("alice".to_string());
+    let active = storage
+        .create(active_input)
+        .await
+        .expect("active target should be created");
+    let active = storage
+        .update(
+            &active.id,
+            IssueUpdate {
+                status: Some(IssueStatus::InProgress),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("assigned target should become active");
+    assert!(matches!(
+        storage.release(&active.id, "alice").await,
+        Err(Error::Storage(StorageError::Assignment(
+            AssignmentError::NotOpen {
+                status: IssueStatus::InProgress,
+                ..
+            }
+        )))
+    ));
+}
+
+#[tokio::test]
+async fn workflow_transition_assignment_matrix() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let unassigned = storage
+        .create(create_test_issue("Unassigned"))
+        .await
+        .expect("unassigned target should be created");
+    let rejected = storage
+        .update(
+            &unassigned.id,
+            IssueUpdate {
+                title: Some("Must not persist".to_string()),
+                status: Some(IssueStatus::InProgress),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(matches!(
+        rejected,
+        Err(Error::Storage(StorageError::InvalidStatusTransition(
+            rivets::domain::StatusTransitionError::AssigneeRequired
+        )))
+    ));
+    assert_eq!(
+        issue_snapshot(
+            &storage
+                .get(&unassigned.id)
+                .await
+                .expect("get should succeed")
+                .expect("target should remain")
+        ),
+        issue_snapshot(&unassigned)
+    );
+
+    let mut assigned_input = create_test_issue("Assigned");
+    assigned_input.assignee = Some("alice".to_string());
+    let assigned = storage
+        .create(assigned_input)
+        .await
+        .expect("assigned target should be created");
+    let active = storage
+        .update(
+            &assigned.id,
+            IssueUpdate {
+                status: Some(IssueStatus::InProgress),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("assigned target should become active");
+    assert_eq!(active.assignee.as_deref(), Some("alice"));
+
+    let open_again = storage
+        .update(
+            &assigned.id,
+            IssueUpdate {
+                status: Some(IssueStatus::Open),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("active target should return to Open");
+    assert_eq!(open_again.assignee.as_deref(), Some("alice"));
+
+    let closed = storage
+        .update(
+            &assigned.id,
+            IssueUpdate {
+                status: Some(IssueStatus::Closed),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("target should close");
+    assert_eq!(closed.assignee, None);
+
+    let reopened = storage
+        .update(
+            &assigned.id,
+            IssueUpdate {
+                status: Some(IssueStatus::Open),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("closed target should reopen");
+    assert_eq!(reopened.status, IssueStatus::Open);
+    assert_eq!(reopened.assignee, None);
+
+    assert!(matches!(
+        storage
+            .update(
+                &assigned.id,
+                IssueUpdate {
+                    status: Some(IssueStatus::Open),
+                    ..Default::default()
+                },
+            )
+            .await,
+        Err(Error::Storage(StorageError::InvalidStatusTransition(
+            rivets::domain::StatusTransitionError::NotClosed {
+                current: IssueStatus::Open,
+            }
+        )))
+    ));
+}
+
+#[tokio::test]
+async fn create_assignment_follows_claim_readiness_after_relationship_validation() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let open = storage
+        .create(create_test_issue("Open prerequisite"))
+        .await
+        .expect("open prerequisite should be created");
+    let closed = storage
+        .create(create_test_issue("Closed prerequisite"))
+        .await
+        .expect("closed prerequisite should be created");
+    storage
+        .update(
+            &closed.id,
+            IssueUpdate {
+                status: Some(IssueStatus::Closed),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("prerequisite should close");
+
+    let count_before = storage
+        .export_all()
+        .await
+        .expect("export should succeed")
+        .len();
+    let mut blocked_assigned = create_test_issue("Blocked assigned create");
+    blocked_assigned.assignee = Some("alice".to_string());
+    blocked_assigned.prerequisites = vec![closed.id.clone(), open.id.clone()];
+    assert!(matches!(
+        storage.create(blocked_assigned).await,
+        Err(Error::Storage(StorageError::Assignment(
+            AssignmentError::Blocked { .. }
+        )))
+    ));
+    assert_eq!(
+        storage
+            .export_all()
+            .await
+            .expect("export should succeed")
+            .len(),
+        count_before
+    );
+
+    let mut ready_assigned = create_test_issue("Ready assigned create");
+    ready_assigned.assignee = Some("alice".to_string());
+    ready_assigned.prerequisites = vec![closed.id.clone()];
+    let ready_assigned = storage
+        .create(ready_assigned)
+        .await
+        .expect("resolved prerequisite should permit assigned creation");
+    assert_eq!(ready_assigned.assignee.as_deref(), Some("alice"));
+
+    let mut blocked_unassigned = create_test_issue("Blocked unassigned create");
+    blocked_unassigned.prerequisites = vec![open.id.clone()];
+    let blocked_unassigned = storage
+        .create(blocked_unassigned)
+        .await
+        .expect("unassigned blocked creation remains valid");
+    assert_eq!(blocked_unassigned.assignee, None);
+
+    let mut duplicate = create_test_issue("Duplicate prerequisite");
+    duplicate.assignee = Some("alice".to_string());
+    duplicate.prerequisites = vec![open.id.clone(), open.id.clone()];
+    assert!(matches!(
+        storage.create(duplicate).await,
+        Err(Error::Storage(StorageError::Validation(_)))
+    ));
+
+    let mut missing = create_test_issue("Missing prerequisite");
+    missing.assignee = Some("alice".to_string());
+    missing.prerequisites = vec![IssueId::new("test-missing")];
+    assert!(matches!(
+        storage.create(missing).await,
+        Err(Error::IssueNotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn import_rejects_invalid_assignment_state_atomically() {
+    let mut source = new_in_memory_storage("test".to_string());
+    let valid = source
+        .create(create_test_issue("Valid import"))
+        .await
+        .expect("valid Issue should be created");
+    let mut invalid = valid.clone();
+    invalid.id = IssueId::new("test-invalid-import");
+    invalid.title = "Invalid import".to_string();
+    invalid.status = IssueStatus::InProgress;
+    invalid.assignee = None;
+
+    let mut destination = new_in_memory_storage("test".to_string());
+    assert!(matches!(
+        destination.import_issues(vec![valid, invalid]).await,
+        Err(Error::Storage(StorageError::Assignment(
+            AssignmentError::AssigneeRequired { .. }
+        )))
+    ));
+    assert!(
+        destination
+            .export_all()
+            .await
+            .expect("export should succeed")
+            .is_empty(),
+        "mixed invalid import must insert nothing"
+    );
 }

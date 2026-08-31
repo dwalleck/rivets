@@ -267,6 +267,7 @@ fn is_default_next_resource_id(value: &u64) -> bool {
 pub(super) struct IssueRecordConversion {
     pub(super) issue: Issue,
     pub(super) migration_conflict: Option<MigrationField>,
+    pub(super) assignment_migration: Option<String>,
 }
 
 /// A compatibility DTO for decoding persisted Issue records.
@@ -422,6 +423,33 @@ impl IssueRecord {
                 }
             }
         }
+        let assignment_migration = match (issue.status, issue.assignee.as_deref()) {
+            (IssueStatus::InProgress, None) => {
+                issue.status = IssueStatus::Open;
+                Some(
+                    "Migration: changed unassigned In Progress Issue to Open because active work requires an Assignee"
+                        .to_string(),
+                )
+            }
+            (IssueStatus::Closed, Some(assignee)) => {
+                let assignee = assignee.to_string();
+                issue.assignee = None;
+                Some(format!(
+                    "Migration: cleared Assignee '{assignee}' from Closed Issue because Closed Issues cannot remain assigned"
+                ))
+            }
+            (IssueStatus::Open | IssueStatus::InProgress | IssueStatus::Closed, None | Some(_)) => {
+                None
+            }
+        };
+        if let Some(message) = &assignment_migration {
+            let content = NoteContent::new(message.clone())
+                .map_err(|error| invalid_data_error(&issue.id, migration_conflict, error))?;
+            issue.append_note(content, updated_at);
+        }
+        issue
+            .validate_assignment_state()
+            .map_err(|error| invalid_data_error(&issue.id, migration_conflict, error))?;
         issue
             .validate()
             .map_err(|error| invalid_data_error(&issue.id, migration_conflict, error))?;
@@ -429,6 +457,7 @@ impl IssueRecord {
         Ok(IssueRecordConversion {
             issue,
             migration_conflict,
+            assignment_migration,
         })
     }
 }

@@ -1,6 +1,6 @@
 //! Error types for rivets CLI operations.
 
-use crate::domain::{IssueId, ResourceError, StatusTransitionError};
+use crate::domain::{AssignmentError, IssueId, ResourceError, StatusTransitionError};
 use std::{fmt, io, path::PathBuf};
 use thiserror::Error;
 
@@ -229,6 +229,10 @@ pub enum StorageError {
     /// (ADR-0005).
     #[error(transparent)]
     InvalidStatusTransition(#[from] StatusTransitionError),
+
+    /// An Assignment Claim, Release, or canonical state invariant was rejected.
+    #[error(transparent)]
+    Assignment(#[from] AssignmentError),
 }
 
 impl StorageError {
@@ -253,7 +257,8 @@ impl StorageError {
             | Self::UnsafePartialLoad(_)
             | Self::ExternalChange { .. }
             | Self::Serialization(_)
-            | Self::InvalidStatusTransition(_)) => Err(error),
+            | Self::InvalidStatusTransition(_)
+            | Self::Assignment(_)) => Err(error),
         }
     }
 
@@ -280,7 +285,29 @@ impl StorageError {
             | Self::UnsafePartialLoad(_)
             | Self::ExternalChange { .. }
             | Self::Serialization(_)
-            | Self::Resource(_)) => Err(error),
+            | Self::Resource(_)
+            | Self::Assignment(_)) => Err(error),
+        }
+    }
+
+    /// Separates an Assignment contract failure from other storage failures.
+    ///
+    /// # Errors
+    ///
+    /// Returns the original error unchanged when it is not an Assignment
+    /// failure.
+    pub fn try_into_assignment_error(self) -> std::result::Result<AssignmentError, Self> {
+        match self {
+            Self::Assignment(source) => Ok(source),
+            error @ (Self::Validation(_)
+            | Self::IdGeneration(_)
+            | Self::DuplicateDependency { .. }
+            | Self::InvalidFormat(_)
+            | Self::UnsafePartialLoad(_)
+            | Self::ExternalChange { .. }
+            | Self::Serialization(_)
+            | Self::Resource(_)
+            | Self::InvalidStatusTransition(_)) => Err(error),
         }
     }
 }

@@ -19,6 +19,7 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|_| EnvFilter::new("rivets=info,rivets_jsonl=info")),
         )
         .with_target(false)
+        .with_writer(std::io::stderr)
         .init();
 
     tracing::debug!("Starting rivets CLI");

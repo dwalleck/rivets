@@ -505,6 +505,7 @@ mod load_from_jsonl_tests {
                 LoadWarning::InvalidIssueData { .. } => has_invalid = true,
                 LoadWarning::CircularDependency { .. }
                 | LoadWarning::MigrationConflict { .. }
+                | LoadWarning::AssignmentStateMigrated { .. }
                 | LoadWarning::InvalidResourceData { .. } => {}
             }
         }
@@ -1204,6 +1205,7 @@ mod storage_after_load_tests {
         let update = rivets::domain::IssueUpdate {
             title: Some("Updated Title".to_string()),
             status: Some(IssueStatus::InProgress),
+            assignee: Some(Some("active-owner".to_string())),
             ..Default::default()
         };
 
@@ -1384,7 +1386,7 @@ mod round_trip_tests {
         let original = concat!(
             r#"{"id":"test-a","title":"First","description":"Test","status":"open","priority":1,"issue_type":"bug","assignee":"alice","labels":["backend"],"design":"Plan","acceptance_criteria":"Done","notes":"History","external_ref":"GH-1","dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null}"#,
             "\n",
-            r#"{"id":"test-b","title":"Second","description":"Test","status":"in_progress","priority":2,"issue_type":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":null,"dependencies":[{"depends_on_id":"test-a","dep_type":"blocks"}],"created_at":"2026-01-03T00:00:00Z","updated_at":"2026-01-04T00:00:00Z","closed_at":null}"#,
+            r#"{"id":"test-b","title":"Second","description":"Test","status":"in_progress","priority":2,"issue_type":"task","assignee":"bob","labels":[],"design":null,"acceptance_criteria":null,"notes":null,"external_ref":null,"dependencies":[{"depends_on_id":"test-a","dep_type":"blocks"}],"created_at":"2026-01-03T00:00:00Z","updated_at":"2026-01-04T00:00:00Z","closed_at":null}"#,
             "\n",
         );
         let file = create_temp_jsonl_file(original);
@@ -1758,4 +1760,93 @@ async fn legacy_relationships_survive_blocking_mutations() {
             {"depends_on_id": "test-prerequisite", "dep_type": "related"}
         ])
     );
+}
+
+#[tokio::test]
+async fn assignment_state_migration_is_visible_and_idempotent() {
+    let content = concat!(
+        r#"{"id":"test-open-none","title":"Open none","description":"","status":"open","priority":2,"issue_kind":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":[],"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null}"#,
+        "\n",
+        r#"{"id":"test-open-alice","title":"Open alice","description":"","status":"open","priority":2,"issue_kind":"task","assignee":"alice","labels":[],"design":null,"acceptance_criteria":null,"notes":[],"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null}"#,
+        "\n",
+        r#"{"id":"test-active-alice","title":"Active alice","description":"","status":"in_progress","priority":2,"issue_kind":"task","assignee":"alice","labels":[],"design":null,"acceptance_criteria":null,"notes":[],"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null}"#,
+        "\n",
+        r#"{"id":"test-active-none","title":"Active none","description":"","status":"in_progress","priority":2,"issue_kind":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":[],"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null}"#,
+        "\n",
+        r#"{"id":"test-closed-none","title":"Closed none","description":"","status":"closed","priority":2,"issue_kind":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":[],"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":"2026-01-02T00:00:00Z"}"#,
+        "\n",
+        r#"{"id":"test-closed-alice","title":"Closed alice","description":"","status":"closed","priority":2,"issue_kind":"task","assignee":"alice","labels":[],"design":null,"acceptance_criteria":null,"notes":[],"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":"2026-01-02T00:00:00Z"}"#,
+        "\n",
+    );
+    let file = create_temp_jsonl_file(content);
+
+    let (storage, warnings) = load_from_jsonl(file.path(), "test".to_string())
+        .await
+        .expect("compatibility records should load");
+    let assignment_warnings = warnings
+        .iter()
+        .filter(|warning| matches!(warning, LoadWarning::AssignmentStateMigrated { .. }))
+        .count();
+    assert_eq!(assignment_warnings, 2);
+
+    let active_none = storage
+        .get(&IssueId::new("test-active-none"))
+        .await
+        .expect("get should succeed")
+        .expect("migrated Issue should exist");
+    assert_eq!(active_none.status, IssueStatus::Open);
+    assert_eq!(active_none.assignee, None);
+    assert!(
+        active_none
+            .notes()
+            .iter()
+            .any(|note| note.content().contains("requires an Assignee"))
+    );
+
+    let closed_alice = storage
+        .get(&IssueId::new("test-closed-alice"))
+        .await
+        .expect("get should succeed")
+        .expect("migrated Issue should exist");
+    assert_eq!(closed_alice.status, IssueStatus::Closed);
+    assert_eq!(closed_alice.assignee, None);
+    assert!(
+        closed_alice
+            .notes()
+            .iter()
+            .any(|note| note.content().contains("cleared Assignee 'alice'"))
+    );
+
+    let open_alice = storage
+        .get(&IssueId::new("test-open-alice"))
+        .await
+        .expect("get should succeed")
+        .expect("valid assigned Open Issue should exist");
+    assert_eq!(open_alice.assignee.as_deref(), Some("alice"));
+    let active_alice = storage
+        .get(&IssueId::new("test-active-alice"))
+        .await
+        .expect("get should succeed")
+        .expect("valid assigned active Issue should exist");
+    assert_eq!(active_alice.status, IssueStatus::InProgress);
+    assert_eq!(active_alice.assignee.as_deref(), Some("alice"));
+
+    save_to_jsonl(storage.as_ref(), file.path())
+        .await
+        .expect("canonical save should succeed");
+    let first_save = std::fs::read(file.path()).expect("first canonical bytes should be readable");
+    let (reloaded, second_warnings) = load_from_jsonl(file.path(), "test".to_string())
+        .await
+        .expect("canonical records should reload");
+    assert!(
+        !second_warnings
+            .iter()
+            .any(|warning| matches!(warning, LoadWarning::AssignmentStateMigrated { .. }))
+    );
+    save_to_jsonl(reloaded.as_ref(), file.path())
+        .await
+        .expect("second canonical save should succeed");
+    let second_save =
+        std::fs::read(file.path()).expect("second canonical bytes should be readable");
+    assert_eq!(second_save, first_save);
 }

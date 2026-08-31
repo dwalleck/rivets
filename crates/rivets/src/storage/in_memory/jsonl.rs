@@ -77,6 +77,11 @@ use tokio::sync::Mutex;
 ///                 field.accepted_migration_name()
 ///             );
 ///         }
+///         rivets::storage::in_memory::LoadWarning::AssignmentStateMigrated {
+///             issue_id, message, ..
+///         } => {
+///             eprintln!("Migrated Assignment state for issue {}: {}", issue_id, message);
+///         }
 ///     }
 /// }
 /// # Ok(())
@@ -120,6 +125,17 @@ pub enum LoadWarning {
         issue_id: IssueId,
         line_number: usize,
         field: MigrationField,
+    },
+
+    /// A persisted lifecycle/Assignment combination was repaired during load.
+    #[error("line {line_number}: migrated Assignment state for Issue {issue_id}: {message}")]
+    AssignmentStateMigrated {
+        /// Repaired Issue.
+        issue_id: IssueId,
+        /// Source line containing the compatibility record.
+        line_number: usize,
+        /// Human-readable repair also appended to the Issue as a migration Note.
+        message: String,
     },
 
     /// Issue data failed validation (invalid priority, title length, etc.)
@@ -229,43 +245,59 @@ pub async fn load_from_jsonl(
     // Convert and validate persisted records at the compatibility boundary.
     let mut issues = Vec::new();
     for (line_number, record) in parsed_records {
-        let (issue_id, migration_conflict, outcome) = match record.into_domain() {
-            Ok(IssueRecordConversion {
-                issue,
-                migration_conflict,
-            }) => (issue.id.clone(), migration_conflict, Ok(issue)),
-            Err(IssueRecordError::InvalidData {
-                issue_id,
-                error,
-                migration_conflict,
-            }) => (
-                issue_id.clone(),
-                migration_conflict,
-                Err(LoadWarning::InvalidIssueData {
+        let (issue_id, migration_conflict, assignment_migration, outcome) =
+            match record.into_domain() {
+                Ok(IssueRecordConversion {
+                    issue,
+                    migration_conflict,
+                    assignment_migration,
+                }) => (
+                    issue.id.clone(),
+                    migration_conflict,
+                    assignment_migration,
+                    Ok(issue),
+                ),
+                Err(IssueRecordError::InvalidData {
                     issue_id,
-                    line_number,
                     error,
-                }),
-            ),
-            Err(IssueRecordError::InvalidResource {
-                issue_id,
-                source,
-                migration_conflict,
-            }) => (
-                issue_id.clone(),
-                migration_conflict,
-                Err(LoadWarning::InvalidResourceData {
+                    migration_conflict,
+                }) => (
+                    issue_id.clone(),
+                    migration_conflict,
+                    None,
+                    Err(LoadWarning::InvalidIssueData {
+                        issue_id,
+                        line_number,
+                        error,
+                    }),
+                ),
+                Err(IssueRecordError::InvalidResource {
                     issue_id,
-                    line_number,
                     source,
-                }),
-            ),
-        };
+                    migration_conflict,
+                }) => (
+                    issue_id.clone(),
+                    migration_conflict,
+                    None,
+                    Err(LoadWarning::InvalidResourceData {
+                        issue_id,
+                        line_number,
+                        source,
+                    }),
+                ),
+            };
         if let Some(field) = migration_conflict {
             warnings.push(LoadWarning::MigrationConflict {
-                issue_id,
+                issue_id: issue_id.clone(),
                 line_number,
                 field,
+            });
+        }
+        if let Some(message) = assignment_migration {
+            warnings.push(LoadWarning::AssignmentStateMigrated {
+                issue_id: issue_id.clone(),
+                line_number,
+                message,
             });
         }
         match outcome {

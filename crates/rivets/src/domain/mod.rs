@@ -236,6 +236,45 @@ impl Issue {
         self.notes.push(Note::from_parts(content, created_at));
     }
 
+    pub(crate) fn apply_status_transition(
+        &mut self,
+        target: IssueStatus,
+        changed_at: DateTime<Utc>,
+    ) -> Result<(), StatusTransitionError> {
+        let current = self.status;
+        current.validate_transition(target)?;
+        if target == IssueStatus::InProgress && self.assignee.is_none() {
+            return Err(StatusTransitionError::AssigneeRequired);
+        }
+
+        self.status = target;
+        match target {
+            IssueStatus::Closed => {
+                self.assignee = None;
+                if self.closed_at.is_none() {
+                    self.closed_at = Some(changed_at);
+                }
+            }
+            IssueStatus::Open if current == IssueStatus::Closed => {
+                self.assignee = None;
+            }
+            IssueStatus::Open | IssueStatus::InProgress => {}
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_assignment_state(&self) -> Result<(), AssignmentError> {
+        match (self.status, self.assignee.is_some()) {
+            (IssueStatus::InProgress, false) => Err(AssignmentError::AssigneeRequired {
+                issue_id: self.id.clone(),
+            }),
+            (IssueStatus::Closed, true) => Err(AssignmentError::ClosedCannotBeAssigned {
+                issue_id: self.id.clone(),
+            }),
+            (IssueStatus::Open | IssueStatus::InProgress | IssueStatus::Closed, _) => Ok(()),
+        }
+    }
+
     /// Return Associated Resources in insertion order.
     pub fn resources(&self) -> &[AssociatedResource] {
         &self.resources
@@ -463,17 +502,14 @@ impl IssueStatus {
         VALUES.get_or_init(join_canonical_names::<Self>)
     }
 
-    /// Validate a status transition per the domain rules (ADR-0005).
-    ///
-    /// The domain owns these rules; adapters and storage implementations
-    /// must not re-validate them.
-    ///
     /// # Invalid Transitions
     ///
     /// - `Closed` → `Closed`: an Issue cannot be closed twice.
-    /// - Any non-`Closed` status → `Open`: only closed Issues can be reopened.
+    /// - `Closed` → `In Progress`: a Closed Issue reopens through `Open`.
+    /// - `Open` → `Open`: only Closed and In Progress Issues can target Open.
     ///
-    /// Every other transition is allowed.
+    /// `In Progress` → `Open` is valid and retains Assignment at the Issue
+    /// transition application seam.
     ///
     /// # Errors
     ///
@@ -483,7 +519,10 @@ impl IssueStatus {
             (Self::Closed, Self::Closed) => {
                 Err(StatusTransitionError::AlreadyClosed { current: self })
             }
-            (Self::Closed, _) => Ok(()),
+            (Self::Closed, Self::InProgress) => {
+                Err(StatusTransitionError::MustReopenToOpen { target })
+            }
+            (Self::Closed | Self::InProgress, Self::Open) => Ok(()),
             (current, Self::Open) => Err(StatusTransitionError::NotClosed { current }),
             _ => Ok(()),
         }
@@ -507,6 +546,72 @@ pub enum StatusTransitionError {
     NotClosed {
         /// The Issue's status when the reopen was rejected.
         current: IssueStatus,
+    },
+    /// A Closed Issue must reopen to Open before becoming active.
+    #[error("Closed Issue must reopen to open before entering {target}")]
+    MustReopenToOpen {
+        /// The rejected target status.
+        target: IssueStatus,
+    },
+    /// Active work requires one responsible Assignee.
+    #[error("Entering in_progress requires an Assignee")]
+    AssigneeRequired,
+}
+
+/// An Assignment Claim or Release rejected by the domain contract.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AssignmentError {
+    /// Claim and Release are valid only while the Issue is Open.
+    #[error("Assignment changes require an Open Issue; {issue_id} is {status}")]
+    NotOpen {
+        /// The affected Issue.
+        issue_id: IssueId,
+        /// The current Workflow State.
+        status: IssueStatus,
+    },
+    /// An unresolved Blocking Dependency prevents a new Claim.
+    #[error("Issue {issue_id} is Blocked and cannot be claimed")]
+    Blocked {
+        /// The affected Issue.
+        issue_id: IssueId,
+    },
+    /// A different Assignee already owns the Claim.
+    #[error("Issue {issue_id} is already claimed by {assignee}")]
+    AlreadyClaimed {
+        /// The affected Issue.
+        issue_id: IssueId,
+        /// The current Assignee.
+        assignee: String,
+    },
+    /// Release was requested for an unassigned Issue.
+    #[error("Issue {issue_id} is not claimed")]
+    NotClaimed {
+        /// The affected Issue.
+        issue_id: IssueId,
+    },
+    /// Release supplied a claimant other than the current Assignee.
+    #[error(
+        "Issue {issue_id} is claimed by {actual}; release expected current Assignee {expected}"
+    )]
+    AssigneeMismatch {
+        /// The affected Issue.
+        issue_id: IssueId,
+        /// The Assignee supplied by the caller.
+        expected: String,
+        /// The current Assignee.
+        actual: String,
+    },
+    /// A canonical In Progress Issue lacks an Assignee.
+    #[error("In Progress Issue {issue_id} requires an Assignee")]
+    AssigneeRequired {
+        /// The affected Issue.
+        issue_id: IssueId,
+    },
+    /// A canonical Closed Issue still carries an Assignee.
+    #[error("Closed Issue {issue_id} cannot remain assigned")]
+    ClosedCannotBeAssigned {
+        /// The affected Issue.
+        issue_id: IssueId,
     },
 }
 
@@ -2179,9 +2284,9 @@ mod tests {
         #[case::in_progress_to_closed(IssueStatus::InProgress, IssueStatus::Closed, true)]
         #[case::closed_to_closed(IssueStatus::Closed, IssueStatus::Closed, false)]
         #[case::closed_to_open(IssueStatus::Closed, IssueStatus::Open, true)]
-        #[case::closed_to_in_progress(IssueStatus::Closed, IssueStatus::InProgress, true)]
+        #[case::closed_to_in_progress(IssueStatus::Closed, IssueStatus::InProgress, false)]
         #[case::open_to_open(IssueStatus::Open, IssueStatus::Open, false)]
-        #[case::in_progress_to_open(IssueStatus::InProgress, IssueStatus::Open, false)]
+        #[case::in_progress_to_open(IssueStatus::InProgress, IssueStatus::Open, true)]
         #[case::open_to_in_progress(IssueStatus::Open, IssueStatus::InProgress, true)]
         fn transition_matrix(
             #[case] current: IssueStatus,
@@ -2213,10 +2318,9 @@ mod tests {
             );
         }
 
-        #[rstest]
-        #[case::open(IssueStatus::Open)]
-        #[case::in_progress(IssueStatus::InProgress)]
-        fn reopening_a_non_closed_issue_yields_not_closed(#[case] current: IssueStatus) {
+        #[test]
+        fn reopening_an_open_issue_yields_not_closed() {
+            let current = IssueStatus::Open;
             let error = current
                 .validate_transition(IssueStatus::Open)
                 .expect_err("non-Closed -> Open must be rejected");

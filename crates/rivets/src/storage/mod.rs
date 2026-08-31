@@ -144,6 +144,18 @@ pub trait IssueStorage: Send + Sync {
     /// Returns `Error::IssueNotFound` if the issue doesn't exist.
     async fn update(&mut self, id: &IssueId, updates: IssueUpdate) -> Result<Issue>;
 
+    /// Atomically Claim an Open, unblocked Issue for one Assignee.
+    ///
+    /// Repeating the current Assignee is an idempotent success. A different
+    /// current Assignee returns [`crate::domain::AssignmentError::AlreadyClaimed`].
+    async fn claim(&mut self, id: &IssueId, claimant: &str) -> Result<Issue>;
+
+    /// Atomically Release an Open Issue from its expected current Assignee.
+    ///
+    /// Blocked Open Issues may be released; In Progress and Closed Issues may
+    /// not.
+    async fn release(&mut self, id: &IssueId, expected_assignee: &str) -> Result<Issue>;
+
     /// Delete an issue.
     ///
     /// Removes the issue and all its outgoing dependencies. Fails if other
@@ -445,6 +457,7 @@ impl JsonlBackedStorage {
                     })
                 }
                 in_memory::LoadWarning::MigrationConflict { .. }
+                | in_memory::LoadWarning::AssignmentStateMigrated { .. }
                 | in_memory::LoadWarning::OrphanedDependency { .. }
                 | in_memory::LoadWarning::CircularDependency { .. } => None,
                 in_memory::LoadWarning::InvalidIssueData {
@@ -515,6 +528,16 @@ impl IssueStorage for JsonlBackedStorage {
     async fn update(&mut self, id: &IssueId, updates: IssueUpdate) -> Result<Issue> {
         self.prepare_mutation().await?;
         self.inner.update(id, updates).await
+    }
+
+    async fn claim(&mut self, id: &IssueId, claimant: &str) -> Result<Issue> {
+        self.prepare_mutation().await?;
+        self.inner.claim(id, claimant).await
+    }
+
+    async fn release(&mut self, id: &IssueId, expected_assignee: &str) -> Result<Issue> {
+        self.prepare_mutation().await?;
+        self.inner.release(id, expected_assignee).await
     }
 
     async fn delete(&mut self, id: &IssueId) -> Result<()> {
@@ -865,6 +888,18 @@ impl IssueStorage for MockStorage {
     async fn update(&mut self, _id: &IssueId, _updates: IssueUpdate) -> Result<Issue> {
         unimplemented!(
             "MockStorage::update() is not implemented. Use in_memory::new_in_memory_storage() for full CRUD."
+        )
+    }
+
+    async fn claim(&mut self, _id: &IssueId, _claimant: &str) -> Result<Issue> {
+        unimplemented!(
+            "MockStorage::claim() is not implemented. Use in_memory::new_in_memory_storage() for full CRUD."
+        )
+    }
+
+    async fn release(&mut self, _id: &IssueId, _expected_assignee: &str) -> Result<Issue> {
+        unimplemented!(
+            "MockStorage::release() is not implemented. Use in_memory::new_in_memory_storage() for full CRUD."
         )
     }
 

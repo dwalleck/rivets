@@ -400,27 +400,38 @@ reviewable diffs) to a `.tmp` file, flushed, then renamed over `issues.jsonl`.
 
 ## State Transitions
 
-Status changes are **explicit only** — via `update --status`, `close`, or
-`reopen`. Dependency operations never change Workflow State. Open, In Progress,
-and Closed are the only states; Blocked and Ready are derived and never
-serialized on Issue records.
+Workflow State changes and Assignment changes are separate operations. `claim`
+and `release` mutate only Assignment; `update --status`, `close`, and `reopen`
+mutate Workflow State and apply the domain-owned Assignment side effects.
+Dependency operations never change Workflow State. Open, In Progress, and Closed
+are the only states; Blocked and Ready are derived and never serialized on Issue
+records.
 
-The transition rules are owned by the domain (`IssueStatus::validate_transition`,
-ADR-0005) and enforced at the single storage update site. Only two transitions
-are rejected:
+The transition rules are owned by the domain (`Issue::apply_status_transition`,
+`IssueStatus::validate_transition`, ADR-0005) and enforced at the storage seam:
 
-- `closed → closed` (an Issue cannot be closed twice)
-- anything non-Closed → `open` (only a Closed Issue can be reopened)
+- entering In Progress requires an assignee;
+- In Progress → Open retains that Assignment;
+- closing clears Assignment;
+- reopening Closed → Open produces an unassigned Issue;
+- Closed → In Progress is rejected; reopen to Open first;
+- closing Closed and updating Open to Open are rejected.
 
-Every other transition among the three states is allowed.
+Claim is a compare-and-set mutation. It requires an Open, unblocked Issue; an
+unassigned Issue becomes owned by the claimant, the current owner may repeat the
+same claim without changing timestamps, and another claimant receives a typed
+Already Claimed error. Release requires the exact owner and an Open Issue, but
+remains valid when that Open Issue is blocked.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Open: create
-    Open --> InProgress: update --status in_progress
-    Open --> Closed: close
-    InProgress --> Closed: close
-    Closed --> Open: reopen
+    Open --> Open: claim / release
+    Open --> InProgress: enter active work (assignee required)
+    InProgress --> Open: return to open (retain assignee)
+    Open --> Closed: close (clear assignee)
+    InProgress --> Closed: close (clear assignee)
+    Closed --> Open: reopen (unassigned)
 ```
 
 The `ready` and `blocked` queries derive their conditions from current Workflow

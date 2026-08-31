@@ -23,6 +23,34 @@ pub(super) fn find_blocking_edge(
         .map(|edge| edge.id())
 }
 
+/// Return whether one Issue has a direct unresolved Blocking Dependency.
+///
+/// This scans only the target Issue's outgoing edges, avoiding the
+/// all-Workspace blocked set used by Ready queries.
+pub(super) fn has_unresolved_blocking_dependency(
+    graph: &DiGraph<IssueId, DependencyType>,
+    node_map: &HashMap<IssueId, NodeIndex>,
+    issues: &HashMap<IssueId, Issue>,
+    issue_id: &IssueId,
+) -> Result<bool> {
+    let node = node_map
+        .get(issue_id)
+        .ok_or_else(|| Error::IssueNotFound(issue_id.clone()))?;
+    for edge in graph.edges(*node) {
+        if *edge.weight() != DependencyType::Blocks {
+            continue;
+        }
+        let prerequisite_id = &graph[edge.target()];
+        let prerequisite = issues
+            .get(prerequisite_id)
+            .ok_or_else(|| Error::IssueNotFound(prerequisite_id.clone()))?;
+        if prerequisite.status != IssueStatus::Closed {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Traverse only Blocking Dependencies in dependent-to-prerequisite order.
 pub(super) fn blocking_dependency_tree_impl(
     graph: &DiGraph<IssueId, DependencyType>,
@@ -232,6 +260,22 @@ mod tests {
         assert!(
             edge_lookup_elapsed <= Duration::from_millis(10),
             "Blocking edge lookup took {edge_lookup_elapsed:?}"
+        );
+
+        let started = Instant::now();
+        assert!(
+            has_unresolved_blocking_dependency(
+                &graph,
+                &node_map,
+                &issues,
+                &IssueId::new("test-00000"),
+            )
+            .unwrap()
+        );
+        let claim_lookup_elapsed = started.elapsed();
+        assert!(
+            claim_lookup_elapsed <= Duration::from_millis(10),
+            "Claim blockedness lookup took {claim_lookup_elapsed:?}"
         );
 
         let started = Instant::now();

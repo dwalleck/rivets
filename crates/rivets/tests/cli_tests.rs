@@ -451,10 +451,18 @@ fn test_cli_list_status_filters_match_issues(initialized_dir: TempDir) {
     let in_progress_id = create_issue(initialized_dir.path(), "In progress issue", &[]);
 
     // Update one to in_progress
-    run_rivets_in_dir(
+    let update = run_rivets_in_dir(
         initialized_dir.path(),
-        &["update", &in_progress_id, "--status", "in_progress"],
+        &[
+            "update",
+            &in_progress_id,
+            "--status",
+            "in_progress",
+            "--assignee",
+            "active-owner",
+        ],
     );
+    assert!(update.status.success());
 
     // List open - should only show open issue
     let output = run_rivets_in_dir(initialized_dir.path(), &["list", "--status", "open"]);
@@ -574,6 +582,8 @@ fn test_cli_update_issue(initialized_dir: TempDir) {
             "Updated title",
             "--status",
             "in_progress",
+            "--assignee",
+            "active-owner",
         ],
     );
 
@@ -1007,7 +1017,14 @@ fn ready_assignment_visibility(initialized_dir: TempDir) {
     let in_progress = create_issue(initialized_dir.path(), "In Progress", &[]);
     let update = run_rivets_in_dir(
         initialized_dir.path(),
-        &["update", &in_progress, "--status", "in_progress"],
+        &[
+            "update",
+            &in_progress,
+            "--status",
+            "in_progress",
+            "--assignee",
+            "active-owner",
+        ],
     );
     assert!(
         update.status.success(),
@@ -1391,10 +1408,18 @@ fn stats_and_frontier_output_separate_lifecycle_from_blocked(initialized_dir: Te
     let dependent = create_issue(initialized_dir.path(), "Dependent", &[]);
     let in_progress = create_issue(initialized_dir.path(), "In progress", &[]);
     let closed = create_issue(initialized_dir.path(), "Closed", &[]);
-    run_rivets_in_dir(
+    let active = run_rivets_in_dir(
         initialized_dir.path(),
-        &["update", &in_progress, "--status", "in_progress"],
+        &[
+            "update",
+            &in_progress,
+            "--status",
+            "in_progress",
+            "--assignee",
+            "active-owner",
+        ],
     );
+    assert!(active.status.success());
     run_rivets_in_dir(initialized_dir.path(), &["close", &closed]);
     let add = run_rivets_in_dir(
         initialized_dir.path(),
@@ -1604,10 +1629,18 @@ fn test_cli_info_with_issues(initialized_dir: TempDir) {
     let id2 = create_issue(initialized_dir.path(), "In progress issue", &[]);
     let id3 = create_issue(initialized_dir.path(), "Closed issue", &[]);
 
-    run_rivets_in_dir(
+    let active = run_rivets_in_dir(
         initialized_dir.path(),
-        &["update", &id2, "--status", "in_progress"],
+        &[
+            "update",
+            &id2,
+            "--status",
+            "in_progress",
+            "--assignee",
+            "active-owner",
+        ],
     );
+    assert!(active.status.success());
     run_rivets_in_dir(initialized_dir.path(), &["close", &id3]);
 
     let output = run_rivets_in_dir(initialized_dir.path(), &["info"]);
@@ -1642,10 +1675,18 @@ fn test_cli_info_with_canonical_states(initialized_dir: TempDir) {
     let in_progress_id = create_issue(initialized_dir.path(), "In progress issue", &[]);
     let closed_id = create_issue(initialized_dir.path(), "Closed issue", &[]);
 
-    run_rivets_in_dir(
+    let active = run_rivets_in_dir(
         initialized_dir.path(),
-        &["update", &in_progress_id, "--status", "in_progress"],
+        &[
+            "update",
+            &in_progress_id,
+            "--status",
+            "in_progress",
+            "--assignee",
+            "active-owner",
+        ],
     );
+    assert!(active.status.success());
     run_rivets_in_dir(initialized_dir.path(), &["close", &closed_id]);
 
     let output = run_rivets_in_dir(initialized_dir.path(), &["info"]);
@@ -1848,10 +1889,18 @@ fn test_cli_stale_with_status_filter(initialized_dir: TempDir) {
     create_issue(initialized_dir.path(), "Open issue", &[]);
     let id2 = create_issue(initialized_dir.path(), "In progress issue", &[]);
 
-    run_rivets_in_dir(
+    let active = run_rivets_in_dir(
         initialized_dir.path(),
-        &["update", &id2, "--status", "in_progress"],
+        &[
+            "update",
+            &id2,
+            "--status",
+            "in_progress",
+            "--assignee",
+            "active-owner",
+        ],
     );
+    assert!(active.status.success());
 
     // Look for stale open issues only
     let output = run_rivets_in_dir(

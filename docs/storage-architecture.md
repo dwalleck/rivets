@@ -11,6 +11,8 @@ classDiagram
         +create(NewIssue) Future~Issue~
         +get(IssueId) Future~Option~Issue~~
         +update(IssueId, IssueUpdate) Future~Issue~
+        +claim(IssueId, str) Future~Issue~
+        +release(IssueId, str) Future~Issue~
         +delete(IssueId) Future~void~
         +add_blocking_dependency(BlockingDependency) Future~void~
         +remove_blocking_dependency(BlockingDependency) Future~void~
@@ -446,6 +448,8 @@ The `StorageBackend::InMemory` variant exists for library/test use (`create_stor
 | create | O(1) | O(1) | HashMap insert + graph node |
 | get | O(1) | O(1) | HashMap lookup |
 | update | O(1) | O(1) | HashMap update |
+| claim | O(outdegree) | O(1) | Compare-and-set Assignment after direct unresolved Blocking scan |
+| release | O(1) | O(1) | Exact-owner compare-and-set; allowed while Open and Blocked |
 | delete | O(D) | O(D) | D = number of dependents checked |
 | add/remove Blocking Dependency | O(outdegree) plus O(V + E) cycle validation on add | O(V) | Only Blocking edges participate |
 | Blocking prerequisite tree | O(V + E) | O(V) | Deterministic BFS over Blocking edges |

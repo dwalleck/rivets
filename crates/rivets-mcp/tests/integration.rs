@@ -513,7 +513,7 @@ async fn mcp_full_issue_json_golden() {
         "status": "closed",
         "priority": 1,
         "issue_kind": "feature",
-        "assignee": "golden-owner",
+        "assignee": null,
         "labels": ["golden", "wire"],
         "design": "Pin the canonical Issue wire shape.",
         "acceptance_criteria": "- [x] Exact fields\n- [x] Stable nested arrays",
@@ -668,54 +668,27 @@ async fn close_rejects_already_closed_issue_without_mutation() {
     );
 }
 
-/// ADR-0005: the domain rejects reopening a non-closed Issue, and MCP
-/// surfaces the identical observable message the CLI prints.
-#[rstest]
-#[case::open(None, IssueStatus::Open)]
-#[case::in_progress(Some("in_progress"), IssueStatus::InProgress)]
+/// ADR-0005: reopening an already Open Issue remains a typed rejection.
 #[tokio::test]
-async fn reopen_rejects_non_closed_issue_without_mutation(
-    #[case] setup_status: Option<&str>,
-    #[case] expected_current: IssueStatus,
-) {
+async fn reopen_rejects_open_issue_without_mutation() {
     let workspace = create_temp_workspace();
     let tools = create_tools();
     set_context(&tools, workspace.path()).await;
-    let issue = create_issue(&tools, "Not closed").await;
-    if let Some(status) = setup_status {
-        tools
-            .update(update_params(
-                issue.id.as_str(),
-                None,
-                None,
-                Some(status),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            ))
-            .await
-            .expect("status setup should succeed");
-    }
+    let issue = create_issue(&tools, "Already open").await;
 
     let rejected = tools
         .reopen(issue.id.as_str(), Some("Not done yet".to_string()), None)
         .await
-        .expect_err("reopening a non-closed Issue must be rejected");
-    assert!(
-        matches!(
-            &rejected,
-            Error::InvalidStatusTransition(StatusTransitionError::NotClosed { current })
-                if *current == expected_current
-        ),
-        "unexpected error: {rejected:?}"
-    );
+        .expect_err("reopening an Open Issue must be rejected");
+    assert!(matches!(
+        &rejected,
+        Error::InvalidStatusTransition(StatusTransitionError::NotClosed {
+            current: IssueStatus::Open
+        })
+    ));
     assert_eq!(
         rejected.to_string(),
-        format!("Issue is not closed (status: {expected_current})"),
+        "Issue is not closed (status: open)",
         "MCP must surface the domain message the CLI prints"
     );
 
@@ -723,12 +696,45 @@ async fn reopen_rejects_non_closed_issue_without_mutation(
         .show(issue.id.as_str(), None)
         .await
         .expect("show should succeed after a rejected reopen");
-    assert_eq!(unchanged.status, expected_current);
+    assert_eq!(unchanged.status, IssueStatus::Open);
     assert_eq!(
         unchanged.notes().len(),
         0,
         "a rejected reopen must not append its Note"
     );
+}
+
+/// Returning active work to Open retains its Assignment.
+#[tokio::test]
+async fn reopen_in_progress_issue_returns_to_open_with_claim() {
+    let workspace = create_temp_workspace();
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+    let issue = create_issue(&tools, "Active work").await;
+    let active = tools
+        .update(update_params(
+            issue.id.as_str(),
+            None,
+            None,
+            Some("in_progress"),
+            None,
+            None,
+            Some("active-owner".to_string()),
+            None,
+            None,
+            None,
+            None,
+        ))
+        .await
+        .expect("status setup should succeed");
+
+    let reopened = tools
+        .reopen(issue.id.as_str(), Some("Paused".to_string()), None)
+        .await
+        .expect("In Progress should return to Open");
+    assert_eq!(reopened.status, IssueStatus::Open);
+    assert_eq!(reopened.assignee, active.assignee);
+    assert_eq!(reopened.notes().len(), 1);
 }
 
 /// Test complete issue lifecycle: create -> update -> close
@@ -2379,7 +2385,7 @@ async fn test_update_persistence() {
                 Some("in_progress"),
                 None,
                 None, // issue_kind
-                None,
+                Some("active-owner".to_string()),
                 None,
                 None,
                 None, // labels
@@ -3832,7 +3838,7 @@ async fn test_issue_counts_accurate() {
             Some("in_progress"),
             None,
             None, // issue_kind
-            None,
+            Some("active-owner".to_string()),
             None,
             None,
             None, // labels

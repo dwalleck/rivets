@@ -1125,7 +1125,7 @@ mod tests {
                 Some("in_progress"),
                 Some(0),
                 None,
-                None,
+                Some("active-owner".to_string()),
                 None,
                 None,
                 None,

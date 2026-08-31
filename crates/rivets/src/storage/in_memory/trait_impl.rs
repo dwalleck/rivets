@@ -2,12 +2,13 @@
 
 use super::InMemoryStorage;
 use super::graph::{
-    blocking_dependency_tree_impl, find_blocked_issues, find_blocking_edge, has_blocking_cycle_impl,
+    blocking_dependency_tree_impl, find_blocked_issues, find_blocking_edge,
+    has_blocking_cycle_impl, has_unresolved_blocking_dependency,
 };
 use super::sorting::sort_by_policy;
 use crate::domain::{
-    BlockingDependency, Dependency, DependencyType, Issue, IssueFilter, IssueId, IssueStatus,
-    IssueUpdate, MAX_PRIORITY, NewIssue, NewResource, Note, ReadyFilter, ResourceId,
+    AssignmentError, BlockingDependency, Dependency, DependencyType, Issue, IssueFilter, IssueId,
+    IssueStatus, IssueUpdate, MAX_PRIORITY, NewIssue, NewResource, Note, ReadyFilter, ResourceId,
     ResourceUpdate, SortPolicy,
 };
 use crate::error::{Error, Result, StorageError};
@@ -99,6 +100,17 @@ impl IssueStorage for InMemoryStorage {
             }
         }
 
+        if new_issue.assignee.is_some()
+            && new_issue
+                .prerequisites
+                .iter()
+                .any(|prerequisite_id| inner.issues[prerequisite_id].status != IssueStatus::Closed)
+        {
+            inner.graph.remove_node(temp_node);
+            inner.node_map.remove(&id);
+            return Err(StorageError::Assignment(AssignmentError::Blocked { issue_id: id }).into());
+        }
+
         // === Phase 4: Create issue (all validations passed) ===
         let now = Utc::now();
         let notes = new_issue
@@ -171,18 +183,7 @@ impl IssueStorage for InMemoryStorage {
         if let Some(description) = updates.description {
             candidate.description = description;
         }
-        if let Some(status) = updates.status {
-            // The domain owns transition rules (ADR-0005); this is the single
-            // application site, not a storage-local re-validation.
-            candidate
-                .status
-                .validate_transition(status)
-                .map_err(StorageError::InvalidStatusTransition)?;
-            candidate.status = status;
-            if status == IssueStatus::Closed && candidate.closed_at.is_none() {
-                candidate.closed_at = Some(now);
-            }
-        }
+        let status = updates.status;
         if let Some(priority) = updates.priority {
             if priority > MAX_PRIORITY {
                 return Err(Error::InvalidPriority(priority));
@@ -194,6 +195,13 @@ impl IssueStorage for InMemoryStorage {
         }
         if let Some(assignee) = updates.assignee {
             candidate.assignee = assignee;
+        }
+        if let Some(status) = status {
+            // The domain owns transition and Assignment coupling (ADRs 0002
+            // and 0005); this is the single application site.
+            candidate
+                .apply_status_transition(status, now)
+                .map_err(StorageError::InvalidStatusTransition)?;
         }
         if let Some(design) = updates.design {
             candidate.design = Some(design);
@@ -209,8 +217,95 @@ impl IssueStorage for InMemoryStorage {
         }
 
         candidate.validate().map_err(StorageError::Validation)?;
+        candidate
+            .validate_assignment_state()
+            .map_err(StorageError::Assignment)?;
         candidate.updated_at = now;
 
+        *stored = candidate.clone();
+        Ok(candidate)
+    }
+
+    async fn claim(&mut self, id: &IssueId, claimant: &str) -> Result<Issue> {
+        let mut inner = self.lock().await;
+        {
+            let issue = inner
+                .issues
+                .get(id)
+                .ok_or_else(|| Error::IssueNotFound(id.clone()))?;
+            if issue.status != IssueStatus::Open {
+                return Err(StorageError::Assignment(AssignmentError::NotOpen {
+                    issue_id: id.clone(),
+                    status: issue.status,
+                })
+                .into());
+            }
+            match issue.assignee.as_deref() {
+                Some(current) if current == claimant => return Ok(issue.clone()),
+                Some(current) => {
+                    return Err(StorageError::Assignment(AssignmentError::AlreadyClaimed {
+                        issue_id: id.clone(),
+                        assignee: current.to_string(),
+                    })
+                    .into());
+                }
+                None => {}
+            }
+        }
+
+        if has_unresolved_blocking_dependency(&inner.graph, &inner.node_map, &inner.issues, id)? {
+            return Err(StorageError::Assignment(AssignmentError::Blocked {
+                issue_id: id.clone(),
+            })
+            .into());
+        }
+
+        let stored = inner
+            .issues
+            .get_mut(id)
+            .ok_or_else(|| Error::IssueNotFound(id.clone()))?;
+        let mut candidate = stored.clone();
+        candidate.assignee = Some(claimant.to_string());
+        candidate.validate().map_err(StorageError::Validation)?;
+        candidate.updated_at = Utc::now();
+        *stored = candidate.clone();
+        Ok(candidate)
+    }
+
+    async fn release(&mut self, id: &IssueId, expected_assignee: &str) -> Result<Issue> {
+        let mut inner = self.lock().await;
+        let stored = inner
+            .issues
+            .get_mut(id)
+            .ok_or_else(|| Error::IssueNotFound(id.clone()))?;
+        if stored.status != IssueStatus::Open {
+            return Err(StorageError::Assignment(AssignmentError::NotOpen {
+                issue_id: id.clone(),
+                status: stored.status,
+            })
+            .into());
+        }
+        match stored.assignee.as_deref() {
+            None => {
+                return Err(StorageError::Assignment(AssignmentError::NotClaimed {
+                    issue_id: id.clone(),
+                })
+                .into());
+            }
+            Some(actual) if actual != expected_assignee => {
+                return Err(StorageError::Assignment(AssignmentError::AssigneeMismatch {
+                    issue_id: id.clone(),
+                    expected: expected_assignee.to_string(),
+                    actual: actual.to_string(),
+                })
+                .into());
+            }
+            Some(_) => {}
+        }
+
+        let mut candidate = stored.clone();
+        candidate.assignee = None;
+        candidate.updated_at = Utc::now();
         *stored = candidate.clone();
         Ok(candidate)
     }
@@ -549,6 +644,12 @@ impl IssueStorage for InMemoryStorage {
 
     async fn import_issues(&mut self, issues: Vec<Issue>) -> Result<()> {
         let mut inner = self.lock().await;
+        for issue in &issues {
+            issue.validate().map_err(StorageError::Validation)?;
+            issue
+                .validate_assignment_state()
+                .map_err(StorageError::Assignment)?;
+        }
 
         // First pass: Add all issues and create nodes
         for issue in &issues {

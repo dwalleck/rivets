@@ -1876,7 +1876,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_reopen_in_progress_issue_returns_error() {
+        async fn test_reopen_in_progress_issue_returns_to_open_with_claim() {
             use crate::domain::{IssueStatus, IssueUpdate};
 
             let temp_dir = TempDir::new().unwrap();
@@ -1888,35 +1888,40 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Create an issue and set it to in_progress
             let new_issue = NewIssue {
                 title: "Test issue".to_string(),
+                assignee: Some("alice".to_string()),
                 ..Default::default()
             };
             let issue = app.storage_mut().create(new_issue).await.unwrap();
-
-            let update = IssueUpdate {
-                status: Some(IssueStatus::InProgress),
-                ..Default::default()
-            };
-            app.storage_mut().update(&issue.id, update).await.unwrap();
+            app.storage_mut()
+                .update(
+                    &issue.id,
+                    IssueUpdate {
+                        status: Some(IssueStatus::InProgress),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
             app.save().await.unwrap();
 
-            // Try to reopen an in_progress issue
             let args = ReopenArgs {
                 issue_ids: vec![issue.id.to_string()],
                 reason: None,
             };
+            execute_reopen(&mut app, &args, OutputMode::Text, true)
+                .await
+                .expect("In Progress should return to Open");
 
-            let result = execute_reopen(&mut app, &args, OutputMode::Text, true).await;
-
-            assert!(result.is_err());
-            let error_msg = result.unwrap_err().to_string();
-            assert!(
-                error_msg.contains("failed"),
-                "Error should indicate failure, got: {}",
-                error_msg
-            );
+            let reopened = app
+                .storage()
+                .get(&issue.id)
+                .await
+                .unwrap()
+                .expect("Issue should remain");
+            assert_eq!(reopened.status, IssueStatus::Open);
+            assert_eq!(reopened.assignee.as_deref(), Some("alice"));
         }
     }
 }
