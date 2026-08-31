@@ -151,17 +151,6 @@ pub struct UpdateArgs {
     #[arg(short = 'k', long = "kind", value_enum)]
     pub issue_kind: Option<IssueKind>,
 
-    /// New assignee
-    ///
-    /// Note: To unassign, use `--no-assignee` flag instead. Clap does not
-    /// support empty strings ("") as argument values by default.
-    #[arg(short, long, conflicts_with = "no_assignee")]
-    pub assignee: Option<String>,
-
-    /// Remove the current assignee (unassign the issue)
-    #[arg(long, conflicts_with = "assignee")]
-    pub no_assignee: bool,
-
     /// New design notes
     #[arg(long, allow_hyphen_values = true)]
     pub design: Option<String>,
@@ -173,6 +162,18 @@ pub struct UpdateArgs {
     /// Note to append
     #[arg(long, allow_hyphen_values = true)]
     pub notes: Option<String>,
+}
+
+/// Arguments for an Assignment Claim or Release.
+#[derive(Parser, Debug, Clone)]
+pub struct AssignmentArgs {
+    /// Issue ID whose Assignment changes.
+    #[arg(value_parser = validate_issue_id)]
+    pub issue_id: String,
+
+    /// Exact Assignee identity to claim as or release.
+    #[arg(short, long)]
+    pub assignee: String,
 }
 
 impl UpdateArgs {
@@ -210,8 +211,6 @@ impl UpdateArgs {
             || self.status.is_some()
             || self.priority.is_some()
             || self.issue_kind.is_some()
-            || self.assignee.is_some()
-            || self.no_assignee
             || self.design.is_some()
             || self.acceptance.is_some()
             || self.notes.is_some()
@@ -543,8 +542,6 @@ mod tests {
                 status: None,
                 priority: None,
                 issue_kind: None,
-                assignee: None,
-                no_assignee: false,
                 design: None,
                 acceptance: None,
                 notes: None,
@@ -593,20 +590,6 @@ mod tests {
         }
 
         #[test]
-        fn test_has_updates_assignee() {
-            let mut args = create_empty_update_args();
-            args.assignee = Some("user@example.com".to_string());
-            assert!(args.has_updates());
-        }
-
-        #[test]
-        fn test_has_updates_no_assignee_flag() {
-            let mut args = create_empty_update_args();
-            args.no_assignee = true;
-            assert!(args.has_updates());
-        }
-
-        #[test]
         fn test_has_updates_design() {
             let mut args = create_empty_update_args();
             args.design = Some("Design notes".to_string());
@@ -650,8 +633,7 @@ mod tests {
                 "--description",
                 "--status",
                 "--priority",
-                "--assignee",
-                "--no-assignee",
+                "--kind",
                 "--design",
                 "--acceptance",
                 "--notes",
@@ -665,6 +647,7 @@ mod tests {
                     help
                 );
             }
+            assert!(!help.contains("assignee"));
         }
 
         #[test]
@@ -685,11 +668,6 @@ mod tests {
             assert!(
                 help.contains("(-p)"),
                 "Expected short flag -p for priority, got: {}",
-                help
-            );
-            assert!(
-                help.contains("(-a)"),
-                "Expected short flag -a for assignee, got: {}",
                 help
             );
         }

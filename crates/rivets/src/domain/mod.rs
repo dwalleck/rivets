@@ -1025,14 +1025,6 @@ pub struct IssueUpdate {
     /// New issue kind (if reclassifying)
     pub issue_kind: Option<IssueKind>,
 
-    /// New assignee (if updating)
-    ///
-    /// This uses the double-Option pattern to represent three distinct states:
-    /// - `None`: Don't modify the assignee (leave unchanged)
-    /// - `Some(None)`: Clear the assignee (set to unassigned)
-    /// - `Some(Some(name))`: Set assignee to the given name
-    pub assignee: Option<Option<String>>,
-
     /// New design notes (if updating)
     pub design: Option<String>,
 

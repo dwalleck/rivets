@@ -387,9 +387,6 @@ impl Tools {
         debug!("Updating issue");
         let status = params.status.as_deref().map(validate_status).transpose()?;
         let issue_kind = params.kind.resolve("update");
-        let assignee = params
-            .assignee
-            .map(|value| if value.is_empty() { None } else { Some(value) });
 
         let mut storage = self
             .mutation_storage_for(params.workspace_root.as_deref())
@@ -402,7 +399,6 @@ impl Tools {
             status,
             priority: params.priority,
             issue_kind,
-            assignee,
             design: params.design,
             acceptance_criteria: params.acceptance_criteria,
             note: None,
@@ -988,7 +984,6 @@ mod tests {
         status: Option<&str>,
         priority: Option<u8>,
         issue_kind: Option<&str>,
-        assignee: Option<String>,
         design: Option<String>,
         acceptance_criteria: Option<String>,
         labels: Option<Vec<String>>,
@@ -999,7 +994,6 @@ mod tests {
             status: status.map(str::to_string),
             priority,
             kind: kind_input(issue_kind),
-            assignee,
             title,
             description,
             design,
@@ -1115,7 +1109,20 @@ mod tests {
     async fn test_update_issue(#[future] tools: Tools) {
         let tools = tools.await;
 
-        let issue = create_issue(&tools, "Original Title").await;
+        let issue = tools
+            .create(create_params(
+                "Original Title".to_string(),
+                None,
+                None,
+                None,
+                Some("active-owner".to_string()),
+                None,
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("create should succeed");
 
         let updated = tools
             .update(update_params(
@@ -1125,7 +1132,6 @@ mod tests {
                 Some("in_progress"),
                 Some(0),
                 None,
-                Some("active-owner".to_string()),
                 None,
                 None,
                 None,

@@ -211,9 +211,6 @@ pub struct UpdateParams {
     #[serde(flatten)]
     pub kind: IssueKindInput,
 
-    /// New assignee.
-    pub assignee: Option<String>,
-
     /// New title.
     pub title: Option<String>,
 

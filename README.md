@@ -53,7 +53,9 @@ rivets close "$ID"
 | `create` | Create an issue (`--title`, `--kind`, `--priority`, `--assignee`, `--labels`, repeatable `--prerequisite`, `--design`, `--acceptance`, `--notes`) |
 | `list` | List issues; filter with `--status`, `--priority`, `--kind`, `--assignee`, `--label`; `--sort` and `--limit` |
 | `show` | Show one or more issues with their Blocking prerequisites/dependents and resources |
-| `update` | Update status, Kind, assignment, design, acceptance criteria, or append a Note; labels use the `label` command |
+| `update` | Update status, Kind, design, acceptance criteria, or append a Note; Assignment uses `claim`/`release`, labels use `label` |
+| `claim` | Atomically assign one Open, unblocked Issue (`<issue-id> --assignee <name>`) |
+| `release` | Atomically unassign one Open Issue from its exact owner (`<issue-id> --assignee <name>`) |
 | `close` | Close one or more issues, optionally `--reason` |
 | `reopen` | Reopen a closed issue, optionally `--reason` |
 | `delete` | Delete an issue permanently (`--force` skips the confirmation prompt) |
@@ -81,7 +83,11 @@ rivets list --status open                # Filter to open issues
 rivets list --status in_progress         # Filter by status
 rivets show demo-a3f8                    # View issue details
 rivets update demo-a3f8 --priority 2     # Update fields
-rivets close demo-a3f8 --reason "Fixed in commit abc123"
+rivets claim demo-a3f8 --assignee alice  # Atomically claim Ready work
+rivets release demo-a3f8 --assignee alice
+rivets claim demo-a3f8 --assignee alice
+rivets update demo-a3f8 --status in_progress
+rivets close demo-a3f8 --reason "Fixed in commit abc123" # Closing clears Assignment
 ```
 
 ### Blocking Dependencies

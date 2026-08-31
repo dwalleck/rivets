@@ -40,10 +40,10 @@ use crate::app::App;
 
 // Re-export argument structs
 pub use args::{
-    BlockedArgs, BlockingDependencyAction, BlockingDependencyArgs, BlockingDependencyListArgs,
-    CloseArgs, CreateArgs, DeleteArgs, InfoArgs, InitArgs, LabelAction, LabelArgs, ListArgs,
-    ReadyArgs, ReopenArgs, ResourceAction, ResourceArgs, ShowArgs, StaleArgs, StatsArgs,
-    UpdateArgs,
+    AssignmentArgs, BlockedArgs, BlockingDependencyAction, BlockingDependencyArgs,
+    BlockingDependencyListArgs, CloseArgs, CreateArgs, DeleteArgs, InfoArgs, InitArgs, LabelAction,
+    LabelArgs, ListArgs, ReadyArgs, ReopenArgs, ResourceAction, ResourceArgs, ShowArgs, StaleArgs,
+    StatsArgs, UpdateArgs,
 };
 
 // Re-export types
@@ -111,6 +111,11 @@ pub enum Commands {
     /// Modifies one or more fields of an existing issue. Only provided fields
     /// are updated; other fields remain unchanged.
     Update(UpdateArgs),
+    /// Claim an Open, unblocked Issue for one Assignee.
+    Claim(AssignmentArgs),
+
+    /// Release an Open Issue owned by the exact Assignee.
+    Release(AssignmentArgs),
 
     /// Close an issue
     ///
@@ -168,6 +173,8 @@ impl Commands {
         match self {
             Self::Create(_)
             | Self::Update(_)
+            | Self::Claim(_)
+            | Self::Release(_)
             | Self::Close(_)
             | Self::Reopen(_)
             | Self::Delete(_) => true,
@@ -265,6 +272,14 @@ impl Cli {
                 let mut app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_update(&mut app, args, output_mode).await
             }
+            Some(Commands::Claim(args)) => {
+                let mut app = load_app_from_cwd(mutates_workspace).await?;
+                execute::execute_claim(&mut app, args, output_mode).await
+            }
+            Some(Commands::Release(args)) => {
+                let mut app = load_app_from_cwd(mutates_workspace).await?;
+                execute::execute_release(&mut app, args, output_mode).await
+            }
             Some(Commands::Close(args)) => {
                 let mut app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_close(&mut app, args, output_mode, self.yes).await
@@ -338,6 +353,8 @@ mod tests {
             &["close", "test-abc"],
             &["reopen", "test-abc"],
             &["delete", "test-abc", "--force"],
+            &["claim", "test-abc", "--assignee", "alice"],
+            &["release", "test-abc", "--assignee", "alice"],
             &[
                 "blocking-dependency",
                 "add",
@@ -884,31 +901,44 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_update_no_assignee() {
-        let cli = Cli::try_parse_from(["rivets", "update", "proj-abc", "--no-assignee"]).unwrap();
-        match cli.command {
-            Some(Commands::Update(args)) => {
-                assert!(args.no_assignee);
-                assert!(args.assignee.is_none());
+    fn general_update_rejects_assignment_flags() {
+        for flag in ["--assignee", "--no-assignee"] {
+            let mut argv = vec!["rivets", "update", "proj-abc", flag];
+            if flag == "--assignee" {
+                argv.push("alice");
             }
-            _ => panic!("Expected Update command"),
+            assert!(
+                Cli::try_parse_from(argv).is_err(),
+                "general update must reject {flag}"
+            );
         }
     }
 
     #[test]
-    fn test_parse_update_assignee_and_no_assignee_conflict() {
-        // --assignee and --no-assignee should conflict
-        let result = Cli::try_parse_from([
-            "rivets",
-            "update",
-            "proj-abc",
-            "--assignee",
-            "alice",
-            "--no-assignee",
-        ]);
-        match result {
-            Ok(_) => panic!("Expected a conflict error, but parsing succeeded."),
-            Err(e) => assert!(e.to_string().contains("cannot be used with")),
+    fn claim_and_release_require_one_issue_and_explicit_assignee() {
+        for command in ["claim", "release"] {
+            let parsed =
+                Cli::try_parse_from(["rivets", command, "proj-abc", "--assignee", "alice"])
+                    .expect("intent should parse");
+            let args = match parsed.command {
+                Some(Commands::Claim(args) | Commands::Release(args)) => args,
+                _ => panic!("Expected Assignment command"),
+            };
+            assert_eq!(args.issue_id, "proj-abc");
+            assert_eq!(args.assignee, "alice");
+
+            assert!(Cli::try_parse_from(["rivets", command, "proj-abc"]).is_err());
+            assert!(
+                Cli::try_parse_from([
+                    "rivets",
+                    command,
+                    "proj-abc",
+                    "proj-def",
+                    "--assignee",
+                    "alice",
+                ])
+                .is_err()
+            );
         }
     }
 }

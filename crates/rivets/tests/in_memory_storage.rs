@@ -198,12 +198,12 @@ async fn test_update_issue() {
 
     let new_issue = create_test_issue("Original Title");
     let created = storage.create(new_issue).await.unwrap();
+    storage.claim(&created.id, "active-owner").await.unwrap();
 
     let updates = IssueUpdate {
         title: Some("Updated Title".to_string()),
         status: Some(IssueStatus::InProgress),
         priority: Some(1),
-        assignee: Some(Some("active-owner".to_string())),
         ..Default::default()
     };
 

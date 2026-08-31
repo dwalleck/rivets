@@ -36,7 +36,6 @@ fn update_params(issue_id: &str, workspace_root: Option<&str>) -> UpdateParams {
         status: None,
         priority: None,
         kind: IssueKindInput::canonical(None),
-        assignee: None,
         title: Some("Updated title".to_string()),
         description: None,
         design: None,

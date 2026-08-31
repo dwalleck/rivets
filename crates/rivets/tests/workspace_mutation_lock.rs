@@ -7,6 +7,7 @@ use serde_json::Value;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
+use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -103,6 +104,59 @@ async fn workspace_mutation_lock_does_not_serialize_distinct_cli_workspaces() {
 }
 
 #[tokio::test]
+async fn claim_and_release_require_workspace_mutation_lock() {
+    let workspace = workspace().await;
+    let created = run(
+        workspace.path(),
+        &["--json", "create", "--title", "Lock target", "--yes"],
+    );
+    let created: Value =
+        serde_json::from_slice(&created.stdout).expect("create output should be JSON");
+    let issue_id = created["id"].as_str().expect("Issue ID");
+
+    let holder = WorkspaceMutationLock::try_acquire(workspace.path())
+        .expect("test holder should acquire Workspace lock");
+    let claim = run(
+        workspace.path(),
+        &["claim", issue_id, "--assignee", "alice"],
+    );
+    assert!(!claim.status.success());
+    assert!(String::from_utf8_lossy(&claim.stderr).contains("Workspace is busy"));
+    assert_eq!(issue_records(workspace.path())[0]["assignee"], Value::Null);
+    drop(holder);
+
+    assert!(
+        run(
+            workspace.path(),
+            &["claim", issue_id, "--assignee", "alice"],
+        )
+        .status
+        .success()
+    );
+
+    let holder = WorkspaceMutationLock::try_acquire(workspace.path())
+        .expect("test holder should reacquire Workspace lock");
+    let release = run(
+        workspace.path(),
+        &["release", issue_id, "--assignee", "alice"],
+    );
+    assert!(!release.status.success());
+    assert!(String::from_utf8_lossy(&release.stderr).contains("Workspace is busy"));
+    assert_eq!(issue_records(workspace.path())[0]["assignee"], "alice");
+    drop(holder);
+
+    assert!(
+        run(
+            workspace.path(),
+            &["release", issue_id, "--assignee", "alice"],
+        )
+        .status
+        .success()
+    );
+    assert_eq!(issue_records(workspace.path())[0]["assignee"], Value::Null);
+}
+
+#[tokio::test]
 async fn workspace_mutation_lock_retry_preserves_both_cli_writes() {
     let workspace = workspace().await;
     let mut first = Command::new(env!("CARGO_BIN_EXE_rivets"))
@@ -153,4 +207,143 @@ async fn workspace_mutation_lock_retry_preserves_both_cli_writes() {
         .collect();
     titles.sort();
     assert_eq!(titles, ["First issue", "Second issue"]);
+}
+
+#[tokio::test]
+async fn synchronized_claims_have_one_durable_winner_and_terminal_retry() {
+    const CLAIMANT_COUNT: usize = 16;
+
+    let workspace = workspace().await;
+    let created = run(
+        workspace.path(),
+        &["--json", "create", "--title", "Claim race", "--yes"],
+    );
+    assert!(created.status.success());
+    let created: Value =
+        serde_json::from_slice(&created.stdout).expect("create output should be JSON");
+    let issue_id = created["id"].as_str().expect("Issue ID").to_string();
+    let claimants = (0..CLAIMANT_COUNT)
+        .map(|index| format!("claimant-{index}"))
+        .collect::<Vec<_>>();
+
+    let barrier = Arc::new(Barrier::new(CLAIMANT_COUNT + 1));
+    let outcomes = thread::scope(|scope| {
+        let handles = claimants
+            .iter()
+            .map(|claimant| {
+                let claimant_barrier = Arc::clone(&barrier);
+                let claimant_id = issue_id.clone();
+                let workspace_path = workspace.path();
+                scope.spawn(move || {
+                    claimant_barrier.wait();
+                    run(
+                        workspace_path,
+                        &["claim", &claimant_id, "--assignee", claimant],
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("claimant should join"))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|output| output.status.success())
+            .count(),
+        1,
+        "exactly one synchronized claimant should mutate the Issue"
+    );
+
+    let record = issue_records(workspace.path())
+        .into_iter()
+        .find(|record| record["id"] == issue_id)
+        .expect("claimed Issue should persist");
+    let winner = record["assignee"]
+        .as_str()
+        .expect("winner should be persisted")
+        .to_string();
+    let claimed_at = record["updated_at"].clone();
+
+    for claimant in &claimants {
+        let retry = run(
+            workspace.path(),
+            &["claim", &issue_id, "--assignee", claimant],
+        );
+        if claimant == &winner {
+            assert!(retry.status.success(), "owner retry should be idempotent");
+        } else {
+            assert!(!retry.status.success(), "loser retry must be terminal");
+            assert!(String::from_utf8_lossy(&retry.stderr).contains("already claimed"));
+        }
+    }
+
+    let record = issue_records(workspace.path())
+        .into_iter()
+        .find(|record| record["id"] == issue_id)
+        .expect("claimed Issue should remain");
+    assert_eq!(record["assignee"], winner);
+    assert_eq!(record["updated_at"], claimed_at);
+}
+
+#[tokio::test]
+async fn synchronized_same_claimant_is_idempotent_after_retry() {
+    let workspace = workspace().await;
+    let created = run(
+        workspace.path(),
+        &["--json", "create", "--title", "Same claimant race", "--yes"],
+    );
+    let created: Value =
+        serde_json::from_slice(&created.stdout).expect("create output should be JSON");
+    let issue_id = created["id"].as_str().expect("Issue ID").to_string();
+
+    let barrier = Arc::new(Barrier::new(3));
+    let (first, second) = thread::scope(|scope| {
+        let workspace_path = workspace.path();
+        let first_barrier = Arc::clone(&barrier);
+        let first_id = issue_id.clone();
+        let first = scope.spawn(move || {
+            first_barrier.wait();
+            run(workspace_path, &["claim", &first_id, "--assignee", "alice"])
+        });
+        let second_barrier = Arc::clone(&barrier);
+        let second_id = issue_id.clone();
+        let second = scope.spawn(move || {
+            second_barrier.wait();
+            run(
+                workspace_path,
+                &["claim", &second_id, "--assignee", "alice"],
+            )
+        });
+        barrier.wait();
+        (
+            first.join().expect("first join"),
+            second.join().expect("second join"),
+        )
+    });
+    assert!(
+        first.status.success() || second.status.success(),
+        "one same-owner claimant must acquire the lock"
+    );
+
+    let claimed = issue_records(workspace.path())
+        .into_iter()
+        .find(|record| record["id"] == issue_id)
+        .expect("claimed Issue should persist");
+    assert_eq!(claimed["assignee"], "alice");
+    let claimed_at = claimed["updated_at"].clone();
+
+    let retry = run(
+        workspace.path(),
+        &["claim", &issue_id, "--assignee", "alice"],
+    );
+    assert!(retry.status.success());
+    let retried = issue_records(workspace.path())
+        .into_iter()
+        .find(|record| record["id"] == issue_id)
+        .expect("claimed Issue should persist");
+    assert_eq!(retried["updated_at"], claimed_at);
 }

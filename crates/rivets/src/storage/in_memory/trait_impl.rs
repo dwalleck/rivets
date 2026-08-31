@@ -193,9 +193,6 @@ impl IssueStorage for InMemoryStorage {
         if let Some(issue_kind) = updates.issue_kind {
             candidate.issue_kind = issue_kind;
         }
-        if let Some(assignee) = updates.assignee {
-            candidate.assignee = assignee;
-        }
         if let Some(status) = status {
             // The domain owns transition and Assignment coupling (ADRs 0002
             // and 0005); this is the single application site.

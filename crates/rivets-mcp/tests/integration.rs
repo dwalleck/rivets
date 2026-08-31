@@ -107,7 +107,6 @@ fn update_params(
     status: Option<&str>,
     priority: Option<u8>,
     issue_kind: Option<&str>,
-    assignee: Option<String>,
     design: Option<String>,
     acceptance_criteria: Option<String>,
     labels: Option<Vec<String>>,
@@ -118,7 +117,6 @@ fn update_params(
         status: status.map(str::to_string),
         priority,
         kind: kind_input(issue_kind),
-        assignee,
         title,
         description,
         design,
@@ -710,7 +708,20 @@ async fn reopen_in_progress_issue_returns_to_open_with_claim() {
     let workspace = create_temp_workspace();
     let tools = create_tools();
     set_context(&tools, workspace.path()).await;
-    let issue = create_issue(&tools, "Active work").await;
+    let issue = tools
+        .create(create_params(
+            "Active work".to_string(),
+            None,
+            None,
+            None,
+            Some("active-owner".to_string()),
+            None,
+            None,
+            None,
+            None,
+        ))
+        .await
+        .expect("create should succeed");
     let active = tools
         .update(update_params(
             issue.id.as_str(),
@@ -719,7 +730,6 @@ async fn reopen_in_progress_issue_returns_to_open_with_claim() {
             Some("in_progress"),
             None,
             None,
-            Some("active-owner".to_string()),
             None,
             None,
             None,
@@ -747,7 +757,20 @@ async fn test_issue_lifecycle_create_update_close() {
     set_context(&tools, workspace.path()).await;
 
     // Create issue
-    let created = create_issue(&tools, "Lifecycle Test Issue").await;
+    let created = tools
+        .create(create_params(
+            "Lifecycle Test Issue".to_string(),
+            None,
+            None,
+            None,
+            Some("alice".to_string()),
+            None,
+            None,
+            None,
+            None,
+        ))
+        .await
+        .expect("create should succeed");
     assert_eq!(created.status, IssueStatus::Open);
 
     // Update to in_progress
@@ -759,7 +782,6 @@ async fn test_issue_lifecycle_create_update_close() {
             Some("in_progress"),
             Some(1),
             None, // issue_kind
-            Some("alice".to_string()),
             None,
             None,
             None, // labels
@@ -996,7 +1018,6 @@ async fn test_update_reclassifies_only_kind_and_persists_across_context_restart(
             None,
             None,
             Some("bug"),
-            None,
             None,
             None,
             None,
@@ -2200,117 +2221,6 @@ async fn test_list_filters(#[case] test_case: ListFilterCase) {
 }
 
 // ============================================================================
-// Assignee Tests
-// ============================================================================
-
-/// Test assignee clearing with empty string.
-#[tokio::test]
-async fn test_assignee_clearing() {
-    let workspace = create_temp_workspace();
-    let tools = create_tools();
-    set_context(&tools, workspace.path()).await;
-
-    // Create issue with assignee
-    let created = tools
-        .create(create_params(
-            "Assigned Issue".to_string(),
-            None,
-            None,
-            None,
-            Some("alice".to_string()),
-            None,
-            None,
-            None,
-            None,
-        ))
-        .await
-        .unwrap();
-
-    assert_eq!(created.assignee, Some("alice".to_string()));
-
-    // Empty string clears the assignee at the MCP parameter boundary.
-    let updated = tools
-        .update(update_params(
-            created.id.as_str(),
-            None,
-            None,
-            None,
-            None,
-            None, // issue_kind
-            Some(String::new()),
-            None,
-            None,
-            None, // labels
-            None, // workspace_root
-        ))
-        .await
-        .unwrap();
-
-    assert!(updated.assignee.is_none(), "Assignee should be cleared");
-}
-
-/// Test assignee update vs no-op.
-#[tokio::test]
-async fn test_assignee_update_vs_noop() {
-    let workspace = create_temp_workspace();
-    let tools = create_tools();
-    set_context(&tools, workspace.path()).await;
-
-    let created = tools
-        .create(create_params(
-            "Test".to_string(),
-            None,
-            None,
-            None,
-            Some("original".to_string()),
-            None,
-            None,
-            None,
-            None,
-        ))
-        .await
-        .unwrap();
-
-    // Update with None (no change)
-    let unchanged = tools
-        .update(update_params(
-            created.id.as_str(),
-            None,
-            None,
-            None,
-            None,
-            None, // issue_kind
-            None, // None means don't update
-            None,
-            None,
-            None, // labels
-            None, // workspace_root
-        ))
-        .await
-        .unwrap();
-    assert_eq!(unchanged.assignee, Some("original".to_string()));
-
-    // Update the assignee.
-    let changed = tools
-        .update(update_params(
-            created.id.as_str(),
-            None,
-            None,
-            None,
-            None,
-            None, // issue_kind
-            Some("new".to_string()),
-            None,
-            None,
-            None, // labels
-            None, // workspace_root
-        ))
-        .await
-        .unwrap();
-    assert_eq!(changed.assignee, Some("new".to_string()));
-}
-
-// ============================================================================
 // where_am_i Tests
 // ============================================================================
 
@@ -2374,7 +2284,20 @@ async fn test_update_persistence() {
     {
         let tools = create_tools();
         set_context(&tools, workspace.path()).await;
-        let issue = create_issue(&tools, "To Update").await;
+        let issue = tools
+            .create(create_params(
+                "To Update".to_string(),
+                None,
+                None,
+                None,
+                Some("active-owner".to_string()),
+                None,
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("create should succeed");
         issue_id = issue.id.as_str().to_string();
 
         tools
@@ -2385,7 +2308,6 @@ async fn test_update_persistence() {
                 Some("in_progress"),
                 None,
                 None, // issue_kind
-                Some("active-owner".to_string()),
                 None,
                 None,
                 None, // labels
@@ -3245,7 +3167,6 @@ async fn test_invalid_status_in_update(#[case] invalid_value: &str) {
             None, // issue_kind
             None,
             None,
-            None,
             None, // labels
             None, // workspace_root
         ))
@@ -3343,7 +3264,6 @@ async fn canonical_workflow_state_inputs() {
             None,
             None,
             None,
-            None,
         ))
         .await
         .expect_err("Blocked is derived and must not be accepted as Workflow State");
@@ -3377,7 +3297,6 @@ async fn canonical_workflow_state_inputs() {
             Some("in_progress"),
             None,
             None, // issue_kind
-            None,
             None,
             None,
             None, // labels
@@ -3445,7 +3364,6 @@ async fn test_update_preserves_unmodified_fields() {
             None, // Don't update status
             None, // Don't update priority
             None, // issue_kind
-            None, // Don't update assignee
             None, // Don't update design
             None, // Don't update acceptance
             None, // labels
@@ -3624,7 +3542,6 @@ async fn test_all_tools_with_storage_backend() {
             Some("in_progress"),
             None,
             None, // issue_kind
-            None,
             None,
             None,
             None, // labels
@@ -3827,7 +3744,20 @@ async fn test_issue_counts_accurate() {
 
     // Create issues with various states
     let issue1 = create_issue(&tools, "Open Issue").await;
-    let issue2 = create_issue(&tools, "In Progress Issue").await;
+    let issue2 = tools
+        .create(create_params(
+            "In Progress Issue".to_string(),
+            None,
+            None,
+            None,
+            Some("active-owner".to_string()),
+            None,
+            None,
+            None,
+            None,
+        ))
+        .await
+        .expect("create should succeed");
     let issue3 = create_issue(&tools, "To Close").await;
 
     tools
@@ -3838,7 +3768,6 @@ async fn test_issue_counts_accurate() {
             Some("in_progress"),
             None,
             None, // issue_kind
-            Some("active-owner".to_string()),
             None,
             None,
             None, // labels

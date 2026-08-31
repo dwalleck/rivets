@@ -7,9 +7,9 @@ use std::io::Write;
 use anyhow::{Context, Result};
 
 use super::args::{
-    BlockedArgs, BlockingDependencyAction, BlockingDependencyArgs, CloseArgs, CreateArgs,
-    DeleteArgs, InfoArgs, InitArgs, LabelAction, LabelArgs, ListArgs, ReadyArgs, ReopenArgs,
-    ResourceAction, ResourceArgs, ShowArgs, StaleArgs, StatsArgs, UpdateArgs,
+    AssignmentArgs, BlockedArgs, BlockingDependencyAction, BlockingDependencyArgs, CloseArgs,
+    CreateArgs, DeleteArgs, InfoArgs, InitArgs, LabelAction, LabelArgs, ListArgs, ReadyArgs,
+    ReopenArgs, ResourceAction, ResourceArgs, ShowArgs, StaleArgs, StatsArgs, UpdateArgs,
 };
 use super::types::{SortOrderArg, SortPolicyArg};
 use crate::output::OutputMode;
@@ -343,11 +343,6 @@ pub async fn execute_update(
             status: args.status,
             priority: args.priority,
             issue_kind: args.issue_kind,
-            assignee: if args.no_assignee {
-                Some(None) // Clear the assignee
-            } else {
-                args.assignee.clone().map(Some)
-            },
             design: args.design.clone(),
             acceptance_criteria: args.acceptance.clone(),
             note: note.clone(),
@@ -360,6 +355,49 @@ pub async fn execute_update(
 
     output_batch_result(&result, "Updated", output_mode)?;
     bail_on_batch_failures(&result, "update")
+}
+/// Atomically claim one Open, unblocked Issue.
+pub async fn execute_claim(
+    app: &mut crate::app::App,
+    args: &AssignmentArgs,
+    output_mode: OutputMode,
+) -> Result<()> {
+    use crate::domain::IssueId;
+    use crate::output;
+
+    let issue = app
+        .storage_mut()
+        .claim(&IssueId::new(&args.issue_id), &args.assignee)
+        .await?;
+    app.save().await?;
+
+    match output_mode {
+        OutputMode::Json => output::print_json(&issue)?,
+        OutputMode::Text => println!("Claimed issue {} for {}", issue.id, args.assignee),
+    }
+    Ok(())
+}
+
+/// Atomically release one Open Issue from its exact Assignee.
+pub async fn execute_release(
+    app: &mut crate::app::App,
+    args: &AssignmentArgs,
+    output_mode: OutputMode,
+) -> Result<()> {
+    use crate::domain::IssueId;
+    use crate::output;
+
+    let issue = app
+        .storage_mut()
+        .release(&IssueId::new(&args.issue_id), &args.assignee)
+        .await?;
+    app.save().await?;
+
+    match output_mode {
+        OutputMode::Json => output::print_json(&issue)?,
+        OutputMode::Text => println!("Released issue {} from {}", issue.id, args.assignee),
+    }
+    Ok(())
 }
 
 /// Handle save-or-record-failure for batch operations.
@@ -1758,8 +1796,6 @@ mod tests {
                 status: None,
                 priority: None,
                 issue_kind: None,
-                assignee: None,
-                no_assignee: false,
                 design: None,
                 acceptance: None,
                 notes: None,

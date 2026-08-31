@@ -40,6 +40,14 @@ fn initialized_dir() -> TempDir {
     );
     temp
 }
+fn claim_issue(dir: &Path, issue_id: &str, assignee: &str) {
+    let output = run_rivets_in_dir(dir, &["claim", issue_id, "--assignee", assignee]);
+    assert!(
+        output.status.success(),
+        "Claim failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
 
 // ============================================================================
 // Help and Version Tests
@@ -101,6 +109,11 @@ fn test_cli_help_shows_all_commands() {
     assert!(
         stdout.contains("update"),
         "Help should show 'update' command"
+    );
+    assert!(stdout.contains("claim"), "Help should show 'claim' command");
+    assert!(
+        stdout.contains("release"),
+        "Help should show 'release' command"
     );
     assert!(stdout.contains("close"), "Help should show 'close' command");
     assert!(
@@ -449,18 +462,12 @@ fn test_cli_list_status_filters_match_issues(initialized_dir: TempDir) {
     // Create issues with different statuses
     let open_id = create_issue(initialized_dir.path(), "Open issue", &[]);
     let in_progress_id = create_issue(initialized_dir.path(), "In progress issue", &[]);
+    claim_issue(initialized_dir.path(), &in_progress_id, "active-owner");
 
     // Update one to in_progress
     let update = run_rivets_in_dir(
         initialized_dir.path(),
-        &[
-            "update",
-            &in_progress_id,
-            "--status",
-            "in_progress",
-            "--assignee",
-            "active-owner",
-        ],
+        &["update", &in_progress_id, "--status", "in_progress"],
     );
     assert!(update.status.success());
 
@@ -572,6 +579,7 @@ fn test_cli_show_nonexistent_issue(initialized_dir: TempDir) {
 #[rstest]
 fn test_cli_update_issue(initialized_dir: TempDir) {
     let issue_id = create_issue(initialized_dir.path(), "Original title", &[]);
+    claim_issue(initialized_dir.path(), &issue_id, "active-owner");
 
     let output = run_rivets_in_dir(
         initialized_dir.path(),
@@ -582,8 +590,6 @@ fn test_cli_update_issue(initialized_dir: TempDir) {
             "Updated title",
             "--status",
             "in_progress",
-            "--assignee",
-            "active-owner",
         ],
     );
 
@@ -1015,16 +1021,10 @@ fn ready_assignment_visibility(initialized_dir: TempDir) {
         &["--prerequisite", &prerequisite],
     );
     let in_progress = create_issue(initialized_dir.path(), "In Progress", &[]);
+    claim_issue(initialized_dir.path(), &in_progress, "active-owner");
     let update = run_rivets_in_dir(
         initialized_dir.path(),
-        &[
-            "update",
-            &in_progress,
-            "--status",
-            "in_progress",
-            "--assignee",
-            "active-owner",
-        ],
+        &["update", &in_progress, "--status", "in_progress"],
     );
     assert!(
         update.status.success(),
@@ -1408,16 +1408,10 @@ fn stats_and_frontier_output_separate_lifecycle_from_blocked(initialized_dir: Te
     let dependent = create_issue(initialized_dir.path(), "Dependent", &[]);
     let in_progress = create_issue(initialized_dir.path(), "In progress", &[]);
     let closed = create_issue(initialized_dir.path(), "Closed", &[]);
+    claim_issue(initialized_dir.path(), &in_progress, "active-owner");
     let active = run_rivets_in_dir(
         initialized_dir.path(),
-        &[
-            "update",
-            &in_progress,
-            "--status",
-            "in_progress",
-            "--assignee",
-            "active-owner",
-        ],
+        &["update", &in_progress, "--status", "in_progress"],
     );
     assert!(active.status.success());
     run_rivets_in_dir(initialized_dir.path(), &["close", &closed]);
@@ -1628,17 +1622,11 @@ fn test_cli_info_with_issues(initialized_dir: TempDir) {
     create_issue(initialized_dir.path(), "Open issue", &[]);
     let id2 = create_issue(initialized_dir.path(), "In progress issue", &[]);
     let id3 = create_issue(initialized_dir.path(), "Closed issue", &[]);
+    claim_issue(initialized_dir.path(), &id2, "active-owner");
 
     let active = run_rivets_in_dir(
         initialized_dir.path(),
-        &[
-            "update",
-            &id2,
-            "--status",
-            "in_progress",
-            "--assignee",
-            "active-owner",
-        ],
+        &["update", &id2, "--status", "in_progress"],
     );
     assert!(active.status.success());
     run_rivets_in_dir(initialized_dir.path(), &["close", &id3]);
@@ -1674,17 +1662,11 @@ fn test_cli_info_with_canonical_states(initialized_dir: TempDir) {
     create_issue(initialized_dir.path(), "Open issue", &[]);
     let in_progress_id = create_issue(initialized_dir.path(), "In progress issue", &[]);
     let closed_id = create_issue(initialized_dir.path(), "Closed issue", &[]);
+    claim_issue(initialized_dir.path(), &in_progress_id, "active-owner");
 
     let active = run_rivets_in_dir(
         initialized_dir.path(),
-        &[
-            "update",
-            &in_progress_id,
-            "--status",
-            "in_progress",
-            "--assignee",
-            "active-owner",
-        ],
+        &["update", &in_progress_id, "--status", "in_progress"],
     );
     assert!(active.status.success());
     run_rivets_in_dir(initialized_dir.path(), &["close", &closed_id]);
@@ -1888,17 +1870,11 @@ fn test_cli_stale_with_days_option(initialized_dir: TempDir) {
 fn test_cli_stale_with_status_filter(initialized_dir: TempDir) {
     create_issue(initialized_dir.path(), "Open issue", &[]);
     let id2 = create_issue(initialized_dir.path(), "In progress issue", &[]);
+    claim_issue(initialized_dir.path(), &id2, "active-owner");
 
     let active = run_rivets_in_dir(
         initialized_dir.path(),
-        &[
-            "update",
-            &id2,
-            "--status",
-            "in_progress",
-            "--assignee",
-            "active-owner",
-        ],
+        &["update", &id2, "--status", "in_progress"],
     );
     assert!(active.status.success());
 
@@ -1994,39 +1970,104 @@ fn test_cli_update_multiple_issues(initialized_dir: TempDir) {
 }
 
 #[rstest]
-fn test_cli_update_no_assignee_flag(initialized_dir: TempDir) {
-    // Create an issue with an assignee
-    let issue_id = create_issue(
+fn claim_release_cli_contract_survives_restart(initialized_dir: TempDir) {
+    let issue_id = create_issue(initialized_dir.path(), "Claim target", &[]);
+
+    let claimed = run_rivets_in_dir(
         initialized_dir.path(),
-        "Issue with assignee",
-        &["--assignee", "alice"],
+        &["--json", "claim", &issue_id, "--assignee", "alice"],
     );
-
-    // Verify the assignee is set
-    let show_before = run_rivets_in_dir(initialized_dir.path(), &["show", &issue_id]);
-    let stdout_before = String::from_utf8_lossy(&show_before.stdout);
     assert!(
-        stdout_before.contains("Assignee: alice"),
-        "Assignee should be set initially"
+        claimed.status.success(),
+        "Claim failed: {}",
+        String::from_utf8_lossy(&claimed.stderr)
     );
+    let claimed: serde_json::Value =
+        serde_json::from_slice(&claimed.stdout).expect("Claim output should be JSON");
+    assert_eq!(claimed["assignee"], "alice");
+    let claimed_at = claimed["updated_at"].clone();
 
-    // Update with --no-assignee to remove the assignee
-    let update_output = run_rivets_in_dir(
+    let restarted = run_rivets_in_dir(initialized_dir.path(), &["--json", "show", &issue_id]);
+    let restarted: serde_json::Value =
+        serde_json::from_slice(&restarted.stdout).expect("show output should be JSON");
+    assert_eq!(restarted[0]["assignee"], "alice");
+
+    let retry = run_rivets_in_dir(
         initialized_dir.path(),
-        &["update", &issue_id, "--no-assignee"],
+        &["--json", "claim", &issue_id, "--assignee", "alice"],
     );
-    assert!(
-        update_output.status.success(),
-        "Update with --no-assignee failed: {:?}",
-        String::from_utf8_lossy(&update_output.stderr)
-    );
+    assert!(retry.status.success());
+    let retry: serde_json::Value =
+        serde_json::from_slice(&retry.stdout).expect("retry output should be JSON");
+    assert_eq!(retry["updated_at"], claimed_at);
 
-    // Verify the assignee was removed
-    let show_after = run_rivets_in_dir(initialized_dir.path(), &["show", &issue_id]);
-    let stdout_after = String::from_utf8_lossy(&show_after.stdout);
+    let conflict = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["claim", &issue_id, "--assignee", "bob"],
+    );
+    assert!(!conflict.status.success());
+    assert!(String::from_utf8_lossy(&conflict.stderr).contains("already claimed by alice"));
+
+    let mismatch = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["release", &issue_id, "--assignee", "bob"],
+    );
+    assert!(!mismatch.status.success());
+    assert!(String::from_utf8_lossy(&mismatch.stderr).contains("release expected"));
+
+    let released = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["--json", "release", &issue_id, "--assignee", "alice"],
+    );
+    assert!(released.status.success());
+    let released: serde_json::Value =
+        serde_json::from_slice(&released.stdout).expect("Release output should be JSON");
+    assert_eq!(released["assignee"], serde_json::Value::Null);
+
+    let restarted = run_rivets_in_dir(initialized_dir.path(), &["--json", "show", &issue_id]);
+    let restarted: serde_json::Value =
+        serde_json::from_slice(&restarted.stdout).expect("show output should be JSON");
+    assert_eq!(restarted[0]["assignee"], serde_json::Value::Null);
+
+    let prerequisite = create_issue(initialized_dir.path(), "Prerequisite", &[]);
+    let blocked = create_issue(initialized_dir.path(), "Blocked target", &[]);
+    let add = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "blocking-dependency",
+            "add",
+            "--dependent",
+            &blocked,
+            "--prerequisite",
+            &prerequisite,
+        ],
+    );
+    assert!(add.status.success());
+    let blocked_claim = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["claim", &blocked, "--assignee", "alice"],
+    );
+    assert!(!blocked_claim.status.success());
+    assert!(String::from_utf8_lossy(&blocked_claim.stderr).contains("Blocked"));
+
+    let active = create_issue(
+        initialized_dir.path(),
+        "Active target",
+        &["--assignee", "active-owner"],
+    );
+    let enter_active = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["update", &active, "--status", "in_progress"],
+    );
+    assert!(enter_active.status.success());
+    let active_claim = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["claim", &active, "--assignee", "active-owner"],
+    );
+    assert!(!active_claim.status.success());
     assert!(
-        !stdout_after.contains("Assignee:"),
-        "Assignee should be removed after --no-assignee"
+        String::from_utf8_lossy(&active_claim.stderr)
+            .contains("Assignment changes require an Open Issue")
     );
 }
 

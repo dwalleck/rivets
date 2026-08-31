@@ -1200,12 +1200,15 @@ mod storage_after_load_tests {
         let (mut storage, _) = load_from_jsonl(file.path(), "test".to_string())
             .await
             .unwrap();
+        storage
+            .claim(&IssueId::new("test-1"), "active-owner")
+            .await
+            .unwrap();
 
         // Update the issue
         let update = rivets::domain::IssueUpdate {
             title: Some("Updated Title".to_string()),
             status: Some(IssueStatus::InProgress),
-            assignee: Some(Some("active-owner".to_string())),
             ..Default::default()
         };
 

@@ -49,7 +49,6 @@ fn update_params(
     status: Option<&str>,
     priority: Option<u8>,
     issue_kind: Option<&str>,
-    assignee: Option<String>,
     design: Option<String>,
     acceptance_criteria: Option<String>,
     labels: Option<Vec<String>>,
@@ -60,7 +59,6 @@ fn update_params(
         status: status.map(str::to_string),
         priority,
         kind: kind_input(issue_kind),
-        assignee,
         title,
         description,
         design,
@@ -229,7 +227,6 @@ async fn exercise_issue_mutations(fixture: &MutationFixture) {
         .update(update_params(
             fixture.update_target.id.as_str(),
             Some("Updated after external edit".to_string()),
-            None,
             None,
             None,
             None,
