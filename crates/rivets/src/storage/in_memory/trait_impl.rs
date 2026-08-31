@@ -1172,7 +1172,7 @@ mod tests {
                     None,
                 )
                 .await
-                .unwrap()
+                .expect("ready stress fixture query should succeed")
                 .into_iter()
                 .map(|issue| issue.id)
                 .collect::<BTreeSet<_>>();

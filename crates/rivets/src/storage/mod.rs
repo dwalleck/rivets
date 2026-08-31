@@ -1160,7 +1160,7 @@ mod tests {
             storage
                 .ready_to_work(&ReadyFilter::default(), None)
                 .await
-                .unwrap()
+                .expect("empty ready query should succeed")
                 .is_empty()
         );
         assert!(storage.blocked_issues().await.unwrap().is_empty());
@@ -1720,8 +1720,20 @@ mod tests {
         let merged = create_storage(StorageBackend::Jsonl(jsonl_path.clone()), "test".into())
             .await
             .expect("merged source should reload");
-        assert!(merged.get(&external_issue.id).await.unwrap().is_some());
-        assert!(merged.get(&cached_issue.id).await.unwrap().is_some());
+        assert!(
+            merged
+                .get(&external_issue.id)
+                .await
+                .expect("merged external issue lookup should succeed")
+                .is_some()
+        );
+        assert!(
+            merged
+                .get(&cached_issue.id)
+                .await
+                .expect("merged cached issue lookup should succeed")
+                .is_some()
+        );
 
         std::fs::remove_file(&jsonl_path).expect("source should be deleted externally");
         let error = cached

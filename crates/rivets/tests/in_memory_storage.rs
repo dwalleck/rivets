@@ -342,7 +342,7 @@ async fn blocking_dependency_round_trip_rebuilds_readiness() {
         storage
             .blocked_issues()
             .await
-            .unwrap()
+            .expect("blocked issue query should succeed after adding dependency")
             .into_iter()
             .map(|(issue, _)| issue.id)
             .collect::<HashSet<_>>(),
@@ -352,7 +352,7 @@ async fn blocking_dependency_round_trip_rebuilds_readiness() {
         !storage
             .ready_to_work(&ReadyFilter::default(), None)
             .await
-            .unwrap()
+            .expect("ready issue query should succeed after adding dependency")
             .iter()
             .any(|issue| issue.id == dependent.id)
     );
@@ -373,7 +373,7 @@ async fn blocking_dependency_round_trip_rebuilds_readiness() {
         reloaded
             .blocked_issues()
             .await
-            .unwrap()
+            .expect("reloaded blocked issue query should succeed")
             .into_iter()
             .map(|(issue, _)| issue.id)
             .collect::<HashSet<_>>(),
@@ -383,7 +383,7 @@ async fn blocking_dependency_round_trip_rebuilds_readiness() {
         !reloaded
             .ready_to_work(&ReadyFilter::default(), None)
             .await
-            .unwrap()
+            .expect("reloaded ready issue query should succeed")
             .iter()
             .any(|issue| issue.id == dependent.id)
     );
@@ -570,7 +570,11 @@ async fn closed_prerequisite_stays_recorded_without_blocking() {
     let prerequisite_state = storage.get(&prerequisite.id).await.unwrap().unwrap();
     let expected_blocked = prerequisite_state.status != IssueStatus::Closed;
     assert_eq!(
-        !storage.blocked_issues().await.unwrap().is_empty(),
+        !storage
+            .blocked_issues()
+            .await
+            .expect("blocked issue query should succeed before closing prerequisite")
+            .is_empty(),
         expected_blocked
     );
     assert!(
@@ -596,7 +600,11 @@ async fn closed_prerequisite_stays_recorded_without_blocking() {
     let prerequisite_state = storage.get(&prerequisite.id).await.unwrap().unwrap();
     let expected_blocked = prerequisite_state.status != IssueStatus::Closed;
     assert_eq!(
-        !storage.blocked_issues().await.unwrap().is_empty(),
+        !storage
+            .blocked_issues()
+            .await
+            .expect("blocked issue query should succeed after closing prerequisite")
+            .is_empty(),
         expected_blocked
     );
     assert!(
@@ -624,11 +632,17 @@ async fn ready_truth_table_covers_state_blocking_and_assignment() {
 
     let mut alice_issue = create_test_issue("Alice");
     alice_issue.assignee = Some("alice".to_string());
-    let alice = storage.create(alice_issue).await.unwrap();
+    let alice = storage
+        .create(alice_issue)
+        .await
+        .expect("Alice issue should be created");
 
     let mut in_progress_input = create_test_issue("In Progress");
     in_progress_input.assignee = Some("active-owner".to_string());
-    let in_progress = storage.create(in_progress_input).await.unwrap();
+    let in_progress = storage
+        .create(in_progress_input)
+        .await
+        .expect("in-progress issue should be created");
     storage
         .update(
             &in_progress.id,
@@ -638,9 +652,12 @@ async fn ready_truth_table_covers_state_blocking_and_assignment() {
             },
         )
         .await
-        .unwrap();
+        .expect("in-progress status update should succeed");
 
-    let closed = storage.create(create_test_issue("Closed")).await.unwrap();
+    let closed = storage
+        .create(create_test_issue("Closed"))
+        .await
+        .expect("closed issue should be created");
     storage
         .update(
             &closed.id,
@@ -650,24 +667,28 @@ async fn ready_truth_table_covers_state_blocking_and_assignment() {
             },
         )
         .await
-        .unwrap();
+        .expect("closed status update should succeed");
 
     let prerequisite = storage
         .create(create_test_issue("Prerequisite"))
         .await
-        .unwrap();
-    let blocked = storage.create(create_test_issue("Blocked")).await.unwrap();
+        .expect("prerequisite issue should be created");
+    let blocked = storage
+        .create(create_test_issue("Blocked"))
+        .await
+        .expect("blocked issue should be created");
     storage
         .add_blocking_dependency(
-            BlockingDependency::new(blocked.id.clone(), prerequisite.id.clone()).unwrap(),
+            BlockingDependency::new(blocked.id.clone(), prerequisite.id.clone())
+                .expect("blocking dependency should be constructible for distinct issues"),
         )
         .await
-        .unwrap();
+        .expect("blocking dependency should be added");
 
     let default_ids = storage
         .ready_to_work(&ReadyFilter::default(), None)
         .await
-        .unwrap()
+        .expect("default ready query should succeed")
         .into_iter()
         .map(|issue| issue.id)
         .collect::<HashSet<_>>();
@@ -685,7 +706,7 @@ async fn ready_truth_table_covers_state_blocking_and_assignment() {
             None,
         )
         .await
-        .unwrap()
+        .expect("assignee-filtered ready query should succeed")
         .into_iter()
         .map(|issue| issue.id)
         .collect::<HashSet<_>>();
@@ -700,7 +721,7 @@ async fn ready_truth_table_covers_state_blocking_and_assignment() {
             None,
         )
         .await
-        .unwrap()
+        .expect("all-assignees ready query should succeed")
         .into_iter()
         .map(|issue| issue.id)
         .collect::<HashSet<_>>();
@@ -716,29 +737,36 @@ async fn non_blocking_relationships_never_change_readiness() {
     let prerequisite = storage
         .create(create_test_issue("Prerequisite"))
         .await
-        .unwrap();
+        .expect("prerequisite issue should be created");
     let directly_blocked = storage
         .create(create_test_issue("Directly Blocked"))
         .await
-        .unwrap();
+        .expect("directly blocked issue should be created");
     let blocked_parent = storage
         .create(create_test_issue("Blocked Parent"))
         .await
-        .unwrap();
-    let child = storage.create(create_test_issue("Child")).await.unwrap();
-    let related = storage.create(create_test_issue("Related")).await.unwrap();
+        .expect("blocked parent issue should be created");
+    let child = storage
+        .create(create_test_issue("Child"))
+        .await
+        .expect("child issue should be created");
+    let related = storage
+        .create(create_test_issue("Related"))
+        .await
+        .expect("related issue should be created");
     let discovered = storage
         .create(create_test_issue("Discovered"))
         .await
-        .unwrap();
+        .expect("discovered issue should be created");
 
     for dependent in [&directly_blocked, &blocked_parent] {
         storage
             .add_blocking_dependency(
-                BlockingDependency::new(dependent.id.clone(), prerequisite.id.clone()).unwrap(),
+                BlockingDependency::new(dependent.id.clone(), prerequisite.id.clone())
+                    .expect("blocking dependency should be constructible for each dependent"),
             )
             .await
-            .unwrap();
+            .expect("blocking dependency should be added for each dependent");
     }
     seed_legacy_relationship(
         &mut storage,
@@ -765,7 +793,7 @@ async fn non_blocking_relationships_never_change_readiness() {
     let blocked_ids = storage
         .blocked_issues()
         .await
-        .unwrap()
+        .expect("blocked issue query should succeed with legacy relationships")
         .into_iter()
         .map(|(issue, _)| issue.id)
         .collect::<HashSet<_>>();
@@ -777,7 +805,7 @@ async fn non_blocking_relationships_never_change_readiness() {
     let ready_ids = storage
         .ready_to_work(&ReadyFilter::default(), None)
         .await
-        .unwrap()
+        .expect("ready query should succeed with legacy relationships")
         .into_iter()
         .map(|issue| issue.id)
         .collect::<HashSet<_>>();
@@ -793,34 +821,50 @@ async fn ready_filters_sort_and_limit_after_eligibility() {
 
     let mut unlabelled = create_test_issue_with_priority("Unlabelled P0", 0);
     unlabelled.issue_kind = IssueKind::Task;
-    storage.create(unlabelled).await.unwrap();
+    storage
+        .create(unlabelled)
+        .await
+        .expect("unlabelled issue should be created");
 
     let mut wrong_kind = create_test_issue_with_priority("Focused Bug P0", 0);
     wrong_kind.issue_kind = IssueKind::Bug;
     wrong_kind.labels = vec!["focus".to_string()];
-    storage.create(wrong_kind).await.unwrap();
+    storage
+        .create(wrong_kind)
+        .await
+        .expect("wrong-kind issue should be created");
 
     let prerequisite = storage
         .create(create_test_issue("Prerequisite"))
         .await
-        .unwrap();
+        .expect("prerequisite issue should be created for filtered query");
     let mut blocked = create_test_issue_with_priority("Blocked Focused Task P0", 0);
     blocked.labels = vec!["focus".to_string()];
-    let blocked = storage.create(blocked).await.unwrap();
+    let blocked = storage
+        .create(blocked)
+        .await
+        .expect("blocked issue should be created for filtered query");
     storage
         .add_blocking_dependency(
-            BlockingDependency::new(blocked.id.clone(), prerequisite.id.clone()).unwrap(),
+            BlockingDependency::new(blocked.id.clone(), prerequisite.id.clone())
+                .expect("blocking dependency should be constructible for filtered query"),
         )
         .await
-        .unwrap();
+        .expect("blocking dependency should be added for filtered query");
 
     let mut first = create_test_issue_with_priority("Focused Task P1", 1);
     first.labels = vec!["focus".to_string()];
-    let first = storage.create(first).await.unwrap();
+    let first = storage
+        .create(first)
+        .await
+        .expect("first focused issue should be created");
 
     let mut second = create_test_issue_with_priority("Focused Task P2", 2);
     second.labels = vec!["focus".to_string()];
-    storage.create(second).await.unwrap();
+    storage
+        .create(second)
+        .await
+        .expect("second focused issue should be created");
 
     let ready = storage
         .ready_to_work(
@@ -833,7 +877,7 @@ async fn ready_filters_sort_and_limit_after_eligibility() {
             Some(SortPolicy::Priority),
         )
         .await
-        .unwrap();
+        .expect("filtered ready query should succeed");
 
     assert_eq!(ready.len(), 1);
     assert_eq!(ready[0].id, first.id);
@@ -859,7 +903,7 @@ async fn test_ready_to_work() {
     let ready = storage
         .ready_to_work(&ReadyFilter::default(), None)
         .await
-        .unwrap();
+        .expect("ready query should succeed");
 
     // issue3 and issue1 should be ready, issue2 should be blocked
     assert_eq!(ready.len(), 2);
@@ -893,7 +937,7 @@ async fn test_ready_to_work_closed_blocker_unblocks() {
     let ready = storage
         .ready_to_work(&ReadyFilter::default(), None)
         .await
-        .unwrap();
+        .expect("initial ready query should succeed");
     assert_eq!(ready.len(), 1);
     assert_eq!(ready[0].id, blocker.id);
 
@@ -913,7 +957,7 @@ async fn test_ready_to_work_closed_blocker_unblocks() {
     let ready = storage
         .ready_to_work(&ReadyFilter::default(), None)
         .await
-        .unwrap();
+        .expect("ready query after closing blocker should succeed");
     assert_eq!(ready.len(), 1);
     assert_eq!(ready[0].id, blocked.id);
 }
@@ -998,7 +1042,10 @@ async fn test_ready_to_work_with_assignee_filter() {
         ..Default::default()
     };
 
-    let ready = storage.ready_to_work(&filter, None).await.unwrap();
+    let ready = storage
+        .ready_to_work(&filter, None)
+        .await
+        .expect("assignee-filtered ready query should succeed");
 
     assert_eq!(ready.len(), 1);
     assert_eq!(ready[0].id, alice.id);
@@ -1146,7 +1193,8 @@ async fn test_dependency_on_nonexistent_issue() {
 
     let result = storage
         .add_blocking_dependency(
-            BlockingDependency::new(issue.id.clone(), IssueId::new("nonexistent").clone()).unwrap(),
+            BlockingDependency::new(issue.id.clone(), IssueId::new("nonexistent").clone())
+                .expect("blocking dependency should accept a missing prerequisite id"),
         )
         .await;
 
@@ -1161,7 +1209,7 @@ async fn test_ready_to_work_empty_storage() {
     let ready = storage
         .ready_to_work(&ReadyFilter::default(), None)
         .await
-        .unwrap();
+        .expect("empty-storage ready query should succeed");
     assert!(
         ready.is_empty(),
         "Empty storage should return no ready issues"
@@ -1200,7 +1248,7 @@ async fn test_ready_to_work_all_closed() {
     let ready = storage
         .ready_to_work(&ReadyFilter::default(), None)
         .await
-        .unwrap();
+        .expect("all-closed ready query should succeed");
     assert!(
         ready.is_empty(),
         "All closed issues should return no ready issues"

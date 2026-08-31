@@ -186,8 +186,10 @@ mod tests {
 
     #[tokio::test]
     async fn mutation_app_owns_lock_until_drop() {
-        let temp_dir = TempDir::new().unwrap();
-        init::init(temp_dir.path(), Some("test")).await.unwrap();
+        let temp_dir = TempDir::new().expect("mutation test temporary directory should be created");
+        init::init(temp_dir.path(), Some("test"))
+            .await
+            .expect("mutation test workspace should initialize");
         let app = App::from_directory_for_mutation(temp_dir.path())
             .await
             .expect("mutation App should acquire");
