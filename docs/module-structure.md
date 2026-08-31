@@ -344,10 +344,10 @@ IDs to prevent collisions.
 | Module | Responsibility |
 |--------|----------------|
 | `server.rs` | MCP server implementation and protocol wiring |
-| `tools.rs` | MCP tool implementations (create, list, show, update, …) |
+| `tools.rs` | MCP tool implementations, including atomic Claim/Release through the durable Workspace mutation gate |
 | `context.rs` | Workspace context management |
-| `models.rs` | MCP request/response models |
-| `error.rs` | MCP error types; classifies storage errors via `StorageError::try_into_resource_error` |
+| `models.rs` | MCP request/response models, including shared Assignment parameters |
+| `error.rs` | MCP error types; preserves typed Assignment failures and marks only Workspace Busy as retryable |
 
 ## Testing Structure
 

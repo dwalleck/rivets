@@ -411,6 +411,45 @@ impl Tools {
         Ok(issue)
     }
 
+    /// Atomically claim one Open, unblocked Issue.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed Assignment error if the Issue is not claimable, or a
+    /// Workspace error if context, locking, loading, or persistence fails.
+    #[instrument(skip(self), fields(%issue_id, %assignee))]
+    pub async fn claim(
+        &self,
+        issue_id: &str,
+        assignee: &str,
+        workspace_root: Option<&str>,
+    ) -> Result<Issue> {
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
+        let issue = storage.claim(&IssueId::new(issue_id), assignee).await?;
+        save_or_reload(storage.as_mut()).await?;
+        Ok(issue)
+    }
+
+    /// Atomically release one Open Issue from its exact Assignee.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed Assignment error if the expected Assignee does not own
+    /// the Issue, or a Workspace error if context, locking, loading, or
+    /// persistence fails.
+    #[instrument(skip(self), fields(%issue_id, %assignee))]
+    pub async fn release(
+        &self,
+        issue_id: &str,
+        assignee: &str,
+        workspace_root: Option<&str>,
+    ) -> Result<Issue> {
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
+        let issue = storage.release(&IssueId::new(issue_id), assignee).await?;
+        save_or_reload(storage.as_mut()).await?;
+        Ok(issue)
+    }
+
     /// Append an immutable Note to an Issue.
     ///
     /// # Errors

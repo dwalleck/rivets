@@ -5,11 +5,11 @@
 use crate::context::Context;
 use crate::error::Error;
 use crate::models::{
-    AddNoteParams, BlockedParams, BlockingDependencyListParams, BlockingDependencyPairParams,
-    BlockingDependencyTreeParams, CloseParams, CreateParams, LabelAddParams, LabelListAllParams,
-    LabelListParams, LabelRemoveParams, ListParams, ReadyParams, ReopenParams, ResourceAddParams,
-    ResourceListParams, ResourceRemoveParams, ResourceUpdateParams, SetContextParams, ShowParams,
-    StaleParams, UpdateParams,
+    AddNoteParams, AssignmentParams, BlockedParams, BlockingDependencyListParams,
+    BlockingDependencyPairParams, BlockingDependencyTreeParams, CloseParams, CreateParams,
+    LabelAddParams, LabelListAllParams, LabelListParams, LabelRemoveParams, ListParams,
+    ReadyParams, ReopenParams, ResourceAddParams, ResourceListParams, ResourceRemoveParams,
+    ResourceUpdateParams, SetContextParams, ShowParams, StaleParams, UpdateParams,
 };
 use crate::tools::Tools;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -145,7 +145,7 @@ impl RivetsMcpServer {
 
     /// Update an existing issue.
     #[tool(
-        description = "Update an existing issue's status, priority, kind, assignee, labels, description, design notes, or acceptance criteria. Use empty string for assignee to clear it. Labels replace existing labels when provided. Uses workspace_root if provided, otherwise uses current context."
+        description = "Update an existing issue's status, priority, kind, labels, description, design notes, or acceptance criteria. Assignment changes use claim or release. Labels replace existing labels when provided. Uses workspace_root if provided, otherwise uses current context."
     )]
     async fn update(
         &self,
@@ -154,6 +154,50 @@ impl RivetsMcpServer {
         match self.tools.update(params).await {
             Ok(issue) => Ok(CallToolResult::success(vec![Content::json(issue)?])),
             Err(e) => Err(to_mcp_error(&e)),
+        }
+    }
+
+    /// Atomically claim an Open, unblocked Issue.
+    #[tool(
+        description = "Atomically assign one Open Issue without unresolved direct Blocking Dependencies. Repeating the same Claim is idempotent; a different Assignee receives Already Claimed. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn claim(
+        &self,
+        Parameters(params): Parameters<AssignmentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .tools
+            .claim(
+                &params.issue_id,
+                &params.assignee,
+                params.workspace_root.as_deref(),
+            )
+            .await
+        {
+            Ok(issue) => Ok(CallToolResult::success(vec![Content::json(issue)?])),
+            Err(error) => Err(to_mcp_error(&error)),
+        }
+    }
+
+    /// Atomically release an Open Issue from its exact Assignee.
+    #[tool(
+        description = "Atomically clear Assignment from one Open Issue when assignee exactly matches its current owner. Release remains valid while the Open Issue is blocked. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn release(
+        &self,
+        Parameters(params): Parameters<AssignmentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .tools
+            .release(
+                &params.issue_id,
+                &params.assignee,
+                params.workspace_root.as_deref(),
+            )
+            .await
+        {
+            Ok(issue) => Ok(CallToolResult::success(vec![Content::json(issue)?])),
+            Err(error) => Err(to_mcp_error(&error)),
         }
     }
 
@@ -576,6 +620,8 @@ mod tests {
         assert!(tool_names.contains(&"blocked"));
         assert!(tool_names.contains(&"create"));
         assert!(tool_names.contains(&"update"));
+        assert!(tool_names.contains(&"claim"));
+        assert!(tool_names.contains(&"release"));
         assert!(tool_names.contains(&"add_note"));
         assert!(tool_names.contains(&"close"));
         assert!(tool_names.contains(&"reopen"));
@@ -602,6 +648,13 @@ mod tests {
         };
         assert!(input_properties("create").contains_key("initial_note"));
         assert!(!input_properties("update").contains_key("notes"));
+        assert!(!input_properties("update").contains_key("assignee"));
+        for tool_name in ["claim", "release"] {
+            let properties = input_properties(tool_name);
+            assert!(properties.contains_key("issue_id"));
+            assert!(properties.contains_key("assignee"));
+            assert!(properties.contains_key("workspace_root"));
+        }
         assert!(input_properties("add_note").contains_key("content"));
         assert!(input_properties("resource_add").contains_key("url"));
         assert!(input_properties("resource_add").contains_key("path"));
@@ -626,7 +679,7 @@ mod tests {
         let list_schema = serde_json::to_string(&list_tool.input_schema).unwrap();
         assert!(list_schema.contains("prerequisites_of"));
         assert!(list_schema.contains("dependents_of"));
-        assert_eq!(tools.len(), 24);
+        assert_eq!(tools.len(), 26);
     }
 
     #[test]

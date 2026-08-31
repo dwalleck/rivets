@@ -37,7 +37,8 @@ ID=$(rivets create --title "Add user authentication" --kind feature | sed 's/^Cr
 # See what's ready to work on
 rivets ready
 
-# Start working on the issue
+# Atomically claim it, then start active work
+rivets claim "$ID" --assignee "$USER"
 rivets update "$ID" --status in_progress
 
 # Mark it done

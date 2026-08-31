@@ -230,6 +230,19 @@ pub struct UpdateParams {
     pub workspace_root: Option<String>,
 }
 
+/// Parameters for atomic Assignment Claim and Release tools.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AssignmentParams {
+    /// Issue ID whose Assignment changes.
+    pub issue_id: String,
+
+    /// Exact Assignee identity to claim as or release.
+    pub assignee: String,
+
+    /// Optional workspace root (uses current context if not specified).
+    pub workspace_root: Option<String>,
+}
+
 /// Parameters for the `add_note` tool.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AddNoteParams {

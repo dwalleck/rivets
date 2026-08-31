@@ -9,8 +9,8 @@
 
 use chrono::{DateTime, Utc};
 use rivets::domain::{
-    BlockingDependency, Issue, IssueKind, IssueStatus, ResourceTarget, StatusTransitionError,
-    WorkspacePath,
+    AssignmentError, BlockingDependency, Issue, IssueKind, IssueStatus, ResourceTarget,
+    StatusTransitionError, WorkspacePath,
 };
 use rivets_mcp::context::Context;
 use rivets_mcp::error::Error;
@@ -746,7 +746,183 @@ async fn reopen_in_progress_issue_returns_to_open_with_claim() {
     assert_eq!(reopened.assignee, active.assignee);
     assert_eq!(reopened.notes().len(), 1);
 }
+#[tokio::test]
+async fn claim_release_contract_survives_context_restart() {
+    let workspace = create_temp_workspace();
+    let workspace_root = workspace.path().to_string_lossy().into_owned();
+    let tools = create_tools();
 
+    assert!(matches!(
+        tools.claim("test-missing", "alice", None).await,
+        Err(Error::NoContext)
+    ));
+
+    let created = tools
+        .create(create_params(
+            "MCP Claim target".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&workspace_root),
+        ))
+        .await
+        .expect("explicit Workspace create should succeed");
+    let claimed = tools
+        .claim(created.id.as_str(), "alice", Some(&workspace_root))
+        .await
+        .expect("explicit Workspace Claim should succeed");
+    assert_eq!(claimed.assignee.as_deref(), Some("alice"));
+    let claimed_at = claimed.updated_at;
+
+    let recreated = create_tools();
+    set_context(&recreated, workspace.path()).await;
+    let durable = recreated
+        .show(created.id.as_str(), None)
+        .await
+        .expect("recreated context should load durable Claim");
+    assert_eq!(durable.assignee.as_deref(), Some("alice"));
+    assert_eq!(
+        recreated
+            .claim(created.id.as_str(), "alice", None)
+            .await
+            .expect("owner retry should be idempotent")
+            .updated_at,
+        claimed_at
+    );
+
+    let conflict = recreated.claim(created.id.as_str(), "bob", None).await;
+    assert!(matches!(
+        &conflict,
+        Err(Error::Assignment(AssignmentError::AlreadyClaimed {
+            issue_id,
+            assignee,
+        })) if issue_id == &created.id && assignee == "alice"
+    ));
+    let mismatch = recreated.release(created.id.as_str(), "bob", None).await;
+    assert!(matches!(
+        &mismatch,
+        Err(Error::Assignment(AssignmentError::AssigneeMismatch {
+            issue_id,
+            expected,
+            actual,
+        })) if issue_id == &created.id && expected == "bob" && actual == "alice"
+    ));
+
+    let released = recreated
+        .release(created.id.as_str(), "alice", None)
+        .await
+        .expect("exact owner should release");
+    assert_eq!(released.assignee, None);
+    let final_context = create_tools();
+    set_context(&final_context, workspace.path()).await;
+    assert_eq!(
+        final_context
+            .show(created.id.as_str(), None)
+            .await
+            .expect("release should persist")
+            .assignee,
+        None
+    );
+}
+
+#[tokio::test]
+async fn claim_release_mcp_state_matrix() {
+    let workspace = create_temp_workspace();
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+
+    let missing = tools.claim("test-missing", "alice", None).await;
+    assert!(matches!(
+        &missing,
+        Err(Error::IssueNotFound(issue_id)) if issue_id == "test-missing"
+    ));
+    let unassigned = create_issue(&tools, "Unassigned release").await;
+    let not_claimed = tools.release(unassigned.id.as_str(), "alice", None).await;
+    assert!(matches!(
+        &not_claimed,
+        Err(Error::Assignment(AssignmentError::NotClaimed { issue_id }))
+            if issue_id == &unassigned.id
+    ));
+
+    let prerequisite = create_issue(&tools, "Open prerequisite").await;
+    let blocked = create_issue(&tools, "Blocked Claim").await;
+    tools
+        .blocking_dependency_add(blocked.id.as_str(), prerequisite.id.as_str(), None)
+        .await
+        .expect("Blocking Dependency should be added");
+    let blocked_claim = tools.claim(blocked.id.as_str(), "alice", None).await;
+    assert!(matches!(
+        &blocked_claim,
+        Err(Error::Assignment(AssignmentError::Blocked { issue_id }))
+            if issue_id == &blocked.id
+    ));
+
+    let releasable = create_issue(&tools, "Blocked release").await;
+    tools
+        .claim(releasable.id.as_str(), "alice", None)
+        .await
+        .expect("initial Claim should succeed");
+    tools
+        .blocking_dependency_add(releasable.id.as_str(), prerequisite.id.as_str(), None)
+        .await
+        .expect("Issue should become blocked after Claim");
+    assert_eq!(
+        tools
+            .release(releasable.id.as_str(), "alice", None)
+            .await
+            .expect("blocked Open owner should release")
+            .assignee,
+        None
+    );
+
+    let active = tools
+        .create(create_params(
+            "Active target".to_string(),
+            None,
+            None,
+            None,
+            Some("active-owner".to_string()),
+            None,
+            None,
+            None,
+            None,
+        ))
+        .await
+        .expect("assigned active target should be created");
+    tools
+        .update(update_params(
+            active.id.as_str(),
+            None,
+            None,
+            Some("in_progress"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ))
+        .await
+        .expect("assigned target should enter In Progress");
+    for result in [
+        tools.claim(active.id.as_str(), "active-owner", None).await,
+        tools
+            .release(active.id.as_str(), "active-owner", None)
+            .await,
+    ] {
+        assert!(matches!(
+            &result,
+            Err(Error::Assignment(AssignmentError::NotOpen {
+                issue_id,
+                status: IssueStatus::InProgress,
+            })) if issue_id == &active.id
+        ));
+    }
+}
 /// Test complete issue lifecycle: create -> update -> close
 #[tokio::test]
 async fn test_issue_lifecycle_create_update_close() {

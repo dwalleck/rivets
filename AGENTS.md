@@ -30,9 +30,8 @@
 1. Run `rivets ready --type task --label ready-for-agent`. The Task filter matters: published specification Features also carry `ready-for-agent` but are context, not executable slices.
 2. Choose only an Open, unblocked, unassigned Task from that frontier. Never start an arbitrary story copied from a specification; native blocking relationships on the published Tasks define safe execution order.
 3. Run `rivets show <task-id>`, then read its **Parent** specification, `CONTEXT.md`, and the ADRs named by the specification before editing code.
-4. Claim before work as the first write: set the Assignee and move the Task to In Progress. Recheck the Assignee immediately before claiming.
-5. Current Assignment updates are not cross-process atomic until **Claim and release Ready Issues atomically** (`rivets-8rj9`) lands. Do not race two agents for the same Task; coordinate claims externally in the meantime.
-6. Close the Task only after its acceptance criteria and specified behavioral seams pass. Closing a blocker automatically advances the next Tasks into the Ready frontier.
+4. Claim before work as the first write with `rivets claim <task-id> --assignee <name>` or MCP `claim`, then move the Task to In Progress. The storage compare-and-set makes one concurrent claimant the durable owner.
+5. Close the Task only after its acceptance criteria and specified behavioral seams pass. Closing a blocker automatically advances the next Tasks into the Ready frontier.
 
 Treat `rivets ready --type task --label ready-for-agent` as the sole frontier source of truth; never hardcode a current frontier in documentation because closing blockers changes it.
 

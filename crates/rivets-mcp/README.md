@@ -4,7 +4,7 @@ MCP (Model Context Protocol) server for the Rivets issue tracking system. Enable
 
 ## Features
 
-- **10 MCP tools** for complete issue management
+- **26 MCP tools** for complete issue management
 - **Multi-workspace support** - work with multiple projects in one session
 - **Stdio transport** - works with any MCP-compatible client
 - **Structured tracing** - debug with `RUST_LOG=debug`
@@ -82,15 +82,24 @@ RUST_LOG=debug rivets-mcp
 | `list` | List Issues with optional filters (Workflow State, priority, Kind, assignee, label) |
 | `show` | Show detailed information about a specific Issue |
 | `blocked` | Get Issues with direct unresolved Blocking Dependencies and their prerequisites |
+| `stale` | Find Issues not updated within a selected period |
+| `label_list`, `label_list_all` | Read labels |
+| `resource_list` | Read Associated Resources |
+| `blocking_dependency_list`, `blocking_dependency_tree` | Read directed Blocking Dependencies |
 
 ### Modification Tools
 
 | Tool | Description |
 |------|-------------|
-| `create` | Create a new issue (bug, feature, task, epic, chore) |
-| `update` | Update an existing issue's fields |
-| `close` | Close/complete an issue |
-| `dep` | Add a dependency between issues |
+| `create` | Create a new Issue |
+| `update` | Update ordinary fields or Workflow State; Assignment is excluded |
+| `claim` | Atomically assign one Open, unblocked Issue |
+| `release` | Atomically unassign one Open Issue from its exact owner |
+| `add_note` | Append an immutable Note |
+| `close`, `reopen` | Apply Workflow State transitions |
+| `label_add`, `label_remove` | Mutate labels |
+| `resource_add`, `resource_update`, `resource_remove` | Mutate Associated Resources |
+| `blocking_dependency_add`, `blocking_dependency_remove` | Mutate directed Blocking Dependencies |
 
 ## Tool Parameters
 
@@ -112,6 +121,22 @@ the JSON-RPC server returns an internal error with
 `{"retryable": true, "workspace_root": "..."}` and writes no Issue bytes.
 Queries and context inspection remain unlocked; different Workspaces remain
 independently writable.
+
+### claim / release
+
+```json
+{
+  "issue_id": "rivets-abc",
+  "assignee": "alice",
+  "workspace_root": "/path/to/your/project"
+}
+```
+
+Claim requires an Open Issue with no unresolved direct Blocking Dependency.
+Repeating the current owner's Claim is an unchanged success; another Assignee
+receives a terminal Already Claimed error. Release requires the exact owner and
+an Open Issue, but remains valid while that Issue is blocked. Only Workspace
+Busy is retryable.
 
 ### list
 
@@ -222,9 +247,10 @@ Logs are written to stderr (stdout is reserved for MCP protocol).
    ready(limit: 5, priority: 1)
    ```
 
-3. **Claim a task**:
+3. **Claim and start a task**:
    ```
-   update(issue_id: "rivets-abc", status: "in_progress", assignee: "me")
+   claim(issue_id: "rivets-abc", assignee: "me")
+   update(issue_id: "rivets-abc", status: "in_progress")
    ```
 
 4. **Complete the task**:

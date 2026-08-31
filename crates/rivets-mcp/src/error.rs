@@ -48,6 +48,10 @@ pub enum Error {
     #[error(transparent)]
     InvalidStatusTransition(#[from] rivets::domain::StatusTransitionError),
 
+    /// An Assignment Claim or Release violated the domain contract.
+    #[error(transparent)]
+    Assignment(#[from] rivets::domain::AssignmentError),
+
     /// The requested issue was not found.
     #[error("Issue not found: {0}")]
     IssueNotFound(String),
@@ -113,6 +117,7 @@ impl Error {
             | Self::InvalidResource(_)
             | Self::InvalidBlockingDependency(_)
             | Self::InvalidStatusTransition(_)
+            | Self::Assignment(_)
             | Self::IssueNotFound(_) => McpError::invalid_params(self.to_string(), None),
             Self::WorkspaceNotFound { .. }
             | Self::WorkspaceNotInitialized(_)
@@ -137,7 +142,10 @@ impl From<RivetsError> for Error {
                 Ok(source) => Self::InvalidResource(source),
                 Err(storage_error) => match storage_error.try_into_status_transition_error() {
                     Ok(source) => Self::InvalidStatusTransition(source),
-                    Err(storage_error) => Self::Storage(RivetsError::Storage(storage_error)),
+                    Err(storage_error) => match storage_error.try_into_assignment_error() {
+                        Ok(source) => Self::Assignment(source),
+                        Err(storage_error) => Self::Storage(RivetsError::Storage(storage_error)),
+                    },
                 },
             },
             error @ (RivetsError::Io(_)
@@ -158,7 +166,9 @@ impl From<RivetsError> for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rivets::domain::{IssueId, IssueStatus, ResourceError, StatusTransitionError};
+    use rivets::domain::{
+        AssignmentError, IssueId, IssueStatus, ResourceError, StatusTransitionError,
+    };
     use rivets::error::StorageError;
 
     #[test]
@@ -220,12 +230,52 @@ mod tests {
                 current: IssueStatus::Open,
             },
         )));
+
         assert!(matches!(
             error,
             Error::InvalidStatusTransition(StatusTransitionError::NotClosed {
                 current: IssueStatus::Open
             })
         ));
+    }
+    #[test]
+    fn assignment_errors_preserve_retry_classification() {
+        use rmcp::model::ErrorCode;
+
+        let issue_id = IssueId::new("test-claimed");
+        let assignment_errors = [
+            AssignmentError::NotOpen {
+                issue_id: issue_id.clone(),
+                status: IssueStatus::InProgress,
+            },
+            AssignmentError::Blocked {
+                issue_id: issue_id.clone(),
+            },
+            AssignmentError::AlreadyClaimed {
+                issue_id: issue_id.clone(),
+                assignee: "alice".to_string(),
+            },
+            AssignmentError::NotClaimed {
+                issue_id: issue_id.clone(),
+            },
+            AssignmentError::AssigneeMismatch {
+                issue_id: issue_id.clone(),
+                expected: "bob".to_string(),
+                actual: "alice".to_string(),
+            },
+            AssignmentError::AssigneeRequired {
+                issue_id: issue_id.clone(),
+            },
+            AssignmentError::ClosedCannotBeAssigned { issue_id },
+        ];
+
+        for source in assignment_errors {
+            let error = Error::from(RivetsError::Storage(StorageError::Assignment(source)));
+            assert!(matches!(error, Error::Assignment(_)));
+            let protocol = error.to_mcp_error();
+            assert_eq!(protocol.code, ErrorCode::INVALID_PARAMS);
+            assert_eq!(protocol.data, None);
+        }
     }
 
     #[test]

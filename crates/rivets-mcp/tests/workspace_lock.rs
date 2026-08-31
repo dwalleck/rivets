@@ -9,11 +9,14 @@ use rivets_mcp::models::{
     CreateParams, IssueKindInput, ListParams, ResourceUpdateParams, UpdateParams,
 };
 use rivets_mcp::tools::Tools;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 use std::sync::Arc;
 use std::time::Instant;
 use tempfile::TempDir;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
+
+static WORKSPACE_LOCK_TESTS: Mutex<()> = Mutex::const_new(());
 
 fn create_params(title: &str, workspace_root: Option<&str>) -> CreateParams {
     CreateParams {
@@ -80,6 +83,33 @@ async fn set_context(tools: &Tools, path: &Path) {
         .set_context(&path.display().to_string())
         .await
         .expect("context should be set");
+}
+
+fn run_cli(workspace: &Path, args: &[&str]) -> Output {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("Workspace manifest parent")
+        .join("Cargo.toml");
+    Command::new(env!("CARGO"))
+        .arg("run")
+        .arg("--quiet")
+        .arg("--manifest-path")
+        .arg(manifest)
+        .args(["-p", "rivets", "--"])
+        .args(args)
+        .current_dir(workspace)
+        .output()
+        .expect("real Rivets CLI should run")
+}
+
+fn persisted_issue(workspace: &Path, issue_id: &str) -> serde_json::Value {
+    std::fs::read_to_string(workspace.join(".rivets/issues.jsonl"))
+        .expect("issues source should be readable")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("Issue record should parse"))
+        .find(|record: &serde_json::Value| record["id"] == issue_id)
+        .expect("Issue record should exist")
 }
 
 async fn create_issue(tools: &Tools, title: &str) -> Issue {
@@ -286,6 +316,7 @@ async fn assert_lifecycle_relationship_and_label_mutators_busy(fixture: &Mutatio
 
 #[tokio::test]
 async fn workspace_lock_blocks_every_mcp_mutator_but_not_queries() {
+    let _serial = WORKSPACE_LOCK_TESTS.lock().await;
     let fixture = MutationFixture::new().await;
     let source_path = fixture.root.join(".rivets/issues.jsonl");
     let before = std::fs::read(&source_path).unwrap();
@@ -299,15 +330,103 @@ async fn workspace_lock_blocks_every_mcp_mutator_but_not_queries() {
         5
     );
     drop(holder);
+}
+
+#[tokio::test]
+async fn claim_and_release_require_workspace_lock() {
+    let _serial = WORKSPACE_LOCK_TESTS.lock().await;
+    let fixture = MutationFixture::new().await;
+    let holder = WorkspaceMutationLock::try_acquire(&fixture.root).unwrap();
+    assert_busy(
+        fixture
+            .tools
+            .claim(fixture.update_target.id.as_str(), "alice", None)
+            .await,
+        &fixture.root,
+    );
+    drop(holder);
+
     fixture
         .tools
-        .label_add(fixture.update_target.id.as_str(), "after-release", None)
+        .claim(fixture.update_target.id.as_str(), "alice", None)
         .await
-        .expect("mutation should succeed after lock release");
+        .expect("Claim should succeed after lock release");
+    let holder = WorkspaceMutationLock::try_acquire(&fixture.root).unwrap();
+    assert_busy(
+        fixture
+            .tools
+            .release(fixture.update_target.id.as_str(), "alice", None)
+            .await,
+        &fixture.root,
+    );
+    drop(holder);
+    fixture
+        .tools
+        .release(fixture.update_target.id.as_str(), "alice", None)
+        .await
+        .expect("Release should succeed after lock release");
+}
+
+#[tokio::test]
+async fn mixed_cli_mcp_mutation_preserves_atomic_claim() {
+    let _serial = WORKSPACE_LOCK_TESTS.lock().await;
+    let fixture = MutationFixture::new().await;
+    let issue_id = fixture.update_target.id.as_str();
+
+    let holder = WorkspaceMutationLock::try_acquire(&fixture.root).unwrap();
+    let contended_claim = run_cli(&fixture.root, &["claim", issue_id, "--assignee", "alice"]);
+    assert!(!contended_claim.status.success());
+    assert!(String::from_utf8_lossy(&contended_claim.stderr).contains("Workspace is busy"));
+    drop(holder);
+    assert!(
+        run_cli(&fixture.root, &["claim", issue_id, "--assignee", "alice"],)
+            .status
+            .success()
+    );
+
+    let holder = WorkspaceMutationLock::try_acquire(&fixture.root).unwrap();
+    assert_busy(
+        fixture.tools.update(update_params(issue_id, None)).await,
+        &fixture.root,
+    );
+    drop(holder);
+    fixture
+        .tools
+        .update(update_params(issue_id, None))
+        .await
+        .expect("MCP retry should reload the CLI Claim before updating");
+    let persisted = persisted_issue(&fixture.root, issue_id);
+    assert_eq!(persisted["assignee"], "alice");
+    assert_eq!(persisted["title"], "Updated title");
+
+    let close_target = fixture
+        .tools
+        .create(create_params("MCP Claim then CLI close", None))
+        .await
+        .expect("second target should be created");
+    fixture
+        .tools
+        .claim(close_target.id.as_str(), "bob", None)
+        .await
+        .expect("MCP Claim should persist");
+    let holder = WorkspaceMutationLock::try_acquire(&fixture.root).unwrap();
+    let contended_close = run_cli(&fixture.root, &["close", close_target.id.as_str()]);
+    assert!(!contended_close.status.success());
+    assert!(String::from_utf8_lossy(&contended_close.stderr).contains("Workspace is busy"));
+    drop(holder);
+    assert!(
+        run_cli(&fixture.root, &["close", close_target.id.as_str()])
+            .status
+            .success()
+    );
+    let closed = persisted_issue(&fixture.root, close_target.id.as_str());
+    assert_eq!(closed["status"], "closed");
+    assert_eq!(closed["assignee"], serde_json::Value::Null);
 }
 
 #[tokio::test]
 async fn workspace_lock_precedes_mcp_cache_miss_and_reload() {
+    let _serial = WORKSPACE_LOCK_TESTS.lock().await;
     let workspace = workspace();
     let root = workspace.path().canonicalize().unwrap();
     let root_string = root.display().to_string();
@@ -343,6 +462,7 @@ async fn workspace_lock_precedes_mcp_cache_miss_and_reload() {
 
 #[tokio::test]
 async fn workspace_lock_does_not_serialize_distinct_mcp_workspaces() {
+    let _serial = WORKSPACE_LOCK_TESTS.lock().await;
     let workspace_a = workspace();
     let workspace_b = workspace();
     let root_a = workspace_a.path().canonicalize().unwrap();
@@ -371,6 +491,7 @@ async fn workspace_lock_does_not_serialize_distinct_mcp_workspaces() {
 #[ignore = "production-scale durable-lock checkpoint"]
 async fn workspace_lock_10k_mcp_mutation_preserves_records() {
     const ISSUE_COUNT: usize = 10_000;
+    let _serial = WORKSPACE_LOCK_TESTS.lock().await;
     let workspace = workspace();
     let root = workspace.path().canonicalize().unwrap();
     let source_path = root.join(".rivets/issues.jsonl");
@@ -398,16 +519,16 @@ async fn workspace_lock_10k_mcp_mutation_preserves_records() {
     set_context(&tools, &root).await;
     let started = Instant::now();
     tools
-        .label_add(
+        .claim(
             first_id
                 .as_ref()
                 .expect("scale fixture should have a first Issue")
                 .as_str(),
-            "guarded",
+            "scale-owner",
             None,
         )
         .await
-        .expect("guarded scale mutation should succeed");
+        .expect("guarded scale Claim should succeed");
     let elapsed = started.elapsed();
     eprintln!("10k MCP guarded mutation elapsed: {elapsed:?}");
 
