@@ -34,18 +34,12 @@ fn create_params(title: &str, workspace_root: Option<&str>) -> CreateParams {
 }
 
 fn update_params(issue_id: &str, workspace_root: Option<&str>) -> UpdateParams {
-    UpdateParams {
-        issue_id: issue_id.to_string(),
-        status: None,
-        priority: None,
-        kind: IssueKindInput::canonical(None),
-        title: Some("Updated title".to_string()),
-        description: None,
-        design: None,
-        acceptance_criteria: None,
-        labels: None,
-        workspace_root: workspace_root.map(str::to_string),
-    }
+    serde_json::from_value(serde_json::json!({
+        "issue_id": issue_id,
+        "title": "Updated title",
+        "workspace_root": workspace_root,
+    }))
+    .expect("update parameters should deserialize")
 }
 
 fn list_params(workspace_root: Option<&str>) -> ListParams {
@@ -425,7 +419,7 @@ async fn mixed_cli_mcp_mutation_preserves_atomic_claim() {
 }
 
 #[tokio::test]
-async fn workspace_lock_precedes_mcp_cache_miss_and_reload() {
+async fn workspace_lock_cache_miss_resolves_before_durable_lock() {
     let _serial = WORKSPACE_LOCK_TESTS.lock().await;
     let workspace = workspace();
     let root = workspace.path().canonicalize().unwrap();
@@ -433,12 +427,14 @@ async fn workspace_lock_precedes_mcp_cache_miss_and_reload() {
     let holder = WorkspaceMutationLock::try_acquire(&root).unwrap();
     std::fs::write(root.join(".rivets/config.yaml"), "not: [valid").unwrap();
     let uncached = tools();
-    assert_busy(
-        uncached
-            .create(create_params("Must not initialize", Some(&root_string)))
-            .await,
-        &root,
-    );
+    match uncached
+        .create(create_params("Must not initialize", Some(&root_string)))
+        .await
+    {
+        Err(Error::ConfigLoad { .. }) => {}
+        Err(error) => panic!("expected config loading to precede lock acquisition, got {error:?}"),
+        Ok(_) => panic!("expected malformed config to fail before lock acquisition"),
+    }
     drop(holder);
 
     std::fs::write(
@@ -460,6 +456,32 @@ async fn workspace_lock_precedes_mcp_cache_miss_and_reload() {
     drop(holder);
 }
 
+#[tokio::test]
+async fn same_server_mutations_serialize_and_both_persist() {
+    let workspace = workspace();
+    let root = workspace.path().canonicalize().unwrap();
+    let source_path = root.join(".rivets/issues.jsonl");
+    let tools = tools();
+    set_context(&tools, &root).await;
+
+    let (first, second) = tokio::join!(
+        tools.create(create_params("Concurrent first", None)),
+        tools.create(create_params("Concurrent second", None)),
+    );
+    assert!(
+        first.is_ok(),
+        "first same-server mutation should succeed: {first:?}"
+    );
+    assert!(
+        second.is_ok(),
+        "second same-server mutation should succeed: {second:?}"
+    );
+
+    let persisted = std::fs::read_to_string(source_path).unwrap();
+    assert_eq!(persisted.lines().count(), 2);
+    assert!(persisted.contains("Concurrent first"));
+    assert!(persisted.contains("Concurrent second"));
+}
 #[tokio::test]
 async fn workspace_lock_does_not_serialize_distinct_mcp_workspaces() {
     let _serial = WORKSPACE_LOCK_TESTS.lock().await;

@@ -8,10 +8,10 @@
 //! # Lock Ordering
 //!
 //! Queries resolve under the `Context` lock, release it, then acquire storage.
-//! Mutations resolve and release `Context`, acquire the durable Workspace lock,
-//! then may reacquire `Context` for lazy cache initialization and finally take
-//! the storage write lock. Never attempt the durable lock while holding a
-//! Context or storage lock, and never reacquire Context while holding storage.
+//! Mutations resolve/cache storage, release `Context`, acquire the storage write
+//! lock, then acquire the durable Workspace lock asynchronously. Never attempt
+//! the durable lock while holding a `Context` lock, and never reacquire
+//! `Context` while holding storage.
 
 use crate::error::{Error, Result};
 use rivets::commands::init::RivetsConfig;
@@ -95,7 +95,7 @@ impl Context {
         workspace_root: &Path,
         protected_workspace: Option<&Path>,
     ) -> Result<WorkspaceInfo> {
-        let canonical = canonicalize_workspace(workspace_root)?;
+        let canonical = canonicalize_workspace_async(workspace_root).await?;
         let rivets_dir = canonical.join(RIVETS_DIR_NAME);
 
         // Load config to get storage settings
@@ -167,6 +167,8 @@ impl Context {
 
         self.storage_cache.remove(&oldest);
         self.database_paths.remove(&oldest);
+        #[cfg(test)]
+        self.test_workspaces.remove(&oldest);
         tracing::debug!(workspace = %oldest.display(), "Evicted workspace from cache");
         true
     }
@@ -220,25 +222,49 @@ impl Context {
             .ok_or_else(|| Error::WorkspaceNotInitialized(workspace.display().to_string()))
     }
 
+    /// Resolve cached storage without performing synchronous filesystem work.
+    pub(crate) async fn storage_for_async(
+        &self,
+        workspace_root: Option<&Path>,
+    ) -> Result<Arc<RwLock<Box<dyn IssueStorage>>>> {
+        let workspace = self.resolve_workspace_root_async(workspace_root).await?;
+
+        self.storage_cache
+            .get(&workspace)
+            .cloned()
+            .ok_or_else(|| Error::WorkspaceNotInitialized(workspace.display().to_string()))
+    }
+
+    /// Resolve one canonical workspace without performing synchronous filesystem work.
+    pub(crate) async fn resolve_workspace_root_async(
+        &self,
+        workspace_root: Option<&Path>,
+    ) -> Result<PathBuf> {
+        match workspace_root {
+            Some(path) => canonicalize_workspace_async(path).await,
+            None => self.current_workspace.clone().ok_or(Error::NoContext),
+        }
+    }
+
+    /// Resolve the durable-lock root without performing synchronous filesystem work.
+    pub(crate) async fn mutation_lock_root_async(
+        &self,
+        workspace_root: Option<&Path>,
+    ) -> Result<Option<PathBuf>> {
+        let workspace = self.resolve_workspace_root_async(workspace_root).await?;
+        #[cfg(test)]
+        if self.test_workspaces.contains(&workspace) {
+            return Ok(None);
+        }
+        Ok(Some(workspace))
+    }
+
     /// Resolve one canonical Workspace without loading its configuration or storage.
     pub(crate) fn resolve_workspace_root(&self, workspace_root: Option<&Path>) -> Result<PathBuf> {
         match workspace_root {
             Some(path) => canonicalize_workspace(path),
             None => self.current_workspace.clone().ok_or(Error::NoContext),
         }
-    }
-
-    /// Resolve the durable-lock root, or the explicit ephemeral unit-test bypass.
-    pub(crate) fn mutation_lock_root(
-        &self,
-        workspace_root: Option<&Path>,
-    ) -> Result<Option<PathBuf>> {
-        let workspace = self.resolve_workspace_root(workspace_root)?;
-        #[cfg(test)]
-        if self.test_workspaces.contains(&workspace) {
-            return Ok(None);
-        }
-        Ok(Some(workspace))
     }
 
     /// Get storage for a workspace, initializing an uncached workspace on first use.
@@ -254,7 +280,7 @@ impl Context {
         &mut self,
         workspace_root: Option<&Path>,
     ) -> Result<Arc<RwLock<Box<dyn IssueStorage>>>> {
-        match self.storage_for(workspace_root) {
+        match self.storage_for_async(workspace_root).await {
             Ok(storage) => return Ok(storage),
             Err(Error::WorkspaceNotInitialized(_)) => {}
             Err(error) => return Err(error),
@@ -287,7 +313,7 @@ impl Context {
     /// Returns an error if no `.rivets/` directory is found in the path hierarchy,
     /// or if storage creation fails.
     pub async fn discover_and_set_workspace(&mut self, start: &Path) -> Result<WorkspaceInfo> {
-        let workspace_root = discover_workspace(start)?;
+        let workspace_root = discover_workspace_async(start).await?;
         self.set_workspace(&workspace_root).await
     }
 
@@ -345,6 +371,29 @@ fn canonicalize_workspace(workspace_root: &Path) -> Result<PathBuf> {
         return Err(Error::NoRivetsDirectory(canonical.display().to_string()));
     }
     Ok(canonical)
+}
+
+async fn canonicalize_workspace_async(workspace_root: &Path) -> Result<PathBuf> {
+    let canonical = tokio::fs::canonicalize(workspace_root)
+        .await
+        .map_err(|source| Error::WorkspaceNotFound {
+            path: workspace_root.display().to_string(),
+            source: Some(source),
+        })?;
+    validate_path(&canonical)?;
+    let rivets_dir = canonical.join(RIVETS_DIR_NAME);
+    match tokio::fs::metadata(&rivets_dir).await {
+        Ok(metadata) if metadata.is_dir() => Ok(canonical),
+        Ok(_) => {
+            debug!(path = %rivets_dir.display(), "No .rivets directory found");
+            Err(Error::NoRivetsDirectory(canonical.display().to_string()))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            debug!(path = %rivets_dir.display(), "No .rivets directory found");
+            Err(Error::NoRivetsDirectory(canonical.display().to_string()))
+        }
+        Err(error) => Err(Error::Io(error)),
+    }
 }
 
 /// Validate that a path is safe to use as a workspace.
@@ -407,6 +456,28 @@ pub fn discover_workspace(start: &Path) -> Result<PathBuf> {
                     path: current.display().to_string(),
                     source: Some(e),
                 });
+        }
+
+        if !current.pop() {
+            break;
+        }
+    }
+
+    Err(Error::NoRivetsDirectory(start.display().to_string()))
+}
+
+async fn discover_workspace_async(start: &Path) -> Result<PathBuf> {
+    let mut current = start.to_path_buf();
+
+    loop {
+        let rivets_dir = current.join(RIVETS_DIR_NAME);
+        match tokio::fs::metadata(&rivets_dir).await {
+            Ok(metadata) if metadata.is_dir() => {
+                return canonicalize_workspace_async(&current).await;
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(Error::Io(error)),
         }
 
         if !current.pop() {
@@ -551,13 +622,26 @@ mod tests {
                 .storage_cache
                 .contains_key(Path::new("/test/workspace1"))
         );
+        assert!(
+            !context
+                .database_paths
+                .contains_key(Path::new("/test/workspace1"))
+        );
+        assert!(
+            !context
+                .test_workspaces
+                .contains(Path::new("/test/workspace1"))
+        );
 
         assert!(context.evict_oldest_except(None));
         assert!(!context.storage_cache.contains_key(protected));
         assert_eq!(context.cache_size(), 1);
+        assert!(!context.database_paths.contains_key(protected));
+        assert!(!context.test_workspaces.contains(protected));
 
         assert!(context.evict_oldest_except(None));
         assert!(!context.evict_oldest_except(None));
         assert_eq!(context.cache_size(), 0);
+        assert!(context.cache_order.is_empty());
     }
 }

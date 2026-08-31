@@ -144,7 +144,7 @@ impl Tools {
         let workspace_path = workspace_root.map(Path::new);
         {
             let context = self.context.read().await;
-            match context.storage_for(workspace_path) {
+            match context.storage_for_async(workspace_path).await {
                 Ok(storage) => return Ok(storage),
                 Err(Error::WorkspaceNotInitialized(_)) => {}
                 Err(error) => return Err(error),
@@ -155,20 +155,19 @@ impl Tools {
         context.storage_for_or_init(workspace_path).await
     }
 
-    /// Resolve, durably lock, and authoritatively reload mutation storage.
+    /// Resolve storage, serialize in-process mutations, then acquire the durable lock.
     async fn mutation_storage_for(&self, workspace_root: Option<&str>) -> Result<MutationStorage> {
         let workspace_path = workspace_root.map(Path::new);
+        let storage = self.storage_for(workspace_root).await?;
         let lock_root = {
             let context = self.context.read().await;
-            context.mutation_lock_root(workspace_path)?
+            context.mutation_lock_root_async(workspace_path).await?
         };
-        let workspace_lock = lock_root
-            .as_deref()
-            .map(WorkspaceMutationLock::try_acquire)
-            .transpose()?;
-        let storage = self.storage_for(workspace_root).await?;
-        let mut storage = storage.write_owned().await;
-        storage.reload().await?;
+        let storage = storage.write_owned().await;
+        let workspace_lock = match lock_root {
+            Some(root) => Some(WorkspaceMutationLock::try_acquire_async(root).await?),
+            None => None,
+        };
         Ok(MutationStorage {
             storage,
             _workspace_lock: workspace_lock,
@@ -202,23 +201,28 @@ impl Tools {
     /// This function does not currently return errors but returns `Result` for API consistency.
     pub async fn where_am_i(&self) -> Result<WhereAmIResponse> {
         let context = self.context.read().await;
+        let workspace = context.current_workspace().cloned();
+        let db_path = context.current_database_path().cloned();
+        drop(context);
 
-        match context.current_workspace() {
+        match workspace {
             Some(workspace) => {
-                let db_path = context.current_database_path();
-
-                // Try to load the config to get the issue prefix
+                // Try to load the config to get the issue prefix. Use async
+                // metadata so a slow filesystem cannot block the MCP runtime.
                 let config_path = workspace.join(".rivets").join("config.yaml");
-                let issue_prefix = if config_path.exists() {
-                    match rivets::commands::init::RivetsConfig::load(&config_path).await {
+                let issue_prefix = match tokio::fs::metadata(&config_path).await {
+                    Ok(_) => match rivets::commands::init::RivetsConfig::load(&config_path).await {
                         Ok(config) => Some(config.issue_prefix),
-                        Err(e) => {
-                            debug!("Failed to load config for issue_prefix: {}", e);
+                        Err(error) => {
+                            debug!(error = %error, "Failed to load config for issue_prefix");
                             None
                         }
+                    },
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => {
+                        debug!(error = %error, "Failed to inspect config for issue_prefix");
+                        None
                     }
-                } else {
-                    None
                 };
 
                 Ok(WhereAmIResponse {
@@ -386,6 +390,21 @@ impl Tools {
     #[instrument(skip(self, params), fields(issue_id = %params.issue_id))]
     pub async fn update(&self, params: UpdateParams) -> Result<Issue> {
         debug!("Updating issue");
+        if params.contains_legacy_assignee() {
+            return Err(Error::InvalidArgument {
+                field: "assignee",
+                value: "legacy assignee field".to_string(),
+                valid_values: "use claim or release",
+            });
+        }
+        if !params.has_updates() {
+            return Err(Error::InvalidArgument {
+                field: "updates",
+                value: "no update fields provided".to_string(),
+                valid_values: "at least one update field",
+            });
+        }
+
         let status = params.status.as_deref().map(validate_status).transpose()?;
         let issue_kind = params.kind.resolve("update");
 
@@ -400,6 +419,7 @@ impl Tools {
             status,
             priority: params.priority,
             issue_kind,
+
             design: params.design,
             acceptance_criteria: params.acceptance_criteria,
             note: None,
@@ -879,6 +899,11 @@ impl Tools {
         let mut storage = self.mutation_storage_for(workspace_root).await?;
 
         let id = IssueId::new(issue_id);
+        let current = storage
+            .get(&id)
+            .await?
+            .ok_or_else(|| Error::IssueNotFound(issue_id.to_string()))?;
+        current.status.validate_reopen()?;
         let updates = IssueUpdate {
             status: Some(IssueStatus::Open),
             note,
@@ -1160,6 +1185,7 @@ mod tests {
             status: status.map(str::to_string),
             priority,
             kind: kind_input(issue_kind),
+            legacy_assignee: Default::default(),
             title,
             description,
             design,
@@ -1595,6 +1621,66 @@ mod tests {
             .await
             .expect("reopen should succeed");
         assert_eq!(reopened.status, IssueStatus::Open);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_reopen_rejects_open_and_in_progress_without_mutation(#[future] tools: Tools) {
+        let tools = tools.await;
+
+        let open = create_issue(&tools, "Still open").await;
+        let open_updated_at = open.updated_at;
+        assert!(matches!(
+            tools.reopen(open.id.as_str(), None, None).await,
+            Err(Error::InvalidStatusTransition(_))
+        ));
+        let open_after = tools
+            .show(open.id.as_str(), None)
+            .await
+            .expect("open issue should remain readable");
+        assert_eq!(open_after.status, IssueStatus::Open);
+        assert_eq!(open_after.updated_at, open_updated_at);
+
+        let in_progress = tools
+            .create(create_params(
+                "Already in progress".to_string(),
+                None,
+                None,
+                None,
+                Some("alice".to_string()),
+                None,
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("assigned issue should be created");
+        let in_progress = tools
+            .update(update_params(
+                in_progress.id.as_str(),
+                None,
+                None,
+                Some("in_progress"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("assigned issue should enter progress");
+        let in_progress_updated_at = in_progress.updated_at;
+        assert!(matches!(
+            tools.reopen(in_progress.id.as_str(), None, None).await,
+            Err(Error::InvalidStatusTransition(_))
+        ));
+        let in_progress_after = tools
+            .show(in_progress.id.as_str(), None)
+            .await
+            .expect("in-progress issue should remain readable");
+        assert_eq!(in_progress_after.status, IssueStatus::InProgress);
+        assert_eq!(in_progress_after.updated_at, in_progress_updated_at);
     }
 
     #[rstest]

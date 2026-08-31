@@ -2,6 +2,7 @@
 
 use rivets::domain::Issue;
 use rivets_mcp::context::Context;
+use rivets_mcp::error::Error;
 use rivets_mcp::models::{CreateParams, IssueKindInput, UpdateParams};
 use rivets_mcp::tools::Tools;
 use serde_json::Value;
@@ -49,23 +50,25 @@ fn update_params(
     status: Option<&str>,
     priority: Option<u8>,
     issue_kind: Option<&str>,
+
     design: Option<String>,
     acceptance_criteria: Option<String>,
     labels: Option<Vec<String>>,
     workspace_root: Option<&str>,
 ) -> UpdateParams {
-    UpdateParams {
-        issue_id: issue_id.to_string(),
-        status: status.map(str::to_string),
-        priority,
-        kind: kind_input(issue_kind),
-        title,
-        description,
-        design,
-        acceptance_criteria,
-        labels,
-        workspace_root: workspace_root.map(str::to_string),
-    }
+    serde_json::from_value(serde_json::json!({
+        "issue_id": issue_id,
+        "status": status,
+        "priority": priority,
+        "issue_kind": issue_kind,
+        "title": title,
+        "description": description,
+        "design": design,
+        "acceptance_criteria": acceptance_criteria,
+        "labels": labels,
+        "workspace_root": workspace_root,
+    }))
+    .expect("update parameters should deserialize")
 }
 
 fn create_temp_workspace() -> TempDir {
@@ -374,4 +377,76 @@ async fn stale_cache_mutations_preserve_external_jsonl_changes() {
     exercise_resource_mutations(&fixture).await;
     exercise_workflow_mutations(&fixture).await;
     exercise_relationship_and_label_mutations(&fixture).await;
+}
+
+#[tokio::test]
+async fn empty_update_rejects_without_mutating_jsonl_or_timestamp() {
+    let workspace = create_temp_workspace();
+    let issues_path = workspace.path().join(".rivets/issues.jsonl");
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+    let issue = create_issue(&tools, "Empty update target").await;
+    let before = std::fs::read(&issues_path).expect("source should be readable");
+    let before_modified = std::fs::metadata(&issues_path)
+        .expect("source metadata should be readable")
+        .modified()
+        .expect("source modification time should be available");
+
+    let params: UpdateParams =
+        serde_json::from_value(serde_json::json!({ "issue_id": issue.id.as_str() }))
+            .expect("empty update parameters should deserialize");
+    match tools.update(params).await {
+        Err(Error::InvalidArgument { field, .. }) => assert_eq!(field, "updates"),
+        Err(error) => panic!("expected empty update rejection, got {error:?}"),
+        Ok(_) => panic!("empty update must not succeed"),
+    }
+
+    assert_eq!(
+        std::fs::read(&issues_path).expect("source should remain readable"),
+        before
+    );
+    assert_eq!(
+        std::fs::metadata(&issues_path)
+            .expect("source metadata should remain readable")
+            .modified()
+            .expect("source modification time should remain available"),
+        before_modified
+    );
+}
+
+#[tokio::test]
+async fn historical_assignee_update_is_rejected_even_when_null() {
+    let workspace = create_temp_workspace();
+    let issues_path = workspace.path().join(".rivets/issues.jsonl");
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+    let issue = create_issue(&tools, "Historical assignee target").await;
+    let before = std::fs::read(&issues_path).expect("source should be readable");
+    let before_modified = std::fs::metadata(&issues_path)
+        .expect("source metadata should be readable")
+        .modified()
+        .expect("source modification time should be available");
+
+    let params: UpdateParams = serde_json::from_value(serde_json::json!({
+        "issue_id": issue.id.as_str(),
+        "assignee": null,
+    }))
+    .expect("historical assignee parameters should deserialize");
+    match tools.update(params).await {
+        Err(Error::InvalidArgument { field, .. }) => assert_eq!(field, "assignee"),
+        Err(error) => panic!("expected historical assignee rejection, got {error:?}"),
+        Ok(_) => panic!("historical assignee must not succeed"),
+    }
+
+    assert_eq!(
+        std::fs::read(&issues_path).expect("source should remain readable"),
+        before
+    );
+    assert_eq!(
+        std::fs::metadata(&issues_path)
+            .expect("source metadata should remain readable")
+            .modified()
+            .expect("source modification time should remain available"),
+        before_modified
+    );
 }
