@@ -363,7 +363,7 @@ mod tests {
                 &issues,
                 &IssueId::new("test-00000"),
             )
-            .unwrap()
+            .expect("blocking dependency lookup should find the seeded Issue")
         );
         let claim_lookup_elapsed = started.elapsed();
         assert!(

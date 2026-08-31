@@ -346,6 +346,9 @@ mod tests {
             AssignmentError::AssigneeRequired {
                 issue_id: issue_id.clone(),
             },
+            AssignmentError::BlankAssignee {
+                issue_id: issue_id.clone(),
+            },
             AssignmentError::ClosedCannotBeAssigned { issue_id },
         ];
 

@@ -1602,7 +1602,13 @@ async fn test_concurrent_workspace_root_initialization() {
             }),
             Ok(winner),
         ) => {
-            assert_eq!(busy, workspace.path().canonicalize().unwrap());
+            assert_eq!(
+                busy,
+                workspace
+                    .path()
+                    .canonicalize()
+                    .expect("contended Workspace path should canonicalize")
+            );
             let retry_title = if winner.title == "First concurrent issue" {
                 "Second concurrent issue"
             } else {
@@ -2146,7 +2152,7 @@ async fn ready_assignment_visibility() {
             tools
                 .ready(ready_params(None, None, None, None, None, None))
                 .await
-                .unwrap()
+                .expect("default Ready query should succeed")
         ),
         BTreeSet::from([unassigned.id.clone()])
     );
@@ -2162,7 +2168,7 @@ async fn ready_assignment_visibility() {
                     None,
                 ))
                 .await
-                .unwrap()
+                .expect("assignee Ready query should succeed")
         ),
         BTreeSet::from([alice.id.clone()])
     );
@@ -2172,7 +2178,12 @@ async fn ready_assignment_visibility() {
         ..ready_params(None, None, None, None, None, None)
     };
     assert_eq!(
-        ready_ids(tools.ready(all.clone()).await.unwrap()),
+        ready_ids(
+            tools
+                .ready(all.clone())
+                .await
+                .expect("all-assignees Ready query should succeed")
+        ),
         BTreeSet::from([unassigned.id.clone(), alice.id.clone()])
     );
     let conflict = tools
@@ -2196,7 +2207,12 @@ async fn ready_assignment_visibility() {
     let restarted = create_tools();
     set_context(&restarted, workspace.path()).await;
     assert_eq!(
-        ready_ids(restarted.ready(all).await.unwrap()),
+        ready_ids(
+            restarted
+                .ready(all)
+                .await
+                .expect("restarted Ready query should succeed")
+        ),
         BTreeSet::from([unassigned.id, alice.id])
     );
 }

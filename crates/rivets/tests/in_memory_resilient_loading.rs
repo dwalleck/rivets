@@ -1205,7 +1205,7 @@ mod storage_after_load_tests {
         storage
             .claim(&IssueId::new("test-1"), "active-owner")
             .await
-            .unwrap();
+            .expect("legacy Issue should be claimable after loading");
 
         // Update the issue
         let update = rivets::domain::IssueUpdate {

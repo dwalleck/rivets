@@ -114,7 +114,10 @@ async fn workspace_mutation_lock_blocks_cli_writes_but_not_reads() {
     let stderr = String::from_utf8_lossy(&create.stderr);
     assert!(stderr.contains("Workspace is busy"));
     assert!(stderr.contains("retry the operation"));
-    assert_eq!(std::fs::read(&source_path).unwrap(), before);
+    assert_eq!(
+        std::fs::read(&source_path).expect("Issue source bytes should remain readable"),
+        before
+    );
 
     let list = run(workspace.path(), &["list", "--json"]);
     assert!(

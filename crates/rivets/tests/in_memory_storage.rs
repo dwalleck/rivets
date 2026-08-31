@@ -198,7 +198,10 @@ async fn test_update_issue() {
 
     let new_issue = create_test_issue("Original Title");
     let created = storage.create(new_issue).await.unwrap();
-    storage.claim(&created.id, "active-owner").await.unwrap();
+    storage
+        .claim(&created.id, "active-owner")
+        .await
+        .expect("Issue should be claimed before entering In Progress");
 
     let updates = IssueUpdate {
         title: Some("Updated Title".to_string()),
@@ -1998,38 +2001,58 @@ async fn import_rejects_invalid_assignment_state_atomically() {
 #[tokio::test]
 async fn related_association_is_symmetric_idempotent_and_removable_from_either_side() {
     let mut storage = new_in_memory_storage("test".to_string());
-    let issue_a = storage.create(create_test_issue("A")).await.unwrap();
-    let issue_b = storage.create(create_test_issue("B")).await.unwrap();
-    let issue_c = storage.create(create_test_issue("C")).await.unwrap();
-    let forward = RelatedAssociation::new(issue_a.id.clone(), issue_b.id.clone()).unwrap();
-    let reverse = RelatedAssociation::new(issue_b.id.clone(), issue_a.id.clone()).unwrap();
+    let issue_a = storage
+        .create(create_test_issue("A"))
+        .await
+        .expect("Issue A should be created");
+    let issue_b = storage
+        .create(create_test_issue("B"))
+        .await
+        .expect("Issue B should be created");
+    let issue_c = storage
+        .create(create_test_issue("C"))
+        .await
+        .expect("Issue C should be created");
+    let forward = RelatedAssociation::new(issue_a.id.clone(), issue_b.id.clone())
+        .expect("distinct Issues should form a Related Association");
+    let reverse = RelatedAssociation::new(issue_b.id.clone(), issue_a.id.clone())
+        .expect("reverse endpoints should form the same Association");
     assert_eq!(forward, reverse);
 
     storage
         .add_related_association(reverse.clone())
         .await
-        .unwrap();
+        .expect("reverse Related Association should be added");
     storage
         .add_related_association(forward.clone())
         .await
-        .unwrap();
+        .expect("duplicate Related Association should be idempotent");
     assert_eq!(
-        storage.related_associations(&issue_a.id).await.unwrap(),
+        storage
+            .related_associations(&issue_a.id)
+            .await
+            .expect("Issue A Related Associations should load"),
         vec![forward.clone()]
     );
     assert_eq!(
-        storage.related_associations(&issue_b.id).await.unwrap(),
+        storage
+            .related_associations(&issue_b.id)
+            .await
+            .expect("Issue B Related Associations should load"),
         vec![forward.clone()]
     );
     assert!(
         storage
             .related_associations(&issue_c.id)
             .await
-            .unwrap()
+            .expect("unrelated Issue Associations should load")
             .is_empty()
     );
 
-    let exported = storage.export_all().await.unwrap();
+    let exported = storage
+        .export_all()
+        .await
+        .expect("Related records should export");
     let related_records = exported
         .iter()
         .flat_map(|issue| {
@@ -2053,55 +2076,78 @@ async fn related_association_is_symmetric_idempotent_and_removable_from_either_s
     )
     .await;
     assert_eq!(
-        storage.related_associations(&issue_a.id).await.unwrap(),
+        storage
+            .related_associations(&issue_a.id)
+            .await
+            .expect("legacy Related records should load"),
         vec![forward.clone()],
         "reciprocal legacy records should remain one logical Association"
     );
 
-    storage.remove_related_association(&reverse).await.unwrap();
+    storage
+        .remove_related_association(&reverse)
+        .await
+        .expect("Related Association should remove from either direction");
     assert!(
         storage
             .related_associations(&issue_a.id)
             .await
-            .unwrap()
+            .expect("Issue A Related Associations should load after removal")
             .is_empty()
     );
     assert!(
         storage
             .related_associations(&issue_b.id)
             .await
-            .unwrap()
+            .expect("Issue B Related Associations should load after removal")
             .is_empty()
     );
     assert!(storage.remove_related_association(&forward).await.is_err());
 
-    let missing =
-        RelatedAssociation::new(issue_a.id.clone(), IssueId::new("test-missing")).unwrap();
+    let missing = RelatedAssociation::new(issue_a.id.clone(), IssueId::new("test-missing"))
+        .expect("distinct missing endpoint should form a candidate Association");
     assert!(storage.add_related_association(missing).await.is_err());
 }
 
 #[tokio::test]
 async fn discovery_origin_is_directed_multi_source_and_acyclic() {
     let mut storage = new_in_memory_storage("test".to_string());
-    let issue_a = storage.create(create_test_issue("A")).await.unwrap();
-    let issue_b = storage.create(create_test_issue("B")).await.unwrap();
-    let issue_c = storage.create(create_test_issue("C")).await.unwrap();
-    let issue_d = storage.create(create_test_issue("D")).await.unwrap();
-    let origin_ab = DiscoveryOrigin::new(issue_a.id.clone(), issue_b.id.clone()).unwrap();
-    let origin_ad = DiscoveryOrigin::new(issue_a.id.clone(), issue_d.id.clone()).unwrap();
+    let issue_a = storage
+        .create(create_test_issue("A"))
+        .await
+        .expect("Issue A should be created");
+    let issue_b = storage
+        .create(create_test_issue("B"))
+        .await
+        .expect("Issue B should be created");
+    let issue_c = storage
+        .create(create_test_issue("C"))
+        .await
+        .expect("Issue C should be created");
+    let issue_d = storage
+        .create(create_test_issue("D"))
+        .await
+        .expect("Issue D should be created");
+    let origin_ab = DiscoveryOrigin::new(issue_a.id.clone(), issue_b.id.clone())
+        .expect("distinct Issues should form a Discovery Origin");
+    let origin_ad = DiscoveryOrigin::new(issue_a.id.clone(), issue_d.id.clone())
+        .expect("distinct Issues should form a second Discovery Origin");
 
     storage
         .add_discovery_origin(origin_ab.clone())
         .await
-        .unwrap();
+        .expect("first Discovery Origin should be added");
     storage
         .add_discovery_origin(origin_ad.clone())
         .await
-        .unwrap();
+        .expect("second Discovery Origin should be added");
     let mut expected = vec![origin_ab.clone(), origin_ad.clone()];
     expected.sort();
     assert_eq!(
-        storage.discovery_origins(&issue_a.id).await.unwrap(),
+        storage
+            .discovery_origins(&issue_a.id)
+            .await
+            .expect("Discovery Origins should load"),
         expected
     );
     assert!(
@@ -2118,12 +2164,14 @@ async fn discovery_origin_is_directed_multi_source_and_acyclic() {
         DependencyType::Related,
     )
     .await;
-    let origin_ca = DiscoveryOrigin::new(issue_c.id.clone(), issue_a.id.clone()).unwrap();
+    let origin_ca = DiscoveryOrigin::new(issue_c.id.clone(), issue_a.id.clone())
+        .expect("distinct Issues should form a Discovery Origin");
     storage
         .add_discovery_origin(origin_ca.clone())
         .await
         .expect("a non-Discovery path must not create a provenance cycle");
-    let cycle = DiscoveryOrigin::new(issue_b.id.clone(), issue_c.id.clone()).unwrap();
+    let cycle = DiscoveryOrigin::new(issue_b.id.clone(), issue_c.id.clone())
+        .expect("distinct Issues should form a cycle candidate");
     assert!(literal_path_exists(
         &[
             (issue_c.id.as_str(), issue_a.id.as_str()),
@@ -2137,17 +2185,18 @@ async fn discovery_origin_is_directed_multi_source_and_acyclic() {
         storage
             .discovery_origins(&issue_b.id)
             .await
-            .unwrap()
+            .expect("rejected cycle target Origins should load")
             .is_empty()
     );
 
-    let reversed = DiscoveryOrigin::new(issue_b.id.clone(), issue_a.id.clone()).unwrap();
+    let reversed = DiscoveryOrigin::new(issue_b.id.clone(), issue_a.id.clone())
+        .expect("distinct reversed endpoints should form an Origin");
     assert!(storage.remove_discovery_origin(&reversed).await.is_err());
     assert!(
         storage
             .discovery_origins(&issue_a.id)
             .await
-            .unwrap()
+            .expect("Discovery Origins should load after reversed removal")
             .contains(&origin_ab)
     );
     seed_legacy_relationship(
@@ -2157,31 +2206,45 @@ async fn discovery_origin_is_directed_multi_source_and_acyclic() {
         DependencyType::DiscoveredFrom,
     )
     .await;
-    storage.remove_discovery_origin(&origin_ab).await.unwrap();
+    storage
+        .remove_discovery_origin(&origin_ab)
+        .await
+        .expect("Discovery Origin should be removed");
     assert!(
         !storage
             .discovery_origins(&issue_a.id)
             .await
-            .unwrap()
+            .expect("Discovery Origins should load after removal")
             .contains(&origin_ab),
         "removal should clear duplicate compatibility records and graph edges"
     );
-    storage.remove_discovery_origin(&origin_ca).await.unwrap();
+    storage
+        .remove_discovery_origin(&origin_ca)
+        .await
+        .expect("remaining Discovery Origin should be removed");
 
-    let missing = DiscoveryOrigin::new(issue_a.id.clone(), IssueId::new("test-missing")).unwrap();
+    let missing = DiscoveryOrigin::new(issue_a.id.clone(), IssueId::new("test-missing"))
+        .expect("distinct missing endpoint should form an Origin candidate");
     assert!(storage.add_discovery_origin(missing).await.is_err());
 }
 
 #[tokio::test]
 async fn nonblocking_relationships_do_not_change_ready_or_blocked_and_coexist() {
     let mut storage = new_in_memory_storage("test".to_string());
-    let issue_a = storage.create(create_test_issue("A")).await.unwrap();
-    let issue_b = storage.create(create_test_issue("B")).await.unwrap();
-    let blocking = BlockingDependency::new(issue_a.id.clone(), issue_b.id.clone()).unwrap();
+    let issue_a = storage
+        .create(create_test_issue("A"))
+        .await
+        .expect("Issue A should be created");
+    let issue_b = storage
+        .create(create_test_issue("B"))
+        .await
+        .expect("Issue B should be created");
+    let blocking = BlockingDependency::new(issue_a.id.clone(), issue_b.id.clone())
+        .expect("distinct Issues should form a Blocking Dependency");
     storage
         .add_blocking_dependency(blocking.clone())
         .await
-        .unwrap();
+        .expect("Blocking Dependency should be added");
     seed_legacy_relationship(
         &mut storage,
         &issue_a.id,
@@ -2193,62 +2256,73 @@ async fn nonblocking_relationships_do_not_change_ready_or_blocked_and_coexist() 
     let ready_before = storage
         .ready_to_work(&ReadyFilter::default(), None)
         .await
-        .unwrap()
+        .expect("Ready snapshot should load")
         .into_iter()
         .map(|issue| issue.id)
         .collect::<HashSet<_>>();
     let blocked_before = storage
         .blocked_issues()
         .await
-        .unwrap()
+        .expect("Blocked snapshot should load")
         .into_iter()
         .map(|(issue, _)| issue.id)
         .collect::<HashSet<_>>();
 
-    let related = RelatedAssociation::new(issue_a.id.clone(), issue_b.id.clone()).unwrap();
-    let discovery = DiscoveryOrigin::new(issue_a.id.clone(), issue_b.id.clone()).unwrap();
+    let related = RelatedAssociation::new(issue_a.id.clone(), issue_b.id.clone())
+        .expect("distinct Issues should form a Related Association");
+    let discovery = DiscoveryOrigin::new(issue_a.id.clone(), issue_b.id.clone())
+        .expect("distinct Issues should form a Discovery Origin");
     storage
         .add_related_association(related.clone())
         .await
-        .unwrap();
+        .expect("Related Association should be added");
     storage
         .add_discovery_origin(discovery.clone())
         .await
-        .unwrap();
+        .expect("Discovery Origin should be added");
 
     let ready_after = storage
         .ready_to_work(&ReadyFilter::default(), None)
         .await
-        .unwrap()
+        .expect("Ready snapshot should reload")
         .into_iter()
         .map(|issue| issue.id)
         .collect::<HashSet<_>>();
     let blocked_after = storage
         .blocked_issues()
         .await
-        .unwrap()
+        .expect("Blocked snapshot should reload")
         .into_iter()
         .map(|(issue, _)| issue.id)
         .collect::<HashSet<_>>();
     assert_eq!(ready_after, ready_before);
     assert_eq!(blocked_after, blocked_before);
     assert_eq!(
-        storage.blocking_prerequisites(&issue_a.id).await.unwrap(),
+        storage
+            .blocking_prerequisites(&issue_a.id)
+            .await
+            .expect("Blocking prerequisites should load"),
         vec![blocking]
     );
     assert_eq!(
-        storage.related_associations(&issue_b.id).await.unwrap(),
+        storage
+            .related_associations(&issue_b.id)
+            .await
+            .expect("Related Associations should load"),
         vec![related]
     );
     assert_eq!(
-        storage.discovery_origins(&issue_a.id).await.unwrap(),
+        storage
+            .discovery_origins(&issue_a.id)
+            .await
+            .expect("Discovery Origins should load"),
         vec![discovery]
     );
 
     let mut kinds = storage
         .export_all()
         .await
-        .unwrap()
+        .expect("coexisting relationship records should export")
         .into_iter()
         .flat_map(|issue| issue.dependencies)
         .map(|dependency| dependency.dep_type)
@@ -2280,7 +2354,7 @@ async fn nonblocking_relationship_operations_stay_within_scale_budget() {
             storage
                 .create(create_test_issue(&format!("Stress {index}")))
                 .await
-                .unwrap(),
+                .expect("stress Issue should be created"),
         );
     }
 
@@ -2290,10 +2364,10 @@ async fn nonblocking_relationship_operations_stay_within_scale_budget() {
             storage
                 .add_related_association(
                     RelatedAssociation::new(issues[index].id.clone(), issues[related].id.clone())
-                        .unwrap(),
+                        .expect("stress Related endpoints should differ"),
                 )
                 .await
-                .unwrap();
+                .expect("stress Related Association should be added");
         }
     }
     for discovered in 0..DISCOVERED_COUNT {
@@ -2304,10 +2378,10 @@ async fn nonblocking_relationship_operations_stay_within_scale_budget() {
             storage
                 .add_discovery_origin(
                     DiscoveryOrigin::new(issues[discovered].id.clone(), issues[source].id.clone())
-                        .unwrap(),
+                        .expect("stress Discovery endpoints should differ"),
                 )
                 .await
-                .unwrap();
+                .expect("stress Discovery Origin should be added");
         }
     }
     for index in 0..DISCOVERED_COUNT {
@@ -2317,24 +2391,31 @@ async fn nonblocking_relationship_operations_stay_within_scale_budget() {
                     issues[DISCOVERED_COUNT + index].id.clone(),
                     issues[2 * DISCOVERED_COUNT + index].id.clone(),
                 )
-                .unwrap(),
+                .expect("stress Blocking endpoints should differ"),
             )
             .await
-            .unwrap();
+            .expect("stress Blocking Dependency should be added");
     }
 
-    let duplicate = RelatedAssociation::new(issues[1].id.clone(), issues[0].id.clone()).unwrap();
+    let duplicate = RelatedAssociation::new(issues[1].id.clone(), issues[0].id.clone())
+        .expect("reverse stress endpoints should form an Association");
     let started = Instant::now();
-    storage.add_related_association(duplicate).await.unwrap();
+    storage
+        .add_related_association(duplicate)
+        .await
+        .expect("duplicate stress Association should be idempotent");
     assert!(started.elapsed() <= OPERATION_BUDGET);
 
     let started = Instant::now();
-    let associations = storage.related_associations(&issues[0].id).await.unwrap();
+    let associations = storage
+        .related_associations(&issues[0].id)
+        .await
+        .expect("stress Related Associations should load");
     assert_eq!(associations.len(), RELATED_OFFSETS.len() * 2);
     assert!(started.elapsed() <= OPERATION_BUDGET);
 
-    let cycle =
-        DiscoveryOrigin::new(issues[DISCOVERED_COUNT].id.clone(), issues[0].id.clone()).unwrap();
+    let cycle = DiscoveryOrigin::new(issues[DISCOVERED_COUNT].id.clone(), issues[0].id.clone())
+        .expect("stress cycle endpoints should differ");
     let started = Instant::now();
     assert!(storage.add_discovery_origin(cycle).await.is_err());
     assert!(started.elapsed() <= OPERATION_BUDGET);

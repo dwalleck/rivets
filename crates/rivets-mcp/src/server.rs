@@ -1194,7 +1194,8 @@ mod tests {
             .iter()
             .find(|tool| tool.name == "blocking_dependency_list")
             .expect("Blocking list tool should be registered");
-        let list_schema = serde_json::to_string(&list_tool.input_schema).unwrap();
+        let list_schema = serde_json::to_string(&list_tool.input_schema)
+            .expect("Blocking Dependency list schema should serialize");
         assert!(list_schema.contains("prerequisites_of"));
         assert!(list_schema.contains("dependents_of"));
         for tool_name in ["related_add", "related_remove"] {

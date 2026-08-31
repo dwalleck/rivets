@@ -1051,7 +1051,12 @@ fn ready_assignment_visibility(initialized_dir: TempDir) {
         serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout)
             .expect("Ready output should be valid JSON")
             .into_iter()
-            .map(|issue| issue["id"].as_str().unwrap().to_string())
+            .map(|issue| {
+                issue["id"]
+                    .as_str()
+                    .expect("Ready Issue ID should be a string")
+                    .to_string()
+            })
             .collect::<BTreeSet<_>>()
     };
 
@@ -1094,7 +1099,12 @@ fn ready_and_blocked_survive_restart(initialized_dir: TempDir) {
         let ready_ids = serde_json::from_slice::<Vec<serde_json::Value>>(&ready.stdout)
             .expect("Ready output should be JSON")
             .into_iter()
-            .map(|issue| issue["id"].as_str().unwrap().to_string())
+            .map(|issue| {
+                issue["id"]
+                    .as_str()
+                    .expect("Ready Issue ID should be a string")
+                    .to_string()
+            })
             .collect::<BTreeSet<_>>();
 
         let blocked = run_rivets_in_dir(initialized_dir.path(), &["--json", "blocked"]);
@@ -1102,7 +1112,12 @@ fn ready_and_blocked_survive_restart(initialized_dir: TempDir) {
         let blocked_ids = serde_json::from_slice::<Vec<serde_json::Value>>(&blocked.stdout)
             .expect("Blocked output should be JSON")
             .into_iter()
-            .map(|entry| entry["issue"]["id"].as_str().unwrap().to_string())
+            .map(|entry| {
+                entry["issue"]["id"]
+                    .as_str()
+                    .expect("Blocked Issue ID should be a string")
+                    .to_string()
+            })
             .collect::<BTreeSet<_>>();
 
         (ready_ids, blocked_ids)
@@ -1288,7 +1303,7 @@ fn blocking_dependency_cli_direction_and_restart(initialized_dir: TempDir) {
 fn create_with_prerequisites_is_atomic(initialized_dir: TempDir) {
     let prerequisite = create_issue(initialized_dir.path(), "Prerequisite", &[]);
     let issues_path = initialized_dir.path().join(".rivets/issues.jsonl");
-    let before = std::fs::read(&issues_path).unwrap();
+    let before = std::fs::read(&issues_path).expect("Issue source bytes should be readable");
 
     let missing = run_rivets_in_dir(
         initialized_dir.path(),
@@ -1301,7 +1316,10 @@ fn create_with_prerequisites_is_atomic(initialized_dir: TempDir) {
         ],
     );
     assert!(!missing.status.success());
-    assert_eq!(std::fs::read(&issues_path).unwrap(), before);
+    assert_eq!(
+        std::fs::read(&issues_path).expect("Issue source bytes should remain readable"),
+        before
+    );
 
     let duplicate = run_rivets_in_dir(
         initialized_dir.path(),
@@ -1316,7 +1334,10 @@ fn create_with_prerequisites_is_atomic(initialized_dir: TempDir) {
         ],
     );
     assert!(!duplicate.status.success());
-    assert_eq!(std::fs::read(&issues_path).unwrap(), before);
+    assert_eq!(
+        std::fs::read(&issues_path).expect("Issue source bytes should remain readable"),
+        before
+    );
 
     let legacy = run_rivets_in_dir(
         initialized_dir.path(),
@@ -3119,7 +3140,11 @@ fn related_and_discovery_cli_are_structured_symmetric_and_persistent(initialized
         serde_json::from_slice(&discovery_list.stdout).expect("Discovery list should be JSON");
     let actual_sources = discovery_list
         .iter()
-        .map(|origin| origin["source_issue_id"].as_str().unwrap())
+        .map(|origin| {
+            origin["source_issue_id"]
+                .as_str()
+                .expect("Discovery source ID should be a string")
+        })
         .collect::<Vec<_>>();
     let mut expected_sources = vec![issue_a.as_str(), issue_b.as_str()];
     expected_sources.sort_unstable();
@@ -3190,8 +3215,8 @@ fn related_and_discovery_cli_are_structured_symmetric_and_persistent(initialized
         assert!(stderr.contains(expected), "unexpected error: {stderr}");
     }
 
-    let before_missing =
-        std::fs::read(initialized_dir.path().join(".rivets/issues.jsonl")).unwrap();
+    let before_missing = std::fs::read(initialized_dir.path().join(".rivets/issues.jsonl"))
+        .expect("Issue source bytes should be readable");
     let missing = run_rivets_in_dir(
         initialized_dir.path(),
         &[
@@ -3206,7 +3231,8 @@ fn related_and_discovery_cli_are_structured_symmetric_and_persistent(initialized
     assert!(!missing.status.success());
     assert!(String::from_utf8_lossy(&missing.stderr).contains("test-missing"));
     assert_eq!(
-        std::fs::read(initialized_dir.path().join(".rivets/issues.jsonl")).unwrap(),
+        std::fs::read(initialized_dir.path().join(".rivets/issues.jsonl"))
+            .expect("Issue source bytes should remain readable"),
         before_missing
     );
 
@@ -3241,7 +3267,8 @@ fn related_and_discovery_cli_are_structured_symmetric_and_persistent(initialized
         &["--json", "related", "list", "--issue", &issue_a],
     );
     assert_eq!(
-        serde_json::from_slice::<Vec<serde_json::Value>>(&related_empty.stdout).unwrap(),
+        serde_json::from_slice::<Vec<serde_json::Value>>(&related_empty.stdout)
+            .expect("empty Related list should be valid JSON"),
         Vec::<serde_json::Value>::new()
     );
 
@@ -3262,7 +3289,8 @@ fn related_and_discovery_cli_are_structured_symmetric_and_persistent(initialized
         &["--json", "discovery", "list", "--discovered", &issue_c],
     );
     let discovery_after_remove: Vec<serde_json::Value> =
-        serde_json::from_slice(&discovery_after_remove.stdout).unwrap();
+        serde_json::from_slice(&discovery_after_remove.stdout)
+            .expect("Discovery list after removal should be valid JSON");
     assert_eq!(discovery_after_remove.len(), 1);
     assert_eq!(
         discovery_after_remove[0]["source_issue_id"], issue_b,

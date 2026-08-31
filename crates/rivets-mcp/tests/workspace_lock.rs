@@ -138,7 +138,10 @@ struct MutationFixture {
 impl MutationFixture {
     async fn new() -> Self {
         let workspace = workspace();
-        let root = workspace.path().canonicalize().unwrap();
+        let root = workspace
+            .path()
+            .canonicalize()
+            .expect("MCP workspace-lock test precondition should hold");
         let root_string = root.display().to_string();
         let tools = tools();
         set_context(&tools, &root).await;
@@ -313,14 +316,24 @@ async fn workspace_lock_blocks_every_mcp_mutator_but_not_queries() {
     let _serial = WORKSPACE_LOCK_TESTS.lock().await;
     let fixture = MutationFixture::new().await;
     let source_path = fixture.root.join(".rivets/issues.jsonl");
-    let before = std::fs::read(&source_path).unwrap();
-    let holder = WorkspaceMutationLock::try_acquire(&fixture.root).unwrap();
+    let before =
+        std::fs::read(&source_path).expect("MCP workspace-lock test precondition should hold");
+    let holder = WorkspaceMutationLock::try_acquire(&fixture.root)
+        .expect("MCP workspace-lock test precondition should hold");
     assert_issue_mutators_busy(&fixture).await;
     assert_resource_mutators_busy(&fixture).await;
     assert_lifecycle_relationship_and_label_mutators_busy(&fixture).await;
-    assert_eq!(std::fs::read(&source_path).unwrap(), before);
     assert_eq!(
-        fixture.tools.list(list_params(None)).await.unwrap().len(),
+        std::fs::read(&source_path).expect("source file should remain readable"),
+        before
+    );
+    assert_eq!(
+        fixture
+            .tools
+            .list(list_params(None))
+            .await
+            .expect("query should remain available while mutation lock is held")
+            .len(),
         5
     );
     drop(holder);
@@ -330,7 +343,8 @@ async fn workspace_lock_blocks_every_mcp_mutator_but_not_queries() {
 async fn claim_and_release_require_workspace_lock() {
     let _serial = WORKSPACE_LOCK_TESTS.lock().await;
     let fixture = MutationFixture::new().await;
-    let holder = WorkspaceMutationLock::try_acquire(&fixture.root).unwrap();
+    let holder = WorkspaceMutationLock::try_acquire(&fixture.root)
+        .expect("MCP workspace-lock test precondition should hold");
     assert_busy(
         fixture
             .tools
@@ -345,7 +359,8 @@ async fn claim_and_release_require_workspace_lock() {
         .claim(fixture.update_target.id.as_str(), "alice", None)
         .await
         .expect("Claim should succeed after lock release");
-    let holder = WorkspaceMutationLock::try_acquire(&fixture.root).unwrap();
+    let holder = WorkspaceMutationLock::try_acquire(&fixture.root)
+        .expect("MCP workspace-lock test precondition should hold");
     assert_busy(
         fixture
             .tools
@@ -367,7 +382,8 @@ async fn mixed_cli_mcp_mutation_preserves_atomic_claim() {
     let fixture = MutationFixture::new().await;
     let issue_id = fixture.update_target.id.as_str();
 
-    let holder = WorkspaceMutationLock::try_acquire(&fixture.root).unwrap();
+    let holder = WorkspaceMutationLock::try_acquire(&fixture.root)
+        .expect("MCP workspace-lock test precondition should hold");
     let contended_claim = run_cli(&fixture.root, &["claim", issue_id, "--assignee", "alice"]);
     assert!(!contended_claim.status.success());
     assert!(String::from_utf8_lossy(&contended_claim.stderr).contains("Workspace is busy"));
@@ -378,7 +394,8 @@ async fn mixed_cli_mcp_mutation_preserves_atomic_claim() {
             .success()
     );
 
-    let holder = WorkspaceMutationLock::try_acquire(&fixture.root).unwrap();
+    let holder = WorkspaceMutationLock::try_acquire(&fixture.root)
+        .expect("MCP workspace-lock test precondition should hold");
     assert_busy(
         fixture.tools.update(update_params(issue_id, None)).await,
         &fixture.root,
@@ -403,7 +420,8 @@ async fn mixed_cli_mcp_mutation_preserves_atomic_claim() {
         .claim(close_target.id.as_str(), "bob", None)
         .await
         .expect("MCP Claim should persist");
-    let holder = WorkspaceMutationLock::try_acquire(&fixture.root).unwrap();
+    let holder = WorkspaceMutationLock::try_acquire(&fixture.root)
+        .expect("MCP workspace-lock test precondition should hold");
     let contended_close = run_cli(&fixture.root, &["close", close_target.id.as_str()]);
     assert!(!contended_close.status.success());
     assert!(String::from_utf8_lossy(&contended_close.stderr).contains("Workspace is busy"));
@@ -422,10 +440,15 @@ async fn mixed_cli_mcp_mutation_preserves_atomic_claim() {
 async fn workspace_lock_cache_miss_resolves_before_durable_lock() {
     let _serial = WORKSPACE_LOCK_TESTS.lock().await;
     let workspace = workspace();
-    let root = workspace.path().canonicalize().unwrap();
+    let root = workspace
+        .path()
+        .canonicalize()
+        .expect("MCP workspace-lock test precondition should hold");
     let root_string = root.display().to_string();
-    let holder = WorkspaceMutationLock::try_acquire(&root).unwrap();
-    std::fs::write(root.join(".rivets/config.yaml"), "not: [valid").unwrap();
+    let holder = WorkspaceMutationLock::try_acquire(&root)
+        .expect("MCP workspace-lock test precondition should hold");
+    std::fs::write(root.join(".rivets/config.yaml"), "not: [valid")
+        .expect("MCP workspace-lock test precondition should hold");
     let uncached = tools();
     match uncached
         .create(create_params("Must not initialize", Some(&root_string)))
@@ -441,12 +464,14 @@ async fn workspace_lock_cache_miss_resolves_before_durable_lock() {
         root.join(".rivets/config.yaml"),
         "issue-prefix: test\nstorage:\n  backend: jsonl\n  data_file: .rivets/issues.jsonl\n",
     )
-    .unwrap();
+    .expect("MCP workspace-lock test precondition should hold");
     let cached = tools();
     set_context(&cached, &root).await;
     let issue = create_issue(&cached, "Cached target").await;
-    let holder = WorkspaceMutationLock::try_acquire(&root).unwrap();
-    std::fs::write(root.join(".rivets/issues.jsonl"), b"{malformed\n").unwrap();
+    let holder = WorkspaceMutationLock::try_acquire(&root)
+        .expect("MCP workspace-lock test precondition should hold");
+    std::fs::write(root.join(".rivets/issues.jsonl"), b"{malformed\n")
+        .expect("MCP workspace-lock test precondition should hold");
     assert_busy(
         cached
             .add_note(issue.id.as_str(), "Must not reload".to_string(), None)
@@ -459,7 +484,10 @@ async fn workspace_lock_cache_miss_resolves_before_durable_lock() {
 #[tokio::test]
 async fn same_server_mutations_serialize_and_both_persist() {
     let workspace = workspace();
-    let root = workspace.path().canonicalize().unwrap();
+    let root = workspace
+        .path()
+        .canonicalize()
+        .expect("MCP workspace-lock test precondition should hold");
     let source_path = root.join(".rivets/issues.jsonl");
     let tools = tools();
     set_context(&tools, &root).await;
@@ -477,7 +505,8 @@ async fn same_server_mutations_serialize_and_both_persist() {
         "second same-server mutation should succeed: {second:?}"
     );
 
-    let persisted = std::fs::read_to_string(source_path).unwrap();
+    let persisted = std::fs::read_to_string(source_path)
+        .expect("MCP workspace-lock test precondition should hold");
     assert_eq!(persisted.lines().count(), 2);
     assert!(persisted.contains("Concurrent first"));
     assert!(persisted.contains("Concurrent second"));
@@ -487,10 +516,17 @@ async fn workspace_lock_does_not_serialize_distinct_mcp_workspaces() {
     let _serial = WORKSPACE_LOCK_TESTS.lock().await;
     let workspace_a = workspace();
     let workspace_b = workspace();
-    let root_a = workspace_a.path().canonicalize().unwrap();
-    let root_b = workspace_b.path().canonicalize().unwrap();
+    let root_a = workspace_a
+        .path()
+        .canonicalize()
+        .expect("MCP workspace-lock test precondition should hold");
+    let root_b = workspace_b
+        .path()
+        .canonicalize()
+        .expect("MCP workspace-lock test precondition should hold");
     let root_b_string = root_b.display().to_string();
-    let holder = WorkspaceMutationLock::try_acquire(&root_a).unwrap();
+    let holder = WorkspaceMutationLock::try_acquire(&root_a)
+        .expect("MCP workspace-lock test precondition should hold");
     let tools = tools();
 
     let created = tools
@@ -503,7 +539,7 @@ async fn workspace_lock_does_not_serialize_distinct_mcp_workspaces() {
     assert_eq!(created.title, "Independent Workspace issue");
     assert!(
         std::fs::read_to_string(root_a.join(".rivets/issues.jsonl"))
-            .unwrap()
+            .expect("held Workspace source file should remain readable")
             .is_empty()
     );
     drop(holder);
@@ -515,7 +551,10 @@ async fn workspace_lock_10k_mcp_mutation_preserves_records() {
     const ISSUE_COUNT: usize = 10_000;
     let _serial = WORKSPACE_LOCK_TESTS.lock().await;
     let workspace = workspace();
-    let root = workspace.path().canonicalize().unwrap();
+    let root = workspace
+        .path()
+        .canonicalize()
+        .expect("MCP workspace-lock test precondition should hold");
     let source_path = root.join(".rivets/issues.jsonl");
     let mut storage = create_storage(StorageBackend::Jsonl(source_path.clone()), "scale".into())
         .await

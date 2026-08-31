@@ -1418,7 +1418,7 @@ mod tests {
                 tools
                     .ready(ready_params(None, None, None, None, None, None))
                     .await
-                    .unwrap()
+                    .expect("default Ready query should succeed")
             ),
             BTreeSet::from([unassigned.id.clone()])
         );
@@ -1434,7 +1434,7 @@ mod tests {
                         None,
                     ))
                     .await
-                    .unwrap()
+                    .expect("assignee Ready query should succeed")
             ),
             BTreeSet::from([alice.id.clone()])
         );
@@ -1446,7 +1446,7 @@ mod tests {
                         ..ready_params(None, None, None, None, None, None)
                     })
                     .await
-                    .unwrap()
+                    .expect("all-assignees Ready query should succeed")
             ),
             BTreeSet::from([unassigned.id, alice.id])
         );

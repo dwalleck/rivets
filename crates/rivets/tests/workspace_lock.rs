@@ -41,7 +41,11 @@ async fn workspace_lock_is_canonical_scoped_and_persistent() {
     assert!(matches!(
         busy,
         Error::WorkspaceBusy { ref workspace_root }
-            if workspace_root == &first.workspace_root().canonicalize().unwrap()
+            if workspace_root
+                == &first
+                    .workspace_root()
+                    .canonicalize()
+                    .expect("canonical Workspace root should resolve")
     ));
     let second = WorkspaceMutationLock::try_acquire(second_workspace.path())
         .expect("different Workspace should acquire independently");

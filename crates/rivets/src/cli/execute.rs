@@ -2106,7 +2106,7 @@ mod tests {
                     },
                 )
                 .await
-                .unwrap();
+                .expect("assigned Issue should enter In Progress");
             app.save().await.unwrap();
 
             let args = ReopenArgs {

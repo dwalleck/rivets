@@ -898,7 +898,8 @@ mod tests {
 
     #[test]
     fn ready_assignment_selectors_are_mutually_exclusive() {
-        let cli = Cli::try_parse_from(["rivets", "ready", "--all-assignees"]).unwrap();
+        let cli = Cli::try_parse_from(["rivets", "ready", "--all-assignees"])
+            .expect("all-assignees Ready syntax should parse");
         assert!(matches!(
             cli.command,
             Some(Commands::Ready(ReadyArgs {
