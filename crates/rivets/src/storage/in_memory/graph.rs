@@ -286,6 +286,14 @@ mod tests {
     use crate::domain::IssueKind;
     use chrono::Utc;
     use std::time::{Duration, Instant};
+    #[allow(unexpected_cfgs)]
+    const fn claim_lookup_budget() -> Duration {
+        if cfg!(tarpaulin) {
+            Duration::from_millis(50)
+        } else {
+            Duration::from_millis(10)
+        }
+    }
 
     #[test]
     fn blocking_graph_and_ready_derivation_stay_within_scale_budget() {
@@ -358,7 +366,7 @@ mod tests {
         );
         let claim_lookup_elapsed = started.elapsed();
         assert!(
-            claim_lookup_elapsed <= Duration::from_millis(10),
+            claim_lookup_elapsed <= claim_lookup_budget(),
             "Claim blockedness lookup took {claim_lookup_elapsed:?}"
         );
 

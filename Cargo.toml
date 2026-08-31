@@ -71,6 +71,7 @@ rstest = "0.26"
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin)'] }
 
 [workspace.lints.clippy]
 all = "warn"
