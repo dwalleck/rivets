@@ -15,7 +15,9 @@ Approved design: [`design.md`](./design.md), requester approval “i approve thi
 | Churn margin | **775 lines (25%)** |
 | **Projected total** | **3,875 lines** |
 
-The 25% margin covers exhaustive trait implementor updates, generated MCP schema assertions, migration fixtures, and error-message adjustments discovered while compiling. The projected total is below the 4,000-line review-size threshold, so the plan uses one PR increment.
+During Slice 3, upstream merged the Related/Discovery adapter stack that this branch had already incorporated as its base. The Assignment increment is therefore measured against that accepted review boundary rather than raw `origin/main`: the accepted boundary owns unrelated relationship work, while `work/brai...work/8rj9` owns this change's Assignment, lock, CLI/MCP, test, and documentation increments. That measured Assignment increment is 9,192 changed lines (8,528 insertions, 664 deletions), exceeding both the 3,875-line projection and the 4,000-line review-size threshold.
+
+Partition revision: the upstream relationship merge is the completed boundary, and the remaining Assignment increment ships as one merged PR stack over it. No further safe split exists inside the integrated commit chain because the merge resolution is required for every adapter to compile and test together.
 
 ### PR increment: `atomic-assignment`
 
