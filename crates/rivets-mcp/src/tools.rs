@@ -23,10 +23,10 @@ use crate::models::{
     SetContextResponse, UpdateParams, WhereAmIResponse,
 };
 use rivets::domain::{
-    AssociatedResource, BlockingDependency, DiscoveryOrigin, Issue, IssueFilter, IssueId,
-    IssueKind, IssueStatus, IssueUpdate, NewIssue, NewResource, NoteContent, ReadyAssignmentFilter,
-    ReadyFilter, RelatedAssociation, ResourceId, ResourceLabel, ResourceRole, ResourceTarget,
-    ResourceUpdate, WebUrl, WorkspacePath,
+    AssignmentError, AssociatedResource, BlockingDependency, DiscoveryOrigin, Issue, IssueFilter,
+    IssueId, IssueKind, IssueStatus, IssueUpdate, NewIssue, NewResource, NoteContent,
+    ReadyAssignmentFilter, ReadyFilter, RelatedAssociation, ResourceId, ResourceLabel,
+    ResourceRole, ResourceTarget, ResourceUpdate, WebUrl, WorkspacePath,
 };
 use rivets::storage::IssueStorage;
 use rivets::workspace_lock::WorkspaceMutationLock;
@@ -40,6 +40,12 @@ use tracing::{debug, instrument};
 /// Prevents potential OOM errors with large issue databases by ensuring
 /// queries always have a reasonable upper bound.
 const DEFAULT_QUERY_LIMIT: usize = 100;
+
+#[derive(Clone, Copy)]
+enum AssignmentOperation {
+    Claim,
+    Release,
+}
 
 /// Parse and validate a status string.
 fn validate_status(status: &str) -> Result<IssueStatus> {
@@ -432,6 +438,29 @@ impl Tools {
         Ok(issue)
     }
 
+    async fn mutate_assignment(
+        &self,
+        issue_id: &str,
+        assignee: &str,
+        workspace_root: Option<&str>,
+        operation: AssignmentOperation,
+    ) -> Result<Issue> {
+        let issue_id = IssueId::new(issue_id);
+        if assignee.trim().is_empty() {
+            return Err(Error::Assignment(AssignmentError::BlankAssignee {
+                issue_id,
+            }));
+        }
+
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
+        let issue = match operation {
+            AssignmentOperation::Claim => storage.claim(&issue_id, assignee).await?,
+            AssignmentOperation::Release => storage.release(&issue_id, assignee).await?,
+        };
+        save_or_reload(storage.as_mut()).await?;
+        Ok(issue)
+    }
+
     /// Atomically claim one Open, unblocked Issue.
     ///
     /// # Errors
@@ -445,10 +474,13 @@ impl Tools {
         assignee: &str,
         workspace_root: Option<&str>,
     ) -> Result<Issue> {
-        let mut storage = self.mutation_storage_for(workspace_root).await?;
-        let issue = storage.claim(&IssueId::new(issue_id), assignee).await?;
-        save_or_reload(storage.as_mut()).await?;
-        Ok(issue)
+        self.mutate_assignment(
+            issue_id,
+            assignee,
+            workspace_root,
+            AssignmentOperation::Claim,
+        )
+        .await
     }
 
     /// Atomically release one Open Issue from its exact Assignee.
@@ -465,10 +497,13 @@ impl Tools {
         assignee: &str,
         workspace_root: Option<&str>,
     ) -> Result<Issue> {
-        let mut storage = self.mutation_storage_for(workspace_root).await?;
-        let issue = storage.release(&IssueId::new(issue_id), assignee).await?;
-        save_or_reload(storage.as_mut()).await?;
-        Ok(issue)
+        self.mutate_assignment(
+            issue_id,
+            assignee,
+            workspace_root,
+            AssignmentOperation::Release,
+        )
+        .await
     }
 
     /// Append an immutable Note to an Issue.
@@ -1185,7 +1220,7 @@ mod tests {
             status: status.map(str::to_string),
             priority,
             kind: kind_input(issue_kind),
-            legacy_assignee: Default::default(),
+            legacy_assignee: crate::models::LegacyAssigneePresence::default(),
             title,
             description,
             design,

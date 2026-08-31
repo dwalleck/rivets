@@ -42,7 +42,7 @@ fn create_params(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
 fn update_params(
     issue_id: &str,
     title: Option<String>,

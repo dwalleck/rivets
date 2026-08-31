@@ -119,20 +119,11 @@ pub async fn execute_info(
     Ok(())
 }
 
-/// Execute the create command
-pub async fn execute_create(
-    app: &mut crate::app::App,
-    args: &CreateArgs,
-    output_mode: OutputMode,
-) -> Result<()> {
-    use crate::domain::{IssueId, NewIssue, NoteContent};
-    use crate::output;
-
-    // Get title (interactive prompt if not provided)
-    let title = match &args.title {
-        Some(t) => t.clone(),
+/// Resolve a create title, including interactive input, before a mutation lock.
+pub(super) fn resolve_create_title(args: &CreateArgs) -> Result<String> {
+    match &args.title {
+        Some(title) => Ok(title.clone()),
         None => {
-            // Interactive mode: prompt for title
             eprint!("Title: ");
             std::io::stderr()
                 .flush()
@@ -141,15 +132,26 @@ pub async fn execute_create(
             std::io::stdin()
                 .read_line(&mut input)
                 .context("Failed to read title from stdin")?;
-            // Apply same validation as CLI argument parsing
-            super::validators::validate_title(input.trim()).map_err(|e| {
+            super::validators::validate_title(input.trim()).map_err(|reason| {
                 crate::error::Error::Validation {
                     field: "title",
-                    reason: e,
+                    reason,
                 }
-            })?
+                .into()
+            })
         }
-    };
+    }
+}
+
+/// Execute the create command
+pub async fn execute_create(
+    app: &mut crate::app::App,
+    args: &CreateArgs,
+    title: String,
+    output_mode: OutputMode,
+) -> Result<()> {
+    use crate::domain::{IssueId, NewIssue, NoteContent};
+    use crate::output;
 
     let prerequisites = args
         .prerequisites
@@ -357,26 +359,51 @@ pub async fn execute_update(
     output_batch_result(&result, "Updated", output_mode)?;
     bail_on_batch_failures(&result, "update")
 }
+#[derive(Clone, Copy)]
+enum AssignmentOperation {
+    Claim,
+    Release,
+}
+
+async fn execute_assignment(
+    app: &mut crate::app::App,
+    args: &AssignmentArgs,
+    output_mode: OutputMode,
+    operation: AssignmentOperation,
+) -> Result<()> {
+    use crate::domain::IssueId;
+    use crate::output;
+
+    let issue_id = IssueId::new(&args.issue_id);
+    let issue = match operation {
+        AssignmentOperation::Claim => app.storage_mut().claim(&issue_id, &args.assignee).await?,
+        AssignmentOperation::Release => {
+            app.storage_mut().release(&issue_id, &args.assignee).await?
+        }
+    };
+    app.save().await?;
+
+    match output_mode {
+        OutputMode::Json => output::print_json(&issue)?,
+        OutputMode::Text => match operation {
+            AssignmentOperation::Claim => {
+                println!("Claimed issue {} for {}", issue.id, args.assignee);
+            }
+            AssignmentOperation::Release => {
+                println!("Released issue {} from {}", issue.id, args.assignee);
+            }
+        },
+    }
+    Ok(())
+}
+
 /// Atomically claim one Open, unblocked Issue.
 pub async fn execute_claim(
     app: &mut crate::app::App,
     args: &AssignmentArgs,
     output_mode: OutputMode,
 ) -> Result<()> {
-    use crate::domain::IssueId;
-    use crate::output;
-
-    let issue = app
-        .storage_mut()
-        .claim(&IssueId::new(&args.issue_id), &args.assignee)
-        .await?;
-    app.save().await?;
-
-    match output_mode {
-        OutputMode::Json => output::print_json(&issue)?,
-        OutputMode::Text => println!("Claimed issue {} for {}", issue.id, args.assignee),
-    }
-    Ok(())
+    execute_assignment(app, args, output_mode, AssignmentOperation::Claim).await
 }
 
 /// Atomically release one Open Issue from its exact Assignee.
@@ -385,20 +412,7 @@ pub async fn execute_release(
     args: &AssignmentArgs,
     output_mode: OutputMode,
 ) -> Result<()> {
-    use crate::domain::IssueId;
-    use crate::output;
-
-    let issue = app
-        .storage_mut()
-        .release(&IssueId::new(&args.issue_id), &args.assignee)
-        .await?;
-    app.save().await?;
-
-    match output_mode {
-        OutputMode::Json => output::print_json(&issue)?,
-        OutputMode::Text => println!("Released issue {} from {}", issue.id, args.assignee),
-    }
-    Ok(())
+    execute_assignment(app, args, output_mode, AssignmentOperation::Release).await
 }
 
 /// Handle save-or-record-failure for batch operations.
@@ -560,13 +574,39 @@ fn confirm_action(prompt: &str) -> Result<bool> {
 ///
 /// Returns `Ok(true)` to proceed, `Ok(false)` if the user cancelled.
 /// Skips the prompt when `skip_confirm` is true or only one issue is affected.
-fn confirm_batch(action: &str, count: usize, skip_confirm: bool) -> Result<bool> {
+pub(super) fn confirm_batch(action: &str, count: usize, skip_confirm: bool) -> Result<bool> {
     if count > 1 && !skip_confirm {
         let prompt = format!("{action} {count} issues?");
         if !confirm_action(&prompt)? {
             println!("{action} cancelled.");
             return Ok(false);
         }
+    }
+    Ok(true)
+}
+
+/// Resolve an interactive delete confirmation before a mutation lock.
+pub(super) async fn confirm_delete(
+    app: &crate::app::App,
+    args: &DeleteArgs,
+    skip_confirm: bool,
+) -> Result<bool> {
+    use crate::domain::IssueId;
+
+    if args.force || skip_confirm {
+        return Ok(true);
+    }
+
+    let issue_id = IssueId::new(&args.issue_id);
+    let issue = app
+        .storage()
+        .get(&issue_id)
+        .await?
+        .ok_or(crate::error::Error::IssueNotFound(issue_id))?;
+    let prompt = format!("Delete issue '{}' ({})?", issue.id, issue.title);
+    if !confirm_action(&prompt)? {
+        println!("Deletion cancelled.");
+        return Ok(false);
     }
     Ok(true)
 }
@@ -584,14 +624,9 @@ pub async fn execute_close(
     app: &mut crate::app::App,
     args: &CloseArgs,
     output_mode: OutputMode,
-    skip_confirm: bool,
 ) -> Result<()> {
     use super::types::BatchResult;
     use crate::domain::{IssueId, IssueStatus, IssueUpdate, NoteContent};
-
-    if !confirm_batch("Close", args.issue_ids.len(), skip_confirm)? {
-        return Ok(());
-    }
 
     let note = args
         .reason
@@ -632,14 +667,9 @@ pub async fn execute_reopen(
     app: &mut crate::app::App,
     args: &ReopenArgs,
     output_mode: OutputMode,
-    skip_confirm: bool,
 ) -> Result<()> {
     use super::types::BatchResult;
     use crate::domain::{IssueId, IssueStatus, IssueUpdate, NoteContent};
-
-    if !confirm_batch("Reopen", args.issue_ids.len(), skip_confirm)? {
-        return Ok(());
-    }
 
     let note = args
         .reason
@@ -657,9 +687,16 @@ pub async fn execute_reopen(
             ..Default::default()
         };
 
-        // Missing issues and invalid transitions are rejected by the
-        // storage/domain seam (ADR-0005); no adapter-local checks here.
-        let storage_result = app.storage_mut().update(&issue_id, update).await;
+        let storage_result = match app.storage().get(&issue_id).await {
+            Ok(Some(issue)) => match issue.status.validate_reopen() {
+                Ok(()) => app.storage_mut().update(&issue_id, update).await,
+                Err(source) => Err(crate::error::Error::Storage(
+                    crate::error::StorageError::InvalidStatusTransition(source),
+                )),
+            },
+            Ok(None) => Err(crate::error::Error::IssueNotFound(issue_id.clone())),
+            Err(error) => Err(error),
+        };
         save_or_record_failure(app, &mut result, id_str, storage_result).await;
     }
 
@@ -672,28 +709,11 @@ pub async fn execute_delete(
     app: &mut crate::app::App,
     args: &DeleteArgs,
     output_mode: OutputMode,
-    skip_confirm: bool,
 ) -> Result<()> {
     use crate::domain::IssueId;
     use crate::output;
 
     let issue_id = IssueId::new(&args.issue_id);
-
-    // Verify the issue exists first
-    let issue = app
-        .storage()
-        .get(&issue_id)
-        .await?
-        .ok_or_else(|| crate::error::Error::IssueNotFound(issue_id.clone()))?;
-
-    // Confirm deletion unless --force or --yes is used
-    if !args.force && !skip_confirm {
-        let prompt = format!("Delete issue '{}' ({})?", issue.id, issue.title);
-        if !confirm_action(&prompt)? {
-            println!("Deletion cancelled.");
-            return Ok(());
-        }
-    }
 
     app.storage_mut().delete(&issue_id).await?;
     app.save().await?;
@@ -2004,7 +2024,7 @@ mod tests {
                 reason: None,
             };
 
-            let result = execute_close(&mut app, &args, OutputMode::Text, true).await;
+            let result = execute_close(&mut app, &args, OutputMode::Text).await;
 
             assert!(result.is_err());
             let error_msg = result.unwrap_err().to_string();
@@ -2047,7 +2067,7 @@ mod tests {
                 reason: None,
             };
 
-            let result = execute_reopen(&mut app, &args, OutputMode::Text, true).await;
+            let result = execute_reopen(&mut app, &args, OutputMode::Text).await;
 
             assert!(result.is_err());
             let error_msg = result.unwrap_err().to_string();
@@ -2059,7 +2079,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_reopen_in_progress_issue_returns_to_open_with_claim() {
+        async fn test_reopen_in_progress_issue_is_rejected_without_mutation() {
             use crate::domain::{IssueStatus, IssueUpdate};
 
             let temp_dir = TempDir::new().unwrap();
@@ -2093,17 +2113,17 @@ mod tests {
                 issue_ids: vec![issue.id.to_string()],
                 reason: None,
             };
-            execute_reopen(&mut app, &args, OutputMode::Text, true)
+            execute_reopen(&mut app, &args, OutputMode::Text)
                 .await
-                .expect("In Progress should return to Open");
+                .expect_err("In Progress is not a Closed Issue");
 
             let reopened = app
                 .storage()
                 .get(&issue.id)
                 .await
-                .unwrap()
+                .expect("issue lookup should succeed")
                 .expect("Issue should remain");
-            assert_eq!(reopened.status, IssueStatus::Open);
+            assert_eq!(reopened.status, IssueStatus::InProgress);
             assert_eq!(reopened.assignee.as_deref(), Some("alice"));
         }
     }

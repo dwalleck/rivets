@@ -7,7 +7,8 @@ use clap::{Parser, Subcommand};
 
 use super::types::{SortOrderArg, SortPolicyArg};
 use super::validators::{
-    validate_description, validate_issue_id, validate_label, validate_prefix, validate_title,
+    validate_assignee, validate_description, validate_issue_id, validate_label, validate_prefix,
+    validate_title,
 };
 use crate::domain::{IssueKind, IssueStatus, MAX_PRIORITY, MIN_PRIORITY, ResourceRole};
 
@@ -172,7 +173,7 @@ pub struct AssignmentArgs {
     pub issue_id: String,
 
     /// Exact Assignee identity to claim as or release.
-    #[arg(short, long)]
+    #[arg(short, long, value_parser = validate_assignee)]
     pub assignee: String,
 }
 
@@ -327,6 +328,15 @@ pub enum BlockingDependencyAction {
     },
 }
 
+impl BlockingDependencyAction {
+    pub(crate) const fn mutates_workspace(&self) -> bool {
+        match self {
+            Self::Add { .. } | Self::Remove { .. } => true,
+            Self::List(_) | Self::Tree { .. } => false,
+        }
+    }
+}
+
 /// Select exactly one Blocking Dependency endpoint perspective.
 #[derive(Parser, Debug, Clone)]
 #[command(group(
@@ -381,6 +391,15 @@ pub enum RelatedAction {
     },
 }
 
+impl RelatedAction {
+    pub(crate) const fn mutates_workspace(&self) -> bool {
+        match self {
+            Self::Add { .. } | Self::Remove { .. } => true,
+            Self::List { .. } => false,
+        }
+    }
+}
+
 /// Arguments for Discovery Origin operations.
 #[derive(Parser, Debug, Clone)]
 pub struct DiscoveryArgs {
@@ -416,6 +435,15 @@ pub enum DiscoveryAction {
         #[arg(long, value_parser = validate_issue_id)]
         discovered: String,
     },
+}
+
+impl DiscoveryAction {
+    pub(crate) const fn mutates_workspace(&self) -> bool {
+        match self {
+            Self::Add { .. } | Self::Remove { .. } => true,
+            Self::List { .. } => false,
+        }
+    }
 }
 /// Arguments for the `blocked` command
 #[derive(Parser, Debug, Clone, Default)]
@@ -505,6 +533,15 @@ pub enum LabelAction {
 
     /// List all labels used across all issues
     ListAll,
+}
+
+impl LabelAction {
+    pub(crate) const fn mutates_workspace(&self) -> bool {
+        match self {
+            Self::Add { .. } | Self::Remove { .. } => true,
+            Self::List { .. } | Self::ListAll => false,
+        }
+    }
 }
 
 /// Arguments for the `resource` command.
@@ -598,6 +635,15 @@ pub enum ResourceAction {
         #[arg(value_parser = validate_issue_id)]
         issue_id: String,
     },
+}
+
+impl ResourceAction {
+    pub(crate) const fn mutates_workspace(&self) -> bool {
+        match self {
+            Self::Add { .. } | Self::Update { .. } | Self::Remove { .. } => true,
+            Self::List { .. } => false,
+        }
+    }
 }
 
 #[cfg(test)]

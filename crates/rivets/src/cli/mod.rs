@@ -50,7 +50,9 @@ pub use args::{
 pub use types::{BatchError, BatchResult, SortOrderArg, SortPolicyArg};
 
 // Re-export validators for external use
-pub use validators::{validate_description, validate_issue_id, validate_prefix, validate_title};
+pub use validators::{
+    validate_assignee, validate_description, validate_issue_id, validate_prefix, validate_title,
+};
 
 /// Rivets - A Rust-based issue tracking system
 ///
@@ -184,30 +186,11 @@ impl Commands {
             | Self::Close(_)
             | Self::Reopen(_)
             | Self::Delete(_) => true,
-            Self::BlockingDependency(args) => matches!(
-                args.action,
-                BlockingDependencyAction::Add { .. } | BlockingDependencyAction::Remove { .. }
-            ),
-            Self::Related(args) => matches!(
-                args.action,
-                RelatedAction::Add { .. } | RelatedAction::Remove { .. }
-            ),
-            Self::Discovery(args) => matches!(
-                args.action,
-                DiscoveryAction::Add { .. } | DiscoveryAction::Remove { .. }
-            ),
-            Self::Label(args) => {
-                matches!(
-                    args.action,
-                    LabelAction::Add { .. } | LabelAction::Remove { .. }
-                )
-            }
-            Self::Resource(args) => matches!(
-                args.action,
-                ResourceAction::Add { .. }
-                    | ResourceAction::Update { .. }
-                    | ResourceAction::Remove { .. }
-            ),
+            Self::BlockingDependency(args) => args.action.mutates_workspace(),
+            Self::Related(args) => args.action.mutates_workspace(),
+            Self::Discovery(args) => args.action.mutates_workspace(),
+            Self::Label(args) => args.action.mutates_workspace(),
+            Self::Resource(args) => args.action.mutates_workspace(),
             Self::Init(_)
             | Self::Info(_)
             | Self::List(_)
@@ -271,8 +254,9 @@ impl Cli {
                 execute::execute_info(&app, args, output_mode).await
             }
             Some(Commands::Create(args)) => {
+                let title = execute::resolve_create_title(args)?;
                 let mut app = load_app_from_cwd(mutates_workspace).await?;
-                execute::execute_create(&mut app, args, output_mode).await
+                execute::execute_create(&mut app, args, title, output_mode).await
             }
             Some(Commands::List(args)) => {
                 let app = load_app_from_cwd(mutates_workspace).await?;
@@ -295,16 +279,28 @@ impl Cli {
                 execute::execute_release(&mut app, args, output_mode).await
             }
             Some(Commands::Close(args)) => {
+                if !execute::confirm_batch("Close", args.issue_ids.len(), self.yes)? {
+                    return Ok(());
+                }
                 let mut app = load_app_from_cwd(mutates_workspace).await?;
-                execute::execute_close(&mut app, args, output_mode, self.yes).await
+                execute::execute_close(&mut app, args, output_mode).await
             }
             Some(Commands::Reopen(args)) => {
+                if !execute::confirm_batch("Reopen", args.issue_ids.len(), self.yes)? {
+                    return Ok(());
+                }
                 let mut app = load_app_from_cwd(mutates_workspace).await?;
-                execute::execute_reopen(&mut app, args, output_mode, self.yes).await
+                execute::execute_reopen(&mut app, args, output_mode).await
             }
             Some(Commands::Delete(args)) => {
+                if !args.force && !self.yes {
+                    let read_app = load_app_from_cwd(false).await?;
+                    if !execute::confirm_delete(&read_app, args, false).await? {
+                        return Ok(());
+                    }
+                }
                 let mut app = load_app_from_cwd(mutates_workspace).await?;
-                execute::execute_delete(&mut app, args, output_mode, self.yes).await
+                execute::execute_delete(&mut app, args, output_mode).await
             }
             Some(Commands::Ready(args)) => {
                 let app = load_app_from_cwd(mutates_workspace).await?;
@@ -984,6 +980,12 @@ mod tests {
             assert_eq!(args.assignee, "alice");
 
             assert!(Cli::try_parse_from(["rivets", command, "proj-abc"]).is_err());
+            for assignee in ["", " \t "] {
+                let error =
+                    Cli::try_parse_from(["rivets", command, "proj-abc", "--assignee", assignee])
+                        .expect_err("blank Assignee must reject at the CLI seam");
+                assert!(error.to_string().contains("Assignee cannot be blank"));
+            }
             assert!(
                 Cli::try_parse_from([
                     "rivets",

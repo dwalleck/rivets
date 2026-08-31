@@ -120,6 +120,38 @@ async fn init_creates_ignored_workspace_lock_sidecar() {
     assert!(ignore.lines().any(|line| line == WORKSPACE_LOCK_FILE_NAME));
 }
 
+#[tokio::test]
+async fn first_mutation_upgrades_existing_workspace_ignore_idempotently() {
+    let workspace = initialized_workspace().await;
+    let ignore_path = workspace.path().join(".rivets/.gitignore");
+    fs::write(&ignore_path, "issues.jsonl\n")
+        .expect("pre-upgrade metadata ignore should be written");
+
+    drop(
+        WorkspaceMutationLock::try_acquire(workspace.path())
+            .expect("first mutation should upgrade metadata"),
+    );
+    let upgraded =
+        fs::read_to_string(&ignore_path).expect("upgraded metadata ignore should be readable");
+    assert!(upgraded.lines().any(|line| line == "issues.jsonl"));
+    assert_eq!(
+        upgraded
+            .lines()
+            .filter(|line| *line == WORKSPACE_LOCK_FILE_NAME)
+            .count(),
+        1
+    );
+
+    drop(
+        WorkspaceMutationLock::try_acquire(workspace.path())
+            .expect("second mutation should reacquire"),
+    );
+    assert_eq!(
+        fs::read_to_string(ignore_path).expect("idempotent metadata ignore should remain readable"),
+        upgraded
+    );
+}
+
 #[test]
 fn workspace_lock_child_holder() {
     let Ok(workspace) = env::var("RIVETS_WORKSPACE_LOCK_HOLDER") else {

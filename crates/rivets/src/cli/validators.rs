@@ -149,6 +149,17 @@ pub fn validate_description(s: &str) -> Result<String, String> {
     validate_text_field(s, "Description")
 }
 
+/// Validate an exact Assignee identity.
+///
+/// Identity is not trimmed: surrounding whitespace is meaningful, but a value
+/// containing only whitespace cannot own an Assignment.
+pub fn validate_assignee(s: &str) -> Result<String, String> {
+    if s.trim().is_empty() {
+        return Err("Assignee cannot be blank".to_string());
+    }
+    validate_text_field(s, "Assignee")
+}
+
 /// Maximum length for labels
 pub const MAX_LABEL_LENGTH: usize = 50;
 

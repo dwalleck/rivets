@@ -99,7 +99,7 @@ fn create_params(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
 fn update_params(
     issue_id: &str,
     title: Option<String>,
@@ -112,18 +112,19 @@ fn update_params(
     labels: Option<Vec<String>>,
     workspace_root: Option<&str>,
 ) -> UpdateParams {
-    UpdateParams {
-        issue_id: issue_id.to_string(),
-        status: status.map(str::to_string),
-        priority,
-        kind: kind_input(issue_kind),
-        title,
-        description,
-        design,
-        acceptance_criteria,
-        labels,
-        workspace_root: workspace_root.map(str::to_string),
-    }
+    serde_json::from_value(serde_json::json!({
+        "issue_id": issue_id,
+        "status": status,
+        "priority": priority,
+        "issue_kind": issue_kind,
+        "title": title,
+        "description": description,
+        "design": design,
+        "acceptance_criteria": acceptance_criteria,
+        "labels": labels,
+        "workspace_root": workspace_root,
+    }))
+    .expect("update parameters should deserialize")
 }
 
 mod helpers {
@@ -702,9 +703,9 @@ async fn reopen_rejects_open_issue_without_mutation() {
     );
 }
 
-/// Returning active work to Open retains its Assignment.
+/// Dedicated Reopen is Closed-only; generic Update retains the active-to-Open path.
 #[tokio::test]
-async fn reopen_in_progress_issue_returns_to_open_with_claim() {
+async fn reopen_rejects_in_progress_while_generic_update_returns_to_open() {
     let workspace = create_temp_workspace();
     let tools = create_tools();
     set_context(&tools, workspace.path()).await;
@@ -738,13 +739,41 @@ async fn reopen_in_progress_issue_returns_to_open_with_claim() {
         .await
         .expect("status setup should succeed");
 
-    let reopened = tools
+    let rejected = tools
         .reopen(issue.id.as_str(), Some("Paused".to_string()), None)
         .await
-        .expect("In Progress should return to Open");
-    assert_eq!(reopened.status, IssueStatus::Open);
-    assert_eq!(reopened.assignee, active.assignee);
-    assert_eq!(reopened.notes().len(), 1);
+        .expect_err("dedicated Reopen must reject In Progress");
+    assert!(matches!(
+        rejected,
+        Error::InvalidStatusTransition(StatusTransitionError::NotClosed {
+            current: IssueStatus::InProgress
+        })
+    ));
+    let unchanged = tools
+        .show(issue.id.as_str(), None)
+        .await
+        .expect("rejected Reopen target should remain readable");
+    assert_eq!(unchanged.status, IssueStatus::InProgress);
+    assert_eq!(unchanged.assignee, active.assignee);
+    assert!(unchanged.notes().is_empty());
+
+    let returned = tools
+        .update(update_params(
+            issue.id.as_str(),
+            None,
+            None,
+            Some("open"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ))
+        .await
+        .expect("generic Update should retain active-to-Open transition");
+    assert_eq!(returned.status, IssueStatus::Open);
+    assert_eq!(returned.assignee, active.assignee);
 }
 #[tokio::test]
 async fn claim_release_contract_survives_context_restart() {
@@ -830,6 +859,35 @@ async fn claim_release_contract_survives_context_restart() {
 }
 
 #[tokio::test]
+async fn claim_and_release_reject_blank_assignees_without_mutation() {
+    let workspace = create_temp_workspace();
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+    let target = create_issue(&tools, "Blank Assignment target").await;
+
+    for assignee in ["", " \t "] {
+        for result in [
+            tools.claim(target.id.as_str(), assignee, None).await,
+            tools.release(target.id.as_str(), assignee, None).await,
+        ] {
+            assert!(matches!(
+                result,
+                Err(Error::Assignment(AssignmentError::BlankAssignee { ref issue_id }))
+                    if issue_id == &target.id
+            ));
+        }
+    }
+    assert_eq!(
+        tools
+            .show(target.id.as_str(), None)
+            .await
+            .expect("blank-input target should remain readable")
+            .assignee,
+        None
+    );
+}
+
+#[tokio::test]
 async fn claim_release_mcp_state_matrix() {
     let workspace = create_temp_workspace();
     let tools = create_tools();
@@ -840,6 +898,7 @@ async fn claim_release_mcp_state_matrix() {
         &missing,
         Err(Error::IssueNotFound(issue_id)) if issue_id == "test-missing"
     ));
+
     let unassigned = create_issue(&tools, "Unassigned release").await;
     let not_claimed = tools.release(unassigned.id.as_str(), "alice", None).await;
     assert!(matches!(

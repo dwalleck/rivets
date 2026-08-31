@@ -160,7 +160,7 @@ impl RivetsMcpServer {
 
     /// Atomically claim an Open, unblocked Issue.
     #[tool(
-        description = "Atomically assign one Open Issue without unresolved direct Blocking Dependencies. Repeating the same Claim is idempotent; a different Assignee receives Already Claimed. Uses workspace_root if provided, otherwise uses current context."
+        description = "Atomically assign one Open Issue without unresolved direct Blocking Dependencies. A same-Assignee retry is idempotent only while the Issue remains Open; a different Assignee receives Already Claimed. Uses workspace_root if provided, otherwise uses current context."
     )]
     async fn claim(
         &self,

@@ -20,7 +20,6 @@ async fn main() -> Result<()> {
         )
         .with_writer(std::io::stderr)
         .with_target(false)
-        .with_writer(std::io::stderr)
         .init();
 
     tracing::debug!("Starting rivets CLI");

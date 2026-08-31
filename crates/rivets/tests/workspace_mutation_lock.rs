@@ -1,15 +1,15 @@
 //! Real CLI mutation transactions under the durable Workspace lock.
 
+mod common;
+
 use rivets::commands::init;
-use rivets::error::Error;
 use rivets::workspace_lock::WorkspaceMutationLock;
 use serde_json::Value;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Arc, Barrier};
 use std::thread;
-use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 async fn workspace() -> TempDir {
@@ -21,11 +21,73 @@ async fn workspace() -> TempDir {
 }
 
 fn run(workspace: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_rivets"))
-        .args(args)
-        .current_dir(workspace)
-        .output()
-        .expect("Rivets CLI should run")
+    common::run_rivets_in_dir(workspace, args)
+}
+
+struct ChildGuard(Child);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            let _ = self.0.kill();
+        }
+        let _ = self.0.wait();
+    }
+}
+
+fn spawn_prompted(workspace: &Path, args: &[&str]) -> ChildGuard {
+    ChildGuard(
+        Command::new(common::get_rivets_binary())
+            .args(args)
+            .current_dir(workspace)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("prompted Rivets process should start"),
+    )
+}
+
+fn wait_for_prompt(child: &mut ChildGuard, expected_fragment: &str) {
+    let stderr = child
+        .0
+        .stderr
+        .as_mut()
+        .expect("prompted process stderr should be piped");
+    let mut seen = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !String::from_utf8_lossy(&seen).contains(expected_fragment) {
+        stderr
+            .read_exact(&mut byte)
+            .expect("prompted process should emit the expected prompt");
+        seen.push(byte[0]);
+        assert!(seen.len() < 1024, "prompt output exceeded safety bound");
+    }
+}
+
+fn answer_prompt(child: &mut ChildGuard, answer: &[u8]) {
+    child
+        .0
+        .stdin
+        .take()
+        .expect("prompted process stdin should be piped")
+        .write_all(answer)
+        .expect("prompt response should be sent");
+    assert!(
+        child
+            .0
+            .wait()
+            .expect("prompted process should exit")
+            .success()
+    );
+}
+
+fn issue_id_by_title(workspace: &Path, title: &str) -> String {
+    issue_records(workspace)
+        .into_iter()
+        .find(|record| record["title"] == title)
+        .and_then(|record| record["id"].as_str().map(str::to_string))
+        .expect("seeded Issue should persist with a string ID")
 }
 
 fn issue_records(workspace: &Path) -> Vec<Value> {
@@ -157,56 +219,118 @@ async fn claim_and_release_require_workspace_mutation_lock() {
 }
 
 #[tokio::test]
-async fn workspace_mutation_lock_retry_preserves_both_cli_writes() {
+async fn interactive_title_prompt_precedes_mutation_lock_and_preserves_writes() {
     let workspace = workspace().await;
-    let mut first = Command::new(env!("CARGO_BIN_EXE_rivets"))
-        .args(["create", "--yes"])
-        .current_dir(workspace.path())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("first writer should start");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        match WorkspaceMutationLock::try_acquire(workspace.path()) {
-            Err(Error::WorkspaceBusy { .. }) => break,
-            Ok(probe) => drop(probe),
-            Err(error) => panic!("lock readiness probe failed: {error}"),
-        }
-        assert!(
-            Instant::now() < deadline,
-            "first writer should acquire before timeout"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
+    let mut first = spawn_prompted(workspace.path(), &["create", "--yes"]);
+    wait_for_prompt(&mut first, "Title: ");
 
     let second = run(
         workspace.path(),
         &["create", "--title", "Second issue", "--yes"],
     );
-    assert!(!second.status.success());
-    assert!(String::from_utf8_lossy(&second.stderr).contains("Workspace is busy"));
-
-    first
-        .stdin
-        .take()
-        .expect("first writer stdin should be piped")
-        .write_all(b"First issue\n")
-        .expect("first writer title should be sent");
-    assert!(first.wait().expect("first writer should exit").success());
-
-    let retry = run(
-        workspace.path(),
-        &["create", "--title", "Second issue", "--yes"],
+    assert!(
+        second.status.success(),
+        "a writer must complete while the first process awaits human input: {}",
+        String::from_utf8_lossy(&second.stderr)
     );
-    assert!(retry.status.success());
+
+    answer_prompt(&mut first, b"First issue\n");
+
     let mut titles: Vec<_> = issue_records(workspace.path())
         .into_iter()
-        .map(|record| record["title"].as_str().unwrap().to_string())
+        .map(|record| {
+            record["title"]
+                .as_str()
+                .expect("persisted title should be a string")
+                .to_string()
+        })
         .collect();
     titles.sort();
     assert_eq!(titles, ["First issue", "Second issue"]);
+}
+
+#[tokio::test]
+async fn lifecycle_confirmation_prompts_precede_mutation_lock() {
+    let workspace = workspace().await;
+    for title in ["Close A", "Close B", "Delete target"] {
+        let created = run(workspace.path(), &["create", "--title", title, "--yes"]);
+        assert!(
+            created.status.success(),
+            "seed issue should be created: {}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+    }
+    let close_a = issue_id_by_title(workspace.path(), "Close A");
+    let close_b = issue_id_by_title(workspace.path(), "Close B");
+    let delete_target = issue_id_by_title(workspace.path(), "Delete target");
+
+    let mut close = spawn_prompted(
+        workspace.path(),
+        &["close", close_a.as_str(), close_b.as_str()],
+    );
+    wait_for_prompt(&mut close, "Close 2 issues?");
+    assert!(
+        run(
+            workspace.path(),
+            &["create", "--title", "During close prompt", "--yes"],
+        )
+        .status
+        .success(),
+        "writer should complete while Close awaits confirmation"
+    );
+    answer_prompt(&mut close, b"n\n");
+
+    assert!(
+        run(
+            workspace.path(),
+            &["close", close_a.as_str(), close_b.as_str(), "--yes"],
+        )
+        .status
+        .success(),
+        "seed issues should close before Reopen prompt"
+    );
+    let mut reopen = spawn_prompted(
+        workspace.path(),
+        &["reopen", close_a.as_str(), close_b.as_str()],
+    );
+    wait_for_prompt(&mut reopen, "Reopen 2 issues?");
+    assert!(
+        run(
+            workspace.path(),
+            &["create", "--title", "During reopen prompt", "--yes"],
+        )
+        .status
+        .success(),
+        "writer should complete while Reopen awaits confirmation"
+    );
+    answer_prompt(&mut reopen, b"n\n");
+
+    let mut delete = spawn_prompted(workspace.path(), &["delete", delete_target.as_str()]);
+    wait_for_prompt(&mut delete, "Delete issue");
+    assert!(
+        run(
+            workspace.path(),
+            &["create", "--title", "During delete prompt", "--yes"],
+        )
+        .status
+        .success(),
+        "writer should complete while Delete awaits confirmation"
+    );
+    answer_prompt(&mut delete, b"n\n");
+
+    for title in [
+        "During close prompt",
+        "During reopen prompt",
+        "During delete prompt",
+        "Delete target",
+    ] {
+        assert!(
+            issue_records(workspace.path())
+                .iter()
+                .any(|record| record["title"] == title),
+            "{title} should survive prompt-time concurrency"
+        );
+    }
 }
 
 #[tokio::test]
