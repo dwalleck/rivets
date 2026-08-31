@@ -421,6 +421,26 @@ impl StorageBackend {
 
 const SOURCE_REVISION_BUFFER_SIZE: usize = 64 * 1024;
 
+/// Incremental hasher for the canonical bytes used as a JSONL source revision.
+///
+/// This stays crate-private so both the storage guard and JSONL writer share
+/// exactly the same revision algorithm without exposing hashing as public API.
+pub(crate) struct RevisionHasher(Sha256);
+
+impl RevisionHasher {
+    pub(crate) fn new() -> Self {
+        Self(Sha256::new())
+    }
+
+    pub(crate) fn update(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+
+    pub(crate) fn finalize(self) -> [u8; 32] {
+        self.0.finalize().into()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum SourceRevision {
     Missing,
@@ -434,7 +454,7 @@ impl SourceRevision {
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Self::Missing),
             Err(error) => return Err(error.into()),
         };
-        let mut hasher = Sha256::new();
+        let mut hasher = RevisionHasher::new();
         let mut buffer = vec![0_u8; SOURCE_REVISION_BUFFER_SIZE];
         loop {
             let bytes_read = file.read(&mut buffer).await?;
@@ -443,7 +463,7 @@ impl SourceRevision {
             }
             hasher.update(&buffer[..bytes_read]);
         }
-        Ok(Self::Present(hasher.finalize().into()))
+        Ok(Self::Present(hasher.finalize()))
     }
 }
 
@@ -485,6 +505,7 @@ impl JsonlBackedStorage {
                 }
                 in_memory::LoadWarning::MigrationConflict { .. }
                 | in_memory::LoadWarning::AssignmentStateMigrated { .. }
+                | in_memory::LoadWarning::WorkflowStateMigrated { .. }
                 | in_memory::LoadWarning::OrphanedDependency { .. }
                 | in_memory::LoadWarning::CircularDependency { .. } => None,
                 in_memory::LoadWarning::InvalidIssueData {
@@ -606,12 +627,12 @@ impl IssueStorage for JsonlBackedStorage {
     }
 
     async fn add_related_association(&mut self, association: RelatedAssociation) -> Result<()> {
-        self.ensure_writable()?;
+        self.prepare_mutation().await?;
         self.inner.add_related_association(association).await
     }
 
     async fn remove_related_association(&mut self, association: &RelatedAssociation) -> Result<()> {
-        self.ensure_writable()?;
+        self.prepare_mutation().await?;
         self.inner.remove_related_association(association).await
     }
 
@@ -620,12 +641,12 @@ impl IssueStorage for JsonlBackedStorage {
     }
 
     async fn add_discovery_origin(&mut self, origin: DiscoveryOrigin) -> Result<()> {
-        self.ensure_writable()?;
+        self.prepare_mutation().await?;
         self.inner.add_discovery_origin(origin).await
     }
 
     async fn remove_discovery_origin(&mut self, origin: &DiscoveryOrigin) -> Result<()> {
-        self.ensure_writable()?;
+        self.prepare_mutation().await?;
         self.inner.remove_discovery_origin(origin).await
     }
 
@@ -717,16 +738,9 @@ impl IssueStorage for JsonlBackedStorage {
                 Vec::new(),
             ),
         };
-        let revision_after = SourceRevision::read(&self.path).await?;
-        if revision_before != revision_after {
-            return Err(StorageError::ExternalChange {
-                path: self.path.clone(),
-            }
-            .into());
-        }
         self.inner = new_storage;
         self.load_warnings = warnings;
-        *self.source_revision.get_mut() = revision_after;
+        *self.source_revision.get_mut() = revision_before;
         Ok(())
     }
 }
@@ -781,16 +795,12 @@ pub async fn create_storage(
                     (in_memory::new_in_memory_storage(prefix.clone()), Vec::new())
                 }
             };
-            let revision_after = SourceRevision::read(&path).await?;
-            if revision_before != revision_after {
-                return Err(StorageError::ExternalChange { path }.into());
-            }
             Ok(Box::new(JsonlBackedStorage {
                 inner,
                 path,
                 prefix,
                 load_warnings,
-                source_revision: RwLock::new(revision_after),
+                source_revision: RwLock::new(revision_before),
             }) as Box<dyn IssueStorage>)
         }
         StorageBackend::PostgreSQL(_conn_str) => {
@@ -952,15 +962,11 @@ impl IssueStorage for MockStorage {
     }
 
     async fn claim(&mut self, _id: &IssueId, _claimant: &str) -> Result<Issue> {
-        unimplemented!(
-            "MockStorage::claim() is not implemented. Use in_memory::new_in_memory_storage() for full CRUD."
-        )
+        Self::unsupported("MockStorage::claim")
     }
 
     async fn release(&mut self, _id: &IssueId, _expected_assignee: &str) -> Result<Issue> {
-        unimplemented!(
-            "MockStorage::release() is not implemented. Use in_memory::new_in_memory_storage() for full CRUD."
-        )
+        Self::unsupported("MockStorage::release")
     }
 
     async fn delete(&mut self, _id: &IssueId) -> Result<()> {
@@ -1094,6 +1100,18 @@ mod tests {
         }
     }
 
+    async fn create_external_issue(path: &Path, title: &str) -> Issue {
+        let mut storage = create_storage(StorageBackend::Jsonl(path.to_path_buf()), "test".into())
+            .await
+            .expect("external storage should open");
+        let issue = storage
+            .create(issue_named(title))
+            .await
+            .expect("external issue should be created");
+        storage.save().await.expect("external issue should persist");
+        issue
+    }
+
     #[tokio::test]
     async fn test_trait_object_usage() {
         // Verify that IssueStorage is object-safe and can be used with Box<dyn>
@@ -1172,6 +1190,33 @@ mod tests {
             .reload()
             .await
             .expect("MockStorage reload should remain a no-op");
+    }
+    #[tokio::test]
+    async fn mock_storage_assignment_mutations_return_typed_errors() {
+        let mut storage = MockStorage::new();
+        let issue_id = IssueId::new(MOCK_ISSUE_ID);
+
+        let claim_error = storage
+            .claim(&issue_id, "alice")
+            .await
+            .expect_err("MockStorage claim should return an unsupported error");
+        assert!(matches!(
+            claim_error,
+            crate::error::Error::Storage(StorageError::UnsupportedOperation {
+                operation: "MockStorage::claim"
+            })
+        ));
+
+        let release_error = storage
+            .release(&issue_id, "alice")
+            .await
+            .expect_err("MockStorage release should return an unsupported error");
+        assert!(matches!(
+            release_error,
+            crate::error::Error::Storage(StorageError::UnsupportedOperation {
+                operation: "MockStorage::release"
+            })
+        ));
     }
 
     #[tokio::test]
@@ -1427,6 +1472,111 @@ mod tests {
                 .expect("external issue lookup should succeed")
                 .is_some(),
             "external issue must survive the cached mutation"
+        );
+    }
+
+    #[tokio::test]
+    async fn relationship_mutators_refresh_stale_source_before_change() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().expect("temporary directory should be created");
+        let jsonl_path = temp_dir.path().join("issues.jsonl");
+        let mut cached = create_storage(StorageBackend::Jsonl(jsonl_path.clone()), "test".into())
+            .await
+            .expect("cached storage should open");
+        let left = cached
+            .create(issue_named("Left"))
+            .await
+            .expect("left issue should be created");
+        let right = cached
+            .create(issue_named("Right"))
+            .await
+            .expect("right issue should be created");
+        let source = cached
+            .create(issue_named("Source"))
+            .await
+            .expect("source issue should be created");
+        cached.save().await.expect("seed issues should persist");
+
+        let related = RelatedAssociation::new(left.id.clone(), right.id.clone())
+            .expect("related endpoints should differ");
+        let origin = DiscoveryOrigin::new(left.id.clone(), source.id.clone())
+            .expect("discovery endpoints should differ");
+        let mut external_ids = Vec::new();
+
+        external_ids.push(
+            create_external_issue(&jsonl_path, "Before related add")
+                .await
+                .id,
+        );
+        cached
+            .add_related_association(related.clone())
+            .await
+            .expect("related add should reload stale source");
+        cached.save().await.expect("related add should persist");
+
+        external_ids.push(
+            create_external_issue(&jsonl_path, "Before related remove")
+                .await
+                .id,
+        );
+        cached
+            .remove_related_association(&related)
+            .await
+            .expect("related remove should reload stale source");
+        cached.save().await.expect("related remove should persist");
+
+        external_ids.push(
+            create_external_issue(&jsonl_path, "Before discovery add")
+                .await
+                .id,
+        );
+        cached
+            .add_discovery_origin(origin.clone())
+            .await
+            .expect("discovery add should reload stale source");
+        cached.save().await.expect("discovery add should persist");
+
+        external_ids.push(
+            create_external_issue(&jsonl_path, "Before discovery remove")
+                .await
+                .id,
+        );
+        cached
+            .remove_discovery_origin(&origin)
+            .await
+            .expect("discovery remove should reload stale source");
+        cached
+            .save()
+            .await
+            .expect("discovery remove should persist");
+
+        let reloaded = create_storage(StorageBackend::Jsonl(jsonl_path), "test".into())
+            .await
+            .expect("result should reload");
+        for external_id in external_ids {
+            assert!(
+                reloaded
+                    .get(&external_id)
+                    .await
+                    .expect("external issue lookup should succeed")
+                    .is_some(),
+                "every external write must survive each relationship mutation"
+            );
+        }
+        assert!(
+            reloaded
+                .related_associations(&left.id)
+                .await
+                .expect("related query should succeed")
+                .is_empty()
+        );
+        assert!(
+            reloaded
+                .discovery_origins(&left.id)
+                .await
+                .expect("discovery query should succeed")
+                .is_empty()
         );
     }
 

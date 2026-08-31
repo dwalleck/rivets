@@ -507,6 +507,7 @@ mod load_from_jsonl_tests {
                 LoadWarning::CircularDependency { .. }
                 | LoadWarning::MigrationConflict { .. }
                 | LoadWarning::AssignmentStateMigrated { .. }
+                | LoadWarning::WorkflowStateMigrated { .. }
                 | LoadWarning::InvalidResourceData { .. } => {}
             }
         }
@@ -1781,6 +1782,10 @@ async fn assignment_state_migration_is_visible_and_idempotent() {
         "\n",
         r#"{"id":"test-closed-alice","title":"Closed alice","description":"","status":"closed","priority":2,"issue_kind":"task","assignee":"alice","labels":[],"design":null,"acceptance_criteria":null,"notes":[],"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":"2026-01-02T00:00:00Z"}"#,
         "\n",
+        r#"{"id":"test-legacy-blocked","title":"Legacy blocked","description":"","status":"blocked","priority":2,"issue_kind":"task","assignee":null,"labels":[],"design":null,"acceptance_criteria":null,"notes":[],"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null}"#,
+        "\n",
+        r#"{"id":"test-open-blank","title":"Open blank","description":"","status":"open","priority":2,"issue_kind":"task","assignee":"   ","labels":[],"design":null,"acceptance_criteria":null,"notes":[],"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null}"#,
+        "\n",
     );
     let file = create_temp_jsonl_file(content);
 
@@ -1791,7 +1796,12 @@ async fn assignment_state_migration_is_visible_and_idempotent() {
         .iter()
         .filter(|warning| matches!(warning, LoadWarning::AssignmentStateMigrated { .. }))
         .count();
-    assert_eq!(assignment_warnings, 2);
+    assert_eq!(assignment_warnings, 3);
+    let workflow_warnings = warnings
+        .iter()
+        .filter(|warning| matches!(warning, LoadWarning::WorkflowStateMigrated { .. }))
+        .count();
+    assert_eq!(workflow_warnings, 1);
 
     let active_none = storage
         .get(&IssueId::new("test-active-none"))
@@ -1834,19 +1844,56 @@ async fn assignment_state_migration_is_visible_and_idempotent() {
         .expect("valid assigned active Issue should exist");
     assert_eq!(active_alice.status, IssueStatus::InProgress);
     assert_eq!(active_alice.assignee.as_deref(), Some("alice"));
-
-    save_to_jsonl(storage.as_ref(), file.path())
+    let legacy_blocked = storage
+        .get(&IssueId::new("test-legacy-blocked"))
         .await
-        .expect("canonical save should succeed");
+        .expect("legacy Blocked lookup should succeed")
+        .expect("legacy Blocked Issue should remain loaded");
+    assert_eq!(legacy_blocked.status, IssueStatus::Open);
+    assert!(
+        legacy_blocked
+            .notes()
+            .iter()
+            .any(|note| note.content().contains("legacy Blocked Workflow State"))
+    );
+    let open_blank = storage
+        .get(&IssueId::new("test-open-blank"))
+        .await
+        .expect("blank Assignment lookup should succeed")
+        .expect("blank Assignment Issue should remain loaded");
+    assert_eq!(open_blank.assignee, None);
+    assert!(
+        open_blank
+            .notes()
+            .iter()
+            .any(|note| note.content().contains("cleared blank Assignee"))
+    );
+
+    let mut guarded = create_storage(
+        StorageBackend::Jsonl(file.path().to_path_buf()),
+        "test".to_string(),
+    )
+    .await
+    .expect("migration warnings should permit guarded storage");
+    guarded
+        .create(NewIssue {
+            title: "Post-migration write".to_string(),
+            ..NewIssue::default()
+        })
+        .await
+        .expect("safe migration warnings should not block mutation");
+    guarded
+        .save()
+        .await
+        .expect("canonical guarded save should succeed");
     let first_save = std::fs::read(file.path()).expect("first canonical bytes should be readable");
     let (reloaded, second_warnings) = load_from_jsonl(file.path(), "test".to_string())
         .await
         .expect("canonical records should reload");
-    assert!(
-        !second_warnings
-            .iter()
-            .any(|warning| matches!(warning, LoadWarning::AssignmentStateMigrated { .. }))
-    );
+    assert!(!second_warnings.iter().any(|warning| matches!(
+        warning,
+        LoadWarning::AssignmentStateMigrated { .. } | LoadWarning::WorkflowStateMigrated { .. }
+    )));
     save_to_jsonl(reloaded.as_ref(), file.path())
         .await
         .expect("second canonical save should succeed");

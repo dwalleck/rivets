@@ -569,6 +569,12 @@ pub enum AssignmentError {
         /// The current Workflow State.
         status: IssueStatus,
     },
+    /// Claim or Release supplied an empty or whitespace-only Assignee.
+    #[error("Assignee for Issue {issue_id} cannot be blank")]
+    BlankAssignee {
+        /// The affected Issue.
+        issue_id: IssueId,
+    },
     /// An unresolved Blocking Dependency prevents a new Claim.
     #[error("Issue {issue_id} is Blocked and cannot be claimed")]
     Blocked {
@@ -895,12 +901,15 @@ fn validate_text_fields(
             "Description contains invalid control character at position {pos}"
         ));
     }
-    if let Some(val) = assignee
-        && let Some(pos) = find_control_char(val)
-    {
-        return Err(format!(
-            "Assignee contains invalid control character at position {pos}"
-        ));
+    if let Some(val) = assignee {
+        if val.trim().is_empty() {
+            return Err("Assignee cannot be blank".to_string());
+        }
+        if let Some(pos) = find_control_char(val) {
+            return Err(format!(
+                "Assignee contains invalid control character at position {pos}"
+            ));
+        }
     }
     for (i, label) in labels.iter().enumerate() {
         if let Some(pos) = find_control_char(label) {

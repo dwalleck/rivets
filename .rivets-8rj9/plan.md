@@ -19,9 +19,11 @@ During Slice 3, upstream merged the Related/Discovery adapter stack that this br
 
 Partition revision: the upstream relationship merge is the completed boundary, and the remaining Assignment increment ships as one merged PR stack over it. No further safe split exists inside the integrated commit chain because the merge resolution is required for every adapter to compile and test together.
 
+Review re-entry adds four independently green correction slices: Slice 4 (700 lines), Slice 5 (800 lines), Slice 6 (650 lines), and Slice 7 (400 lines), for 2,550 lines plus a 25%/638-line review churn margin, or 3,188 projected review-fix lines. The revised cumulative projection is 7,063 lines. These corrections modify the already-open integrated PR because each fixes its current public/storage/concurrency contract; splitting them behind the known-broken PR would leave PR 102 unmergeable.
+
 ### PR increment: `atomic-assignment`
 
-Slices: 1–3, in order.
+Slices: 1–7, in order.
 
 Mergeable definition: the public storage seam, CLI, MCP, compatibility loader, tests, and synchronized documentation implement the complete approved Assignment contract. The increment verifies without another increment through storage truth tables, real CLI process tests, real MCP Workspace tests, synchronized mixed-adapter contention, raw JSONL oracles, and focused workspace checks.
 
@@ -121,16 +123,138 @@ Mergeable definition: the public storage seam, CLI, MCP, compatibility loader, t
 - Run the parity registry generator/check used by the repository → Claim/Release are implemented shared intents, update/close/reopen Assignment gaps are removed, and generated Markdown matches JSON.
 - Apply C7/C9/C11 named mutations and rerun owning fences → red with claim-specific output; restore and rerun → green.
 
+## Slice 4: Repair persistence compatibility, canonical Assignee text, and storage wrapper integrity — F1, F5, F8, F9, F13, F17, F18, F21
+
+**Claim IDs:** C1, C2, C4, C10, C12, C17
+
+**Expected behavior:** Legacy Blocked and blank-Assignment records migrate visibly to canonical Open/unassigned shapes; blank create/Claim/Release input rejects; read-only snapshot loads tolerate atomic replacement while every mutator, including Related/Discovery, reloads iff changed; MockStorage returns typed unsupported errors; shared filter/revision helpers preserve output; production-scale timing fixtures are explicit checkpoints.
+
+**Oracle:** Hand-authored JSONL and byte-stable second save; text-shape/state matrices; old/new complete snapshot sets; typed MockStorage variants; independent Ready/list truth tables; read-back digest comparison.
+
+**Stress fixture:** Existing 10,000-Issue/50,000-edge Claim/Ready fixtures run explicitly with `--ignored`; multi-buffer JSONL revision comparison catches hash-domain drift.
+
+**Regression fence:** `crates/rivets/tests/in_memory_resilient_loading.rs` legacy workflow/Assignment migration; storage source-revision and MockStorage tests; relationship stale-source tests; existing Ready/list truth tables; exact ignored scale tests.
+
+**Named mutation:** Decode status directly as `IssueStatus`; remove blank validation; restore `ensure_writable` on one relationship mutator; make MockStorage Claim panic; use a different revision hasher update domain. Each owning fence must turn red, then green after restoration.
+
+**Complexity/production scale:** Blank validation is O(m) over bounded Assignee text without allocation. Revision hashing and JSONL load remain O(file bytes). Unchanged-source mutations avoid a full O(n+e) parse/graph rebuild. Ready/list predicates remain O(1) per Issue.
+
+**Wall budget/phase:** Always-on unchanged-source mutation performs two revision hashes plus atomic save but no unconditional reload; explicit 10k/50k timing phases are one-off ignored checkpoints with their existing 10 ms/2 s budgets.
+
+**Files:** `crates/rivets/src/domain/mod.rs`; `crates/rivets/src/storage/mod.rs`; `crates/rivets/src/storage/in_memory/{issue_record.rs,jsonl.rs,trait_impl.rs,graph.rs}`; `crates/rivets/tests/{in_memory_resilient_loading.rs,in_memory_storage.rs}`.
+
+**Estimate:** 6 focused hours; signal only.
+
+**Diff estimate:** 700 changed lines including migration and revision fences.
+
+**PR increment:** `atomic-assignment`
+
+**Commands and expected results:**
+- `cargo test -p rivets legacy_blocked` and `cargo test -p rivets assignment` → compatibility rows migrate once, blank identities reject without mutation, and canonical Claim/Release matrices remain exact.
+- `cargo test -p rivets storage::tests` plus focused stale relationship tests → read snapshots remain complete, every mutation reloads changed source, MockStorage returns typed errors, and revision digests agree.
+- Run the two exact ignored 10k/50k checkpoints → existing performance bounds pass without entering the default suite.
+
+## Slice 5: Correct MCP Update, Reopen, same-server serialization, async locking, and cache ownership — F2, F6, F7, F10, F12, F20, F22, F24
+**Claim IDs:** C3, C5, C7, C9, C13, C15, C16
+
+**Expected behavior:** Historical MCP `assignee` and empty Update reject before mutation; Reopen accepts only Closed; concurrent same-server mutations serialize and both succeed; external processes remain fail-fast Busy; cached freshness comes from `prepare_mutation`; lock/path filesystem work does not block async workers; eviction removes test lock-bypass metadata; Claim/Release share one private transaction helper and advertise Open-only idempotency.
+
+**Oracle:** Public MCP protocol envelopes, full pre/post Issue/JSONL snapshots, parent barriers and operation logs, scheduler sentinel, cache membership, and generated schemas.
+
+**Stress fixture:** Two simultaneous creates against one server plus an external lock holder; stale Related/Discovery mutation after atomic source replacement; current-thread sentinel while asynchronous lock acquisition is delayed.
+
+**Regression fence:** MCP integration Update/Reopen/Claim/Release tests; `tests/workspace_lock.rs`; `tests/stale_cache.rs`; Context eviction unit test; router schema/description tests.
+
+**Named mutation:** Drop legacy-assignee detection; remove Reopen Closed guard; acquire flock before storage write guard; re-add unconditional reload; call synchronous lock acquisition from the async handler; retain evicted test marker. Each owning fence must turn red, then green after restoration.
+
+**Complexity/production scale:** Parameter/state/cache checks are O(1). Path canonicalization/metadata and flock move to Tokio filesystem or blocking pool. Cached unchanged-source mutations avoid O(n+e) reload; persistence remains O(n+e) save.
+
+**Wall budget/phase:** Adapter-only checks remain below 1 ms excluding filesystem/storage. Filesystem latency is isolated from async workers; same-server wait duration is bounded only by the owning mutation and does not become `WorkspaceBusy`.
+
+**Files:** `crates/rivets-mcp/src/{context.rs,error.rs,models.rs,server.rs,tools.rs}`; `crates/rivets-mcp/tests/{integration.rs,stale_cache.rs,workspace_lock.rs}`; `crates/rivets/src/workspace_lock.rs`.
+
+**Estimate:** 8 focused hours; signal only.
+
+**Diff estimate:** 800 changed lines including concurrency and responsiveness fences.
+
+**PR increment:** `atomic-assignment`
+
+**Commands and expected results:**
+- `cargo test -p rivets-mcp update` and `cargo test -p rivets-mcp reopen` → historical/empty Update and non-Closed Reopen reject with unchanged bytes while canonical controls succeed.
+- `cargo test -p rivets-mcp --test workspace_lock` and `cargo test -p rivets-mcp --test stale_cache` → same-server calls both succeed, external contention remains Busy, stale relationship writes are preserved, and async responsiveness advances.
+- `cargo test -p rivets-mcp context` → evicted test Workspaces no longer bypass durable locking.
+
+## Slice 6: Move CLI prompts outside lock ownership and make sidecar/classification adoption exhaustive — F3, F4, F11, F15, F19, F22, F23
+
+**Claim IDs:** C0, C6, C14
+
+**Expected behavior:** Title and confirmation prompts hold no durable lock; after input the command acquires the lock, loads authoritative state, mutates, and saves; upgraded Workspaces idempotently ignore the sidecar; every nested action has an exhaustive lock classification; Claim/Release share private transaction/rendering scaffolding; project workflow docs claim before In Progress; tracing config has one stderr writer.
+
+**Oracle:** Parent-owned pipes and child exits, raw JSONL reduction, exact ignore-file entries, compiler-exhaustive action matches, Clap syntax smoke, and documented real CLI sequence.
+
+**Stress fixture:** Hold create, multi-close, multi-reopen, and delete at prompts while another writer completes; then resume and require both serialized results. Start from an old `.rivets/.gitignore` without the sidecar rule and acquire repeatedly.
+
+**Regression fence:** `crates/rivets/tests/workspace_mutation_lock.rs`; Workspace lock upgrade tests; CLI mutation-classification tests; Claim/Release restart contract; documented workflow smoke.
+
+**Named mutation:** Construct mutation App before prompt; skip ignore adoption; replace one nested exhaustive action match with wildcard false; split Claim/Release save paths. Each owning fence must turn red, then green after restoration.
+
+**Complexity/production scale:** Action classification and Assignment dispatch are O(1). Ignore adoption scans one small metadata file; no Issue/edge loop is added.
+
+**Wall budget/phase:** Human prompt is an unbounded one-off phase with no Workspace lock. Post-prompt mutation uses the existing one-command transaction. Ignore adoption is one-off per lock acquisition and bounded by metadata-file size.
+
+**Files:** `CLAUDE.md`; `crates/rivets/src/{app.rs,main.rs,workspace_lock.rs}`; `crates/rivets/src/cli/{args.rs,execute.rs,mod.rs}`; `crates/rivets/tests/{common/mod.rs,workspace_lock.rs,workspace_mutation_lock.rs}`.
+
+**Estimate:** 7 focused hours; signal only.
+
+**Diff estimate:** 650 changed lines including real-process prompt fixtures.
+
+**PR increment:** `atomic-assignment`
+
+**Commands and expected results:**
+- `cargo test -p rivets --test workspace_mutation_lock` → every idle prompt permits another writer; resumed commands reload and preserve both results without probe races or leaked children.
+- `cargo test -p rivets workspace_lock` and `cargo test -p rivets cli::tests` → pre-upgrade ignore adoption is idempotent and every action variant is explicitly classified.
+- Run the documented Claim→In Progress→Close sequence with the real binary → every step succeeds; status-only unassigned control rejects.
+
+## Slice 7: Synchronize parity documentation and PR-added test diagnostics — F14, F16
+
+**Claim IDs:** C10, C18
+
+**Expected behavior:** Authoritative parity text contains no claim that legacy Blocked is accepted or counted; rendered Markdown matches; every bare `unwrap()` introduced by PR 102 has a descriptive failure context.
+
+**Oracle:** Canonical status parser/registry assertions, generated Markdown check, and zero added bare-unwrap diff matches.
+
+**Stress fixture:** N/A — documentation/test-diagnostic cleanup adds no runtime logic.
+
+**Regression fence:** Parity registry contract test; renderer `--check`; affected test targets compile and run.
+
+**Named mutation:** Reinsert one legacy Blocked registry sentence or one PR-added bare unwrap; registry/diff audit turns red, then green after restoration.
+
+**Complexity/production scale:** N/A — no production loop or runtime behavior.
+
+**Wall budget/phase:** N/A — no runtime phase.
+
+**Files:** `docs/cli-mcp-parity.json`; generated `docs/cli-mcp-parity.md`; PR-added/modified Rust test files; `.rivets-8rj9/review-decisions.md`.
+
+**Estimate:** 3 focused hours; signal only.
+
+**Diff estimate:** 400 changed lines, primarily diagnostic substitutions.
+
+**PR increment:** `atomic-assignment`
+
+**Commands and expected results:**
+- `python3 scripts/render-cli-mcp-parity.py && python3 scripts/render-cli-mcp-parity.py --check` → generated reference exactly matches canonical status vocabulary.
+- Diff audit for PR-added test lines containing bare `.unwrap()` → zero; affected tests compile and pass with descriptive failure contexts.
+
 ## Tracker taxonomy
 
 No intended future work is introduced. Every excluded capability is a permanent non-goal already approved in `design.md`: multiple Assignees, authenticated authority, administrative stealing, leases/expiry, distributed locking, direct-library cross-process coordination, and batch Claim/Release. No tracker issue is required.
 
 ## Self-review
 
-- [x] Every design claim C0–C11 is assigned exactly once: Slice 1 owns C1–C4/C10, Slice 2 owns C0/C5/C6/C8, Slice 3 owns C7/C9/C11.
+- [x] Original claims C0–C11 retain their owning implementation slices; review-fix slices name the original root-cause claims they correct. New claims C12–C18 are each owned exactly once: Slice 4 owns C12/C17, Slice 5 owns C13/C15/C16, Slice 6 owns C14, and Slice 7 owns C18.
 - [x] Every slice contains all thirteen mandatory fields; conditional fields carry an explicit N/A reason.
-- [x] Every PENDING falsifier is assigned to the implementing slice, with its permanent fence and named mutation in that slice.
+- [x] Every PENDING review falsifier is assigned to the review-fix slice implementing its claim, with its permanent fence and named mutation in that slice.
 - [x] Every new loop records complexity, production input, explicit cost bound, and rationale; every introduced always-on phase has a bound or an explicit no-new-phase rationale.
-- [x] Partition arithmetic records the 3,100-line sum, 25%/775-line churn margin, and 3,875-line total; every slice names the single mergeable increment.
+- [x] Partition arithmetic records the original 3,875-line projection and the 3,188-line review-fix projection for a revised cumulative 7,063 lines; every slice names the existing integrated PR increment.
 - [x] Tracker taxonomy is applied; no untracked deferral phrase remains.
 - [x] No slice is declared complete; checkpointed-build exclusively judges completion.

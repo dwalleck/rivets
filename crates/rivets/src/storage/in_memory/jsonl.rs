@@ -10,9 +10,8 @@ use super::issue_record::{
 };
 use crate::domain::{DependencyType, IssueId, ResourceError};
 use crate::error::{Error, Result, StorageError};
-use crate::storage::IssueStorage;
+use crate::storage::{IssueStorage, RevisionHasher};
 use rivets_jsonl::{Warning as JsonlWarning, read_jsonl_resilient_with_line_numbers};
-use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::fs::File;
@@ -82,6 +81,11 @@ use tokio::sync::Mutex;
 ///         } => {
 ///             eprintln!("Migrated Assignment state for issue {}: {}", issue_id, message);
 ///         }
+///         rivets::storage::in_memory::LoadWarning::WorkflowStateMigrated {
+///             issue_id, message, ..
+///         } => {
+///             eprintln!("Migrated Workflow State for issue {}: {}", issue_id, message);
+///         }
 ///     }
 /// }
 /// # Ok(())
@@ -130,6 +134,17 @@ pub enum LoadWarning {
     /// A persisted lifecycle/Assignment combination was repaired during load.
     #[error("line {line_number}: migrated Assignment state for Issue {issue_id}: {message}")]
     AssignmentStateMigrated {
+        /// Repaired Issue.
+        issue_id: IssueId,
+        /// Source line containing the compatibility record.
+        line_number: usize,
+        /// Human-readable repair also appended to the Issue as a migration Note.
+        message: String,
+    },
+
+    /// A removed persisted Workflow State was repaired during load.
+    #[error("line {line_number}: migrated Workflow State for Issue {issue_id}: {message}")]
+    WorkflowStateMigrated {
         /// Repaired Issue.
         issue_id: IssueId,
         /// Source line containing the compatibility record.
@@ -245,15 +260,17 @@ pub async fn load_from_jsonl(
     // Convert and validate persisted records at the compatibility boundary.
     let mut issues = Vec::new();
     for (line_number, record) in parsed_records {
-        let (issue_id, migration_conflict, assignment_migration, outcome) =
+        let (issue_id, migration_conflict, workflow_migration, assignment_migration, outcome) =
             match record.into_domain() {
                 Ok(IssueRecordConversion {
                     issue,
                     migration_conflict,
+                    workflow_migration,
                     assignment_migration,
                 }) => (
                     issue.id.clone(),
                     migration_conflict,
+                    workflow_migration,
                     assignment_migration,
                     Ok(issue),
                 ),
@@ -264,6 +281,7 @@ pub async fn load_from_jsonl(
                 }) => (
                     issue_id.clone(),
                     migration_conflict,
+                    None,
                     None,
                     Err(LoadWarning::InvalidIssueData {
                         issue_id,
@@ -279,6 +297,7 @@ pub async fn load_from_jsonl(
                     issue_id.clone(),
                     migration_conflict,
                     None,
+                    None,
                     Err(LoadWarning::InvalidResourceData {
                         issue_id,
                         line_number,
@@ -291,6 +310,13 @@ pub async fn load_from_jsonl(
                 issue_id: issue_id.clone(),
                 line_number,
                 field,
+            });
+        }
+        if let Some(message) = workflow_migration {
+            warnings.push(LoadWarning::WorkflowStateMigrated {
+                issue_id: issue_id.clone(),
+                line_number,
+                message,
             });
         }
         if let Some(message) = assignment_migration {
@@ -394,7 +420,7 @@ pub(crate) async fn save_to_jsonl_with_revision(
     let temp_path = path.with_extension("tmp");
     let file = File::create(&temp_path).await.map_err(Error::Io)?;
     let mut writer = BufWriter::new(file);
-    let mut hasher = Sha256::new();
+    let mut hasher = RevisionHasher::new();
     let mut issues = storage.export_all().await?;
     issues.sort_by(|a, b| a.id.cmp(&b.id));
 
@@ -413,5 +439,5 @@ pub(crate) async fn save_to_jsonl_with_revision(
     tokio::fs::rename(&temp_path, path)
         .await
         .map_err(Error::Io)?;
-    Ok(hasher.finalize().into())
+    Ok(hasher.finalize())
 }

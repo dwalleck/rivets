@@ -296,6 +296,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "production-scale 10k/50k graph timing checkpoint; run cargo test -p rivets storage::in_memory::graph::tests::blocking_graph_and_ready_derivation_stay_within_scale_budget -- --ignored --exact"]
     fn blocking_graph_and_ready_derivation_stay_within_scale_budget() {
         const ISSUE_COUNT: usize = 10_000;
         const EDGE_COUNT: usize = 50_000;

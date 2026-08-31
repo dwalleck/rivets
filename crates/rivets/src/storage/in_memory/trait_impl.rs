@@ -9,8 +9,8 @@ use super::graph::{
 use super::sorting::sort_by_policy;
 use crate::domain::{
     AssignmentError, BlockingDependency, Dependency, DependencyType, DiscoveryOrigin, Issue,
-    IssueFilter, IssueId, IssueStatus, IssueUpdate, MAX_PRIORITY, NewIssue, NewResource, Note,
-    ReadyFilter, RelatedAssociation, ResourceId, ResourceUpdate, SortPolicy,
+    IssueFilter, IssueId, IssueKind, IssueStatus, IssueUpdate, MAX_PRIORITY, NewIssue, NewResource,
+    Note, ReadyFilter, RelatedAssociation, ResourceId, ResourceUpdate, SortPolicy,
 };
 use crate::error::{Error, Result, StorageError};
 use crate::storage::IssueStorage;
@@ -20,43 +20,45 @@ use petgraph::Direction;
 use petgraph::visit::EdgeRef;
 use std::collections::HashSet;
 
+/// Check whether an Issue matches every common list or Ready criterion.
+fn matches_common_filter(
+    issue: &Issue,
+    priority: Option<u8>,
+    issue_kind: Option<&IssueKind>,
+    label: Option<&str>,
+) -> bool {
+    priority.is_none_or(|priority| issue.priority == priority)
+        && issue_kind.is_none_or(|issue_kind| &issue.issue_kind == issue_kind)
+        && label.is_none_or(|label| issue.labels.iter().any(|issue_label| issue_label == label))
+}
+
 /// Check whether an Issue matches every generic list criterion.
 fn matches_filter(issue: &Issue, filter: &IssueFilter) -> bool {
     filter
         .status
         .as_ref()
         .is_none_or(|status| &issue.status == status)
-        && filter
-            .priority
-            .is_none_or(|priority| issue.priority == priority)
-        && filter
-            .issue_kind
-            .as_ref()
-            .is_none_or(|issue_kind| &issue.issue_kind == issue_kind)
+        && matches_common_filter(
+            issue,
+            filter.priority,
+            filter.issue_kind.as_ref(),
+            filter.label.as_deref(),
+        )
         && filter
             .assignee
             .as_ref()
             .is_none_or(|assignee| issue.assignee.as_ref() == Some(assignee))
-        && filter
-            .label
-            .as_ref()
-            .is_none_or(|label| issue.labels.contains(label))
 }
 
 /// Check post-eligibility Ready query criteria.
 fn matches_ready_filter(issue: &Issue, filter: &ReadyFilter) -> bool {
     filter.assignment.allows(issue.assignee.as_deref())
-        && filter
-            .priority
-            .is_none_or(|priority| issue.priority == priority)
-        && filter
-            .issue_kind
-            .as_ref()
-            .is_none_or(|issue_kind| &issue.issue_kind == issue_kind)
-        && filter
-            .label
-            .as_ref()
-            .is_none_or(|label| issue.labels.contains(label))
+        && matches_common_filter(
+            issue,
+            filter.priority,
+            filter.issue_kind.as_ref(),
+            filter.label.as_deref(),
+        )
 }
 
 #[async_trait]
@@ -231,6 +233,12 @@ impl IssueStorage for InMemoryStorage {
                 .issues
                 .get(id)
                 .ok_or_else(|| Error::IssueNotFound(id.clone()))?;
+            if claimant.trim().is_empty() {
+                return Err(StorageError::Assignment(AssignmentError::BlankAssignee {
+                    issue_id: id.clone(),
+                })
+                .into());
+            }
             if issue.status != IssueStatus::Open {
                 return Err(StorageError::Assignment(AssignmentError::NotOpen {
                     issue_id: id.clone(),
@@ -272,35 +280,47 @@ impl IssueStorage for InMemoryStorage {
 
     async fn release(&mut self, id: &IssueId, expected_assignee: &str) -> Result<Issue> {
         let mut inner = self.lock().await;
+        {
+            let stored = inner
+                .issues
+                .get(id)
+                .ok_or_else(|| Error::IssueNotFound(id.clone()))?;
+            if expected_assignee.trim().is_empty() {
+                return Err(StorageError::Assignment(AssignmentError::BlankAssignee {
+                    issue_id: id.clone(),
+                })
+                .into());
+            }
+            if stored.status != IssueStatus::Open {
+                return Err(StorageError::Assignment(AssignmentError::NotOpen {
+                    issue_id: id.clone(),
+                    status: stored.status,
+                })
+                .into());
+            }
+            match stored.assignee.as_deref() {
+                None => {
+                    return Err(StorageError::Assignment(AssignmentError::NotClaimed {
+                        issue_id: id.clone(),
+                    })
+                    .into());
+                }
+                Some(actual) if actual != expected_assignee => {
+                    return Err(StorageError::Assignment(AssignmentError::AssigneeMismatch {
+                        issue_id: id.clone(),
+                        expected: expected_assignee.to_string(),
+                        actual: actual.to_string(),
+                    })
+                    .into());
+                }
+                Some(_) => {}
+            }
+        }
+
         let stored = inner
             .issues
             .get_mut(id)
             .ok_or_else(|| Error::IssueNotFound(id.clone()))?;
-        if stored.status != IssueStatus::Open {
-            return Err(StorageError::Assignment(AssignmentError::NotOpen {
-                issue_id: id.clone(),
-                status: stored.status,
-            })
-            .into());
-        }
-        match stored.assignee.as_deref() {
-            None => {
-                return Err(StorageError::Assignment(AssignmentError::NotClaimed {
-                    issue_id: id.clone(),
-                })
-                .into());
-            }
-            Some(actual) if actual != expected_assignee => {
-                return Err(StorageError::Assignment(AssignmentError::AssigneeMismatch {
-                    issue_id: id.clone(),
-                    expected: expected_assignee.to_string(),
-                    actual: actual.to_string(),
-                })
-                .into());
-            }
-            Some(_) => {}
-        }
-
         let mut candidate = stored.clone();
         candidate.assignee = None;
         candidate.updated_at = Utc::now();
@@ -1010,6 +1030,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "production-scale 10k/50k Ready timing checkpoint; run cargo test -p rivets storage::in_memory::trait_impl::tests::ready_stress_fixture_matches_oracle_within_budget -- --ignored --exact"]
     async fn ready_stress_fixture_matches_oracle_within_budget() {
         const ISSUE_COUNT: usize = 10_000;
         const EDGE_COUNT: usize = 50_000;

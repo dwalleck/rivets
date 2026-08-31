@@ -1469,6 +1469,21 @@ async fn claim_compare_and_set_matrix_changes_only_assignment() {
         .await
         .expect("target should be created");
     let before = issue_snapshot(&created);
+    for claimant in ["", "   ", "\t\n", "\u{2003}"] {
+        let rejected = storage.claim(&created.id, claimant).await;
+        assert!(matches!(
+            rejected,
+            Err(Error::Storage(StorageError::Assignment(
+                AssignmentError::BlankAssignee { ref issue_id }
+            ))) if issue_id == &created.id
+        ));
+        let unchanged = storage
+            .get(&created.id)
+            .await
+            .expect("get should succeed")
+            .expect("target should remain");
+        assert_eq!(issue_snapshot(&unchanged), before);
+    }
     tokio::time::sleep(Duration::from_millis(1)).await;
 
     let claimed = storage
@@ -1611,6 +1626,22 @@ async fn release_compare_and_set_matrix_changes_only_assignment() {
         .create(assigned_input)
         .await
         .expect("assigned target should be created");
+    let assigned_before = issue_snapshot(&assigned);
+    for expected_assignee in ["", "   ", "\t\n", "\u{2003}"] {
+        let rejected = storage.release(&assigned.id, expected_assignee).await;
+        assert!(matches!(
+            rejected,
+            Err(Error::Storage(StorageError::Assignment(
+                AssignmentError::BlankAssignee { ref issue_id }
+            ))) if issue_id == &assigned.id
+        ));
+        let unchanged = storage
+            .get(&assigned.id)
+            .await
+            .expect("get should succeed")
+            .expect("assigned target should remain");
+        assert_eq!(issue_snapshot(&unchanged), assigned_before);
+    }
 
     assert!(matches!(
         storage.release(&assigned.id, "bob").await,
