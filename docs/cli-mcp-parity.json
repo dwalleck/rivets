@@ -109,7 +109,7 @@
           "info"
         ],
         "arguments": {},
-        "result": "Database path, Issue ID prefix, and total/open/in_progress/legacy blocked/closed counts."
+        "result": "Database path, Issue ID prefix, and total/open/in_progress/closed counts."
       },
       "mcp": {
         "surfaces": [],
@@ -124,7 +124,7 @@
         "crates/rivets-mcp/src/server.rs::where_am_i"
       ],
       "differences": [
-        "CLI info hardcodes the default issues.jsonl path and mixes configuration identity with legacy Workflow State counts.",
+        "CLI info hardcodes the default issues.jsonl path and mixes configuration identity with Issue statistics.",
         "No shared MCP Workspace Information tool exists; where_am_i is MCP-only context inspection."
       ]
     },
@@ -200,7 +200,7 @@
           "list"
         ],
         "arguments": {
-          "status": "optional Workflow State; currently also accepts legacy Blocked and CLI-only in-progress alias",
+          "status": "optional Workflow State; canonical values plus a CLI-only in-progress alias",
           "priority": "optional P0-P4",
           "kind": "optional Issue Kind",
           "assignee": "optional string",
@@ -215,7 +215,7 @@
           "list"
         ],
         "arguments": {
-          "status": "optional raw string; current canonical spellings plus legacy Blocked",
+          "status": "optional raw string; canonical Workflow State spellings only",
           "priority": "optional unconstrained u8",
           "issue_kind": "optional Issue Kind",
           "assignee": "optional string",
@@ -227,13 +227,13 @@
       },
       "differences": [
         "CLI defaults to Priority ordering and limit 50; MCP fixes newest-created ordering and defaults to 100.",
-        "Both accept legacy Blocked Workflow State; CLI alone accepts the in-progress alias.",
+        "CLI alone accepts the in-progress alias.",
         "CLI constrains Priority to P0-P4; MCP accepts any u8.",
         "MCP accepts a hidden migration-only issue_type alias.",
         "Newest-created ties are not deterministically ordered."
       ],
       "risk": "Equivalent omitted inputs return different subsets/order, validation differs, and implicit truncation can hide Issues.",
-      "required_resolution": "Require a positive explicit limit, use deterministic newest-created ordering in both adapters, enforce canonical Workflow State and Priority, and publish the same constrained schemas.",
+      "required_resolution": "Require a positive explicit limit, use deterministic newest-created ordering in both adapters, enforce canonical Priority, and publish the same constrained schemas.",
       "evidence": [
         "crates/rivets/src/cli/args.rs::ListArgs",
         "crates/rivets/src/cli/execute.rs::execute_list",
@@ -299,7 +299,7 @@
           "issue_ids": "one or more Issue IDs",
           "title": "optional string",
           "description": "optional string",
-          "status": "optional legacy status",
+          "status": "optional canonical Workflow State",
           "priority": "optional P0-P4",
           "kind": "optional Issue Kind",
           "design": "optional string",
@@ -962,7 +962,7 @@
         ],
         "arguments": {
           "days": "current default 30",
-          "status": "optional legacy status",
+          "status": "optional canonical Workflow State",
           "limit": "current default 50"
         },
         "result": "Issue list; Closed excluded when status omitted; oldest-updated first."
@@ -981,11 +981,11 @@
       },
       "differences": [
         "CLI defaults to limit 50, excludes Closed when status is omitted, and orders oldest-updated; MCP defaults to 100, includes Closed, and inherits newest-created order.",
-        "Both accept legacy Blocked Workflow State; CLI alone accepts the in-progress alias.",
+        "CLI alone accepts the in-progress alias.",
         "Ordering ties are not deterministic."
       ],
       "risk": "Equivalent omitted inputs return different Issues and MCP can omit the stalest records while including Closed work.",
-      "required_resolution": "Require a positive explicit limit, exclude Closed by default, use deterministic oldest-updated ordering, and share canonical Workflow State validation.",
+      "required_resolution": "Require a positive explicit limit, exclude Closed by default, and use deterministic oldest-updated ordering.",
       "evidence": [
         "crates/rivets/src/cli/args.rs::StaleArgs",
         "crates/rivets/src/cli/execute.rs::execute_stale",
@@ -1022,11 +1022,10 @@
       "differences": [
         "CLI advertises an ignored Assignee filter; MCP has no Assignee filter.",
         "CLI JSON names blocker rows blocked_by while MCP names them blockers.",
-        "Issue and blocker ordering is not deterministic.",
-        "Legacy Blocked Workflow State can still appear; direct Blocking computation itself is already typed."
+        "Issue and blocker ordering is not deterministic."
       ],
       "risk": "CLI silently ignores input, adapters cannot express equivalent filtered queries, and result order/shape is unstable.",
-      "required_resolution": "Implement equivalent Assignee filtering, canonical Workflow State handling, deterministic Issue/blocker ordering, and the same semantic blocker payload across adapters.",
+      "required_resolution": "Implement equivalent Assignee filtering, deterministic Issue/blocker ordering, and the same semantic blocker payload across adapters.",
       "evidence": [
         "crates/rivets/src/cli/args.rs::BlockedArgs",
         "crates/rivets/src/cli/execute.rs::execute_blocked",
@@ -1050,15 +1049,15 @@
         "arguments": {
           "detailed": "optional boolean; current default false"
         },
-        "result": "Statistics; currently mixes legacy Blocked status with blocked-by-dependency count."
+        "result": "Statistics with canonical Workflow State counts plus separate derived Ready and blocked-by-dependency counts."
       },
       "mcp": {
         "surfaces": [],
         "arguments": {},
         "result": "No registered tool; unused StatsResponse exists."
       },
-      "risk": "MCP has no equivalent Workspace health view and CLI statistics do not satisfy canonical Workflow State/Ready/Blocked meaning.",
-      "required_resolution": "Add shared Workspace Statistics to MCP and align both adapters to canonical Workflow State, deterministic Priority counts, Ready, and Blocked definitions.",
+      "risk": "MCP has no equivalent Workspace health view, and CLI Priority counts are conditional on --detailed.",
+      "required_resolution": "Add shared Workspace Statistics to MCP with deterministic Priority counts and matching Ready and Blocked definitions.",
       "evidence": [
         "crates/rivets/src/cli/args.rs::StatsArgs",
         "crates/rivets/src/cli/execute.rs::execute_stats",
@@ -1068,8 +1067,7 @@
         "crates/rivets-mcp/src/server.rs::RivetsMcpServer"
       ],
       "differences": [
-        "CLI statistics publish legacy Blocked Workflow State and make Priority counts conditional on --detailed.",
-        "CLI Ready count uses legacy broad readiness and ParentChild propagation.",
+        "CLI statistics make Priority counts conditional on --detailed.",
         "No MCP statistics tool is registered; StatsResponse is unused."
       ]
     },
