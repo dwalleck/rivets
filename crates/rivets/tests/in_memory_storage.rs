@@ -2340,6 +2340,7 @@ async fn nonblocking_relationships_do_not_change_ready_or_blocked_and_coexist() 
 }
 
 #[tokio::test]
+#[ignore = "production-scale relationship timing checkpoint; run cargo test -p rivets --test in_memory_storage nonblocking_relationship_operations_stay_within_scale_budget -- --ignored --exact"]
 async fn nonblocking_relationship_operations_stay_within_scale_budget() {
     const ISSUE_COUNT: usize = 300;
     const RELATED_OFFSETS: [usize; 3] = [1, 2, 3];

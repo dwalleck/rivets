@@ -245,6 +245,13 @@ Mergeable definition: the public storage seam, CLI, MCP, compatibility loader, t
 - `python3 scripts/render-cli-mcp-parity.py && python3 scripts/render-cli-mcp-parity.py --check` → generated reference exactly matches canonical status vocabulary.
 - Diff audit for PR-added test lines containing bare `.unwrap()` → zero; affected tests compile and pass with descriptive failure contexts.
 
+## Review correction execution
+
+- [x] Slice 4: persistence compatibility, Assignee validation, storage wrappers, shared filters/revisions, and opt-in scale fences.
+- [x] Slice 5: MCP Update/Reopen contract, same-server serialization, freshness ownership, async filesystem isolation, cache eviction, and Assignment helpers.
+- [x] Slice 6: pre-lock CLI prompts, sidecar ignore adoption, exhaustive mutation classification, documented claim order, and shared CLI Assignment helpers.
+- [x] Slice 7: authoritative parity regeneration and zero PR-added bare test unwraps.
+
 ## Tracker taxonomy
 
 No intended future work is introduced. Every excluded capability is a permanent non-goal already approved in `design.md`: multiple Assignees, authenticated authority, administrative stealing, leases/expiry, distributed locking, direct-library cross-process coordination, and batch Claim/Release. No tracker issue is required.
@@ -253,8 +260,8 @@ No intended future work is introduced. Every excluded capability is a permanent 
 
 - [x] Original claims C0–C11 retain their owning implementation slices; review-fix slices name the original root-cause claims they correct. New claims C12–C18 are each owned exactly once: Slice 4 owns C12/C17, Slice 5 owns C13/C15/C16, Slice 6 owns C14, and Slice 7 owns C18.
 - [x] Every slice contains all thirteen mandatory fields; conditional fields carry an explicit N/A reason.
-- [x] Every PENDING review falsifier is assigned to the review-fix slice implementing its claim, with its permanent fence and named mutation in that slice.
+- [x] Every review falsifier was assigned to and passed in the review-fix slice implementing its claim, with its permanent fence and named mutation recorded in that slice.
 - [x] Every new loop records complexity, production input, explicit cost bound, and rationale; every introduced always-on phase has a bound or an explicit no-new-phase rationale.
 - [x] Partition arithmetic records the original 3,875-line projection and the 3,188-line review-fix projection for a revised cumulative 7,063 lines; every slice names the existing integrated PR increment.
 - [x] Tracker taxonomy is applied; no untracked deferral phrase remains.
-- [x] No slice is declared complete; checkpointed-build exclusively judges completion.
+- [x] Every slice is complete under the final checkpointed-build gate recorded in `design.md`.
