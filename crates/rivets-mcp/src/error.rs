@@ -88,6 +88,52 @@ pub enum Error {
     #[error("Invalid Blocking Dependency: {0}")]
     InvalidBlockingDependency(#[from] rivets::domain::BlockingDependencyError),
 
+    /// Related Association endpoints failed domain validation.
+    #[error("Invalid Related Association: {0}")]
+    InvalidRelatedAssociation(#[from] rivets::domain::RelatedAssociationError),
+
+    /// Discovery Origin endpoint roles failed domain validation.
+    #[error("Invalid Discovery Origin: {0}")]
+    InvalidDiscoveryOrigin(#[from] rivets::domain::DiscoveryOriginError),
+
+    /// The requested Related Association does not exist.
+    #[error("Related association not found: {left_issue_id} <-> {right_issue_id}")]
+    RelatedAssociationNotFound {
+        /// Canonical left endpoint.
+        left_issue_id: String,
+        /// Canonical right endpoint.
+        right_issue_id: String,
+    },
+
+    /// The requested Discovery Origin already exists.
+    #[error("Discovery origin already exists: {discovered_issue_id} -> {source_issue_id}")]
+    DuplicateDiscoveryOrigin {
+        /// Discovered Issue.
+        discovered_issue_id: String,
+        /// Source Issue.
+        source_issue_id: String,
+    },
+
+    /// The requested Discovery Origin does not exist.
+    #[error("Discovery origin not found: {discovered_issue_id} -> {source_issue_id}")]
+    DiscoveryOriginNotFound {
+        /// Discovered Issue.
+        discovered_issue_id: String,
+        /// Source Issue.
+        source_issue_id: String,
+    },
+
+    /// Adding a Discovery Origin would create a cycle.
+    #[error(
+        "Discovery origin cycle detected: adding origin from {discovered_issue_id} to {source_issue_id} would create a cycle"
+    )]
+    CircularDiscoveryOrigin {
+        /// Discovered Issue.
+        discovered_issue_id: String,
+        /// Source Issue.
+        source_issue_id: String,
+    },
+
     /// An error from the rivets storage layer.
     #[error("Storage error: {0}")]
     Storage(#[source] RivetsError),
@@ -118,6 +164,12 @@ impl Error {
             | Self::InvalidBlockingDependency(_)
             | Self::InvalidStatusTransition(_)
             | Self::Assignment(_)
+            | Self::InvalidRelatedAssociation(_)
+            | Self::InvalidDiscoveryOrigin(_)
+            | Self::RelatedAssociationNotFound { .. }
+            | Self::DuplicateDiscoveryOrigin { .. }
+            | Self::DiscoveryOriginNotFound { .. }
+            | Self::CircularDiscoveryOrigin { .. }
             | Self::IssueNotFound(_) => McpError::invalid_params(self.to_string(), None),
             Self::WorkspaceNotFound { .. }
             | Self::WorkspaceNotInitialized(_)
@@ -138,6 +190,34 @@ impl From<RivetsError> for Error {
         match error {
             RivetsError::IssueNotFound(issue_id) => Self::IssueNotFound(issue_id.to_string()),
             RivetsError::WorkspaceBusy { workspace_root } => Self::WorkspaceBusy { workspace_root },
+            RivetsError::RelatedAssociationNotFound {
+                left_issue_id,
+                right_issue_id,
+            } => Self::RelatedAssociationNotFound {
+                left_issue_id: left_issue_id.to_string(),
+                right_issue_id: right_issue_id.to_string(),
+            },
+            RivetsError::DuplicateDiscoveryOrigin {
+                discovered_issue_id,
+                source_issue_id,
+            } => Self::DuplicateDiscoveryOrigin {
+                discovered_issue_id: discovered_issue_id.to_string(),
+                source_issue_id: source_issue_id.to_string(),
+            },
+            RivetsError::DiscoveryOriginNotFound {
+                discovered_issue_id,
+                source_issue_id,
+            } => Self::DiscoveryOriginNotFound {
+                discovered_issue_id: discovered_issue_id.to_string(),
+                source_issue_id: source_issue_id.to_string(),
+            },
+            RivetsError::CircularDiscoveryOrigin {
+                discovered_issue_id,
+                source_issue_id,
+            } => Self::CircularDiscoveryOrigin {
+                discovered_issue_id: discovered_issue_id.to_string(),
+                source_issue_id: source_issue_id.to_string(),
+            },
             RivetsError::Storage(storage_error) => match storage_error.try_into_resource_error() {
                 Ok(source) => Self::InvalidResource(source),
                 Err(storage_error) => match storage_error.try_into_status_transition_error() {

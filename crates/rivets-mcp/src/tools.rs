@@ -23,9 +23,10 @@ use crate::models::{
     SetContextResponse, UpdateParams, WhereAmIResponse,
 };
 use rivets::domain::{
-    AssociatedResource, BlockingDependency, Issue, IssueFilter, IssueId, IssueKind, IssueStatus,
-    IssueUpdate, NewIssue, NewResource, NoteContent, ReadyAssignmentFilter, ReadyFilter,
-    ResourceId, ResourceLabel, ResourceRole, ResourceTarget, ResourceUpdate, WebUrl, WorkspacePath,
+    AssociatedResource, BlockingDependency, DiscoveryOrigin, Issue, IssueFilter, IssueId,
+    IssueKind, IssueStatus, IssueUpdate, NewIssue, NewResource, NoteContent, ReadyAssignmentFilter,
+    ReadyFilter, RelatedAssociation, ResourceId, ResourceLabel, ResourceRole, ResourceTarget,
+    ResourceUpdate, WebUrl, WorkspacePath,
 };
 use rivets::storage::IssueStorage;
 use rivets::workspace_lock::WorkspaceMutationLock;
@@ -732,6 +733,132 @@ impl Tools {
             root_dependent_id: dependent_id.to_string(),
             prerequisites,
         })
+    }
+
+    /// Add one symmetric Related Association.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for self-reference, missing endpoints, missing context,
+    /// or persistence failure.
+    #[instrument(skip(self), fields(%issue_id, %related_issue_id))]
+    pub async fn related_add(
+        &self,
+        issue_id: &str,
+        related_issue_id: &str,
+        workspace_root: Option<&str>,
+    ) -> Result<RelatedAssociation> {
+        let association =
+            RelatedAssociation::new(IssueId::new(issue_id), IssueId::new(related_issue_id))?;
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
+        storage.add_related_association(association.clone()).await?;
+        save_or_reload(storage.as_mut()).await?;
+        Ok(association)
+    }
+
+    /// Remove one symmetric Related Association.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for self-reference, missing endpoints, an absent
+    /// association, missing context, or persistence failure.
+    #[instrument(skip(self), fields(%issue_id, %related_issue_id))]
+    pub async fn related_remove(
+        &self,
+        issue_id: &str,
+        related_issue_id: &str,
+        workspace_root: Option<&str>,
+    ) -> Result<RelatedAssociation> {
+        let association =
+            RelatedAssociation::new(IssueId::new(issue_id), IssueId::new(related_issue_id))?;
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
+        storage.remove_related_association(&association).await?;
+        save_or_reload(storage.as_mut()).await?;
+        Ok(association)
+    }
+
+    /// List every Related Association containing one Issue.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Issue or Workspace is missing, or storage
+    /// cannot be queried.
+    #[instrument(skip(self), fields(%issue_id))]
+    pub async fn related_list(
+        &self,
+        issue_id: &str,
+        workspace_root: Option<&str>,
+    ) -> Result<Vec<RelatedAssociation>> {
+        let storage = self.storage_for(workspace_root).await?;
+        let storage = storage.read().await;
+        Ok(storage
+            .related_associations(&IssueId::new(issue_id))
+            .await?)
+    }
+
+    /// Add one directed Discovery Origin.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for self-reference, missing endpoints, a duplicate,
+    /// a Discovery cycle, missing context, or persistence failure.
+    #[instrument(skip(self), fields(%discovered_issue_id, %source_issue_id))]
+    pub async fn discovery_add(
+        &self,
+        discovered_issue_id: &str,
+        source_issue_id: &str,
+        workspace_root: Option<&str>,
+    ) -> Result<DiscoveryOrigin> {
+        let origin = DiscoveryOrigin::new(
+            IssueId::new(discovered_issue_id),
+            IssueId::new(source_issue_id),
+        )?;
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
+        storage.add_discovery_origin(origin.clone()).await?;
+        save_or_reload(storage.as_mut()).await?;
+        Ok(origin)
+    }
+
+    /// Remove one directed Discovery Origin.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for self-reference, missing endpoints, an absent
+    /// origin, missing context, or persistence failure.
+    #[instrument(skip(self), fields(%discovered_issue_id, %source_issue_id))]
+    pub async fn discovery_remove(
+        &self,
+        discovered_issue_id: &str,
+        source_issue_id: &str,
+        workspace_root: Option<&str>,
+    ) -> Result<DiscoveryOrigin> {
+        let origin = DiscoveryOrigin::new(
+            IssueId::new(discovered_issue_id),
+            IssueId::new(source_issue_id),
+        )?;
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
+        storage.remove_discovery_origin(&origin).await?;
+        save_or_reload(storage.as_mut()).await?;
+        Ok(origin)
+    }
+
+    /// List every Discovery Origin for one discovered Issue.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Issue or Workspace is missing, or storage
+    /// cannot be queried.
+    #[instrument(skip(self), fields(%discovered_issue_id))]
+    pub async fn discovery_list(
+        &self,
+        discovered_issue_id: &str,
+        workspace_root: Option<&str>,
+    ) -> Result<Vec<DiscoveryOrigin>> {
+        let storage = self.storage_for(workspace_root).await?;
+        let storage = storage.read().await;
+        Ok(storage
+            .discovery_origins(&IssueId::new(discovered_issue_id))
+            .await?)
     }
 
     /// Reopen a closed issue.

@@ -738,7 +738,6 @@ impl fmt::Display for DependencyType {
         }
     }
 }
-
 impl DependencyType {
     /// Comma-separated canonical dependency-type names, for error messages.
     ///
@@ -1544,15 +1543,6 @@ mod tests {
         ] {
             let possible = role.to_possible_value().expect("possible value");
             assert_eq!(possible.get_name(), role.to_string());
-        }
-        for dep_type in [
-            DependencyType::Blocks,
-            DependencyType::Related,
-            DependencyType::ParentChild,
-            DependencyType::DiscoveredFrom,
-        ] {
-            let possible = dep_type.to_possible_value().expect("possible value");
-            assert_eq!(possible.get_name(), dep_type.to_string());
         }
     }
 

@@ -5,10 +5,10 @@
 //! semantics, and sort policies.
 
 use rivets::domain::{
-    AssignmentError, BlockingDependency, Dependency, DependencyType, Issue, IssueId, IssueKind,
-    IssueStatus, IssueUpdate, MAX_PRIORITY, NewIssue, NewResource, NoteContent,
-    ReadyAssignmentFilter, ReadyFilter, ResourceId, ResourceLabel, ResourceRole, ResourceTarget,
-    ResourceUpdate, SortPolicy, WebUrl, WorkspacePath,
+    AssignmentError, BlockingDependency, Dependency, DependencyType, DiscoveryOrigin, Issue,
+    IssueId, IssueKind, IssueStatus, IssueUpdate, MAX_PRIORITY, NewIssue, NewResource, NoteContent,
+    ReadyAssignmentFilter, ReadyFilter, RelatedAssociation, ResourceId, ResourceLabel,
+    ResourceRole, ResourceTarget, ResourceUpdate, SortPolicy, WebUrl, WorkspacePath,
 };
 use rivets::error::{Error, StorageError};
 use rivets::storage::IssueStorage;
@@ -1914,4 +1914,349 @@ async fn import_rejects_invalid_assignment_state_atomically() {
             .is_empty(),
         "mixed invalid import must insert nothing"
     );
+}
+
+#[tokio::test]
+async fn related_association_is_symmetric_idempotent_and_removable_from_either_side() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let issue_a = storage.create(create_test_issue("A")).await.unwrap();
+    let issue_b = storage.create(create_test_issue("B")).await.unwrap();
+    let issue_c = storage.create(create_test_issue("C")).await.unwrap();
+    let forward = RelatedAssociation::new(issue_a.id.clone(), issue_b.id.clone()).unwrap();
+    let reverse = RelatedAssociation::new(issue_b.id.clone(), issue_a.id.clone()).unwrap();
+    assert_eq!(forward, reverse);
+
+    storage
+        .add_related_association(reverse.clone())
+        .await
+        .unwrap();
+    storage
+        .add_related_association(forward.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.related_associations(&issue_a.id).await.unwrap(),
+        vec![forward.clone()]
+    );
+    assert_eq!(
+        storage.related_associations(&issue_b.id).await.unwrap(),
+        vec![forward.clone()]
+    );
+    assert!(
+        storage
+            .related_associations(&issue_c.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let exported = storage.export_all().await.unwrap();
+    let related_records = exported
+        .iter()
+        .flat_map(|issue| {
+            issue
+                .dependencies
+                .iter()
+                .filter(|dependency| dependency.dep_type == DependencyType::Related)
+                .map(move |dependency| (&issue.id, &dependency.depends_on_id))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        related_records,
+        vec![(forward.left_issue_id(), forward.right_issue_id())]
+    );
+
+    seed_legacy_relationship(
+        &mut storage,
+        forward.right_issue_id(),
+        forward.left_issue_id(),
+        DependencyType::Related,
+    )
+    .await;
+    assert_eq!(
+        storage.related_associations(&issue_a.id).await.unwrap(),
+        vec![forward.clone()],
+        "reciprocal legacy records should remain one logical Association"
+    );
+
+    storage.remove_related_association(&reverse).await.unwrap();
+    assert!(
+        storage
+            .related_associations(&issue_a.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        storage
+            .related_associations(&issue_b.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(storage.remove_related_association(&forward).await.is_err());
+
+    let missing =
+        RelatedAssociation::new(issue_a.id.clone(), IssueId::new("test-missing")).unwrap();
+    assert!(storage.add_related_association(missing).await.is_err());
+}
+
+#[tokio::test]
+async fn discovery_origin_is_directed_multi_source_and_acyclic() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let issue_a = storage.create(create_test_issue("A")).await.unwrap();
+    let issue_b = storage.create(create_test_issue("B")).await.unwrap();
+    let issue_c = storage.create(create_test_issue("C")).await.unwrap();
+    let issue_d = storage.create(create_test_issue("D")).await.unwrap();
+    let origin_ab = DiscoveryOrigin::new(issue_a.id.clone(), issue_b.id.clone()).unwrap();
+    let origin_ad = DiscoveryOrigin::new(issue_a.id.clone(), issue_d.id.clone()).unwrap();
+
+    storage
+        .add_discovery_origin(origin_ab.clone())
+        .await
+        .unwrap();
+    storage
+        .add_discovery_origin(origin_ad.clone())
+        .await
+        .unwrap();
+    let mut expected = vec![origin_ab.clone(), origin_ad.clone()];
+    expected.sort();
+    assert_eq!(
+        storage.discovery_origins(&issue_a.id).await.unwrap(),
+        expected
+    );
+    assert!(
+        storage
+            .add_discovery_origin(origin_ab.clone())
+            .await
+            .is_err()
+    );
+
+    seed_legacy_relationship(
+        &mut storage,
+        &issue_b.id,
+        &issue_c.id,
+        DependencyType::Related,
+    )
+    .await;
+    let origin_ca = DiscoveryOrigin::new(issue_c.id.clone(), issue_a.id.clone()).unwrap();
+    storage
+        .add_discovery_origin(origin_ca.clone())
+        .await
+        .expect("a non-Discovery path must not create a provenance cycle");
+    let cycle = DiscoveryOrigin::new(issue_b.id.clone(), issue_c.id.clone()).unwrap();
+    assert!(literal_path_exists(
+        &[
+            (issue_c.id.as_str(), issue_a.id.as_str()),
+            (issue_a.id.as_str(), issue_b.id.as_str()),
+        ],
+        issue_c.id.as_str(),
+        issue_b.id.as_str(),
+    ));
+    assert!(storage.add_discovery_origin(cycle).await.is_err());
+    assert!(
+        storage
+            .discovery_origins(&issue_b.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let reversed = DiscoveryOrigin::new(issue_b.id.clone(), issue_a.id.clone()).unwrap();
+    assert!(storage.remove_discovery_origin(&reversed).await.is_err());
+    assert!(
+        storage
+            .discovery_origins(&issue_a.id)
+            .await
+            .unwrap()
+            .contains(&origin_ab)
+    );
+    seed_legacy_relationship(
+        &mut storage,
+        &issue_a.id,
+        &issue_b.id,
+        DependencyType::DiscoveredFrom,
+    )
+    .await;
+    storage.remove_discovery_origin(&origin_ab).await.unwrap();
+    assert!(
+        !storage
+            .discovery_origins(&issue_a.id)
+            .await
+            .unwrap()
+            .contains(&origin_ab),
+        "removal should clear duplicate compatibility records and graph edges"
+    );
+    storage.remove_discovery_origin(&origin_ca).await.unwrap();
+
+    let missing = DiscoveryOrigin::new(issue_a.id.clone(), IssueId::new("test-missing")).unwrap();
+    assert!(storage.add_discovery_origin(missing).await.is_err());
+}
+
+#[tokio::test]
+async fn nonblocking_relationships_do_not_change_ready_or_blocked_and_coexist() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let issue_a = storage.create(create_test_issue("A")).await.unwrap();
+    let issue_b = storage.create(create_test_issue("B")).await.unwrap();
+    let blocking = BlockingDependency::new(issue_a.id.clone(), issue_b.id.clone()).unwrap();
+    storage
+        .add_blocking_dependency(blocking.clone())
+        .await
+        .unwrap();
+    seed_legacy_relationship(
+        &mut storage,
+        &issue_a.id,
+        &issue_b.id,
+        DependencyType::ParentChild,
+    )
+    .await;
+
+    let ready_before = storage
+        .ready_to_work(&ReadyFilter::default(), None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|issue| issue.id)
+        .collect::<HashSet<_>>();
+    let blocked_before = storage
+        .blocked_issues()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(issue, _)| issue.id)
+        .collect::<HashSet<_>>();
+
+    let related = RelatedAssociation::new(issue_a.id.clone(), issue_b.id.clone()).unwrap();
+    let discovery = DiscoveryOrigin::new(issue_a.id.clone(), issue_b.id.clone()).unwrap();
+    storage
+        .add_related_association(related.clone())
+        .await
+        .unwrap();
+    storage
+        .add_discovery_origin(discovery.clone())
+        .await
+        .unwrap();
+
+    let ready_after = storage
+        .ready_to_work(&ReadyFilter::default(), None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|issue| issue.id)
+        .collect::<HashSet<_>>();
+    let blocked_after = storage
+        .blocked_issues()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(issue, _)| issue.id)
+        .collect::<HashSet<_>>();
+    assert_eq!(ready_after, ready_before);
+    assert_eq!(blocked_after, blocked_before);
+    assert_eq!(
+        storage.blocking_prerequisites(&issue_a.id).await.unwrap(),
+        vec![blocking]
+    );
+    assert_eq!(
+        storage.related_associations(&issue_b.id).await.unwrap(),
+        vec![related]
+    );
+    assert_eq!(
+        storage.discovery_origins(&issue_a.id).await.unwrap(),
+        vec![discovery]
+    );
+
+    let mut kinds = storage
+        .export_all()
+        .await
+        .unwrap()
+        .into_iter()
+        .flat_map(|issue| issue.dependencies)
+        .map(|dependency| dependency.dep_type)
+        .collect::<Vec<_>>();
+    kinds.sort_unstable();
+    assert_eq!(
+        kinds,
+        vec![
+            DependencyType::Blocks,
+            DependencyType::Related,
+            DependencyType::ParentChild,
+            DependencyType::DiscoveredFrom,
+        ]
+    );
+}
+
+#[tokio::test]
+async fn nonblocking_relationship_operations_stay_within_scale_budget() {
+    const ISSUE_COUNT: usize = 300;
+    const RELATED_OFFSETS: [usize; 3] = [1, 2, 3];
+    const DISCOVERED_COUNT: usize = 100;
+    const SOURCES_PER_DISCOVERY: usize = 4;
+    const OPERATION_BUDGET: Duration = Duration::from_secs(2);
+
+    let mut storage = new_in_memory_storage("stress".to_string());
+    let mut issues = Vec::with_capacity(ISSUE_COUNT);
+    for index in 0..ISSUE_COUNT {
+        issues.push(
+            storage
+                .create(create_test_issue(&format!("Stress {index}")))
+                .await
+                .unwrap(),
+        );
+    }
+
+    for index in 0..ISSUE_COUNT {
+        for offset in RELATED_OFFSETS {
+            let related = (index + offset) % ISSUE_COUNT;
+            storage
+                .add_related_association(
+                    RelatedAssociation::new(issues[index].id.clone(), issues[related].id.clone())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+    }
+    for discovered in 0..DISCOVERED_COUNT {
+        for source_offset in 0..SOURCES_PER_DISCOVERY {
+            let source = DISCOVERED_COUNT
+                + (discovered * SOURCES_PER_DISCOVERY + source_offset)
+                    % (ISSUE_COUNT - DISCOVERED_COUNT);
+            storage
+                .add_discovery_origin(
+                    DiscoveryOrigin::new(issues[discovered].id.clone(), issues[source].id.clone())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+    }
+    for index in 0..DISCOVERED_COUNT {
+        storage
+            .add_blocking_dependency(
+                BlockingDependency::new(
+                    issues[DISCOVERED_COUNT + index].id.clone(),
+                    issues[2 * DISCOVERED_COUNT + index].id.clone(),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    let duplicate = RelatedAssociation::new(issues[1].id.clone(), issues[0].id.clone()).unwrap();
+    let started = Instant::now();
+    storage.add_related_association(duplicate).await.unwrap();
+    assert!(started.elapsed() <= OPERATION_BUDGET);
+
+    let started = Instant::now();
+    let associations = storage.related_associations(&issues[0].id).await.unwrap();
+    assert_eq!(associations.len(), RELATED_OFFSETS.len() * 2);
+    assert!(started.elapsed() <= OPERATION_BUDGET);
+
+    let cycle =
+        DiscoveryOrigin::new(issues[DISCOVERED_COUNT].id.clone(), issues[0].id.clone()).unwrap();
+    let started = Instant::now();
+    assert!(storage.add_discovery_origin(cycle).await.is_err());
+    assert!(started.elapsed() <= OPERATION_BUDGET);
 }

@@ -50,6 +50,7 @@ chrono = { workspace = true }
 tokio-test = "0.4"
 tempfile = { workspace = true }
 rstest = { workspace = true }
+clap = { workspace = true }
 
 [lints]
 workspace = true

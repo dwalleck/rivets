@@ -4,25 +4,24 @@ use super::IssueId;
 use serde::{Deserialize, Serialize};
 
 /// A directed relationship from an Issue that depends on work to its prerequisite.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "RawBlockingDependency")]
 pub struct BlockingDependency {
     dependent_id: IssueId,
     prerequisite_id: IssueId,
 }
 
-impl<'de> Deserialize<'de> for BlockingDependency {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct Wire {
-            dependent_id: IssueId,
-            prerequisite_id: IssueId,
-        }
+#[derive(Deserialize)]
+struct RawBlockingDependency {
+    dependent_id: IssueId,
+    prerequisite_id: IssueId,
+}
 
-        let wire = Wire::deserialize(deserializer)?;
-        Self::new(wire.dependent_id, wire.prerequisite_id).map_err(serde::de::Error::custom)
+impl TryFrom<RawBlockingDependency> for BlockingDependency {
+    type Error = BlockingDependencyError;
+
+    fn try_from(raw: RawBlockingDependency) -> Result<Self, Self::Error> {
+        Self::new(raw.dependent_id, raw.prerequisite_id)
     }
 }
 
@@ -74,7 +73,10 @@ impl BlockingDependency {
 pub enum BlockingDependencyError {
     /// A Blocking Dependency cannot point from an Issue to itself.
     #[error("Issue {issue_id} cannot depend on itself")]
-    SelfReference { issue_id: IssueId },
+    SelfReference {
+        /// The Issue that cannot depend on itself.
+        issue_id: IssueId,
+    },
 }
 
 /// A symmetric, non-blocking association between two Issues.
@@ -244,25 +246,17 @@ mod tests {
                 issue_id: IssueId::new("test-a")
             })
         );
-    }
 
-    #[test]
-    fn blocking_dependency_deserialization_enforces_invariant() {
-        let dependency: BlockingDependency = serde_json::from_value(serde_json::json!({
-            "dependent_id": "test-dependent",
-            "prerequisite_id": "test-prerequisite"
-        }))
-        .expect("distinct endpoint roles should deserialize");
-        assert_eq!(dependency.dependent_id().as_str(), "test-dependent");
-        assert_eq!(dependency.prerequisite_id().as_str(), "test-prerequisite");
-
-        let self_reference = serde_json::from_value::<BlockingDependency>(serde_json::json!({
-            "dependent_id": "test-self",
-            "prerequisite_id": "test-self"
-        }));
+        let deserialization_error =
+            serde_json::from_value::<BlockingDependency>(serde_json::json!({
+                "dependent_id": "test-self",
+                "prerequisite_id": "test-self"
+            }))
+            .expect_err("deserialization must enforce the self-reference invariant");
         assert!(
-            self_reference.is_err(),
-            "deserialization must preserve the self-reference invariant"
+            deserialization_error
+                .to_string()
+                .contains("cannot depend on itself")
         );
     }
 
@@ -327,6 +321,26 @@ mod tests {
         assert!(
             discovery.is_err(),
             "Discovery self-reference must not deserialize"
+        );
+    }
+
+    #[test]
+    fn blocking_dependency_deserialization_enforces_invariant() {
+        let dependency: BlockingDependency = serde_json::from_value(serde_json::json!({
+            "dependent_id": "test-dependent",
+            "prerequisite_id": "test-prerequisite"
+        }))
+        .expect("distinct endpoint roles should deserialize");
+        assert_eq!(dependency.dependent_id().as_str(), "test-dependent");
+        assert_eq!(dependency.prerequisite_id().as_str(), "test-prerequisite");
+
+        let self_reference = serde_json::from_value::<BlockingDependency>(serde_json::json!({
+            "dependent_id": "test-self",
+            "prerequisite_id": "test-self"
+        }));
+        assert!(
+            self_reference.is_err(),
+            "deserialization must preserve the self-reference invariant"
         );
     }
 }

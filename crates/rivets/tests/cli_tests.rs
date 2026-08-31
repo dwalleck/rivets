@@ -2966,3 +2966,306 @@ fn mixed_legacy_fixture_loads_migrates_and_persists_via_cli(initialized_dir: Tem
         expected_opaque_note
     );
 }
+
+#[rstest]
+fn related_and_discovery_cli_are_structured_symmetric_and_persistent(initialized_dir: TempDir) {
+    let issue_a = create_issue(initialized_dir.path(), "Issue A", &[]);
+    let issue_b = create_issue(initialized_dir.path(), "Issue B", &[]);
+    let issue_c = create_issue(initialized_dir.path(), "Issue C", &[]);
+    let mut expected_related_endpoints = [issue_a.as_str(), issue_b.as_str()];
+    expected_related_endpoints.sort_unstable();
+
+    for command in ["related", "discovery"] {
+        let help = run_rivets_in_dir(initialized_dir.path(), &[command, "--help"]);
+        assert!(
+            help.status.success(),
+            "{command} help failed: {}",
+            String::from_utf8_lossy(&help.stderr)
+        );
+        assert!(String::from_utf8_lossy(&help.stdout).contains("add"));
+        assert!(String::from_utf8_lossy(&help.stdout).contains("remove"));
+        assert!(String::from_utf8_lossy(&help.stdout).contains("list"));
+    }
+
+    let related_add = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "--json",
+            "related",
+            "add",
+            "--issue",
+            expected_related_endpoints[1],
+            "--related",
+            expected_related_endpoints[0],
+        ],
+    );
+    assert!(
+        related_add.status.success(),
+        "Related add failed: {}",
+        String::from_utf8_lossy(&related_add.stderr)
+    );
+    let related_add: serde_json::Value =
+        serde_json::from_slice(&related_add.stdout).expect("Related add should be JSON");
+    assert_eq!(related_add["action"], "add");
+    assert_eq!(related_add["relationship"], "related");
+    assert_eq!(related_add["status"], "success");
+    assert_eq!(related_add["left_issue_id"], expected_related_endpoints[0]);
+    assert_eq!(related_add["right_issue_id"], expected_related_endpoints[1]);
+    assert!(related_add.get("issue_id").is_none());
+    assert!(related_add.get("related_issue_id").is_none());
+
+    let related_duplicate = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "related",
+            "add",
+            "--issue",
+            expected_related_endpoints[1],
+            "--related",
+            expected_related_endpoints[0],
+        ],
+    );
+    assert!(related_duplicate.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&related_duplicate.stdout).trim(),
+        format!(
+            "{} is related to {}",
+            expected_related_endpoints[0], expected_related_endpoints[1]
+        )
+    );
+
+    let related_list = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "--json",
+            "related",
+            "list",
+            "--issue",
+            expected_related_endpoints[1],
+        ],
+    );
+    assert!(
+        related_list.status.success(),
+        "Related list failed: {}",
+        String::from_utf8_lossy(&related_list.stderr)
+    );
+    let related_list: Vec<serde_json::Value> =
+        serde_json::from_slice(&related_list.stdout).expect("Related list should be JSON");
+    assert_eq!(
+        related_list.len(),
+        1,
+        "reversed duplicate must be idempotent"
+    );
+    assert_eq!(
+        related_list[0]["left_issue_id"],
+        expected_related_endpoints[0]
+    );
+    assert_eq!(
+        related_list[0]["right_issue_id"],
+        expected_related_endpoints[1]
+    );
+
+    let discovery_add_a = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "discovery",
+            "add",
+            "--discovered",
+            &issue_c,
+            "--source",
+            &issue_a,
+        ],
+    );
+    assert!(
+        discovery_add_a.status.success(),
+        "Discovery add failed: {}",
+        String::from_utf8_lossy(&discovery_add_a.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&discovery_add_a.stdout).trim(),
+        format!("{issue_c} was discovered from {issue_a}")
+    );
+    let discovery_add_b = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "--json",
+            "discovery",
+            "add",
+            "--discovered",
+            &issue_c,
+            "--source",
+            &issue_b,
+        ],
+    );
+    assert!(discovery_add_b.status.success());
+    let discovery_add_b: serde_json::Value =
+        serde_json::from_slice(&discovery_add_b.stdout).expect("Discovery add should be JSON");
+    assert_eq!(discovery_add_b["action"], "add");
+    assert_eq!(discovery_add_b["relationship"], "discovery_origin");
+    assert_eq!(discovery_add_b["discovered_issue_id"], issue_c);
+    assert_eq!(discovery_add_b["source_issue_id"], issue_b);
+    assert_eq!(discovery_add_b["status"], "success");
+
+    let discovery_list = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["--json", "discovery", "list", "--discovered", &issue_c],
+    );
+    assert!(
+        discovery_list.status.success(),
+        "Discovery list failed: {}",
+        String::from_utf8_lossy(&discovery_list.stderr)
+    );
+    let discovery_list: Vec<serde_json::Value> =
+        serde_json::from_slice(&discovery_list.stdout).expect("Discovery list should be JSON");
+    let actual_sources = discovery_list
+        .iter()
+        .map(|origin| origin["source_issue_id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    let mut expected_sources = vec![issue_a.as_str(), issue_b.as_str()];
+    expected_sources.sort_unstable();
+    assert_eq!(actual_sources, expected_sources);
+    assert!(
+        discovery_list
+            .iter()
+            .all(|origin| origin["discovered_issue_id"] == issue_c)
+    );
+
+    let duplicate_discovery = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "discovery",
+            "add",
+            "--discovered",
+            &issue_c,
+            "--source",
+            &issue_a,
+        ],
+    );
+    assert!(!duplicate_discovery.status.success());
+    assert!(
+        String::from_utf8_lossy(&duplicate_discovery.stderr)
+            .contains("Discovery origin already exists")
+    );
+
+    let discovery_cycle = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "discovery",
+            "add",
+            "--discovered",
+            &issue_a,
+            "--source",
+            &issue_c,
+        ],
+    );
+    assert!(!discovery_cycle.status.success());
+    assert!(String::from_utf8_lossy(&discovery_cycle.stderr).contains("would create a cycle"));
+
+    for (command, endpoint_flag) in [("related", "--issue"), ("discovery", "--discovered")] {
+        let self_reference = run_rivets_in_dir(
+            initialized_dir.path(),
+            &[
+                command,
+                "add",
+                endpoint_flag,
+                &issue_a,
+                if command == "related" {
+                    "--related"
+                } else {
+                    "--source"
+                },
+                &issue_a,
+            ],
+        );
+        assert!(
+            !self_reference.status.success(),
+            "{command} self-reference should fail"
+        );
+        let stderr = String::from_utf8_lossy(&self_reference.stderr);
+        let expected = if command == "related" {
+            "related to itself"
+        } else {
+            "own Discovery source"
+        };
+        assert!(stderr.contains(expected), "unexpected error: {stderr}");
+    }
+
+    let before_missing =
+        std::fs::read(initialized_dir.path().join(".rivets/issues.jsonl")).unwrap();
+    let missing = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "related",
+            "add",
+            "--issue",
+            &issue_a,
+            "--related",
+            "test-missing",
+        ],
+    );
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("test-missing"));
+    assert_eq!(
+        std::fs::read(initialized_dir.path().join(".rivets/issues.jsonl")).unwrap(),
+        before_missing
+    );
+
+    let related_remove = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "--json",
+            "related",
+            "remove",
+            "--issue",
+            expected_related_endpoints[1],
+            "--related",
+            expected_related_endpoints[0],
+        ],
+    );
+    assert!(related_remove.status.success());
+    let related_remove: serde_json::Value =
+        serde_json::from_slice(&related_remove.stdout).expect("Related remove should be JSON");
+    assert_eq!(related_remove["action"], "remove");
+    assert_eq!(related_remove["relationship"], "related");
+    assert_eq!(
+        related_remove["left_issue_id"],
+        expected_related_endpoints[0]
+    );
+    assert_eq!(
+        related_remove["right_issue_id"],
+        expected_related_endpoints[1]
+    );
+    assert_eq!(related_remove["status"], "success");
+    let related_empty = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["--json", "related", "list", "--issue", &issue_a],
+    );
+    assert_eq!(
+        serde_json::from_slice::<Vec<serde_json::Value>>(&related_empty.stdout).unwrap(),
+        Vec::<serde_json::Value>::new()
+    );
+
+    let discovery_remove = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "discovery",
+            "remove",
+            "--discovered",
+            &issue_c,
+            "--source",
+            &issue_a,
+        ],
+    );
+    assert!(discovery_remove.status.success());
+    let discovery_after_remove = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["--json", "discovery", "list", "--discovered", &issue_c],
+    );
+    let discovery_after_remove: Vec<serde_json::Value> =
+        serde_json::from_slice(&discovery_after_remove.stdout).unwrap();
+    assert_eq!(discovery_after_remove.len(), 1);
+    assert_eq!(
+        discovery_after_remove[0]["source_issue_id"], issue_b,
+        "each real process must observe the preceding persisted mutation"
+    );
+}

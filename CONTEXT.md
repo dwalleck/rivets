@@ -93,7 +93,7 @@ The sole person or agent responsible for an Issue's next action. Assignment clai
 _Avoid_: Owner, collaborator, current worker
 
 **Label**:
-A Workspace-defined classification applied to an Issue for grouping and filtering. Rivets gives a Label no intrinsic lifecycle or dependency meaning, though integrations may interpret agreed label conventions.
+A Workspace-defined classification applied to an Issue for grouping and filtering. Its name is 1–50 lowercase ASCII letters or digits with optional hyphens or underscores; it starts and ends alphanumeric, has no consecutive separators, and carries no intrinsic lifecycle or dependency meaning.
 _Avoid_: Issue Kind, Workflow State
 
 **Ready**:

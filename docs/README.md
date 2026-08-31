@@ -6,9 +6,9 @@ Rivets is a Rust issue tracker (edition 2024, MSRV 1.94.0) that stores Issues as
 
 - `rivets` — CLI application and core issue-tracking domain
 - `rivets-jsonl` — JSONL reading/writing library
-- `rivets-mcp` — MCP server for AI assistants (26 tools)
+- `rivets-mcp` — MCP server for AI assistants (32 tools)
 
-The CLI exposes 18 top-level commands: `init`, `info`, `create`, `list`, `show`, `update`, `claim`, `release`, `close`, `reopen`, `delete`, `ready`, `blocking-dependency`, `label`, `resource`, `stale`, `blocked`, and `stats`.
+The CLI exposes 20 top-level commands: `init`, `info`, `create`, `list`, `show`, `update`, `claim`, `release`, `close`, `reopen`, `delete`, `ready`, `blocking-dependency`, `related`, `discovery`, `label`, `resource`, `stale`, `blocked`, and `stats`.
 
 **Current behavior:**
 
@@ -17,7 +17,7 @@ The CLI exposes 18 top-level commands: `init`, `info`, `create`, `list`, `show`,
 - JSONL loading has three stages: parse compatibility records, import Issues, then rebuild relationships.
 - Issue IDs combine a prefix with an adaptive hash whose inputs include a timestamp and nonce; they are not content-addressed.
 - `blocking-dependency add/remove/list/tree` uses explicit dependent and prerequisite roles. The same typed storage interface backs equivalent MCP tools; relationship changes never auto-mutate Issue status.
-- Implemented surfaces include atomic Assignment Claim/Release, canonical Blocking Dependencies, Associated Resources, immutable Notes, mutable Issue Kind, labels, `stats`/`stale`/`info`, and MCP multi-workspace support. Most MCP issue operations accept an optional `workspace_root`; otherwise they use the context selected by `set_context`.
+- Implemented surfaces include atomic Assignment Claim/Release, canonical Blocking Dependencies, symmetric Related Associations, directed Discovery Origins, Associated Resources, immutable Notes, mutable Issue Kind, labels, `stats`/`stale`/`info`, and MCP multi-workspace support. Most MCP issue operations accept an optional `workspace_root`; otherwise they use the context selected by `set_context`.
 
 This index separates **current reference documentation** (describes the implemented system) from **accepted decisions** (ADRs, some of which the implementation intentionally lags) and **historical artifacts** (pre-implementation plans and research, not the work frontier).
 
@@ -28,6 +28,7 @@ This index separates **current reference documentation** (describes the implemen
 - [Storage Architecture](./storage-architecture.md) — storage trait hierarchy, in-memory representation, JSONL persistence and error recovery, cycle detection, and readiness queries.
 - [Data Flow](./data-flow.md) — end-to-end flows: command lifecycle, init, CRUD, Blocking Dependency mutation/query, JSONL load, and state transitions.
 - [Terminology Reference](./terminology.md) — implementation vocabulary for storage layers, data structures, and operations.
+- [CLI and MCP Interface Parity](./cli-mcp-parity.md) — normative operation, argument, validation, ordering, and result contract; current gaps and intentional adapter mechanics.
 - [CONTEXT.md](../CONTEXT.md) — canonical domain glossary (Workspace, Issue, Workflow State, Ready, Blocked, Issue Relationships, Associated Resources). Authoritative for domain meaning; ADRs record why load-bearing decisions were made.
 - [AGENTS.md](../AGENTS.md) — current engineering and navigation rules for AI assistants working in the repo.
 - [README.md](../README.md) — user-facing overview of the CLI.
@@ -40,8 +41,9 @@ This index separates **current reference documentation** (describes the implemen
 - [ADR-0003: Model related material as Associated Resources](./adr/0003-associated-resources.md) — typed resources with explicit targets (Web URL or Workspace Path) and standard roles replace the singular untyped External Reference.
 - [ADR-0004: One wire vocabulary for Issue records](./adr/0004-one-wire-vocabulary.md) — MCP tool responses and CLI `--json` serialize the domain `Issue` directly; timestamps normalize to RFC-3339 `Z` form.
 - [ADR-0005: The domain owns Workflow State and Assignment transitions](./adr/0005-domain-owned-status-transitions.md) — lifecycle side effects and atomic Claim/Release rules live behind the shared domain/storage seam.
+- [ADR-0006: CLI and MCP share semantic Interface Parity](./adr/0006-semantic-interface-parity.md) — shared intents preserve observable domain behavior while adapter-specific invocation and presentation mechanics remain explicit.
 
-**Implementation lags some accepted decisions.** Blocking Dependency mutation, direct Blocked derivation, canonical Workflow State, and Assignment-aware Ready queries now use canonical typed interfaces. Parentage, Related Association, Discovery Origin, and canonical `relationships` persistence remain in their tracked ADR-0002 slices. Issue Kind is mutable (Bug, Feature, Task, Epic, Chore); “Issue type” is legacy vocabulary. Legacy singular Notes, External References, Workflow State spellings, and generic relationship records are accepted only at compatibility seams; do not document them as canonical.
+**Implementation lags some accepted decisions.** Blocking Dependency mutation, Related Associations, Discovery Origins, direct Blocked derivation, canonical Workflow State, and Assignment-aware Ready queries now use canonical typed interfaces. Parentage and canonical `relationships` persistence remain in their tracked ADR-0002 slices. Issue Kind is mutable (Bug, Feature, Task, Epic, Chore); “Issue type” is legacy vocabulary. Legacy singular Notes, External References, Workflow State spellings, and generic relationship records are accepted only at compatibility seams; do not document them as canonical.
 
 ## Agent Documentation
 

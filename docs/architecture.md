@@ -16,7 +16,7 @@ The current implementation is a three-crate Cargo workspace:
 
 - **`rivets`**: CLI application, domain model, and storage layer (the `crates/rivets` crate)
 - **`rivets-jsonl`**: Generic JSON Lines (JSONL) library providing resilient, line-numbered parsing and atomic writes (the `crates/rivets-jsonl` crate)
-- **`rivets-mcp`**: MCP (Model Context Protocol) server exposing the tracker as 21 tools (the `crates/rivets-mcp` crate)
+- **`rivets-mcp`**: MCP (Model Context Protocol) server exposing the tracker as 32 tools (the `crates/rivets-mcp` crate)
 
 Earlier design research (rivets-fk9 for JSONL library design, rivets-kr3 for workspace structure) informed the original two-crate layout; the workspace has since grown to three crates with the addition of `rivets-mcp`.
 
@@ -27,11 +27,11 @@ graph TB
     subgraph "CLI Layer (rivets)"
         CLI[CLI Entry Point<br/>main.rs]
         Args[Argument Parser<br/>clap]
-        Commands[Command Handlers<br/>16 top-level commands]
+        Commands[Command Handlers<br/>20 top-level commands]
     end
 
     subgraph "MCP Layer (rivets-mcp)"
-        Mcp[rivets-mcp server<br/>21 tools]
+        Mcp[rivets-mcp server<br/>32 tools]
     end
 
     subgraph "Application Layer (rivets)"
@@ -79,15 +79,15 @@ graph TB
 
 - **Entry Point**: `main.rs` with `#[tokio::main(flavor = "current_thread")]`
 - **Argument Parsing**: Clap derive API for type-safe CLI arguments
-- **Commands** (16 top-level): init, info, create, list, show, update, close, reopen, delete, ready, blocking-dependency, label, resource, stale, blocked, stats
+- **Commands** (20 top-level): init, info, create, list, show, update, claim, release, close, reopen, delete, ready, blocking-dependency, related, discovery, label, resource, stale, blocked, stats
 - **Validation**: Priority 0-4, enum types (status, kind), explicit Blocking endpoint roles, ID format validation, prefix validation (2-20 alphanumeric characters)
 
 ### 2. Application Layer (`rivets`)
 
-- **App Struct**: Manages storage lifecycle and command execution. `App::from_directory` is read-only; `App::from_directory_for_mutation` acquires the canonical Workspace sidecar before configuration/storage load and retains it through save.
+- **App Struct**: Manages storage lifecycle and command execution. `App::from_directory` searches upward (max depth 256) for the `.rivets/` directory and is read-only; `App::from_directory_for_mutation` acquires the canonical Workspace sidecar before configuration/storage load and retains it through save.
 - **Configuration**: `.rivets/config.yaml` is the **single** configuration source: `issue-prefix` plus a `storage` section (`backend` and `data_file`). There is no config layering, no environment-variable merge, and no user-level config. Defaults (prefix `proj`, backend `jsonl`, data file `.rivets/issues.jsonl`) are baked into `init`.
 - **Durable mutation ownership**: Existing-Workspace CLI and MCP writers use nonblocking `.rivets/workspace.lock`. Contention returns typed retryable Workspace Busy; different canonical Workspace roots lock independently.
-- **Auto-save**: Mutating commands persist after execution while retaining durable ownership. Batch `update`/`close`/`reopen` and label mutations reload storage after a failed save; `create`, `delete`, Blocking Dependency mutations, and resource mutations return the save error without reusing that process's App.
+- **Auto-save**: Mutating commands persist after execution while retaining durable ownership. Batch `update`/`close`/`reopen` and label mutations reload storage after a failed save; `create`, `delete`, relationship mutations, and resource mutations return the save error without reusing that process's App.
 - **Async Runtime**: Tokio current-thread for sequential CLI operations.
 
 ### 3. Storage Abstraction (`rivets`)
@@ -132,7 +132,7 @@ pub trait IssueStorage: Send + Sync {
 
 ### 4. Domain Layer (`rivets`)
 
-- **Core Types**: Issue, NewIssue, IssueUpdate, IssueFilter, ReadyFilter, ReadyAssignmentFilter, BlockingDependency, Note, AssociatedResource, ResourceId
+- **Core Types**: Issue, NewIssue, IssueUpdate, IssueFilter, ReadyFilter, ReadyAssignmentFilter, BlockingDependency, RelatedAssociation, DiscoveryOrigin, Note, AssociatedResource, ResourceId
 - **Issue fields**: id, title, description, status, priority (0-4), issue_kind, assignee, labels, design notes, acceptance criteria, ordered append-only Notes, ordered Associated Resources, legacy relationship records for persistence, and creation/update/close timestamps
 - **Enums**:
   - `IssueStatus`: exactly `open`, `in_progress`, `closed`. Blocked and Ready are derived conditions and are never serialized on Issue records. Status transitions are validated by the domain.
@@ -260,7 +260,7 @@ sequenceDiagram
 - ✅ Single-source YAML configuration (`.rivets/config.yaml`)
 - ✅ Labels (add/remove, atomic), immutable Notes, Associated Resources (add/update/remove with typed roles), mutable Issue Kind
 - ✅ `stats`, `stale`, `info` commands
-- ✅ MCP server (`rivets-mcp`) with 21 tools and per-call `workspace_root` overrides / `set_context` default workspace
+- ✅ MCP server (`rivets-mcp`) with 32 tools and per-call `workspace_root` overrides / `set_context` default workspace
 - ✅ Auto-save after mutations with reload-on-save-failure recovery
 
 ### Not Implemented

@@ -4,23 +4,40 @@
 //! - Dependency tree traversal (BFS)
 //! - Direct blocked issue detection
 
-use crate::domain::{BlockingDependency, DependencyType, Issue, IssueId, IssueStatus};
+use crate::domain::{
+    BlockingDependency, DependencyType, DiscoveryOrigin, Issue, IssueId, IssueStatus,
+    RelatedAssociation,
+};
 use crate::error::{Error, Result};
-use petgraph::algo;
+use petgraph::Direction;
 use petgraph::graph::{DiGraph, EdgeIndex, NodeIndex};
 use petgraph::visit::EdgeRef;
 use std::collections::{HashMap, HashSet, VecDeque};
 
+/// Find an edge of one relationship kind for an exact endpoint pair.
+pub(super) fn find_edge(
+    graph: &DiGraph<IssueId, DependencyType>,
+    source_node: NodeIndex,
+    target_node: NodeIndex,
+    dependency_type: DependencyType,
+) -> Option<EdgeIndex> {
+    graph
+        .edges_connecting(source_node, target_node)
+        .find(|edge| *edge.weight() == dependency_type)
+        .map(|edge| edge.id())
+}
 /// Find the Blocking edge for one endpoint pair, ignoring parallel other kinds.
 pub(super) fn find_blocking_edge(
     graph: &DiGraph<IssueId, DependencyType>,
     dependent_node: NodeIndex,
     prerequisite_node: NodeIndex,
 ) -> Option<EdgeIndex> {
-    graph
-        .edges_connecting(dependent_node, prerequisite_node)
-        .find(|edge| *edge.weight() == DependencyType::Blocks)
-        .map(|edge| edge.id())
+    find_edge(
+        graph,
+        dependent_node,
+        prerequisite_node,
+        DependencyType::Blocks,
+    )
 }
 
 /// Return whether one Issue has a direct unresolved Blocking Dependency.
@@ -95,24 +112,28 @@ pub(super) fn blocking_dependency_tree_impl(
     Ok(result)
 }
 
-/// Check whether one Blocking edge would create a Blocking-only cycle.
-pub(super) fn has_blocking_cycle_impl(
+/// Check whether an edge of one relationship kind would create a cycle.
+///
+/// Edges are stored dependent-to-dependency, so adding `from -> to` is cyclic
+/// exactly when a path of the same kind already exists from `to` to `from`.
+pub(super) fn has_cycle_for_type_impl(
     graph: &DiGraph<IssueId, DependencyType>,
     node_map: &HashMap<IssueId, NodeIndex>,
-    dependent_id: &IssueId,
-    prerequisite_id: &IssueId,
+    from: &IssueId,
+    to: &IssueId,
+    dependency_type: DependencyType,
 ) -> Result<bool> {
-    let dependent_node = node_map
-        .get(dependent_id)
-        .ok_or_else(|| Error::IssueNotFound(dependent_id.clone()))?;
-    let prerequisite_node = node_map
-        .get(prerequisite_id)
-        .ok_or_else(|| Error::IssueNotFound(prerequisite_id.clone()))?;
+    let from_node = node_map
+        .get(from)
+        .ok_or_else(|| Error::IssueNotFound(from.clone()))?;
+    let to_node = node_map
+        .get(to)
+        .ok_or_else(|| Error::IssueNotFound(to.clone()))?;
     let mut visited = HashSet::new();
-    let mut stack = vec![*prerequisite_node];
+    let mut stack = vec![*to_node];
 
     while let Some(node) = stack.pop() {
-        if node == *dependent_node {
+        if node == *from_node {
             return Ok(true);
         }
         if !visited.insert(node) {
@@ -121,7 +142,7 @@ pub(super) fn has_blocking_cycle_impl(
         stack.extend(
             graph
                 .edges(node)
-                .filter(|edge| *edge.weight() == DependencyType::Blocks)
+                .filter(|edge| *edge.weight() == dependency_type)
                 .map(|edge| edge.target()),
         );
     }
@@ -129,26 +150,89 @@ pub(super) fn has_blocking_cycle_impl(
     Ok(false)
 }
 
-/// Internal implementation of cycle detection.
-///
-/// Uses petgraph's `has_path_connecting` to check if adding
-/// an edge from `from` to `to` would create a cycle.
-pub(super) fn has_cycle_impl(
+/// Check whether one Blocking edge would create a Blocking-only cycle.
+pub(super) fn has_blocking_cycle_impl(
     graph: &DiGraph<IssueId, DependencyType>,
     node_map: &HashMap<IssueId, NodeIndex>,
-    from: &IssueId,
-    to: &IssueId,
+    dependent_id: &IssueId,
+    prerequisite_id: &IssueId,
 ) -> Result<bool> {
-    let from_node = node_map
-        .get(from)
-        .ok_or_else(|| Error::IssueNotFound(from.clone()))?;
-    let to_node = node_map
-        .get(to)
-        .ok_or_else(|| Error::IssueNotFound(to.clone()))?;
+    has_cycle_for_type_impl(
+        graph,
+        node_map,
+        dependent_id,
+        prerequisite_id,
+        DependencyType::Blocks,
+    )
+}
 
-    // Check if there's already a path from `to` to `from`
-    // If so, adding `from -> to` would create a cycle
-    Ok(algo::has_path_connecting(graph, *to_node, *from_node, None))
+/// Return all Related Associations touching an existing Issue.
+pub(super) fn related_associations_impl(
+    graph: &DiGraph<IssueId, DependencyType>,
+    node_map: &HashMap<IssueId, NodeIndex>,
+    issue_id: &IssueId,
+) -> Result<Vec<RelatedAssociation>> {
+    let node = node_map
+        .get(issue_id)
+        .ok_or_else(|| Error::IssueNotFound(issue_id.clone()))?;
+    let mut associations = Vec::new();
+    for edge in graph
+        .edges(*node)
+        .filter(|edge| *edge.weight() == DependencyType::Related)
+    {
+        match RelatedAssociation::new(issue_id.clone(), graph[edge.target()].clone()) {
+            Ok(association) => associations.push(association),
+            Err(error) => tracing::warn!(
+                issue_id = ?issue_id,
+                error = ?error,
+                "Skipping invalid Related graph edge"
+            ),
+        }
+    }
+    for edge in graph
+        .edges_directed(*node, Direction::Incoming)
+        .filter(|edge| *edge.weight() == DependencyType::Related)
+    {
+        match RelatedAssociation::new(issue_id.clone(), graph[edge.source()].clone()) {
+            Ok(association) => associations.push(association),
+            Err(error) => tracing::warn!(
+                issue_id = ?issue_id,
+                error = ?error,
+                "Skipping invalid Related graph edge"
+            ),
+        }
+    }
+    associations.sort();
+    associations.dedup();
+    Ok(associations)
+}
+
+/// Return Discovery Origins for an existing discovered Issue.
+pub(super) fn discovery_origins_impl(
+    graph: &DiGraph<IssueId, DependencyType>,
+    node_map: &HashMap<IssueId, NodeIndex>,
+    discovered_issue_id: &IssueId,
+) -> Result<Vec<DiscoveryOrigin>> {
+    let node = node_map
+        .get(discovered_issue_id)
+        .ok_or_else(|| Error::IssueNotFound(discovered_issue_id.clone()))?;
+    let mut origins = Vec::new();
+    for edge in graph
+        .edges(*node)
+        .filter(|edge| *edge.weight() == DependencyType::DiscoveredFrom)
+    {
+        match DiscoveryOrigin::new(discovered_issue_id.clone(), graph[edge.target()].clone()) {
+            Ok(origin) => origins.push(origin),
+            Err(error) => tracing::warn!(
+                discovered_issue_id = ?discovered_issue_id,
+                error = ?error,
+                "Skipping invalid Discovery graph edge"
+            ),
+        }
+    }
+    origins.sort();
+    origins.dedup();
+    Ok(origins)
 }
 
 /// Find Issues blocked by direct unresolved Blocking Dependencies.

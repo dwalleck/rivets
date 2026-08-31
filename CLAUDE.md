@@ -75,17 +75,19 @@ rivets create \
 
 **Multi-line values**: rivets stores flag values verbatim and does NOT interpret `\n` escapes — and neither does bash inside double quotes, so `--acceptance "a\nb"` stores literal `\n` text. Use a real newline inside the quotes (as above), or bash ANSI-C quoting: `--acceptance $'- [ ] a\n- [ ] b'`.
 
-### Managing Dependencies
+### Managing Blocking Dependencies
 
 ```bash
-# Add dependency (issue-a blocks issue-b)
-rivets dep add issue-a issue-b --type blocks
+# The dependent Issue depends on the prerequisite Issue
+rivets blocking-dependency add --dependent issue-a --prerequisite issue-b
 
-# View dependency tree
-rivets dep tree issue-id
+# Inspect prerequisites, reverse dependents, or the prerequisite tree
+rivets blocking-dependency list --dependent issue-a
+rivets blocking-dependency list --prerequisite issue-b
+rivets blocking-dependency tree --dependent issue-a
 
-# See what's blocking an issue
-rivets show issue-id  # Shows dependencies section
+# Show role-named Blocking relationships on an Issue
+rivets show issue-a
 ```
 
 ## Development Commands

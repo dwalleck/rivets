@@ -175,9 +175,11 @@ current timestamp and a nonce, so the hash does not identify the content. The
 hash length adapts to database size (4 chars up to 500 issues, 5 up to 1,500,
 6 beyond), with nonce retries and a length bump on collision.
 
-Blocking prerequisites passed to `create` use a repeatable, role-specific
-`--prerequisite issue-id` option. Creation accepts only Blocking prerequisites;
-other relationship kinds have dedicated interfaces in later ADR-0002 slices.
+Blocking prerequisites passed at creation use repeatable
+`--prerequisite <issue-id>` flags. Creation accepts only Blocking prerequisites,
+validates every prerequisite, and writes either the Issue plus all Blocking
+edges or nothing. Other relationship kinds have dedicated interfaces in later
+ADR-0002 slices.
 
 ## List/Query Flow
 

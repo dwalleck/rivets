@@ -4,7 +4,7 @@ MCP (Model Context Protocol) server for the Rivets issue tracking system. Enable
 
 ## Features
 
-- **26 MCP tools** for complete issue management
+- **32 MCP tools** for complete issue management
 - **Multi-workspace support** - work with multiple projects in one session
 - **Stdio transport** - works with any MCP-compatible client
 - **Structured tracing** - debug with `RUST_LOG=debug`
@@ -86,6 +86,8 @@ RUST_LOG=debug rivets-mcp
 | `label_list`, `label_list_all` | Read labels |
 | `resource_list` | Read Associated Resources |
 | `blocking_dependency_list`, `blocking_dependency_tree` | Read directed Blocking Dependencies |
+| `related_list` | Read symmetric Related Associations |
+| `discovery_list` | Read directed Discovery Origins |
 
 ### Modification Tools
 
@@ -100,6 +102,8 @@ RUST_LOG=debug rivets-mcp
 | `label_add`, `label_remove` | Mutate labels |
 | `resource_add`, `resource_update`, `resource_remove` | Mutate Associated Resources |
 | `blocking_dependency_add`, `blocking_dependency_remove` | Mutate directed Blocking Dependencies |
+| `related_add`, `related_remove` | Mutate symmetric Related Associations |
+| `discovery_add`, `discovery_remove` | Mutate directed Discovery Origins |
 
 ## Tool Parameters
 

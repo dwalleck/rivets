@@ -41,9 +41,9 @@ use crate::app::App;
 // Re-export argument structs
 pub use args::{
     AssignmentArgs, BlockedArgs, BlockingDependencyAction, BlockingDependencyArgs,
-    BlockingDependencyListArgs, CloseArgs, CreateArgs, DeleteArgs, InfoArgs, InitArgs, LabelAction,
-    LabelArgs, ListArgs, ReadyArgs, ReopenArgs, ResourceAction, ResourceArgs, ShowArgs, StaleArgs,
-    StatsArgs, UpdateArgs,
+    BlockingDependencyListArgs, CloseArgs, CreateArgs, DeleteArgs, DiscoveryAction, DiscoveryArgs,
+    InfoArgs, InitArgs, LabelAction, LabelArgs, ListArgs, ReadyArgs, RelatedAction, RelatedArgs,
+    ReopenArgs, ResourceAction, ResourceArgs, ShowArgs, StaleArgs, StatsArgs, UpdateArgs,
 };
 
 // Re-export types
@@ -142,6 +142,12 @@ pub enum Commands {
     /// Manage directed Blocking Dependencies with explicit endpoint roles.
     BlockingDependency(BlockingDependencyArgs),
 
+    /// Manage symmetric, non-blocking Related Associations.
+    Related(RelatedArgs),
+
+    /// Manage directed, non-blocking Discovery Origins.
+    Discovery(DiscoveryArgs),
+
     /// Manage issue labels
     ///
     /// Add, remove, or list labels on issues.
@@ -181,6 +187,14 @@ impl Commands {
             Self::BlockingDependency(args) => matches!(
                 args.action,
                 BlockingDependencyAction::Add { .. } | BlockingDependencyAction::Remove { .. }
+            ),
+            Self::Related(args) => matches!(
+                args.action,
+                RelatedAction::Add { .. } | RelatedAction::Remove { .. }
+            ),
+            Self::Discovery(args) => matches!(
+                args.action,
+                DiscoveryAction::Add { .. } | DiscoveryAction::Remove { .. }
             ),
             Self::Label(args) => {
                 matches!(
@@ -300,6 +314,14 @@ impl Cli {
                 let mut app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_blocking_dependency(&mut app, args, output_mode).await
             }
+            Some(Commands::Related(args)) => {
+                let mut app = load_app_from_cwd(mutates_workspace).await?;
+                execute::execute_related(&mut app, args, output_mode).await
+            }
+            Some(Commands::Discovery(args)) => {
+                let mut app = load_app_from_cwd(mutates_workspace).await?;
+                execute::execute_discovery(&mut app, args, output_mode).await
+            }
             Some(Commands::Label(args)) => {
                 let mut app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_label(&mut app, args, output_mode).await
@@ -371,6 +393,38 @@ mod tests {
                 "--prerequisite",
                 "test-def",
             ],
+            &[
+                "related",
+                "add",
+                "--issue",
+                "test-abc",
+                "--related",
+                "test-def",
+            ],
+            &[
+                "related",
+                "remove",
+                "--issue",
+                "test-abc",
+                "--related",
+                "test-def",
+            ],
+            &[
+                "discovery",
+                "add",
+                "--discovered",
+                "test-abc",
+                "--source",
+                "test-def",
+            ],
+            &[
+                "discovery",
+                "remove",
+                "--discovered",
+                "test-abc",
+                "--source",
+                "test-def",
+            ],
             &["label", "add", "urgent", "test-abc"],
             &["label", "remove", "urgent", "test-abc"],
             &[
@@ -404,6 +458,8 @@ mod tests {
             &["ready"],
             &["blocking-dependency", "list", "--dependent", "test-abc"],
             &["blocking-dependency", "tree", "--dependent", "test-abc"],
+            &["related", "list", "--issue", "test-abc"],
+            &["discovery", "list", "--discovered", "test-abc"],
             &["label", "list", "test-abc"],
             &["label", "list-all"],
             &["resource", "list", "test-abc"],

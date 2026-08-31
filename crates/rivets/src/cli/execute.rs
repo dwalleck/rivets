@@ -8,8 +8,9 @@ use anyhow::{Context, Result};
 
 use super::args::{
     AssignmentArgs, BlockedArgs, BlockingDependencyAction, BlockingDependencyArgs, CloseArgs,
-    CreateArgs, DeleteArgs, InfoArgs, InitArgs, LabelAction, LabelArgs, ListArgs, ReadyArgs,
-    ReopenArgs, ResourceAction, ResourceArgs, ShowArgs, StaleArgs, StatsArgs, UpdateArgs,
+    CreateArgs, DeleteArgs, DiscoveryAction, DiscoveryArgs, InfoArgs, InitArgs, LabelAction,
+    LabelArgs, ListArgs, ReadyArgs, RelatedAction, RelatedArgs, ReopenArgs, ResourceAction,
+    ResourceArgs, ShowArgs, StaleArgs, StatsArgs, UpdateArgs,
 };
 use super::types::{SortOrderArg, SortPolicyArg};
 use crate::output::OutputMode;
@@ -893,6 +894,152 @@ pub async fn execute_blocking_dependency(
                             "  ".repeat(depth),
                             dependency.dependent_id(),
                             dependency.prerequisite_id()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Execute one Related Association operation.
+pub async fn execute_related(
+    app: &mut crate::app::App,
+    args: &RelatedArgs,
+    output_mode: OutputMode,
+) -> Result<()> {
+    use crate::domain::{IssueId, RelatedAssociation};
+    use crate::output;
+
+    match &args.action {
+        RelatedAction::Add { issue, related } => {
+            let association = RelatedAssociation::new(IssueId::new(issue), IssueId::new(related))?;
+            app.storage_mut()
+                .add_related_association(association.clone())
+                .await?;
+            app.save().await?;
+            match output_mode {
+                OutputMode::Json => output::print_json(&serde_json::json!({
+                    "action": "add",
+                    "relationship": "related",
+                    "left_issue_id": association.left_issue_id(),
+                    "right_issue_id": association.right_issue_id(),
+                    "status": "success"
+                }))?,
+                OutputMode::Text => println!(
+                    "{} is related to {}",
+                    association.left_issue_id(),
+                    association.right_issue_id()
+                ),
+            }
+        }
+        RelatedAction::Remove { issue, related } => {
+            let association = RelatedAssociation::new(IssueId::new(issue), IssueId::new(related))?;
+            app.storage_mut()
+                .remove_related_association(&association)
+                .await?;
+            app.save().await?;
+            match output_mode {
+                OutputMode::Json => output::print_json(&serde_json::json!({
+                    "action": "remove",
+                    "relationship": "related",
+                    "left_issue_id": association.left_issue_id(),
+                    "right_issue_id": association.right_issue_id(),
+                    "status": "success"
+                }))?,
+                OutputMode::Text => println!(
+                    "Removed: {} is no longer related to {}",
+                    association.left_issue_id(),
+                    association.right_issue_id()
+                ),
+            }
+        }
+        RelatedAction::List { issue } => {
+            let associations = app
+                .storage()
+                .related_associations(&IssueId::new(issue))
+                .await?;
+            match output_mode {
+                OutputMode::Json => output::print_json(&associations)?,
+                OutputMode::Text if associations.is_empty() => {
+                    println!("No Related Associations found");
+                }
+                OutputMode::Text => {
+                    for association in associations {
+                        println!(
+                            "{} is related to {}",
+                            association.left_issue_id(),
+                            association.right_issue_id()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Execute one Discovery Origin operation.
+pub async fn execute_discovery(
+    app: &mut crate::app::App,
+    args: &DiscoveryArgs,
+    output_mode: OutputMode,
+) -> Result<()> {
+    use crate::domain::{DiscoveryOrigin, IssueId};
+    use crate::output;
+
+    match &args.action {
+        DiscoveryAction::Add { discovered, source } => {
+            let origin = DiscoveryOrigin::new(IssueId::new(discovered), IssueId::new(source))?;
+            app.storage_mut().add_discovery_origin(origin).await?;
+            app.save().await?;
+            match output_mode {
+                OutputMode::Json => output::print_json(&serde_json::json!({
+                    "action": "add",
+                    "relationship": "discovery_origin",
+                    "discovered_issue_id": discovered,
+                    "source_issue_id": source,
+                    "status": "success"
+                }))?,
+                OutputMode::Text => println!("{discovered} was discovered from {source}"),
+            }
+        }
+        DiscoveryAction::Remove { discovered, source } => {
+            let origin = DiscoveryOrigin::new(IssueId::new(discovered), IssueId::new(source))?;
+            app.storage_mut().remove_discovery_origin(&origin).await?;
+            app.save().await?;
+            match output_mode {
+                OutputMode::Json => output::print_json(&serde_json::json!({
+                    "action": "remove",
+                    "relationship": "discovery_origin",
+                    "discovered_issue_id": discovered,
+                    "source_issue_id": source,
+                    "status": "success"
+                }))?,
+                OutputMode::Text => {
+                    println!("Removed: {discovered} was discovered from {source}");
+                }
+            }
+        }
+        DiscoveryAction::List { discovered } => {
+            let origins = app
+                .storage()
+                .discovery_origins(&IssueId::new(discovered))
+                .await?;
+            match output_mode {
+                OutputMode::Json => output::print_json(&origins)?,
+                OutputMode::Text if origins.is_empty() => {
+                    println!("No Discovery Origins found");
+                }
+                OutputMode::Text => {
+                    for origin in origins {
+                        println!(
+                            "{} was discovered from {}",
+                            origin.discovered_issue_id(),
+                            origin.source_issue_id()
                         );
                     }
                 }

@@ -1,0 +1,2116 @@
+{
+  "schema_version": 1,
+  "decision": {
+    "id": "ADR-0006",
+    "path": "adr/0006-semantic-interface-parity.md"
+  },
+  "definition": "Interface Parity means that CLI and MCP operations representing the same domain intent enforce the same domain invariants, defaults, ordering, validation, error meaning, and result meaning. Adapter mechanics may differ only when classified explicitly.",
+  "current_parity_values": {
+    "conformant": "Current adapters have equivalent observable domain behavior.",
+    "drift": "Both adapters expose the intent, but observable behavior differs.",
+    "not_comparable": "The intent currently exists in one adapter or is absent from both."
+  },
+  "target_status_values": {
+    "conformant": "The required target contract is implemented.",
+    "gap_cli": "The CLI lacks required target behavior.",
+    "gap_mcp": "MCP lacks required target behavior.",
+    "gap_both": "Both adapters lack required target behavior.",
+    "intentional_cli_only": "The intent is deliberately available only through the CLI.",
+    "intentional_mcp_only": "The intent is deliberately available only through MCP.",
+    "legacy_cutover": "The current surface is legacy and must be replaced by canonical intents rather than expanded."
+  },
+  "adapter_mechanics": [
+    "CLI text rendering, --json selection, prompts, confirmations, and partial-success batching are presentation or invocation mechanics.",
+    "MCP protocol envelopes, current context, per-call workspace_root, and loop-equivalent single-target calls are adapter mechanics.",
+    "Loop-equivalent MCP calls satisfy parity for CLI batches because current CLI batches are partial-success convenience, not atomic multi-Issue transactions.",
+    "Workspace initialization and permanent Issue deletion are intentionally CLI-only. MCP context inspection and selection are intentionally MCP-only."
+  ],
+  "target_rules": [
+    {
+      "id": "explicit-query-limit",
+      "contract": "List Issues, Ready Issues, and Stale Issues require an explicit limit in both adapters."
+    },
+    {
+      "id": "intent-specific-ordering",
+      "contract": "List Issues orders newest-created first; Ready Issues uses Hybrid ordering; Stale Issues orders oldest-updated first."
+    },
+    {
+      "id": "stale-excludes-closed",
+      "contract": "Stale Issues excludes Closed Issues unless the caller explicitly filters for Closed Workflow State."
+    },
+    {
+      "id": "canonical-issue-id-input",
+      "contract": "Both adapters enforce the canonical prefix-suffix Issue ID grammar before lookup or mutation."
+    },
+    {
+      "id": "canonical-label-input",
+      "contract": "Labels are 1-50 lowercase ASCII alphanumeric characters with internal hyphens or underscores, start and end alphanumeric, and contain no consecutive separators."
+    },
+    {
+      "id": "canonical-workflow",
+      "contract": "Open, In Progress, and Closed are the only Workflow States; Blocked and Ready are derived conditions."
+    },
+    {
+      "id": "canonical-assignment",
+      "contract": "Assignment changes through Claim and Release intents, not blind general update. Closing clears Assignment and reopening produces an unassigned Open Issue."
+    },
+    {
+      "id": "canonical-relationships",
+      "contract": "Blocking Dependency, Parentage, Related Association, and Discovery Origin use dedicated intents and their ADR-0002 invariants; generic dependency operations are legacy."
+    },
+    {
+      "id": "show-complete-relationships",
+      "contract": "Show Issue returns the Issue and complete canonical relationship views in both adapters; presentation and protocol envelopes may differ."
+    },
+    {
+      "id": "same-semantic-result",
+      "contract": "Shared intents return the same domain information and error meaning even when adapter envelopes differ."
+    }
+  ],
+  "operations": [
+    {
+      "id": "initialize_workspace",
+      "title": "Initialize Workspace",
+      "requirement": "cli_only",
+      "current_parity": "not_comparable",
+      "target_status": "intentional_cli_only",
+      "target": "Create the Workspace's Rivets files and choose its Issue ID prefix.",
+      "cli": {
+        "surfaces": [
+          "init"
+        ],
+        "arguments": {
+          "prefix": "optional string; absent prompts unless --quiet; default proj",
+          "quiet": "optional boolean; current default false"
+        },
+        "result": "Creates .rivets/config.yaml, .rivets/issues.jsonl, and .rivets/.gitignore with the selected Issue ID prefix; quiet suppresses text output."
+      },
+      "mcp": {
+        "surfaces": [],
+        "arguments": {},
+        "result": "Not available by design."
+      },
+      "risk": "MCP clients cannot create repository files accidentally.",
+      "required_resolution": "Retain as an explicit CLI-only safety exception.",
+      "evidence": [
+        "crates/rivets/src/cli/args.rs::InitArgs",
+        "crates/rivets/src/cli/execute.rs::execute_init"
+      ]
+    },
+    {
+      "id": "workspace_information",
+      "title": "Workspace Information",
+      "requirement": "shared",
+      "current_parity": "not_comparable",
+      "target_status": "gap_both",
+      "target": "Return Workspace root, storage location/backend, Issue ID prefix, and configuration identity without issue statistics.",
+      "cli": {
+        "surfaces": [
+          "info"
+        ],
+        "arguments": {},
+        "result": "Database path, Issue ID prefix, and total/open/in_progress/legacy blocked/closed counts."
+      },
+      "mcp": {
+        "surfaces": [],
+        "arguments": {},
+        "result": "No shared Workspace Information tool; where_am_i is context inspection."
+      },
+      "risk": "Neither adapter currently returns the required shared Workspace root, configured storage/backend, Issue ID prefix, and configuration identity contract.",
+      "required_resolution": "Separate information from statistics, source fields from actual Workspace configuration, and add the shared Workspace Information intent to MCP.",
+      "evidence": [
+        "crates/rivets/src/cli/execute.rs::execute_info",
+        "crates/rivets-mcp/src/tools.rs::where_am_i",
+        "crates/rivets-mcp/src/server.rs::where_am_i"
+      ],
+      "differences": [
+        "CLI info hardcodes the default issues.jsonl path and mixes configuration identity with legacy Workflow State counts.",
+        "No shared MCP Workspace Information tool exists; where_am_i is MCP-only context inspection."
+      ]
+    },
+    {
+      "id": "create_issue",
+      "title": "Create Issue",
+      "requirement": "shared",
+      "current_parity": "drift",
+      "target_status": "gap_both",
+      "target": "Atomically create a valid Issue with optional initial Note and validated initial canonical Issue Relationships.",
+      "cli": {
+        "surfaces": [
+          "create"
+        ],
+        "arguments": {
+          "title": "optional at parse time; interactive when absent",
+          "description": "optional string",
+          "priority": "optional P0-P4; current default P2",
+          "kind": "optional Issue Kind; current default Task",
+          "assignee": "optional string",
+          "labels": "optional list",
+          "design": "optional string",
+          "acceptance": "optional string",
+          "notes": "optional initial Note",
+          "prerequisite": "repeatable canonical Blocking prerequisite Issue ID"
+        },
+        "result": "Issue created atomically with every validated Blocking prerequisite."
+      },
+      "mcp": {
+        "surfaces": [
+          "create"
+        ],
+        "arguments": {
+          "title": "required string",
+          "description": "optional string",
+          "priority": "optional integer; current default P2",
+          "issue_kind": "optional Issue Kind; current default Task",
+          "assignee": "optional string",
+          "labels": "optional list",
+          "design": "optional string",
+          "acceptance": "optional string",
+          "initial_note": "optional Note",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Issue; initial relationships are always empty."
+      },
+      "differences": [
+        "CLI atomically accepts repeated validated Blocking prerequisites; MCP Create accepts no initial relationships.",
+        "Neither adapter can express every canonical initial Parentage, Related Association, or Discovery Origin.",
+        "CLI may prompt for a missing title while MCP requires it; this is an intentional adapter mechanic.",
+        "MCP accepts a hidden migration-only issue_type alias that is absent from its public schema."
+      ],
+      "risk": "Equivalent canonical relationship-bearing creates cannot be expressed across adapters, and compatibility-only input remains at a public MCP seam.",
+      "required_resolution": "Give both adapters equivalent validated canonical initial-relationship inputs while preserving CLI prompting and MCP envelopes as adapter mechanics.",
+      "evidence": [
+        "crates/rivets/src/cli/args.rs::CreateArgs",
+        "crates/rivets/src/cli/execute.rs::execute_create",
+        "crates/rivets/src/storage/in_memory/trait_impl.rs::create",
+        "crates/rivets-mcp/src/models.rs::CreateParams",
+        "crates/rivets-mcp/src/tools.rs::create",
+        "crates/rivets/tests/cli_tests.rs::create_with_prerequisites_is_atomic"
+      ]
+    },
+    {
+      "id": "list_issues",
+      "title": "List Issues",
+      "requirement": "shared",
+      "current_parity": "drift",
+      "target_status": "gap_both",
+      "target": "Filter Issues by Workflow State, Priority, Issue Kind, Assignee, and Label; require an explicit limit; order newest-created first.",
+      "cli": {
+        "surfaces": [
+          "list"
+        ],
+        "arguments": {
+          "status": "optional Workflow State; currently also accepts legacy Blocked and CLI-only in-progress alias",
+          "priority": "optional P0-P4",
+          "kind": "optional Issue Kind",
+          "assignee": "optional string",
+          "label": "optional string",
+          "limit": "optional; current default 50; zero accepted",
+          "sort": "optional; current default Priority; Priority/Newest/Oldest/Updated"
+        },
+        "result": "Issue list."
+      },
+      "mcp": {
+        "surfaces": [
+          "list"
+        ],
+        "arguments": {
+          "status": "optional raw string; current canonical spellings plus legacy Blocked",
+          "priority": "optional unconstrained u8",
+          "issue_kind": "optional Issue Kind",
+          "assignee": "optional string",
+          "label": "optional string",
+          "limit": "optional; current default 100",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Issue list."
+      },
+      "differences": [
+        "CLI defaults to Priority ordering and limit 50; MCP fixes newest-created ordering and defaults to 100.",
+        "Both accept legacy Blocked Workflow State; CLI alone accepts the in-progress alias.",
+        "CLI constrains Priority to P0-P4; MCP accepts any u8.",
+        "MCP accepts a hidden migration-only issue_type alias.",
+        "Newest-created ties are not deterministically ordered."
+      ],
+      "risk": "Equivalent omitted inputs return different subsets/order, validation differs, and implicit truncation can hide Issues.",
+      "required_resolution": "Require a positive explicit limit, use deterministic newest-created ordering in both adapters, enforce canonical Workflow State and Priority, and publish the same constrained schemas.",
+      "evidence": [
+        "crates/rivets/src/cli/args.rs::ListArgs",
+        "crates/rivets/src/cli/execute.rs::execute_list",
+        "crates/rivets/src/storage/in_memory/trait_impl.rs::list",
+        "crates/rivets-mcp/src/models.rs::ListParams",
+        "crates/rivets-mcp/src/tools.rs::list"
+      ]
+    },
+    {
+      "id": "show_issue",
+      "title": "Show Issue",
+      "requirement": "shared",
+      "current_parity": "drift",
+      "target_status": "gap_both",
+      "target": "Return the Issue plus complete canonical relationship views.",
+      "cli": {
+        "surfaces": [
+          "show"
+        ],
+        "arguments": {
+          "issue_ids": "one or more canonical Issue IDs"
+        },
+        "result": "Array of enriched Issue details with blocking_prerequisites and blocking_dependents; legacy dependencies omitted."
+      },
+      "mcp": {
+        "surfaces": [
+          "show"
+        ],
+        "arguments": {
+          "issue_id": "one Issue ID",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Bare Issue with no canonical relationship views."
+      },
+      "differences": [
+        "CLI returns enriched Issue details with Blocking prerequisites and dependents; MCP returns a bare Issue despite its handler description.",
+        "Neither adapter returns complete Parentage, Related Association, and Discovery Origin views.",
+        "CLI validates Issue ID grammar; MCP constructs IssueId from an unconstrained string.",
+        "CLI batch is loop-equivalent and intentional."
+      ],
+      "risk": "MCP clients cannot observe Blocking relationship context and neither adapter provides the complete canonical relationship view.",
+      "required_resolution": "Return complete canonical relationship views from both adapters and adopt shared canonical Issue ID parsing; retain adapter-specific batch/envelope mechanics.",
+      "evidence": [
+        "crates/rivets/src/cli/execute.rs::execute_show",
+        "crates/rivets/src/output/json.rs::IssueDetails",
+        "crates/rivets-mcp/src/tools.rs::show",
+        "crates/rivets-mcp/src/server.rs::show",
+        "crates/rivets-mcp/tests/integration.rs::mcp_full_issue_json_golden"
+      ]
+    },
+    {
+      "id": "update_issue",
+      "title": "Update Issue",
+      "requirement": "shared",
+      "current_parity": "drift",
+      "target_status": "gap_both",
+      "target": "Update mutable descriptive fields and Issue Kind; reject empty updates; Assignment, Labels, Notes, relationships, and lifecycle transitions use intent-named operations.",
+      "cli": {
+        "surfaces": [
+          "update"
+        ],
+        "arguments": {
+          "issue_ids": "one or more Issue IDs",
+          "title": "optional string",
+          "description": "optional string",
+          "status": "optional legacy status",
+          "priority": "optional P0-P4",
+          "kind": "optional Issue Kind",
+          "design": "optional string",
+          "acceptance": "optional string",
+          "notes": "optional Note append"
+        },
+        "result": "Partial-success batch result."
+      },
+      "mcp": {
+        "surfaces": [
+          "update"
+        ],
+        "arguments": {
+          "issue_id": "one Issue ID",
+          "title": "optional string",
+          "description": "optional string",
+          "status": "optional string",
+          "priority": "optional integer",
+          "issue_kind": "optional Issue Kind",
+          "design": "optional string",
+          "acceptance_criteria": "optional string",
+          "labels": "optional full replacement",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Issue."
+      },
+      "differences": [
+        "CLI rejects empty updates; MCP accepts them and advances updated_at.",
+        "MCP replaces Labels while CLI requires dedicated add/remove for label mutation.",
+        "CLI appends Notes through update; MCP uses add_note.",
+        "General Update cannot mutate Assignment; dedicated Claim/Release own that intent.",
+        "CLI validates Issue ID and Priority grammar before mutation; MCP uses unconstrained strings and weaker numeric schema.",
+        "MCP accepts a hidden migration-only issue_type alias."
+      ],
+      "risk": "Adapter choice changes accepted fields, no-op mutation history, validation, and ownership/lifecycle semantics.",
+      "required_resolution": "Restrict general Update to canonical descriptive fields and Issue Kind, reject empty requests, adopt canonical Issue ID parsing, and route Assignment, Labels, Notes, relationships, and lifecycle through dedicated intents.",
+      "evidence": [
+        "crates/rivets/src/cli/args.rs::UpdateArgs",
+        "crates/rivets/src/cli/execute.rs::execute_update",
+        "crates/rivets-mcp/src/models.rs::UpdateParams",
+        "crates/rivets-mcp/src/tools.rs::update",
+        "crates/rivets/src/storage/in_memory/trait_impl.rs::update"
+      ]
+    },
+    {
+      "id": "close_issue",
+      "title": "Close Issue",
+      "requirement": "shared",
+      "current_parity": "drift",
+      "target_status": "gap_both",
+      "target": "Close an Issue, append an optional reason Note, clear Assignment, and preserve canonical relationship invariants.",
+      "cli": {
+        "surfaces": [
+          "close"
+        ],
+        "arguments": {
+          "issue_ids": "one or more Issue IDs",
+          "reason": "optional string"
+        },
+        "result": "Partial-success batch result."
+      },
+      "mcp": {
+        "surfaces": [
+          "close"
+        ],
+        "arguments": {
+          "issue_id": "one Issue ID",
+          "reason": "optional string",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Issue."
+      },
+      "differences": [
+        "CLI batch/confirmation behavior is an intentional adapter mechanic.",
+        "CLI validates Issue ID grammar before mutation; MCP uses an unconstrained string."
+      ],
+      "risk": "Invalid Issue IDs fail differently across adapters.",
+      "required_resolution": "Adopt canonical Issue ID parsing in MCP Close while retaining the shared Assignment-clearing transition.",
+      "evidence": [
+        "crates/rivets/src/cli/execute.rs::execute_close",
+        "crates/rivets-mcp/src/tools.rs::close",
+        "crates/rivets/src/storage/in_memory/trait_impl.rs::update",
+        "docs/adr/0002-issue-relationships-and-readiness.md"
+      ]
+    },
+    {
+      "id": "reopen_issue",
+      "title": "Reopen Issue",
+      "requirement": "shared",
+      "current_parity": "drift",
+      "target_status": "gap_both",
+      "target": "Reopen a Closed Issue as unassigned Open and append an optional reason Note.",
+      "cli": {
+        "surfaces": [
+          "reopen"
+        ],
+        "arguments": {
+          "issue_ids": "one or more Issue IDs",
+          "reason": "optional string"
+        },
+        "result": "Partial-success batch result."
+      },
+      "mcp": {
+        "surfaces": [
+          "reopen"
+        ],
+        "arguments": {
+          "issue_id": "one Issue ID",
+          "reason": "optional string",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Issue."
+      },
+      "differences": [
+        "CLI batch/confirmation behavior is an intentional adapter mechanic.",
+        "CLI validates Issue ID grammar before mutation; MCP uses an unconstrained string."
+      ],
+      "risk": "Invalid Issue IDs fail differently across adapters.",
+      "required_resolution": "Adopt canonical Issue ID parsing in MCP Reopen while retaining the shared unassigned-Open transition.",
+      "evidence": [
+        "crates/rivets/src/cli/execute.rs::execute_reopen",
+        "crates/rivets-mcp/src/tools.rs::reopen",
+        "crates/rivets/src/storage/in_memory/trait_impl.rs::update",
+        "docs/adr/0002-issue-relationships-and-readiness.md"
+      ]
+    },
+    {
+      "id": "delete_issue",
+      "title": "Delete Issue Permanently",
+      "requirement": "cli_only",
+      "current_parity": "not_comparable",
+      "target_status": "intentional_cli_only",
+      "target": "Permanently delete one Issue through an explicitly confirmed human-facing operation.",
+      "cli": {
+        "surfaces": [
+          "delete"
+        ],
+        "arguments": {
+          "issue_id": "one Issue ID",
+          "force": "optional confirmation bypass"
+        },
+        "result": "Text 'Deleted issue: ID' or JSON {deleted: ID, status: success}; confirmation is bypassed only by --force/--yes."
+      },
+      "mcp": {
+        "surfaces": [],
+        "arguments": {},
+        "result": "Not available by design."
+      },
+      "risk": "Permanent deletion lacks a recovery path and MCP has no human confirmation channel.",
+      "required_resolution": "Retain as an explicit CLI-only safety exception.",
+      "evidence": [
+        "crates/rivets/src/cli/args.rs::DeleteArgs",
+        "docs/agents/issue-tracker.md"
+      ]
+    },
+    {
+      "id": "ready_issues",
+      "title": "Ready Issues",
+      "requirement": "shared",
+      "current_parity": "drift",
+      "target_status": "gap_both",
+      "target": "Return Open, unblocked Issues using assignee-aware canonical readiness, require limit, and use Hybrid ordering.",
+      "cli": {
+        "surfaces": [
+          "ready"
+        ],
+        "arguments": {
+          "assignee": "optional string",
+          "all_assignees": "optional boolean",
+          "priority": "optional P0-P4",
+          "kind": "optional Issue Kind",
+          "label": "optional Label",
+          "limit": "current default 10",
+          "sort": "current default Hybrid; Hybrid/Priority/Oldest"
+        },
+        "result": "Issue list."
+      },
+      "mcp": {
+        "surfaces": [
+          "ready"
+        ],
+        "arguments": {
+          "assignee": "optional string",
+          "all_assignees": "optional boolean",
+          "priority": "optional integer",
+          "issue_kind": "optional Issue Kind",
+          "label": "optional Label",
+          "limit": "current default 100",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Issue list."
+      },
+      "differences": [
+        "CLI defaults to limit 10 and exposes Hybrid/Priority/Oldest; MCP defaults to 100 and fixes Hybrid.",
+        "CLI constrains Priority to P0-P4; MCP accepts any u8 and a hidden issue_type alias.",
+        "Canonical Open, direct-unblocked, Assignment-aware readiness is implemented in shared storage."
+      ],
+      "risk": "Adapters truncate the frontier differently through defaults and validation.",
+      "required_resolution": "Require a positive explicit limit, use shared deterministic Hybrid ordering, adopt canonical Priority/Issue Kind schemas, and align Assignment selectors.",
+      "evidence": [
+        "crates/rivets/src/cli/args.rs::ReadyArgs",
+        "crates/rivets/src/cli/execute.rs::execute_ready",
+        "crates/rivets/src/storage/in_memory/trait_impl.rs::ready_to_work",
+        "crates/rivets/src/storage/in_memory/graph.rs::find_blocked_issues",
+        "crates/rivets-mcp/src/models.rs::ReadyParams",
+        "crates/rivets-mcp/src/tools.rs::ready"
+      ]
+    },
+    {
+      "id": "legacy_add_dependency",
+      "title": "Legacy: Add Generic Dependency",
+      "requirement": "legacy",
+      "current_parity": "not_comparable",
+      "target_status": "legacy_cutover",
+      "target": "Retired; typed relationship intents replace generic mutation.",
+      "cli": {
+        "surfaces": [],
+        "arguments": {},
+        "result": "Absent."
+      },
+      "mcp": {
+        "surfaces": [],
+        "arguments": {},
+        "result": "Absent."
+      },
+      "risk": "Reintroducing a generic route would collapse distinct relationship invariants; compatibility loading still reconstructs legacy all-kind graph records.",
+      "required_resolution": "Do not restore generic operations; complete and migrate through dedicated Blocking Dependency, Parentage, Related Association, and Discovery Origin intents.",
+      "evidence": [
+        "crates/rivets/src/cli/mod.rs::generic_dependency_cli_is_absent",
+        "crates/rivets-mcp/src/server.rs::generic_dependency_mcp_tool_is_absent",
+        "crates/rivets/src/domain/mod.rs::DependencyType",
+        "crates/rivets/src/storage/in_memory/jsonl.rs::load_from_jsonl"
+      ],
+      "differences": [
+        "No CLI or MCP generic relationship route remains; generic DependencyType records are compatibility-only persistence input."
+      ]
+    },
+    {
+      "id": "legacy_remove_dependency",
+      "title": "Legacy: Remove Generic Dependency",
+      "requirement": "legacy",
+      "current_parity": "not_comparable",
+      "target_status": "legacy_cutover",
+      "target": "Retired; typed relationship removal intents replace it.",
+      "cli": {
+        "surfaces": [],
+        "arguments": {},
+        "result": "Absent."
+      },
+      "mcp": {
+        "surfaces": [],
+        "arguments": {},
+        "result": "Absent."
+      },
+      "risk": "Reintroducing a generic route would collapse distinct relationship invariants; compatibility loading still reconstructs legacy all-kind graph records.",
+      "required_resolution": "Do not restore generic operations; complete and migrate through dedicated Blocking Dependency, Parentage, Related Association, and Discovery Origin intents.",
+      "evidence": [
+        "crates/rivets/src/cli/mod.rs::generic_dependency_cli_is_absent",
+        "crates/rivets-mcp/src/server.rs::generic_dependency_mcp_tool_is_absent",
+        "crates/rivets/src/domain/mod.rs::DependencyType",
+        "crates/rivets/src/storage/in_memory/jsonl.rs::load_from_jsonl"
+      ],
+      "differences": [
+        "No CLI or MCP generic relationship route remains; generic DependencyType records are compatibility-only persistence input."
+      ]
+    },
+    {
+      "id": "legacy_list_dependencies",
+      "title": "Legacy: List Generic Dependencies",
+      "requirement": "legacy",
+      "current_parity": "not_comparable",
+      "target_status": "legacy_cutover",
+      "target": "Retired; typed relationship query intents replace it.",
+      "cli": {
+        "surfaces": [],
+        "arguments": {},
+        "result": "Absent."
+      },
+      "mcp": {
+        "surfaces": [],
+        "arguments": {},
+        "result": "Absent."
+      },
+      "risk": "Reintroducing a generic route would collapse distinct relationship invariants; compatibility loading still reconstructs legacy all-kind graph records.",
+      "required_resolution": "Do not restore generic operations; complete and migrate through dedicated Blocking Dependency, Parentage, Related Association, and Discovery Origin intents.",
+      "evidence": [
+        "crates/rivets/src/cli/mod.rs::generic_dependency_cli_is_absent",
+        "crates/rivets-mcp/src/server.rs::generic_dependency_mcp_tool_is_absent",
+        "crates/rivets/src/domain/mod.rs::DependencyType",
+        "crates/rivets/src/storage/in_memory/jsonl.rs::load_from_jsonl"
+      ],
+      "differences": [
+        "No CLI or MCP generic relationship route remains; generic DependencyType records are compatibility-only persistence input."
+      ]
+    },
+    {
+      "id": "legacy_dependency_tree",
+      "title": "Legacy: Show Generic Dependency Tree",
+      "requirement": "legacy",
+      "current_parity": "not_comparable",
+      "target_status": "legacy_cutover",
+      "target": "Retired; Blocking Dependency Tree is the only readiness graph tree.",
+      "cli": {
+        "surfaces": [],
+        "arguments": {},
+        "result": "Absent."
+      },
+      "mcp": {
+        "surfaces": [],
+        "arguments": {},
+        "result": "Absent."
+      },
+      "risk": "Reintroducing a generic route would collapse distinct relationship invariants; compatibility loading still reconstructs legacy all-kind graph records.",
+      "required_resolution": "Do not restore generic operations; complete and migrate through dedicated Blocking Dependency, Parentage, Related Association, and Discovery Origin intents.",
+      "evidence": [
+        "crates/rivets/src/cli/mod.rs::generic_dependency_cli_is_absent",
+        "crates/rivets-mcp/src/server.rs::generic_dependency_mcp_tool_is_absent",
+        "crates/rivets/src/domain/mod.rs::DependencyType",
+        "crates/rivets/src/storage/in_memory/jsonl.rs::load_from_jsonl"
+      ],
+      "differences": [
+        "No CLI or MCP generic relationship route remains; generic DependencyType records are compatibility-only persistence input."
+      ]
+    },
+    {
+      "id": "add_label",
+      "title": "Add Label",
+      "requirement": "shared",
+      "current_parity": "drift",
+      "target_status": "gap_both",
+      "target": "Idempotently add one canonical Label to an Issue.",
+      "cli": {
+        "surfaces": [
+          "label add"
+        ],
+        "arguments": {
+          "label": "canonical Label",
+          "issue_id or ids": "one or more Issue IDs"
+        },
+        "result": "Partial-success BatchResult with succeeded Issues and per-Issue failures."
+      },
+      "mcp": {
+        "surfaces": [
+          "label_add"
+        ],
+        "arguments": {
+          "issue_id": "one Issue ID",
+          "label": "unconstrained string",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Updated Issue."
+      },
+      "differences": [
+        "CLI trims and validates most Label grammar but permits mixed adjacent separators.",
+        "MCP and storage accept raw unconstrained Label strings.",
+        "Create/update Label collections and Label filters bypass one canonical Label value.",
+        "CLI batching is loop-equivalent and intentional."
+      ],
+      "risk": "Adapter and entry-point choice changes which Label spellings can be persisted or queried.",
+      "required_resolution": "Introduce one domain-owned canonical Label value and parse every CLI, MCP, create/update, filter, persistence, and storage input through it.",
+      "evidence": [
+        "CONTEXT.md::Label",
+        "crates/rivets/src/cli/validators.rs::validate_label",
+        "crates/rivets/src/cli/execute.rs::execute_label_add",
+        "crates/rivets/src/cli/execute.rs::execute_label_remove",
+        "crates/rivets/src/storage/in_memory/trait_impl.rs::add_label",
+        "crates/rivets-mcp/src/tools.rs::label_add",
+        "crates/rivets-mcp/src/tools.rs::label_remove"
+      ]
+    },
+    {
+      "id": "remove_label",
+      "title": "Remove Label",
+      "requirement": "shared",
+      "current_parity": "drift",
+      "target_status": "gap_both",
+      "target": "Idempotently remove one canonical Label from an Issue.",
+      "cli": {
+        "surfaces": [
+          "label remove"
+        ],
+        "arguments": {
+          "label": "canonical Label",
+          "issue_id or ids": "one or more Issue IDs"
+        },
+        "result": "Partial-success BatchResult with succeeded Issues and per-Issue failures."
+      },
+      "mcp": {
+        "surfaces": [
+          "label_remove"
+        ],
+        "arguments": {
+          "issue_id": "one Issue ID",
+          "label": "unconstrained string",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Updated Issue."
+      },
+      "differences": [
+        "CLI trims and validates most Label grammar but permits mixed adjacent separators.",
+        "MCP and storage accept raw unconstrained Label strings.",
+        "Create/update Label collections and Label filters bypass one canonical Label value.",
+        "CLI batching is loop-equivalent and intentional."
+      ],
+      "risk": "Adapter and entry-point choice changes which Label spellings can be persisted or queried.",
+      "required_resolution": "Introduce one domain-owned canonical Label value and parse every CLI, MCP, create/update, filter, persistence, and storage input through it.",
+      "evidence": [
+        "CONTEXT.md::Label",
+        "crates/rivets/src/cli/validators.rs::validate_label",
+        "crates/rivets/src/cli/execute.rs::execute_label_add",
+        "crates/rivets/src/cli/execute.rs::execute_label_remove",
+        "crates/rivets/src/storage/in_memory/trait_impl.rs::add_label",
+        "crates/rivets-mcp/src/tools.rs::label_add",
+        "crates/rivets-mcp/src/tools.rs::label_remove"
+      ]
+    },
+    {
+      "id": "list_issue_labels",
+      "title": "List Issue Labels",
+      "requirement": "shared",
+      "current_parity": "drift",
+      "target_status": "gap_mcp",
+      "target": "Return an Issue's Labels.",
+      "cli": {
+        "surfaces": [
+          "label list"
+        ],
+        "arguments": {
+          "issue_id": "Issue ID"
+        },
+        "result": "Label list."
+      },
+      "mcp": {
+        "surfaces": [
+          "label_list"
+        ],
+        "arguments": {
+          "issue_id": "Issue ID",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Label list."
+      },
+      "differences": [
+        "CLI validates Issue ID grammar before lookup; MCP uses an unconstrained string.",
+        "Both return Label insertion order."
+      ],
+      "risk": "MCP accepts Issue IDs rejected by CLI; Label result meaning otherwise matches.",
+      "required_resolution": "Adopt canonical Issue ID parsing without changing ordered Label results.",
+      "evidence": [
+        "crates/rivets/src/cli/execute.rs::execute_label_list",
+        "crates/rivets-mcp/src/tools.rs::label_list"
+      ]
+    },
+    {
+      "id": "list_all_labels",
+      "title": "List All Labels",
+      "requirement": "shared",
+      "current_parity": "conformant",
+      "target_status": "conformant",
+      "target": "Return all Workspace Labels sorted and deduplicated.",
+      "cli": {
+        "surfaces": [
+          "label list-all"
+        ],
+        "arguments": {},
+        "result": "Sorted unique Label list."
+      },
+      "mcp": {
+        "surfaces": [
+          "label_list_all"
+        ],
+        "arguments": {
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Sorted unique Label list."
+      },
+      "risk": "None.",
+      "required_resolution": "Preserve current behavior.",
+      "evidence": [
+        "crates/rivets/src/cli/execute.rs::execute_label_list_all",
+        "crates/rivets-mcp/src/tools.rs::label_list_all"
+      ]
+    },
+    {
+      "id": "add_resource",
+      "title": "Add Associated Resource",
+      "requirement": "shared",
+      "current_parity": "drift",
+      "target_status": "gap_mcp",
+      "target": "Add a validated Associated Resource with one target, role, and optional label.",
+      "cli": {
+        "surfaces": [
+          "resource add"
+        ],
+        "arguments": {
+          "issue_id": "Issue ID",
+          "url or path": "exactly one Resource Target",
+          "role": "Resource Role",
+          "label": "optional Resource Label"
+        },
+        "result": "Updated Issue."
+      },
+      "mcp": {
+        "surfaces": [
+          "resource_add"
+        ],
+        "arguments": {
+          "issue_id": "Issue ID",
+          "url or path": "exactly one Resource Target",
+          "role": "Resource Role string",
+          "label": "optional Resource Label",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Updated Issue."
+      },
+      "differences": [
+        "CLI validates Issue ID grammar before the operation; MCP uses an unconstrained string.",
+        "CLI publishes Resource Role as an enum and enforces exactly one URL/Path at parse time; MCP publishes a plain role string and optional URL/Path fields, then validates at runtime."
+      ],
+      "risk": "MCP public schema and Issue ID validation are weaker than CLI even where runtime Resource semantics match.",
+      "required_resolution": "Adopt canonical Issue ID parsing and publish canonical Resource constraints in MCP while preserving stable Resource identity and insertion order.",
+      "evidence": [
+        "crates/rivets/src/cli/args.rs::ResourceAction::Add",
+        "crates/rivets/src/domain/resource.rs::ResourceRole",
+        "crates/rivets-mcp/src/models.rs::ResourceAddParams",
+        "crates/rivets-mcp/src/tools.rs::resource_add"
+      ]
+    },
+    {
+      "id": "update_resource",
+      "title": "Update Associated Resource",
+      "requirement": "shared",
+      "current_parity": "drift",
+      "target_status": "gap_mcp",
+      "target": "Update supplied Resource fields while preserving stable identity and order.",
+      "cli": {
+        "surfaces": [
+          "resource update"
+        ],
+        "arguments": {
+          "issue_id": "Issue ID",
+          "resource": "Resource ID",
+          "url or path": "optional target",
+          "role": "optional role",
+          "label or no-label": "optional label change"
+        },
+        "result": "Updated Issue."
+      },
+      "mcp": {
+        "surfaces": [
+          "resource_update"
+        ],
+        "arguments": {
+          "issue_id": "Issue ID",
+          "resource_id": "Resource ID",
+          "url or path": "optional target",
+          "role": "optional role string",
+          "label or clear_label": "optional label change",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Updated Issue."
+      },
+      "differences": [
+        "CLI validates Issue ID grammar before the operation; MCP uses an unconstrained string.",
+        "CLI schema requires at least one change and publishes exclusive target/label groups plus Resource Role enum; MCP schema makes fields independently optional and relies on runtime rejection."
+      ],
+      "risk": "MCP public schema and Issue ID validation are weaker than CLI even where runtime Resource semantics match.",
+      "required_resolution": "Adopt canonical Issue ID parsing and publish canonical Resource constraints in MCP while preserving stable Resource identity and insertion order.",
+      "evidence": [
+        "crates/rivets/src/cli/args.rs::ResourceAction::Update",
+        "crates/rivets/src/domain/mod.rs::Issue::update_resource",
+        "crates/rivets-mcp/src/models.rs::ResourceUpdateParams",
+        "crates/rivets-mcp/src/tools.rs::resource_update"
+      ]
+    },
+    {
+      "id": "remove_resource",
+      "title": "Remove Associated Resource",
+      "requirement": "shared",
+      "current_parity": "drift",
+      "target_status": "gap_mcp",
+      "target": "Remove a Resource by stable ID while preserving remaining IDs and order.",
+      "cli": {
+        "surfaces": [
+          "resource remove"
+        ],
+        "arguments": {
+          "issue_id": "Issue ID",
+          "resource": "Resource ID"
+        },
+        "result": "Updated Issue."
+      },
+      "mcp": {
+        "surfaces": [
+          "resource_remove"
+        ],
+        "arguments": {
+          "issue_id": "Issue ID",
+          "resource_id": "Resource ID",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Updated Issue."
+      },
+      "differences": [
+        "CLI validates Issue ID grammar before the operation; MCP uses an unconstrained string."
+      ],
+      "risk": "MCP public schema and Issue ID validation are weaker than CLI even where runtime Resource semantics match.",
+      "required_resolution": "Adopt canonical Issue ID parsing and publish canonical Resource constraints in MCP while preserving stable Resource identity and insertion order.",
+      "evidence": [
+        "crates/rivets/src/cli/args.rs::ResourceAction::Remove",
+        "crates/rivets-mcp/src/tools.rs::resource_remove"
+      ]
+    },
+    {
+      "id": "list_resources",
+      "title": "List Associated Resources",
+      "requirement": "shared",
+      "current_parity": "drift",
+      "target_status": "gap_mcp",
+      "target": "Return an Issue's Resources in insertion order.",
+      "cli": {
+        "surfaces": [
+          "resource list"
+        ],
+        "arguments": {
+          "issue_id": "Issue ID"
+        },
+        "result": "Associated Resource list."
+      },
+      "mcp": {
+        "surfaces": [
+          "resource_list"
+        ],
+        "arguments": {
+          "issue_id": "Issue ID",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Associated Resource list."
+      },
+      "differences": [
+        "CLI validates Issue ID grammar before the operation; MCP uses an unconstrained string."
+      ],
+      "risk": "MCP public schema and Issue ID validation are weaker than CLI even where runtime Resource semantics match.",
+      "required_resolution": "Adopt canonical Issue ID parsing and publish canonical Resource constraints in MCP while preserving stable Resource identity and insertion order.",
+      "evidence": [
+        "crates/rivets/src/cli/args.rs::ResourceAction::List",
+        "crates/rivets-mcp/src/tools.rs::resource_list"
+      ]
+    },
+    {
+      "id": "stale_issues",
+      "title": "Stale Issues",
+      "requirement": "shared",
+      "current_parity": "drift",
+      "target_status": "gap_both",
+      "target": "Return non-Closed Issues older than the requested age, require limit, and order oldest-updated first; Closed is included only when explicitly filtered.",
+      "cli": {
+        "surfaces": [
+          "stale"
+        ],
+        "arguments": {
+          "days": "current default 30",
+          "status": "optional legacy status",
+          "limit": "current default 50"
+        },
+        "result": "Issue list; Closed excluded when status omitted; oldest-updated first."
+      },
+      "mcp": {
+        "surfaces": [
+          "stale"
+        ],
+        "arguments": {
+          "days": "current default 30",
+          "status": "optional string",
+          "limit": "current default 100",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Issue list; Closed included when status omitted; storage newest-created order."
+      },
+      "differences": [
+        "CLI defaults to limit 50, excludes Closed when status is omitted, and orders oldest-updated; MCP defaults to 100, includes Closed, and inherits newest-created order.",
+        "Both accept legacy Blocked Workflow State; CLI alone accepts the in-progress alias.",
+        "Ordering ties are not deterministic."
+      ],
+      "risk": "Equivalent omitted inputs return different Issues and MCP can omit the stalest records while including Closed work.",
+      "required_resolution": "Require a positive explicit limit, exclude Closed by default, use deterministic oldest-updated ordering, and share canonical Workflow State validation.",
+      "evidence": [
+        "crates/rivets/src/cli/args.rs::StaleArgs",
+        "crates/rivets/src/cli/execute.rs::execute_stale",
+        "crates/rivets-mcp/src/models.rs::StaleParams",
+        "crates/rivets-mcp/src/tools.rs::stale",
+        "crates/rivets/src/storage/in_memory/trait_impl.rs::list"
+      ]
+    },
+    {
+      "id": "blocked_issues",
+      "title": "Blocked Issues",
+      "requirement": "shared",
+      "current_parity": "drift",
+      "target_status": "gap_both",
+      "target": "Return Issues blocked by unresolved Blocking Dependencies with optional Assignee filtering and blocker details.",
+      "cli": {
+        "surfaces": [
+          "blocked"
+        ],
+        "arguments": {
+          "assignee": "advertised optional string but currently ignored"
+        },
+        "result": "Blocked Issue wrappers with blockers."
+      },
+      "mcp": {
+        "surfaces": [
+          "blocked"
+        ],
+        "arguments": {
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Blocked Issue wrappers with blockers."
+      },
+      "differences": [
+        "CLI advertises an ignored Assignee filter; MCP has no Assignee filter.",
+        "CLI JSON names blocker rows blocked_by while MCP names them blockers.",
+        "Issue and blocker ordering is not deterministic.",
+        "Legacy Blocked Workflow State can still appear; direct Blocking computation itself is already typed."
+      ],
+      "risk": "CLI silently ignores input, adapters cannot express equivalent filtered queries, and result order/shape is unstable.",
+      "required_resolution": "Implement equivalent Assignee filtering, canonical Workflow State handling, deterministic Issue/blocker ordering, and the same semantic blocker payload across adapters.",
+      "evidence": [
+        "crates/rivets/src/cli/args.rs::BlockedArgs",
+        "crates/rivets/src/cli/execute.rs::execute_blocked",
+        "crates/rivets/src/storage/in_memory/trait_impl.rs::blocked_issues",
+        "crates/rivets/src/output/json.rs::print_blocked_json",
+        "crates/rivets-mcp/src/models.rs::BlockedIssueResponse",
+        "crates/rivets-mcp/src/tools.rs::blocked"
+      ]
+    },
+    {
+      "id": "workspace_statistics",
+      "title": "Workspace Statistics",
+      "requirement": "shared",
+      "current_parity": "not_comparable",
+      "target_status": "gap_both",
+      "target": "Return total Issues, counts by canonical Workflow State and Priority, derived Ready count, and derived Blocked count.",
+      "cli": {
+        "surfaces": [
+          "stats"
+        ],
+        "arguments": {
+          "detailed": "optional boolean; current default false"
+        },
+        "result": "Statistics; currently mixes legacy Blocked status with blocked-by-dependency count."
+      },
+      "mcp": {
+        "surfaces": [],
+        "arguments": {},
+        "result": "No registered tool; unused StatsResponse exists."
+      },
+      "risk": "MCP has no equivalent Workspace health view and CLI statistics do not satisfy canonical Workflow State/Ready/Blocked meaning.",
+      "required_resolution": "Add shared Workspace Statistics to MCP and align both adapters to canonical Workflow State, deterministic Priority counts, Ready, and Blocked definitions.",
+      "evidence": [
+        "crates/rivets/src/cli/args.rs::StatsArgs",
+        "crates/rivets/src/cli/execute.rs::execute_stats",
+        "crates/rivets/src/storage/in_memory/trait_impl.rs::ready_to_work",
+        "crates/rivets/src/storage/in_memory/trait_impl.rs::blocked_issues",
+        "crates/rivets-mcp/src/models.rs::StatsResponse",
+        "crates/rivets-mcp/src/server.rs::RivetsMcpServer"
+      ],
+      "differences": [
+        "CLI statistics publish legacy Blocked Workflow State and make Priority counts conditional on --detailed.",
+        "CLI Ready count uses legacy broad readiness and ParentChild propagation.",
+        "No MCP statistics tool is registered; StatsResponse is unused."
+      ]
+    },
+    {
+      "id": "append_note",
+      "title": "Append Note",
+      "requirement": "shared",
+      "current_parity": "drift",
+      "target_status": "gap_mcp",
+      "target": "Append one immutable, system-timestamped Note.",
+      "cli": {
+        "surfaces": [],
+        "forms": [
+          {
+            "surface": "update",
+            "argument": "notes"
+          }
+        ],
+        "arguments": {
+          "issue_id": "one or more through update",
+          "content": "Note content"
+        },
+        "result": "Updated Issue in batch result."
+      },
+      "mcp": {
+        "surfaces": [
+          "add_note"
+        ],
+        "arguments": {
+          "issue_id": "one Issue ID",
+          "content": "Note content",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Updated Issue."
+      },
+      "differences": [
+        "CLI validates Issue ID grammar; MCP uses an unconstrained string.",
+        "CLI update --notes batching and MCP add_note spelling/envelope are intentional adapter mechanics."
+      ],
+      "risk": "MCP accepts Issue IDs rejected by CLI; Note append semantics otherwise match.",
+      "required_resolution": "Adopt canonical Issue ID parsing in MCP while preserving append-only Note semantics and loop-equivalent adapter mechanics.",
+      "evidence": [
+        "crates/rivets/src/cli/args.rs::UpdateArgs",
+        "crates/rivets/src/cli/execute.rs::execute_update",
+        "crates/rivets-mcp/src/tools.rs::add_note",
+        "crates/rivets/src/domain/mod.rs::NoteContent"
+      ]
+    },
+    {
+      "id": "set_workspace_context",
+      "title": "Set MCP Workspace Context",
+      "requirement": "mcp_only",
+      "current_parity": "not_comparable",
+      "target_status": "intentional_mcp_only",
+      "target": "Select the default Workspace for subsequent MCP calls.",
+      "cli": {
+        "surfaces": [],
+        "arguments": {},
+        "result": "CLI discovers from current directory."
+      },
+      "mcp": {
+        "surfaces": [
+          "set_context"
+        ],
+        "arguments": {
+          "workspace_root": "required absolute or resolvable Workspace path"
+        },
+        "result": "Context and storage paths."
+      },
+      "risk": "None; persistent process context is MCP-specific.",
+      "required_resolution": "Retain as an explicit MCP-only adapter mechanic.",
+      "evidence": [
+        "crates/rivets-mcp/src/tools.rs::set_context"
+      ]
+    },
+    {
+      "id": "inspect_workspace_context",
+      "title": "Inspect MCP Workspace Context",
+      "requirement": "mcp_only",
+      "current_parity": "not_comparable",
+      "target_status": "intentional_mcp_only",
+      "target": "Report whether MCP context is set and which Workspace it selects.",
+      "cli": {
+        "surfaces": [],
+        "arguments": {},
+        "result": "CLI has no persistent context."
+      },
+      "mcp": {
+        "surfaces": [
+          "where_am_i"
+        ],
+        "arguments": {},
+        "result": "Context-set flag, Workspace root, database path, and Issue ID prefix."
+      },
+      "risk": "None; this is distinct from shared Workspace Information.",
+      "required_resolution": "Retain as an explicit MCP-only adapter mechanic.",
+      "evidence": [
+        "crates/rivets-mcp/src/tools.rs::where_am_i"
+      ]
+    },
+    {
+      "id": "claim_assignment",
+      "title": "Claim Assignment",
+      "requirement": "future_shared",
+      "current_parity": "drift",
+      "target_status": "gap_mcp",
+      "target": "Atomically claim an Open, unblocked, unassigned Issue; same claimant retry is idempotent and another claimant is rejected without mutation.",
+      "cli": {
+        "surfaces": [
+          "claim"
+        ],
+        "arguments": {
+          "issue_id": "canonical Issue ID",
+          "assignee": "exact Assignee identity"
+        },
+        "result": "Atomically assigned Issue; same-owner retry is unchanged and another owner receives terminal Already Claimed."
+      },
+      "mcp": {
+        "surfaces": [
+          "claim"
+        ],
+        "arguments": {
+          "issue_id": "unconstrained string pending canonical Issue ID validation",
+          "assignee": "exact Assignee identity",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Atomically assigned Issue; same-owner retry is unchanged and another owner receives terminal Already Claimed."
+      },
+      "differences": [
+        "MCP Claim accepts an unconstrained Issue ID string while CLI validates canonical grammar before mutation."
+      ],
+      "risk": "The remaining MCP grammar gap can make invalid Claim requests fail later than CLI, but concurrent ownership is now atomic.",
+      "required_resolution": "Adopt canonical Issue ID parsing in MCP Claim while retaining the implemented atomic storage contract.",
+      "evidence": [
+        "crates/rivets/src/cli/args.rs::AssignmentArgs",
+        "crates/rivets/src/cli/execute.rs::execute_claim",
+        "crates/rivets/src/storage/in_memory/trait_impl.rs::claim",
+        "crates/rivets-mcp/src/models.rs::AssignmentParams",
+        "crates/rivets-mcp/src/tools.rs::claim",
+        "crates/rivets-mcp/src/server.rs::claim",
+        "crates/rivets/tests/cli_tests.rs::claim_release_cli_contract_survives_restart",
+        "crates/rivets-mcp/tests/integration.rs::claim_release_contract_survives_context_restart",
+        ".rivets/issues.jsonl::rivets-8rj9"
+      ]
+    },
+    {
+      "id": "release_assignment",
+      "title": "Release Assignment",
+      "requirement": "future_shared",
+      "current_parity": "drift",
+      "target_status": "gap_mcp",
+      "target": "Release an Open Assignment only when the expected current Assignee matches.",
+      "cli": {
+        "surfaces": [
+          "release"
+        ],
+        "arguments": {
+          "issue_id": "canonical Issue ID",
+          "assignee": "expected current Assignee identity"
+        },
+        "result": "Atomically unassigned Issue only for the exact owner; mismatch and unassigned failures are terminal."
+      },
+      "mcp": {
+        "surfaces": [
+          "release"
+        ],
+        "arguments": {
+          "issue_id": "unconstrained string pending canonical Issue ID validation",
+          "assignee": "expected current Assignee identity",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Atomically unassigned Issue only for the exact owner; mismatch and unassigned failures are terminal."
+      },
+      "differences": [
+        "MCP Release accepts an unconstrained Issue ID string while CLI validates canonical grammar before mutation."
+      ],
+      "risk": "The remaining MCP grammar gap can make invalid Release requests fail later than CLI, but exact-owner release is now atomic.",
+      "required_resolution": "Adopt canonical Issue ID parsing in MCP Release while retaining the implemented atomic storage contract.",
+      "evidence": [
+        "crates/rivets/src/cli/args.rs::AssignmentArgs",
+        "crates/rivets/src/cli/execute.rs::execute_release",
+        "crates/rivets/src/storage/in_memory/trait_impl.rs::release",
+        "crates/rivets-mcp/src/models.rs::AssignmentParams",
+        "crates/rivets-mcp/src/tools.rs::release",
+        "crates/rivets-mcp/src/server.rs::release",
+        "crates/rivets/tests/cli_tests.rs::claim_release_cli_contract_survives_restart",
+        "crates/rivets-mcp/tests/integration.rs::claim_release_contract_survives_context_restart",
+        ".rivets/issues.jsonl::rivets-8rj9"
+      ]
+    },
+    {
+      "id": "add_blocking_dependency",
+      "title": "Add Blocking Dependency",
+      "requirement": "future_shared",
+      "current_parity": "drift",
+      "target_status": "gap_mcp",
+      "target": "Add a directed Blocking Dependency from dependent Issue to prerequisite Issue.",
+      "cli": {
+        "surfaces": [
+          "blocking-dependency add"
+        ],
+        "arguments": {
+          "dependent": "dependent Issue ID",
+          "prerequisite": "prerequisite Issue ID"
+        },
+        "result": "Role-named mutation confirmation."
+      },
+      "mcp": {
+        "surfaces": [
+          "blocking_dependency_add"
+        ],
+        "arguments": {
+          "dependent_id": "dependent Issue ID",
+          "prerequisite_id": "prerequisite Issue ID",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Structured Blocking Dependency."
+      },
+      "risk": "MCP accepts endpoint IDs rejected by CLI, so equivalent malformed requests do not have the same validation/error meaning.",
+      "required_resolution": "Adopt canonical Issue ID parsing in MCP while retaining the shared typed Blocking storage operation and role-named results.",
+      "evidence": [
+        "crates/rivets/src/cli/args.rs::BlockingDependencyAction",
+        "crates/rivets/src/cli/execute.rs::execute_blocking_dependency",
+        "crates/rivets/src/storage/mod.rs::IssueStorage",
+        "crates/rivets/src/storage/in_memory/trait_impl.rs",
+        "crates/rivets-mcp/src/models.rs::BlockingDependencyPairParams",
+        "crates/rivets-mcp/src/tools.rs::blocking_dependency_add",
+        "crates/rivets-mcp/src/tools.rs::blocking_dependency_tree"
+      ],
+      "differences": [
+        "CLI validates both endpoint Issue IDs; MCP uses unconstrained strings.",
+        "Typed direction, duplicate/cycle invariants, and semantic success result otherwise match; text/protocol envelopes are adapter mechanics."
+      ]
+    },
+    {
+      "id": "remove_blocking_dependency",
+      "title": "Remove Blocking Dependency",
+      "requirement": "future_shared",
+      "current_parity": "drift",
+      "target_status": "gap_mcp",
+      "target": "Remove one directed Blocking Dependency without changing either Issue's Workflow State.",
+      "cli": {
+        "surfaces": [
+          "blocking-dependency remove"
+        ],
+        "arguments": {
+          "dependent": "dependent Issue ID",
+          "prerequisite": "prerequisite Issue ID"
+        },
+        "result": "Role-named mutation confirmation."
+      },
+      "mcp": {
+        "surfaces": [
+          "blocking_dependency_remove"
+        ],
+        "arguments": {
+          "dependent_id": "dependent Issue ID",
+          "prerequisite_id": "prerequisite Issue ID",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Structured removed Blocking Dependency."
+      },
+      "risk": "MCP accepts endpoint IDs rejected by CLI, so equivalent malformed requests do not have the same validation/error meaning.",
+      "required_resolution": "Adopt canonical Issue ID parsing in MCP while retaining the shared typed Blocking storage operation and role-named results.",
+      "evidence": [
+        "crates/rivets/src/cli/args.rs::BlockingDependencyAction",
+        "crates/rivets/src/cli/execute.rs::execute_blocking_dependency",
+        "crates/rivets/src/storage/mod.rs::IssueStorage",
+        "crates/rivets/src/storage/in_memory/trait_impl.rs",
+        "crates/rivets-mcp/src/models.rs::BlockingDependencyPairParams",
+        "crates/rivets-mcp/src/tools.rs::blocking_dependency_add",
+        "crates/rivets-mcp/src/tools.rs::blocking_dependency_tree"
+      ],
+      "differences": [
+        "CLI validates both endpoint Issue IDs; MCP uses unconstrained strings.",
+        "Exact typed edge removal and semantic success result otherwise match."
+      ]
+    },
+    {
+      "id": "list_blocking_dependencies",
+      "title": "List Blocking Dependencies",
+      "requirement": "future_shared",
+      "current_parity": "drift",
+      "target_status": "gap_mcp",
+      "target": "List an Issue's prerequisites and dependents with explicit roles.",
+      "cli": {
+        "surfaces": [
+          "blocking-dependency list"
+        ],
+        "arguments": {
+          "dependent or prerequisite": "exactly one endpoint perspective"
+        },
+        "result": "Structured dependent/prerequisite relationships."
+      },
+      "mcp": {
+        "surfaces": [
+          "blocking_dependency_list"
+        ],
+        "arguments": {
+          "query": "tagged prerequisites_of/dependents_of role",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Structured dependent/prerequisite relationships."
+      },
+      "risk": "MCP accepts endpoint IDs rejected by CLI, so equivalent malformed requests do not have the same validation/error meaning.",
+      "required_resolution": "Adopt canonical Issue ID parsing in MCP while retaining the shared typed Blocking storage operation and role-named results.",
+      "evidence": [
+        "crates/rivets/src/cli/args.rs::BlockingDependencyAction",
+        "crates/rivets/src/cli/execute.rs::execute_blocking_dependency",
+        "crates/rivets/src/storage/mod.rs::IssueStorage",
+        "crates/rivets/src/storage/in_memory/trait_impl.rs",
+        "crates/rivets-mcp/src/models.rs::BlockingDependencyPairParams",
+        "crates/rivets-mcp/src/tools.rs::blocking_dependency_add",
+        "crates/rivets-mcp/src/tools.rs::blocking_dependency_tree"
+      ],
+      "differences": [
+        "CLI validates the selected endpoint Issue ID; MCP uses an unconstrained string.",
+        "CLI ArgGroup and MCP tagged query both make exactly one endpoint perspective representable."
+      ]
+    },
+    {
+      "id": "show_blocking_dependency_tree",
+      "title": "Show Blocking Dependency Tree",
+      "requirement": "future_shared",
+      "current_parity": "drift",
+      "target_status": "gap_mcp",
+      "target": "Traverse only Blocking Dependencies with explicit direction and a caller-supplied depth policy.",
+      "cli": {
+        "surfaces": [
+          "blocking-dependency tree"
+        ],
+        "arguments": {
+          "dependent": "root dependent Issue ID",
+          "depth": "default 5; zero unlimited"
+        },
+        "result": "Role-named Blocking prerequisite tree."
+      },
+      "mcp": {
+        "surfaces": [
+          "blocking_dependency_tree"
+        ],
+        "arguments": {
+          "dependent_id": "root dependent Issue ID",
+          "depth": "optional; zero unlimited",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Role-named Blocking prerequisite tree."
+      },
+      "risk": "MCP accepts invalid roots and an omitted MCP request can traverse/return substantially more than the equivalent omitted CLI request.",
+      "required_resolution": "Adopt canonical Issue ID parsing and one shared omitted-depth policy (or require explicit depth) while retaining typed deterministic traversal.",
+      "evidence": [
+        "crates/rivets/src/cli/args.rs::BlockingDependencyAction",
+        "crates/rivets/src/cli/execute.rs::execute_blocking_dependency",
+        "crates/rivets/src/storage/mod.rs::IssueStorage",
+        "crates/rivets/src/storage/in_memory/trait_impl.rs",
+        "crates/rivets-mcp/src/models.rs::BlockingDependencyPairParams",
+        "crates/rivets-mcp/src/tools.rs::blocking_dependency_add",
+        "crates/rivets-mcp/src/tools.rs::blocking_dependency_tree"
+      ],
+      "differences": [
+        "CLI validates the root Issue ID; MCP uses an unconstrained string.",
+        "CLI omitted depth defaults to 5; MCP omitted depth means unlimited.",
+        "Explicit depth, direction, deterministic BFS rows, and result meaning otherwise match."
+      ]
+    },
+    {
+      "id": "set_parentage",
+      "title": "Set Parentage",
+      "requirement": "future_shared",
+      "current_parity": "not_comparable",
+      "target_status": "gap_both",
+      "target": "Attach a child Issue to one Epic parent without affecting Ready or Blocked.",
+      "cli": {
+        "surfaces": [],
+        "arguments": {},
+        "result": "Only legacy parent-child dependency exists."
+      },
+      "mcp": {
+        "surfaces": [],
+        "arguments": {},
+        "result": "Only legacy generic dep exists."
+      },
+      "risk": "Current adapters cannot enforce one Epic parent and non-blocking semantics canonically.",
+      "required_resolution": "Add equivalent Set Parentage intents.",
+      "evidence": [
+        "docs/adr/0002-issue-relationships-and-readiness.md",
+        "crates/rivets/src/domain/mod.rs::DependencyType",
+        "crates/rivets/src/storage/in_memory/jsonl.rs::load_from_jsonl",
+        "crates/rivets/src/storage/in_memory/graph.rs::find_blocked_issues",
+        ".rivets/issues.jsonl::rivets-qcje"
+      ],
+      "differences": [
+        "No canonical CLI or MCP surface exists; only legacy ParentChild records are compatibility-loaded.",
+        "Legacy ParentChild currently propagates blockedness and lacks one-Epic-parent/cardinality/lifecycle invariants."
+      ]
+    },
+    {
+      "id": "clear_parentage",
+      "title": "Clear Parentage",
+      "requirement": "future_shared",
+      "current_parity": "not_comparable",
+      "target_status": "gap_both",
+      "target": "Remove a child's Parentage without changing lifecycle or readiness.",
+      "cli": {
+        "surfaces": [],
+        "arguments": {},
+        "result": "No canonical intent."
+      },
+      "mcp": {
+        "surfaces": [],
+        "arguments": {},
+        "result": "No canonical intent."
+      },
+      "risk": "MCP cannot remove even the legacy equivalent and neither adapter exposes ownership semantics.",
+      "required_resolution": "Add equivalent Clear Parentage intents.",
+      "evidence": [
+        "docs/adr/0002-issue-relationships-and-readiness.md",
+        "crates/rivets/src/domain/mod.rs::DependencyType",
+        "crates/rivets/src/storage/in_memory/jsonl.rs::load_from_jsonl",
+        "crates/rivets/src/storage/in_memory/graph.rs::find_blocked_issues",
+        ".rivets/issues.jsonl::rivets-qcje"
+      ],
+      "differences": [
+        "No canonical CLI or MCP surface exists; only legacy ParentChild records are compatibility-loaded.",
+        "Legacy ParentChild currently propagates blockedness and lacks one-Epic-parent/cardinality/lifecycle invariants."
+      ]
+    },
+    {
+      "id": "move_parentage",
+      "title": "Move Parentage",
+      "requirement": "future_shared",
+      "current_parity": "not_comparable",
+      "target_status": "gap_both",
+      "target": "Atomically validate a new Epic parent before replacing the old Parentage.",
+      "cli": {
+        "surfaces": [],
+        "arguments": {},
+        "result": "No canonical intent."
+      },
+      "mcp": {
+        "surfaces": [],
+        "arguments": {},
+        "result": "No canonical intent."
+      },
+      "risk": "Remove-then-add can leave a gap or invalid ownership state.",
+      "required_resolution": "Add equivalent atomic Move Parentage intents.",
+      "evidence": [
+        "docs/adr/0002-issue-relationships-and-readiness.md",
+        "crates/rivets/src/domain/mod.rs::DependencyType",
+        "crates/rivets/src/storage/in_memory/jsonl.rs::load_from_jsonl",
+        "crates/rivets/src/storage/in_memory/graph.rs::find_blocked_issues",
+        ".rivets/issues.jsonl::rivets-qcje"
+      ],
+      "differences": [
+        "No canonical CLI or MCP surface exists; only legacy ParentChild records are compatibility-loaded.",
+        "Legacy ParentChild currently propagates blockedness and lacks one-Epic-parent/cardinality/lifecycle invariants."
+      ]
+    },
+    {
+      "id": "show_parentage",
+      "title": "Show Parentage",
+      "requirement": "future_shared",
+      "current_parity": "not_comparable",
+      "target_status": "gap_both",
+      "target": "Return an Issue's parent and direct children with explicit ownership roles.",
+      "cli": {
+        "surfaces": [],
+        "arguments": {},
+        "result": "No canonical intent."
+      },
+      "mcp": {
+        "surfaces": [],
+        "arguments": {},
+        "result": "No canonical intent."
+      },
+      "risk": "Ownership must currently be inferred from generic relationship direction.",
+      "required_resolution": "Add equivalent Parentage query intents.",
+      "evidence": [
+        "docs/adr/0002-issue-relationships-and-readiness.md",
+        "crates/rivets/src/domain/mod.rs::DependencyType",
+        "crates/rivets/src/storage/in_memory/jsonl.rs::load_from_jsonl",
+        "crates/rivets/src/storage/in_memory/graph.rs::find_blocked_issues",
+        ".rivets/issues.jsonl::rivets-qcje"
+      ],
+      "differences": [
+        "No canonical CLI or MCP surface exists; only legacy ParentChild records are compatibility-loaded.",
+        "Legacy ParentChild currently propagates blockedness and lacks one-Epic-parent/cardinality/lifecycle invariants."
+      ]
+    },
+    {
+      "id": "add_related_association",
+      "title": "Add Related Association",
+      "requirement": "future_shared",
+      "current_parity": "drift",
+      "target_status": "gap_mcp",
+      "target": "Create one symmetric, non-blocking Related Association visible from either Issue.",
+      "cli": {
+        "surfaces": [
+          "related add"
+        ],
+        "arguments": {
+          "issue": "one endpoint Issue ID",
+          "related": "other endpoint Issue ID"
+        },
+        "result": "Symmetric association mutation confirmation."
+      },
+      "mcp": {
+        "surfaces": [
+          "related_add"
+        ],
+        "arguments": {
+          "issue_id": "one endpoint Issue ID",
+          "related_issue_id": "other endpoint Issue ID",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Structured canonical Related Association."
+      },
+      "risk": "MCP accepts endpoint IDs rejected by CLI, so equivalent malformed requests do not have the same validation/error meaning.",
+      "required_resolution": "Adopt canonical Issue ID parsing in MCP while retaining the shared symmetric storage operation.",
+      "evidence": [
+        "crates/rivets/src/cli/args.rs::RelatedAction",
+        "crates/rivets/src/cli/execute.rs::execute_related",
+        "crates/rivets/src/domain/relationship.rs::RelatedAssociation",
+        "crates/rivets/src/storage/mod.rs::IssueStorage",
+        "crates/rivets-mcp/src/models.rs::RelatedPairParams",
+        "crates/rivets-mcp/src/tools.rs::related_add"
+      ],
+      "differences": [
+        "CLI validates both endpoint Issue IDs; MCP uses unconstrained strings.",
+        "Symmetry, canonical identity, idempotency, persistence, and semantic success result otherwise match."
+      ]
+    },
+    {
+      "id": "remove_related_association",
+      "title": "Remove Related Association",
+      "requirement": "future_shared",
+      "current_parity": "drift",
+      "target_status": "gap_mcp",
+      "target": "Remove the symmetric association from either endpoint.",
+      "cli": {
+        "surfaces": [
+          "related remove"
+        ],
+        "arguments": {
+          "issue": "one endpoint Issue ID",
+          "related": "other endpoint Issue ID"
+        },
+        "result": "Symmetric association removal confirmation."
+      },
+      "mcp": {
+        "surfaces": [
+          "related_remove"
+        ],
+        "arguments": {
+          "issue_id": "one endpoint Issue ID",
+          "related_issue_id": "other endpoint Issue ID",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Structured removed Related Association."
+      },
+      "risk": "MCP accepts endpoint IDs rejected by CLI, so equivalent malformed requests do not have the same validation/error meaning.",
+      "required_resolution": "Adopt canonical Issue ID parsing in MCP while retaining the shared symmetric storage operation.",
+      "evidence": [
+        "crates/rivets/src/cli/args.rs::RelatedAction",
+        "crates/rivets/src/cli/execute.rs::execute_related",
+        "crates/rivets/src/domain/relationship.rs::RelatedAssociation",
+        "crates/rivets/src/storage/mod.rs::IssueStorage",
+        "crates/rivets-mcp/src/models.rs::RelatedPairParams",
+        "crates/rivets-mcp/src/tools.rs::related_remove"
+      ],
+      "differences": [
+        "CLI validates both endpoint Issue IDs; MCP uses unconstrained strings.",
+        "Symmetric exact removal and semantic success result otherwise match."
+      ]
+    },
+    {
+      "id": "list_related_associations",
+      "title": "List Related Associations",
+      "requirement": "future_shared",
+      "current_parity": "drift",
+      "target_status": "gap_mcp",
+      "target": "List symmetric Related Associations independent of endpoint order.",
+      "cli": {
+        "surfaces": [
+          "related list"
+        ],
+        "arguments": {
+          "issue": "Issue whose Related Associations to list"
+        },
+        "result": "Structured canonical Related Associations."
+      },
+      "mcp": {
+        "surfaces": [
+          "related_list"
+        ],
+        "arguments": {
+          "issue_id": "Issue whose Related Associations to list",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Structured canonical Related Associations."
+      },
+      "risk": "MCP accepts an Issue ID rejected by CLI, so equivalent malformed requests do not have the same validation/error meaning.",
+      "required_resolution": "Adopt canonical Issue ID parsing in MCP while retaining the shared symmetric query.",
+      "evidence": [
+        "crates/rivets/src/cli/args.rs::RelatedAction",
+        "crates/rivets/src/cli/execute.rs::execute_related",
+        "crates/rivets/src/domain/relationship.rs::RelatedAssociation",
+        "crates/rivets/src/storage/mod.rs::IssueStorage",
+        "crates/rivets-mcp/src/models.rs::RelatedListParams",
+        "crates/rivets-mcp/src/tools.rs::related_list"
+      ],
+      "differences": [
+        "CLI validates the selected Issue ID; MCP uses an unconstrained string.",
+        "Symmetric visibility, canonical ordering, and result meaning otherwise match."
+      ]
+    },
+    {
+      "id": "add_discovery_origin",
+      "title": "Add Discovery Origin",
+      "requirement": "future_shared",
+      "current_parity": "drift",
+      "target_status": "gap_mcp",
+      "target": "Record directed provenance from discovered Issue to source Issue without affecting readiness.",
+      "cli": {
+        "surfaces": [
+          "discovery add"
+        ],
+        "arguments": {
+          "discovered": "discovered Issue ID",
+          "source": "source Issue ID"
+        },
+        "result": "Role-named mutation confirmation."
+      },
+      "mcp": {
+        "surfaces": [
+          "discovery_add"
+        ],
+        "arguments": {
+          "discovered_issue_id": "discovered Issue ID",
+          "source_issue_id": "source Issue ID",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Structured Discovery Origin."
+      },
+      "risk": "MCP accepts endpoint IDs rejected by CLI, so equivalent malformed requests do not have the same validation/error meaning.",
+      "required_resolution": "Adopt canonical Issue ID parsing in MCP while retaining the shared directed provenance operation.",
+      "evidence": [
+        "crates/rivets/src/cli/args.rs::DiscoveryAction",
+        "crates/rivets/src/cli/execute.rs::execute_discovery",
+        "crates/rivets/src/domain/relationship.rs::DiscoveryOrigin",
+        "crates/rivets/src/storage/mod.rs::IssueStorage",
+        "crates/rivets-mcp/src/models.rs::DiscoveryPairParams",
+        "crates/rivets-mcp/src/tools.rs::discovery_add"
+      ],
+      "differences": [
+        "CLI validates both endpoint Issue IDs; MCP uses unconstrained strings.",
+        "Direction, duplicate/cycle invariants, persistence, and semantic success result otherwise match."
+      ]
+    },
+    {
+      "id": "remove_discovery_origin",
+      "title": "Remove Discovery Origin",
+      "requirement": "future_shared",
+      "current_parity": "drift",
+      "target_status": "gap_mcp",
+      "target": "Remove one directed Discovery Origin without other domain effects.",
+      "cli": {
+        "surfaces": [
+          "discovery remove"
+        ],
+        "arguments": {
+          "discovered": "discovered Issue ID",
+          "source": "source Issue ID"
+        },
+        "result": "Role-named mutation confirmation."
+      },
+      "mcp": {
+        "surfaces": [
+          "discovery_remove"
+        ],
+        "arguments": {
+          "discovered_issue_id": "discovered Issue ID",
+          "source_issue_id": "source Issue ID",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Structured removed Discovery Origin."
+      },
+      "risk": "MCP accepts endpoint IDs rejected by CLI, so equivalent malformed requests do not have the same validation/error meaning.",
+      "required_resolution": "Adopt canonical Issue ID parsing in MCP while retaining the shared directed provenance operation.",
+      "evidence": [
+        "crates/rivets/src/cli/args.rs::DiscoveryAction",
+        "crates/rivets/src/cli/execute.rs::execute_discovery",
+        "crates/rivets/src/domain/relationship.rs::DiscoveryOrigin",
+        "crates/rivets/src/storage/mod.rs::IssueStorage",
+        "crates/rivets-mcp/src/models.rs::DiscoveryPairParams",
+        "crates/rivets-mcp/src/tools.rs::discovery_remove"
+      ],
+      "differences": [
+        "CLI validates both endpoint Issue IDs; MCP uses unconstrained strings.",
+        "Exact directed removal and semantic success result otherwise match."
+      ]
+    },
+    {
+      "id": "list_discovery_origins",
+      "title": "List Discovery Origins",
+      "requirement": "future_shared",
+      "current_parity": "drift",
+      "target_status": "gap_mcp",
+      "target": "List source Issues for a discovered Issue with explicit provenance direction.",
+      "cli": {
+        "surfaces": [
+          "discovery list"
+        ],
+        "arguments": {
+          "discovered": "discovered Issue whose sources to list"
+        },
+        "result": "Structured directed Discovery Origins."
+      },
+      "mcp": {
+        "surfaces": [
+          "discovery_list"
+        ],
+        "arguments": {
+          "discovered_issue_id": "discovered Issue whose sources to list",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Structured directed Discovery Origins."
+      },
+      "risk": "MCP accepts an Issue ID rejected by CLI, so equivalent malformed requests do not have the same validation/error meaning.",
+      "required_resolution": "Adopt canonical Issue ID parsing in MCP while retaining the shared directed provenance query.",
+      "evidence": [
+        "crates/rivets/src/cli/args.rs::DiscoveryAction",
+        "crates/rivets/src/cli/execute.rs::execute_discovery",
+        "crates/rivets/src/domain/relationship.rs::DiscoveryOrigin",
+        "crates/rivets/src/storage/mod.rs::IssueStorage",
+        "crates/rivets-mcp/src/models.rs::DiscoveryListParams",
+        "crates/rivets-mcp/src/tools.rs::discovery_list"
+      ],
+      "differences": [
+        "CLI validates the selected discovered Issue ID; MCP uses an unconstrained string.",
+        "Directed source-only query semantics, ordering, and result meaning otherwise match."
+      ]
+    }
+  ],
+  "delivery_groups": [
+    {
+      "id": "workspace_mutation_lock",
+      "title": "Serialize Workspace mutations",
+      "tracking_issue": "rivets-j13o",
+      "intents": [
+        "claim_assignment",
+        "release_assignment"
+      ],
+      "blocked_by": [
+        "rivets-c5e5"
+      ]
+    },
+    {
+      "id": "canonical_workflow",
+      "title": "Canonical Workflow State, Ready, and Blocked",
+      "tracking_issue": "rivets-brai",
+      "intents": [
+        "list_issues",
+        "ready_issues",
+        "close_issue",
+        "reopen_issue",
+        "stale_issues",
+        "blocked_issues",
+        "workspace_statistics"
+      ],
+      "blocked_by": [
+        "rivets-gf4j"
+      ]
+    },
+    {
+      "id": "canonical_parentage",
+      "title": "Canonical Parentage",
+      "tracking_issue": "rivets-qcje",
+      "intents": [
+        "create_issue",
+        "show_issue",
+        "set_parentage",
+        "clear_parentage",
+        "move_parentage",
+        "show_parentage"
+      ],
+      "blocked_by": [
+        "rivets-gf4j"
+      ]
+    },
+    {
+      "id": "canonical_related_discovery",
+      "title": "Canonical Related Associations and Discovery Origins",
+      "tracking_issue": "rivets-2x2i",
+      "intents": [
+        "create_issue",
+        "show_issue",
+        "add_related_association",
+        "remove_related_association",
+        "list_related_associations",
+        "add_discovery_origin",
+        "remove_discovery_origin",
+        "list_discovery_origins"
+      ],
+      "blocked_by": [
+        "rivets-gf4j"
+      ]
+    },
+    {
+      "id": "canonical_assignment",
+      "title": "Atomic Assignment Claim and Release",
+      "tracking_issue": "rivets-8rj9",
+      "intents": [
+        "update_issue",
+        "close_issue",
+        "reopen_issue",
+        "ready_issues",
+        "claim_assignment",
+        "release_assignment"
+      ],
+      "blocked_by": [
+        "rivets-brai",
+        "rivets-j13o"
+      ]
+    },
+    {
+      "id": "canonical_persistence",
+      "title": "Canonical Workflow and Relationship migration",
+      "tracking_issue": "rivets-vio8",
+      "intents": [
+        "create_issue",
+        "show_issue",
+        "legacy_add_dependency",
+        "legacy_remove_dependency",
+        "legacy_list_dependencies",
+        "legacy_dependency_tree"
+      ],
+      "blocked_by": [
+        "rivets-brai",
+        "rivets-qcje",
+        "rivets-2x2i",
+        "rivets-8rj9"
+      ]
+    },
+    {
+      "id": "canonical_issue_id_input",
+      "title": "Canonical Issue ID parsing",
+      "tracking_issue": "rivets-ragt",
+      "intents": [
+        "create_issue",
+        "show_issue",
+        "update_issue",
+        "close_issue",
+        "reopen_issue",
+        "add_label",
+        "remove_label",
+        "list_issue_labels",
+        "add_resource",
+        "update_resource",
+        "remove_resource",
+        "list_resources",
+        "append_note",
+        "add_blocking_dependency",
+        "remove_blocking_dependency",
+        "list_blocking_dependencies",
+        "show_blocking_dependency_tree",
+        "add_related_association",
+        "remove_related_association",
+        "list_related_associations",
+        "add_discovery_origin",
+        "remove_discovery_origin",
+        "list_discovery_origins"
+      ],
+      "blocked_by": []
+    },
+    {
+      "id": "canonical_label_input",
+      "title": "Canonical Label grammar",
+      "tracking_issue": "rivets-g3t7",
+      "intents": [
+        "create_issue",
+        "list_issues",
+        "update_issue",
+        "ready_issues",
+        "add_label",
+        "remove_label"
+      ],
+      "blocked_by": []
+    },
+    {
+      "id": "list_stale_query_parity",
+      "title": "List and Stale query parity",
+      "tracking_issue": "rivets-yk25",
+      "intents": [
+        "list_issues",
+        "stale_issues"
+      ],
+      "blocked_by": [
+        "rivets-brai",
+        "rivets-g3t7"
+      ]
+    },
+    {
+      "id": "ready_blocked_query_parity",
+      "title": "Ready and Blocked query parity",
+      "tracking_issue": "rivets-2va7",
+      "intents": [
+        "ready_issues",
+        "blocked_issues"
+      ],
+      "blocked_by": [
+        "rivets-8rj9",
+        "rivets-g3t7"
+      ]
+    },
+    {
+      "id": "create_show_relationship_parity",
+      "title": "Create and Show relationship parity",
+      "tracking_issue": "rivets-d9gg",
+      "intents": [
+        "create_issue",
+        "show_issue"
+      ],
+      "blocked_by": [
+        "rivets-vio8",
+        "rivets-ragt",
+        "rivets-g3t7"
+      ]
+    },
+    {
+      "id": "workspace_info_stats_parity",
+      "title": "Workspace Information and Statistics parity",
+      "tracking_issue": "rivets-u2mz",
+      "intents": [
+        "workspace_information",
+        "workspace_statistics"
+      ],
+      "blocked_by": [
+        "rivets-brai"
+      ]
+    },
+    {
+      "id": "general_update_contract",
+      "title": "Canonical general Update contract",
+      "tracking_issue": "rivets-67d7",
+      "intents": [
+        "update_issue"
+      ],
+      "blocked_by": [
+        "rivets-8rj9",
+        "rivets-g3t7",
+        "rivets-ragt"
+      ]
+    },
+    {
+      "id": "resource_parameter_shape",
+      "title": "Cohesive MCP Resource parameters",
+      "tracking_issue": "rivets-l3pk",
+      "intents": [
+        "add_resource",
+        "update_resource",
+        "remove_resource"
+      ],
+      "blocked_by": []
+    },
+    {
+      "id": "mcp_schema_precision",
+      "title": "Canonical MCP schemas and shared defaults",
+      "tracking_issue": "rivets-mmqc",
+      "intents": [
+        "create_issue",
+        "list_issues",
+        "update_issue",
+        "ready_issues",
+        "add_resource",
+        "update_resource",
+        "remove_resource",
+        "list_resources",
+        "add_blocking_dependency",
+        "remove_blocking_dependency",
+        "list_blocking_dependencies",
+        "show_blocking_dependency_tree"
+      ],
+      "blocked_by": [
+        "rivets-ragt",
+        "rivets-g3t7",
+        "rivets-l3pk",
+        "rivets-yk25"
+      ]
+    },
+    {
+      "id": "cross_adapter_parity_suite",
+      "title": "Cross-adapter semantic parity suite",
+      "tracking_issue": "rivets-y4vw",
+      "intents": [
+        "workspace_information",
+        "create_issue",
+        "list_issues",
+        "show_issue",
+        "update_issue",
+        "close_issue",
+        "reopen_issue",
+        "ready_issues",
+        "add_label",
+        "remove_label",
+        "list_issue_labels",
+        "add_resource",
+        "update_resource",
+        "remove_resource",
+        "list_resources",
+        "stale_issues",
+        "blocked_issues",
+        "workspace_statistics",
+        "append_note",
+        "claim_assignment",
+        "release_assignment",
+        "add_blocking_dependency",
+        "remove_blocking_dependency",
+        "list_blocking_dependencies",
+        "show_blocking_dependency_tree",
+        "set_parentage",
+        "clear_parentage",
+        "move_parentage",
+        "show_parentage",
+        "add_related_association",
+        "remove_related_association",
+        "list_related_associations",
+        "add_discovery_origin",
+        "remove_discovery_origin",
+        "list_discovery_origins"
+      ],
+      "blocked_by": [
+        "rivets-ragt",
+        "rivets-g3t7",
+        "rivets-yk25",
+        "rivets-2va7",
+        "rivets-d9gg",
+        "rivets-u2mz",
+        "rivets-67d7",
+        "rivets-mmqc"
+      ]
+    }
+  ]
+}
