@@ -1174,7 +1174,7 @@
       "requirement": "future_shared",
       "current_parity": "drift",
       "target_status": "gap_mcp",
-      "target": "Atomically claim an Open, unblocked, unassigned Issue; same claimant retry is idempotent and another claimant is rejected without mutation.",
+      "target": "Atomically claim an Open, unblocked, unassigned Issue; only while it remains Open, same claimant retry is idempotent and another claimant is rejected without mutation; once it leaves Open, Claim rejects every claimant.",
       "cli": {
         "surfaces": [
           "claim"
@@ -1183,7 +1183,7 @@
           "issue_id": "canonical Issue ID",
           "assignee": "exact Assignee identity"
         },
-        "result": "Atomically assigned Issue; same-owner retry is unchanged and another owner receives terminal Already Claimed."
+        "result": "Atomically assigned Open Issue; only while it remains Open, same-owner retry is unchanged and another owner receives terminal Already Claimed; after it leaves Open, every claimant is rejected."
       },
       "mcp": {
         "surfaces": [
@@ -1194,7 +1194,7 @@
           "assignee": "exact Assignee identity",
           "workspace_root": "optional adapter mechanic"
         },
-        "result": "Atomically assigned Issue; same-owner retry is unchanged and another owner receives terminal Already Claimed."
+        "result": "Atomically assigned Open Issue; only while it remains Open, same-owner retry is unchanged and another owner receives terminal Already Claimed; after it leaves Open, every claimant is rejected."
       },
       "differences": [
         "MCP Claim accepts an unconstrained Issue ID string while CLI validates canonical grammar before mutation."

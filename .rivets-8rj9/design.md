@@ -139,6 +139,7 @@ C0, C5, C6, C7, and C9 drive public adapters or generated interfaces. C1–C4 te
 - `2026-08-30 | Slice 6 CLI prompt/ignore/classification gates | PASS` — C14 passed through real child-process prompt handshakes and pre-upgrade metadata; moving Create lock acquisition before the title prompt turned the owning fence red before restoration.
 - `2026-08-30 | python3 scripts/render-cli-mcp-parity.py --check plus origin/main added-line unwrap audit | PASS` — C18 rendered Markdown matches the authoritative registry, stale persisted-Blocked wording has zero matches, and PR-added bare `.unwrap()` has zero matches.
 - `2026-08-30 | cargo fmt --all -- --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test --all-features | PASS` — final review-corrected gate passed 1,159 tests with 9 explicit ignored checkpoints; all five affected production-scale checkpoints also passed when run exactly.
+- `2026-08-31 | claim_assignment authoritative registry audit + renderer check + parity_registry_classifies_every_cli_leaf_and_mcp_tool | PASS` — F10 wording now states in the canonical JSON and generated Markdown that same-claimant Claim is idempotent only while the Issue remains Open and rejects every claimant after it leaves Open.
 
 ## Review correction claims
 
