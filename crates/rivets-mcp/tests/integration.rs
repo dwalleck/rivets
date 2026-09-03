@@ -27,6 +27,14 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::RwLock;
 
+#[path = "../../rivets/tests/common/mixed_legacy.rs"]
+mod mixed_legacy;
+
+use mixed_legacy::{
+    CONFLICT_ID, LEGACY_NOTE_ID, LEGACY_OPAQUE_ID, LEGACY_URL_ID, MIXED_ISSUE_COUNT,
+    assert_canonical_records, fixture_records, read_records, record, seed_mixed_workspace,
+};
+
 fn kind_input(value: Option<&str>) -> IssueKindInput {
     // Parse through the domain FromStr so tests exercise the real
     // vocabulary instead of a parallel arm table.
@@ -4814,4 +4822,216 @@ async fn resource_mutations_persist_across_context_restart() {
         .map(|r| r["id"].as_str().expect("id is a string").to_string())
         .collect();
     assert_eq!(persisted_ids, ["r1", "r3"]);
+}
+
+// ============================================================================
+// Mixed legacy Workspace migration (rivets-c5e5)
+// ============================================================================
+
+fn assert_mixed_issue_kinds(issues: &[Issue]) {
+    for (issue_id, expected_kind) in [
+        ("test-missing", IssueKind::Bug),
+        ("test-null", IssueKind::Feature),
+        (LEGACY_NOTE_ID, IssueKind::Task),
+        (LEGACY_URL_ID, IssueKind::Epic),
+        (LEGACY_OPAQUE_ID, IssueKind::Chore),
+        ("test-canonical", IssueKind::Bug),
+        ("test-equal-kind", IssueKind::Task),
+        (CONFLICT_ID, IssueKind::Feature),
+    ] {
+        let issue = issues
+            .iter()
+            .find(|issue| issue.id.as_str() == issue_id)
+            .unwrap_or_else(|| panic!("MCP list should include Issue {issue_id}"));
+        assert_eq!(issue.issue_kind, expected_kind);
+    }
+}
+
+async fn assert_migrated_mcp_content(tools: &Tools, fixture: &[serde_json::Value]) -> String {
+    let expected_long_note = record(fixture, LEGACY_NOTE_ID)["notes"]
+        .as_str()
+        .expect("legacy Note fixture should be a string")
+        .to_owned();
+    let long_note_issue = tools
+        .show(LEGACY_NOTE_ID, None)
+        .await
+        .expect("MCP show should convert the legacy multiline Note");
+    assert_eq!(long_note_issue.notes().len(), 1);
+    assert_eq!(long_note_issue.notes()[0].content(), expected_long_note);
+    assert_eq!(
+        *long_note_issue.notes()[0].created_at(),
+        long_note_issue.updated_at
+    );
+
+    let url_issue = tools
+        .show(LEGACY_URL_ID, None)
+        .await
+        .expect("MCP show should convert a legacy Web resource");
+    assert!(url_issue.notes().is_empty());
+    assert_eq!(url_issue.resources().len(), 1);
+    assert_eq!(url_issue.resources()[0].id().as_str(), "r1");
+    assert_eq!(
+        url_issue.resources()[0].target().to_string(),
+        "https://example.com/legacy/pr/7"
+    );
+    assert_eq!(url_issue.resources()[0].role().to_string(), "reference");
+    assert!(url_issue.resources()[0].label().is_none());
+
+    let opaque_issue = tools
+        .show(LEGACY_OPAQUE_ID, None)
+        .await
+        .expect("MCP show should preserve an opaque legacy reference as a Note");
+    assert_eq!(opaque_issue.notes().len(), 1);
+    assert_eq!(
+        opaque_issue.notes()[0].content(),
+        "Migrated legacy external reference:   GH-opaque-42  "
+    );
+    assert_eq!(
+        *opaque_issue.notes()[0].created_at(),
+        opaque_issue.updated_at
+    );
+
+    let canonical_issue = tools
+        .show("test-canonical", None)
+        .await
+        .expect("MCP show should preserve canonical nested ordering");
+    assert_eq!(canonical_issue.notes()[0].content(), "Canonical first Note");
+    assert_eq!(
+        canonical_issue.notes()[1].content(),
+        "Canonical second Note"
+    );
+    assert_eq!(canonical_issue.resources()[0].id().as_str(), "r1");
+    assert_eq!(canonical_issue.resources()[1].id().as_str(), "r2");
+    assert_eq!(
+        canonical_issue.resources()[0].role().to_string(),
+        "evidence"
+    );
+    assert_eq!(
+        canonical_issue.resources()[1].role().to_string(),
+        "documentation"
+    );
+
+    expected_long_note
+}
+
+async fn assert_reloaded_mcp_content(tools: &Tools, expected_long_note: &str) {
+    let reloaded = tools
+        .list(list_params(None, None, None, None, None, None, None))
+        .await
+        .expect("fresh MCP context should reload every canonical record");
+    assert_eq!(reloaded.len(), MIXED_ISSUE_COUNT);
+    assert_mixed_issue_kinds(&reloaded);
+
+    let reloaded_long_note = tools
+        .show(LEGACY_NOTE_ID, None)
+        .await
+        .expect("fresh MCP context should reload the converted long Note");
+    assert_eq!(reloaded_long_note.notes()[0].content(), expected_long_note);
+
+    let reloaded_url = tools
+        .show(LEGACY_URL_ID, None)
+        .await
+        .expect("fresh MCP context should reload the migrated URL resource");
+    assert_eq!(reloaded_url.resources().len(), 1);
+    assert_eq!(
+        reloaded_url.resources()[0].target().to_string(),
+        "https://example.com/legacy/pr/7"
+    );
+
+    let reloaded_opaque = tools
+        .show(LEGACY_OPAQUE_ID, None)
+        .await
+        .expect("fresh MCP context should reload the opaque-reference Note");
+    assert_eq!(
+        reloaded_opaque.notes()[0].content(),
+        "Migrated legacy external reference:   GH-opaque-42  "
+    );
+
+    let reloaded_canonical = tools
+        .show("test-canonical", None)
+        .await
+        .expect("fresh MCP context should reload canonical nested ordering");
+    assert_eq!(
+        reloaded_canonical.notes()[0].content(),
+        "Canonical first Note"
+    );
+    assert_eq!(
+        reloaded_canonical.notes()[1].content(),
+        "Canonical second Note"
+    );
+    assert_eq!(reloaded_canonical.resources()[0].id().as_str(), "r1");
+    assert_eq!(reloaded_canonical.resources()[1].id().as_str(), "r2");
+
+    let reloaded_conflict = tools
+        .show(CONFLICT_ID, None)
+        .await
+        .expect("fresh MCP context should reload the mutated conflict Issue");
+    assert_eq!(reloaded_conflict.title, "Canonical migration update");
+    assert_eq!(reloaded_conflict.issue_kind, IssueKind::Feature);
+}
+
+#[tokio::test]
+async fn mixed_legacy_fixture_migrates_through_mcp_and_context_recreation() {
+    let workspace = create_temp_workspace();
+    seed_mixed_workspace(workspace.path());
+    let issues_path = workspace.path().join(".rivets/issues.jsonl");
+    let atomic_temp_path = issues_path.with_extension("tmp");
+    let fixture = fixture_records();
+
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+    let listed = tools
+        .list(list_params(None, None, None, None, None, None, None))
+        .await
+        .expect("MCP list should load every mixed legacy record");
+    assert_eq!(listed.len(), MIXED_ISSUE_COUNT);
+    for fixture_record in &fixture {
+        let issue_id = fixture_record["id"]
+            .as_str()
+            .expect("fixture Issue id should be a string");
+        assert!(listed.iter().any(|issue| issue.id.as_str() == issue_id));
+    }
+    assert_mixed_issue_kinds(&listed);
+    let expected_long_note = assert_migrated_mcp_content(&tools, &fixture).await;
+
+    let updated = tools
+        .update(update_params(
+            CONFLICT_ID,
+            Some("Canonical migration update".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ))
+        .await
+        .expect("one deterministic MCP update should rewrite the mixed file");
+    assert_eq!(updated.title, "Canonical migration update");
+    assert_eq!(updated.issue_kind, IssueKind::Feature);
+
+    let persisted_records = read_records(&issues_path);
+    assert_canonical_records(&persisted_records);
+    let persisted_ids: Vec<&str> = persisted_records
+        .iter()
+        .map(|record| {
+            record["id"]
+                .as_str()
+                .expect("persisted Issue id should be a string")
+        })
+        .collect();
+    let mut sorted_ids = persisted_ids.clone();
+    sorted_ids.sort_unstable();
+    assert_eq!(persisted_ids, sorted_ids);
+    assert_eq!(
+        record(&persisted_records, CONFLICT_ID)["title"],
+        "Canonical migration update"
+    );
+    assert!(!atomic_temp_path.exists());
+
+    let restarted = create_tools();
+    set_context(&restarted, workspace.path()).await;
+    assert_reloaded_mcp_content(&restarted, &expected_long_note).await;
 }
