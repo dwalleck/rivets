@@ -242,17 +242,129 @@ For maintainers, see [Publishing](#publishing) for release procedures.
 <details>
 <summary>Release procedure</summary>
 
-Publish crates in dependency order:
+Rivets publishes `rivets-jsonl`, `rivets`, and `rivets-mcp` at one shared
+workspace version. Publish them in that order because each later crate depends
+on the previous one.
+
+#### Prerequisites
+
+- Publish access to all three crates on crates.io. For a manual release,
+  authenticate with `cargo login`.
+- [`git-cliff`](https://git-cliff.org/) for changelog generation.
+- A clean release branch based on `main`, with the current `main` CI run green.
+- Optional: the GitHub CLI (`gh`) for creating the GitHub release.
+
+#### 1. Prepare the release
+
+Choose a semantic version without the leading `v`:
 
 ```bash
-cargo publish -p rivets-jsonl
-# Wait for indexing...
-cargo publish -p rivets
-# Wait for indexing...
-cargo publish -p rivets-mcp
+VERSION=0.2.0
+TAG="v${VERSION}"
 ```
 
-Generate changelog: `git cliff --unreleased --bump --prepend CHANGELOG.md`
+Update the root `Cargo.toml` in three places:
+
+1. `[workspace.package] version`
+2. `[workspace.dependencies] rivets-jsonl` version
+3. `[workspace.dependencies] rivets` version
+
+All crate manifests inherit the workspace version. Refresh `Cargo.lock`, then
+generate the release changelog:
+
+```bash
+cargo check --workspace
+git cliff --unreleased --tag "$TAG" --prepend CHANGELOG.md
+```
+
+Review `CHANGELOG.md`: leave a fresh `[Unreleased]` section above the new
+release and update the comparison links at the bottom.
+
+#### 2. Verify the release commit
+
+Run the same essential checks enforced by CI:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo nextest run --all-features --workspace
+cargo test --doc --all-features --workspace
+cargo build --release --all-features --workspace
+```
+
+Commit `Cargo.toml`, `Cargo.lock`, and `CHANGELOG.md` with a message such as
+`chore(release): prepare v0.2.0`, open a pull request, and merge only after CI
+passes.
+
+#### 3. Tag the merged release
+
+Tag the merge commit on `main`:
+
+```bash
+git checkout main
+git pull --ff-only
+git tag -a "$TAG" -m "Rivets ${VERSION}"
+git push origin "$TAG"
+```
+
+#### 4. Publish to crates.io
+
+Dry-run and publish each crate serially. Wait for each version to appear in the
+crates.io index before checking or publishing its dependent:
+
+```bash
+cargo publish --locked -p rivets-jsonl --dry-run
+cargo publish --locked -p rivets-jsonl
+cargo info "rivets-jsonl@${VERSION}"  # Retry until indexed
+
+cargo publish --locked -p rivets --dry-run
+cargo publish --locked -p rivets
+cargo info "rivets@${VERSION}"        # Retry until indexed
+
+cargo publish --locked -p rivets-mcp --dry-run
+cargo publish --locked -p rivets-mcp
+cargo info "rivets-mcp@${VERSION}"    # Retry until indexed
+```
+
+Published crate versions are immutable. If publication stops partway through,
+fix the failure and continue with the remaining crate; do not reuse or overwrite
+an already-published version.
+
+#### 5. Create the GitHub release
+
+After all three `cargo info` checks succeed, create the release from the
+existing tag:
+
+```bash
+gh release create "$TAG" \
+  --verify-tag \
+  --title "Rivets ${VERSION}" \
+  --generate-notes \
+  --fail-on-no-commits
+```
+
+### Automating releases
+
+This repository does not currently have a release workflow. The recommended
+automation is a tag-triggered `.github/workflows/release.yml` using
+[crates.io Trusted Publishing](https://crates.io/docs/trusted-publishing).
+Trusted Publishing uses GitHub OIDC instead of a long-lived crates.io token.
+
+A safe workflow should:
+
+1. Run only for `v*` tags and verify the tag matches the workspace version.
+2. Use a protected GitHub `release` environment with required approval.
+3. Grant only `contents: write` and `id-token: write`.
+4. Re-run release checks.
+5. Authenticate with `rust-lang/crates-io-auth-action@v1`.
+6. Publish the three crates serially, waiting for crates.io indexing between them.
+7. Create the GitHub release after all publications succeed.
+
+Configure each crate's trusted publisher on crates.io with this repository, the
+exact workflow filename, and the `release` environment. A local script or
+`cargo-release` can automate version/changelog/tag preparation, but CI-based
+Trusted Publishing is safer for registry credentials and provides an auditable
+approval gate.
 
 </details>
 
