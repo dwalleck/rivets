@@ -323,4 +323,24 @@ mod tests {
             "Discovery self-reference must not deserialize"
         );
     }
+
+    #[test]
+    fn blocking_dependency_deserialization_enforces_invariant() {
+        let dependency: BlockingDependency = serde_json::from_value(serde_json::json!({
+            "dependent_id": "test-dependent",
+            "prerequisite_id": "test-prerequisite"
+        }))
+        .expect("distinct endpoint roles should deserialize");
+        assert_eq!(dependency.dependent_id().as_str(), "test-dependent");
+        assert_eq!(dependency.prerequisite_id().as_str(), "test-prerequisite");
+
+        let self_reference = serde_json::from_value::<BlockingDependency>(serde_json::json!({
+            "dependent_id": "test-self",
+            "prerequisite_id": "test-self"
+        }));
+        assert!(
+            self_reference.is_err(),
+            "deserialization must preserve the self-reference invariant"
+        );
+    }
 }

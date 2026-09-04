@@ -11,6 +11,8 @@ classDiagram
         +create(NewIssue) Future~Issue~
         +get(IssueId) Future~Option~Issue~~
         +update(IssueId, IssueUpdate) Future~Issue~
+        +claim(IssueId, str) Future~Issue~
+        +release(IssueId, str) Future~Issue~
         +delete(IssueId) Future~void~
         +add_blocking_dependency(BlockingDependency) Future~void~
         +remove_blocking_dependency(BlockingDependency) Future~void~
@@ -18,7 +20,7 @@ classDiagram
         +blocking_dependents(IssueId) Future~Vec~BlockingDependency~~
         +blocking_dependency_tree(IssueId, Option~usize~) Future~Vec~(BlockingDependency, usize)~~
         +list(IssueFilter) Future~Vec~Issue~~
-        +ready_to_work(Option~IssueFilter~, Option~SortPolicy~) Future~Vec~Issue~~
+        +ready_to_work(ReadyFilter, Option~SortPolicy~) Future~Vec~Issue~~
         +blocked_issues() Future~Vec~(Issue, Vec~Issue~)~~
         +add_label(IssueId, str) Future~Issue~
         +remove_label(IssueId, str) Future~Issue~
@@ -50,7 +52,10 @@ classDiagram
         -path: PathBuf
         -prefix: String
         -load_warnings: Vec~LoadWarning~
+        -source_revision: RwLock~SourceRevision~
+        -prepare_mutation() Result
         -ensure_writable() Result
+        -ensure_source_unchanged() Result
     }
 
     IssueStorage <|.. InMemoryStorage : implements
@@ -127,7 +132,7 @@ The in-memory engine is the runtime engine for every backend, including the pers
 
 ## JSONL Persistence Layer
 
-The persisted backend is `StorageBackend::Jsonl(path)`: the factory loads the file into the in-memory engine and wraps it in the private `JsonlBackedStorage`, which delegates every trait call to the inner storage and additionally gates mutations and saves on the partial-load guard (see Error Recovery below).
+The persisted backend is `StorageBackend::Jsonl(path)`: the factory loads the file into the in-memory engine and wraps it in the private `JsonlBackedStorage`. The wrapper tracks the raw source revision with SHA-256, reloads a completed external change before mutation, rejects a post-mutation external change before save, and retains the partial-load guard (see Error Recovery below).
 
 ```mermaid
 sequenceDiagram
@@ -143,17 +148,23 @@ sequenceDiagram
     alt Any Issue record was omitted during load
         Storage-->>App: Err(StorageError::UnsafePartialLoad) - no write attempted
     else Complete load
-        Storage->>Inner: export_all()
-        Inner-->>Storage: issues
-        Storage->>Storage: sort issues by id (deterministic line order)
-        Storage->>FS: create(path.with_extension("tmp")) e.g. issues.tmp
-        loop For each issue (dependencies sorted)
-            Storage->>Storage: serialize CanonicalIssueRecord
-            Storage->>FS: write_all(json + \n)
+        Storage->>Storage: ensure_source_unchanged()
+        alt Source changed after mutation
+            Storage-->>App: Err(StorageError::ExternalChange) - no write attempted
+        else Source revision matches
+            Storage->>Inner: export_all()
+            Inner-->>Storage: issues
+            Storage->>Storage: sort issues by id (deterministic line order)
+            Storage->>FS: create(path.with_extension("tmp")) e.g. issues.tmp
+            loop For each issue (dependencies sorted)
+                Storage->>Storage: serialize CanonicalIssueRecord
+                Storage->>FS: write_all(json + \n)
+            end
+            Storage->>FS: flush()
+            Storage->>FS: rename(.tmp → issues.jsonl)
+            Storage->>Storage: record SHA-256 revision of bytes written
+            Storage-->>App: Ok(())
         end
-        Storage->>FS: flush()
-        Storage->>FS: rename(.tmp → issues.jsonl)
-        Storage-->>App: Ok(())
     end
 ```
 
@@ -241,6 +252,13 @@ Each line is a canonical record written by `CanonicalIssueRecord` (the persisted
 
 The loader is resilient: a bad line never aborts the whole load. Every problem becomes a typed `LoadWarning` and the affected record or edge is skipped. Reads are served from the successfully loaded issues; the warnings are returned alongside the storage.
 
+#### Durable Workspace Mutation Ownership
+
+- **Sidecar**: `.rivets/workspace.lock` is persistent and ignored. Its file handle owns a standard-library nonblocking exclusive lock; file existence is not ownership.
+- **Scope**: existing-Workspace CLI and MCP mutations acquire before storage load/reload and hold through validation, mutation, save, and save-failure recovery.
+- **Contention**: `WorkspaceBusy` is typed and retryable; no Issue bytes are read for authoritative mutation or written by the contender.
+- **Independence and release**: canonical Workspace roots use distinct sidecars; dropping or terminating the holder releases the OS lock without deleting the file.
+
 #### Skipped Issue Record
 ```
 Line 42: Invalid JSON, skipping: expected ',' at line 1 column 234
@@ -250,6 +268,12 @@ Warning: Loaded with 1 errors. 99 issues available for read-only access.
 - **Action**: The JSONL-backed wrapper (`JsonlBackedStorage`) keeps reads available, but `ensure_writable()` rejects every mutation and `save()` with `StorageError::UnsafePartialLoad` before any state change — an incomplete in-memory representation can never replace the source file.
 - **Result**: The original JSONL bytes remain unchanged rather than replacing the skipped record
 - **Recovery**: Manually repair the JSONL file, then restart or call `reload()`; there is no implicit force-repair path
+
+#### External Source Change
+
+- **Before mutation**: a changed SHA-256 source revision triggers `reload()` while the caller still holds the storage write lock; the mutation then runs against the latest complete state.
+- **After mutation, before save**: a changed revision returns typed `StorageError::ExternalChange` before the temporary output is opened. MCP save recovery reloads the external state, and the source bytes remain unchanged.
+- **Scope**: source revisions protect completed non-cooperating edits; the durable Workspace sidecar additionally serializes cooperating CLI/MCP load→mutate→save transactions.
 
 #### Migration Conflict (warning-only)
 ```
@@ -311,53 +335,31 @@ identifiers plus one-based depth.
 
 ```mermaid
 graph TD
-    Start[ready_to_work filter] --> Init[blocked = empty set]
+    Start[All Issues] --> Open{Workflow State Open?}
+    Open -->|No| Exclude[Exclude]
+    Open -->|Yes| Direct{Outgoing Blocks edge to<br/>a non-Closed prerequisite?}
+    Direct -->|Yes| Exclude
+    Direct -->|No| Assignment{Ready Assignment selector matches?}
+    Assignment -->|No| Exclude
+    Assignment -->|Yes| Filters[Priority, Issue Kind, label]
+    Filters --> Sort[Hybrid, Priority, or Oldest]
+    Sort --> Limit[Apply limit]
+    Limit --> Result[Ready Issues]
 
-    Init --> Phase1[Phase 1: Direct Blocks]
-    Phase1 --> Loop1{For each non-closed issue}
-    Loop1 --> Check1{Has Blocks edge to<br/>an unclosed issue?}
-    Check1 -->|Yes| AddBlocked[blocked.insert issue]
-    Check1 -->|No| Loop1
-    Loop1 -->|Done| Phase2
-
-    Phase2[Phase 2: Transitive via parent-child] --> BFS[BFS queue = blocked]
-    BFS --> Loop2{Queue not empty?}
-    Loop2 -->|Yes| Pop[pop issue, depth]
-    Pop --> DepthCheck{depth < 50?}
-    DepthCheck -->|Yes| Children[Find child issues<br/>via incoming parent-child edges]
-    Children --> AddChildren[blocked.insert children<br/>queue.push children, depth+1]
-    AddChildren --> Loop2
-    DepthCheck -->|No| Loop2
-    Loop2 -->|No| Filter
-
-    Filter[Filter: status ≠ closed<br/>AND id ∉ blocked] --> ApplyFilter[Apply additional filters]
-    ApplyFilter --> Sort[Sort by policy: Hybrid default, Priority, Oldest]
-    Sort --> Result[Return ready issues]
-
-    style AddBlocked fill:#FFB6C1
+    style Exclude fill:#FFB6C1
     style Result fill:#90EE90
 ```
 
-Blocking is entirely graph-derived: Phase 1 collects issues with a `Blocks` edge to any unclosed issue, and Phase 2 propagates through parent-child edges (children of a blocked parent are blocked) up to a BFS depth of 50. The legacy `blocked` status value still exists in the domain for compatibility, but `ready_to_work` and `blocked_issues` never consult it — only graph edges decide blocking.
+Blocked is derived only from direct unresolved Blocking Dependencies. The
+prerequisite resolves when its Workflow State becomes Closed; the relationship
+remains recorded. Parentage, Related Associations, and Discovery Origins never
+participate.
 
-### Blocking Propagation Example
-
-```mermaid
-graph TD
-    Task1[Task: rivets-task1<br/>TRANSITIVELY BLOCKED] -->|parent-child| Epic[Epic: rivets-epic1<br/>BLOCKED by feature1]
-    Task2[Task: rivets-task2<br/>TRANSITIVELY BLOCKED] -->|parent-child| Epic
-    Subtask1[Subtask: rivets-sub1<br/>TRANSITIVELY BLOCKED] -->|parent-child| Task1
-
-    Epic -->|blocks| Feature1[Feature: rivets-feat1<br/>Status: in_progress]
-
-    style Epic fill:#FFB6C1
-    style Task1 fill:#FFB6C1
-    style Task2 fill:#FFB6C1
-    style Subtask1 fill:#FFB6C1
-    style Feature1 fill:#FFE4B5
-```
-
-**Result**: None of these issues appear in "ready work" because they're all blocked (directly or transitively)
+Ready eligibility requires Workflow State Open, not Blocked, and one explicit
+Assignment mode encoded by `ReadyAssignmentFilter`: `Unassigned` (the default),
+an exact `Assignee`, or `All`. `ReadyFilter` then applies priority, Issue Kind,
+and label criteria. Storage sorts the eligible filtered set and applies the
+limit last. Neither Blocked nor Ready is serialized on Issue records.
 
 ## Delete Operation with Referential Integrity
 
@@ -446,12 +448,14 @@ The `StorageBackend::InMemory` variant exists for library/test use (`create_stor
 | create | O(1) | O(1) | HashMap insert + graph node |
 | get | O(1) | O(1) | HashMap lookup |
 | update | O(1) | O(1) | HashMap update |
+| claim | O(outdegree) | O(1) | Compare-and-set Assignment after direct unresolved Blocking scan |
+| release | O(1) | O(1) | Exact-owner compare-and-set; allowed while Open and Blocked |
 | delete | O(D) | O(D) | D = number of dependents checked |
 | add/remove Blocking Dependency | O(outdegree) plus O(V + E) cycle validation on add | O(V) | Only Blocking edges participate |
 | Blocking prerequisite tree | O(V + E) | O(V) | Deterministic BFS over Blocking edges |
 | list (no filter) | O(N) | O(N) | Iterate all issues |
-| ready_to_work | O(V + E) | O(V) | BFS for transitive blocks |
-| blocked_issues | O(V + E) | O(V) | Edge scan for direct blockers |
+| ready_to_work | O(V + E) | O(V) | Direct Blocking edge scan, eligibility/filter pass, and result sort |
+| blocked_issues | O(V + E) | O(V) | Direct Blocking edge scan |
 | save_to_jsonl | O(N log N) | O(N) | Export, sort, streaming write, atomic rename |
 | load_from_jsonl | O(N + E·(V+E)) worst case | O(N) | Parse all lines, import, per-edge cycle checks |
 

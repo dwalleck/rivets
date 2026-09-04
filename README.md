@@ -37,7 +37,8 @@ ID=$(rivets create --title "Add user authentication" --kind feature | sed 's/^Cr
 # See what's ready to work on
 rivets ready
 
-# Start working on the issue
+# Atomically claim it, then start active work
+rivets claim "$ID" --assignee "$USER"
 rivets update "$ID" --status in_progress
 
 # Mark it done
@@ -53,12 +54,14 @@ rivets close "$ID"
 | `create` | Create an issue (`--title`, `--kind`, `--priority`, `--assignee`, `--labels`, repeatable `--prerequisite`, `--design`, `--acceptance`, `--notes`) |
 | `list` | List issues; filter with `--status`, `--priority`, `--kind`, `--assignee`, `--label`; `--sort` and `--limit` |
 | `show` | Show one or more issues with their Blocking prerequisites/dependents and resources |
-| `update` | Update status, Kind, assignment, design, acceptance criteria, or append a Note; labels use the `label` command |
+| `update` | Update status, Kind, design, acceptance criteria, or append a Note; Assignment uses `claim`/`release`, labels use `label` |
+| `claim` | Atomically assign one Open, unblocked Issue (`<issue-id> --assignee <name>`) |
+| `release` | Atomically unassign one Open Issue from its exact owner (`<issue-id> --assignee <name>`) |
 | `close` | Close one or more issues, optionally `--reason` |
 | `reopen` | Reopen a closed issue, optionally `--reason` |
 | `delete` | Delete an issue permanently (`--force` skips the confirmation prompt) |
-| `ready` | Issues with no blockers, hybrid-sorted by priority |
-| `blocked` | Issues blocked by open Blocking prerequisites, along with those prerequisites |
+| `ready` | Open Issues without unresolved direct Blocking Dependencies; defaults to unassigned, with `--assignee` and `--all-assignees` selectors |
+| `blocked` | Issues with direct Blocking Dependencies to non-Closed prerequisites, along with those prerequisites |
 | `blocking-dependency` | Blocking Dependencies: `add`/`remove --dependent <id> --prerequisite <id>`, `list --dependent|--prerequisite <id>`, `tree --dependent <id> [--depth N]` |
 | `related` | Symmetric Related Associations: `add`/`remove --issue <id> --related <id>`, `list --issue <id>` |
 | `discovery` | Directed Discovery Origins: `add`/`remove --discovered <id> --source <id>`, `list --discovered <id>` |
@@ -78,12 +81,16 @@ Replace them with IDs printed by `rivets create` in your repository.
 
 ```bash
 rivets create --title "Fix login bug" --kind bug --priority 1
-rivets list                              # All issues, open and closed (priority-sorted, max 50)
+rivets list                              # All Workflow States (priority-sorted, max 50)
 rivets list --status open                # Filter to open issues
 rivets list --status in_progress         # Filter by status
 rivets show demo-a3f8                    # View issue details
 rivets update demo-a3f8 --priority 2     # Update fields
-rivets close demo-a3f8 --reason "Fixed in commit abc123"
+rivets claim demo-a3f8 --assignee alice  # Atomically claim Ready work
+rivets release demo-a3f8 --assignee alice
+rivets claim demo-a3f8 --assignee alice
+rivets update demo-a3f8 --status in_progress
+rivets close demo-a3f8 --reason "Fixed in commit abc123" # Closing clears Assignment
 ```
 
 ### Blocking Dependencies
@@ -95,12 +102,17 @@ rivets blocking-dependency list --dependent demo-a3f8       # Its prerequisites
 rivets blocking-dependency list --prerequisite demo-b2c9    # Issues that depend on it
 rivets blocking-dependency tree --dependent demo-a3f8 --depth 3
 rivets blocked
-rivets ready
+rivets ready                             # Unassigned Ready Issues
+rivets ready --assignee alice            # Ready Issues claimed by alice
+rivets ready --all-assignees             # Ready Issues regardless of Assignment
 ```
 
 A Blocking Dependency always points from the dependent Issue to its
 prerequisite. Self-dependencies and Blocking-only cycles are rejected. Closing
 a prerequisite leaves the relationship recorded but stops it from blocking.
+Ready requires Workflow State Open. Parentage, Related Associations, and
+Discovery Origins never affect Blocked or Ready, and neither condition is
+serialized on Issue records.
 
 ### Non-blocking Relationships
 

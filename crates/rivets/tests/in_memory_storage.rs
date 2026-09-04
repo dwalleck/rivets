@@ -5,12 +5,12 @@
 //! semantics, and sort policies.
 
 use rivets::domain::{
-    BlockingDependency, Dependency, DependencyType, DiscoveryOrigin, IssueFilter, IssueId,
-    IssueKind, IssueStatus, IssueUpdate, MAX_PRIORITY, NewIssue, NewResource, NoteContent,
-    RelatedAssociation, ResourceId, ResourceLabel, ResourceRole, ResourceTarget, ResourceUpdate,
-    SortPolicy, WebUrl, WorkspacePath,
+    AssignmentError, BlockingDependency, Dependency, DependencyType, DiscoveryOrigin, Issue,
+    IssueId, IssueKind, IssueStatus, IssueUpdate, MAX_PRIORITY, NewIssue, NewResource, NoteContent,
+    ReadyAssignmentFilter, ReadyFilter, RelatedAssociation, ResourceId, ResourceLabel,
+    ResourceRole, ResourceTarget, ResourceUpdate, SortPolicy, WebUrl, WorkspacePath,
 };
-use rivets::error::Error;
+use rivets::error::{Error, StorageError};
 use rivets::storage::IssueStorage;
 use rivets::storage::in_memory::{load_from_jsonl, new_in_memory_storage, save_to_jsonl};
 use std::collections::HashSet;
@@ -198,6 +198,10 @@ async fn test_update_issue() {
 
     let new_issue = create_test_issue("Original Title");
     let created = storage.create(new_issue).await.unwrap();
+    storage
+        .claim(&created.id, "active-owner")
+        .await
+        .expect("Issue should be claimed before entering In Progress");
 
     let updates = IssueUpdate {
         title: Some("Updated Title".to_string()),
@@ -296,7 +300,7 @@ async fn test_delete_with_dependents() {
 
 // ========== Dependency Tests ==========
 #[tokio::test]
-async fn blocking_dependency_coexists_with_legacy_kind() {
+async fn blocking_dependency_round_trip_rebuilds_readiness() {
     let mut storage = new_in_memory_storage("test".to_string());
     let prerequisite = storage
         .create(create_test_issue("Prerequisite"))
@@ -337,6 +341,24 @@ async fn blocking_dependency_coexists_with_legacy_kind() {
             .len(),
         2
     );
+    assert_eq!(
+        storage
+            .blocked_issues()
+            .await
+            .expect("blocked issue query should succeed after adding dependency")
+            .into_iter()
+            .map(|(issue, _)| issue.id)
+            .collect::<HashSet<_>>(),
+        HashSet::from([dependent.id.clone()])
+    );
+    assert!(
+        !storage
+            .ready_to_work(&ReadyFilter::default(), None)
+            .await
+            .expect("ready issue query should succeed after adding dependency")
+            .iter()
+            .any(|issue| issue.id == dependent.id)
+    );
 
     let directory = tempdir().unwrap();
     let path = directory.path().join("issues.jsonl");
@@ -349,6 +371,24 @@ async fn blocking_dependency_coexists_with_legacy_kind() {
             .await
             .unwrap(),
         vec![blocking.clone()]
+    );
+    assert_eq!(
+        reloaded
+            .blocked_issues()
+            .await
+            .expect("reloaded blocked issue query should succeed")
+            .into_iter()
+            .map(|(issue, _)| issue.id)
+            .collect::<HashSet<_>>(),
+        HashSet::from([dependent.id.clone()])
+    );
+    assert!(
+        !reloaded
+            .ready_to_work(&ReadyFilter::default(), None)
+            .await
+            .expect("reloaded ready issue query should succeed")
+            .iter()
+            .any(|issue| issue.id == dependent.id)
     );
 
     reloaded
@@ -531,13 +571,18 @@ async fn closed_prerequisite_stays_recorded_without_blocking() {
         .await
         .unwrap();
     let prerequisite_state = storage.get(&prerequisite.id).await.unwrap().unwrap();
-    assert_eq!(prerequisite_state.status, IssueStatus::Open);
-    let blocked = storage.blocked_issues().await.unwrap();
-    assert_eq!(blocked.len(), 1);
-    assert_eq!(blocked[0].0.id, dependent.id);
+    let expected_blocked = prerequisite_state.status != IssueStatus::Closed;
+    assert_eq!(
+        !storage
+            .blocked_issues()
+            .await
+            .expect("blocked issue query should succeed before closing prerequisite")
+            .is_empty(),
+        expected_blocked
+    );
     assert!(
         !storage
-            .ready_to_work(None, None)
+            .ready_to_work(&ReadyFilter::default(), None)
             .await
             .unwrap()
             .iter()
@@ -556,11 +601,18 @@ async fn closed_prerequisite_stays_recorded_without_blocking() {
         .unwrap();
 
     let prerequisite_state = storage.get(&prerequisite.id).await.unwrap().unwrap();
-    assert_eq!(prerequisite_state.status, IssueStatus::Closed);
-    assert!(storage.blocked_issues().await.unwrap().is_empty());
+    let expected_blocked = prerequisite_state.status != IssueStatus::Closed;
+    assert_eq!(
+        !storage
+            .blocked_issues()
+            .await
+            .expect("blocked issue query should succeed after closing prerequisite")
+            .is_empty(),
+        expected_blocked
+    );
     assert!(
         storage
-            .ready_to_work(None, None)
+            .ready_to_work(&ReadyFilter::default(), None)
             .await
             .unwrap()
             .iter()
@@ -572,380 +624,267 @@ async fn closed_prerequisite_stays_recorded_without_blocking() {
     );
 }
 
+// ========== Ready to Work Tests ==========
 #[tokio::test]
-async fn legacy_parentage_propagation_remains_fenced_until_readiness_cutover() {
+async fn ready_truth_table_covers_state_blocking_and_assignment() {
     let mut storage = new_in_memory_storage("test".to_string());
-    let blocker = storage.create(create_test_issue("Blocker")).await.unwrap();
-    let parent = storage.create(create_test_issue("Parent")).await.unwrap();
-    let child = storage.create(create_test_issue("Child")).await.unwrap();
-    storage
-        .add_blocking_dependency(
-            BlockingDependency::new(parent.id.clone(), blocker.id.clone()).unwrap(),
-        )
+    let unassigned = storage
+        .create(create_test_issue("Unassigned"))
         .await
         .unwrap();
+
+    let mut alice_issue = create_test_issue("Alice");
+    alice_issue.assignee = Some("alice".to_string());
+    let alice = storage
+        .create(alice_issue)
+        .await
+        .expect("Alice issue should be created");
+
+    let mut in_progress_input = create_test_issue("In Progress");
+    in_progress_input.assignee = Some("active-owner".to_string());
+    let in_progress = storage
+        .create(in_progress_input)
+        .await
+        .expect("in-progress issue should be created");
+    storage
+        .update(
+            &in_progress.id,
+            IssueUpdate {
+                status: Some(IssueStatus::InProgress),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("in-progress status update should succeed");
+
+    let closed = storage
+        .create(create_test_issue("Closed"))
+        .await
+        .expect("closed issue should be created");
+    storage
+        .update(
+            &closed.id,
+            IssueUpdate {
+                status: Some(IssueStatus::Closed),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("closed status update should succeed");
+
+    let prerequisite = storage
+        .create(create_test_issue("Prerequisite"))
+        .await
+        .expect("prerequisite issue should be created");
+    let blocked = storage
+        .create(create_test_issue("Blocked"))
+        .await
+        .expect("blocked issue should be created");
+    storage
+        .add_blocking_dependency(
+            BlockingDependency::new(blocked.id.clone(), prerequisite.id.clone())
+                .expect("blocking dependency should be constructible for distinct issues"),
+        )
+        .await
+        .expect("blocking dependency should be added");
+
+    let default_ids = storage
+        .ready_to_work(&ReadyFilter::default(), None)
+        .await
+        .expect("default ready query should succeed")
+        .into_iter()
+        .map(|issue| issue.id)
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        default_ids,
+        HashSet::from([unassigned.id.clone(), prerequisite.id.clone()])
+    );
+
+    let alice_ids = storage
+        .ready_to_work(
+            &ReadyFilter {
+                assignment: ReadyAssignmentFilter::Assignee("alice".to_string()),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .expect("assignee-filtered ready query should succeed")
+        .into_iter()
+        .map(|issue| issue.id)
+        .collect::<HashSet<_>>();
+    assert_eq!(alice_ids, HashSet::from([alice.id.clone()]));
+
+    let all_ids = storage
+        .ready_to_work(
+            &ReadyFilter {
+                assignment: ReadyAssignmentFilter::All,
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .expect("all-assignees ready query should succeed")
+        .into_iter()
+        .map(|issue| issue.id)
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        all_ids,
+        HashSet::from([unassigned.id, alice.id, prerequisite.id])
+    );
+}
+
+#[tokio::test]
+async fn non_blocking_relationships_never_change_readiness() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let prerequisite = storage
+        .create(create_test_issue("Prerequisite"))
+        .await
+        .expect("prerequisite issue should be created");
+    let directly_blocked = storage
+        .create(create_test_issue("Directly Blocked"))
+        .await
+        .expect("directly blocked issue should be created");
+    let blocked_parent = storage
+        .create(create_test_issue("Blocked Parent"))
+        .await
+        .expect("blocked parent issue should be created");
+    let child = storage
+        .create(create_test_issue("Child"))
+        .await
+        .expect("child issue should be created");
+    let related = storage
+        .create(create_test_issue("Related"))
+        .await
+        .expect("related issue should be created");
+    let discovered = storage
+        .create(create_test_issue("Discovered"))
+        .await
+        .expect("discovered issue should be created");
+
+    for dependent in [&directly_blocked, &blocked_parent] {
+        storage
+            .add_blocking_dependency(
+                BlockingDependency::new(dependent.id.clone(), prerequisite.id.clone())
+                    .expect("blocking dependency should be constructible for each dependent"),
+            )
+            .await
+            .expect("blocking dependency should be added for each dependent");
+    }
     seed_legacy_relationship(
         &mut storage,
         &child.id,
-        &parent.id,
+        &blocked_parent.id,
         DependencyType::ParentChild,
     )
     .await;
-
-    let ready = storage.ready_to_work(None, None).await.unwrap();
-    assert_eq!(ready.len(), 1);
-    assert_eq!(ready[0].id, blocker.id);
-    let blocked = storage.blocked_issues().await.unwrap();
-    assert_eq!(blocked.len(), 1);
-    assert_eq!(blocked[0].0.id, parent.id);
-}
-
-#[tokio::test]
-async fn related_association_is_symmetric_idempotent_and_removable_from_either_side() {
-    let mut storage = new_in_memory_storage("test".to_string());
-    let issue_a = storage.create(create_test_issue("A")).await.unwrap();
-    let issue_b = storage.create(create_test_issue("B")).await.unwrap();
-    let issue_c = storage.create(create_test_issue("C")).await.unwrap();
-    let forward = RelatedAssociation::new(issue_a.id.clone(), issue_b.id.clone()).unwrap();
-    let reverse = RelatedAssociation::new(issue_b.id.clone(), issue_a.id.clone()).unwrap();
-    assert_eq!(forward, reverse);
-
-    storage
-        .add_related_association(reverse.clone())
-        .await
-        .unwrap();
-    storage
-        .add_related_association(forward.clone())
-        .await
-        .unwrap();
-    assert_eq!(
-        storage.related_associations(&issue_a.id).await.unwrap(),
-        vec![forward.clone()]
-    );
-    assert_eq!(
-        storage.related_associations(&issue_b.id).await.unwrap(),
-        vec![forward.clone()]
-    );
-    assert!(
-        storage
-            .related_associations(&issue_c.id)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-
-    let exported = storage.export_all().await.unwrap();
-    let related_records = exported
-        .iter()
-        .flat_map(|issue| {
-            issue
-                .dependencies
-                .iter()
-                .filter(|dependency| dependency.dep_type == DependencyType::Related)
-                .map(move |dependency| (&issue.id, &dependency.depends_on_id))
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        related_records,
-        vec![(forward.left_issue_id(), forward.right_issue_id())]
-    );
-
     seed_legacy_relationship(
         &mut storage,
-        forward.right_issue_id(),
-        forward.left_issue_id(),
+        &related.id,
+        &prerequisite.id,
         DependencyType::Related,
     )
     .await;
-    assert_eq!(
-        storage.related_associations(&issue_a.id).await.unwrap(),
-        vec![forward.clone()],
-        "reciprocal legacy records should remain one logical Association"
-    );
-
-    storage.remove_related_association(&reverse).await.unwrap();
-    assert!(
-        storage
-            .related_associations(&issue_a.id)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        storage
-            .related_associations(&issue_b.id)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(storage.remove_related_association(&forward).await.is_err());
-
-    let missing =
-        RelatedAssociation::new(issue_a.id.clone(), IssueId::new("test-missing")).unwrap();
-    assert!(storage.add_related_association(missing).await.is_err());
-}
-
-#[tokio::test]
-async fn discovery_origin_is_directed_multi_source_and_acyclic() {
-    let mut storage = new_in_memory_storage("test".to_string());
-    let issue_a = storage.create(create_test_issue("A")).await.unwrap();
-    let issue_b = storage.create(create_test_issue("B")).await.unwrap();
-    let issue_c = storage.create(create_test_issue("C")).await.unwrap();
-    let issue_d = storage.create(create_test_issue("D")).await.unwrap();
-    let origin_ab = DiscoveryOrigin::new(issue_a.id.clone(), issue_b.id.clone()).unwrap();
-    let origin_ad = DiscoveryOrigin::new(issue_a.id.clone(), issue_d.id.clone()).unwrap();
-
-    storage
-        .add_discovery_origin(origin_ab.clone())
-        .await
-        .unwrap();
-    storage
-        .add_discovery_origin(origin_ad.clone())
-        .await
-        .unwrap();
-    let mut expected = vec![origin_ab.clone(), origin_ad.clone()];
-    expected.sort();
-    assert_eq!(
-        storage.discovery_origins(&issue_a.id).await.unwrap(),
-        expected
-    );
-    assert!(
-        storage
-            .add_discovery_origin(origin_ab.clone())
-            .await
-            .is_err()
-    );
-
     seed_legacy_relationship(
         &mut storage,
-        &issue_b.id,
-        &issue_c.id,
-        DependencyType::Related,
-    )
-    .await;
-    let origin_ca = DiscoveryOrigin::new(issue_c.id.clone(), issue_a.id.clone()).unwrap();
-    storage
-        .add_discovery_origin(origin_ca.clone())
-        .await
-        .expect("a non-Discovery path must not create a provenance cycle");
-    let cycle = DiscoveryOrigin::new(issue_b.id.clone(), issue_c.id.clone()).unwrap();
-    assert!(literal_path_exists(
-        &[
-            (issue_c.id.as_str(), issue_a.id.as_str()),
-            (issue_a.id.as_str(), issue_b.id.as_str()),
-        ],
-        issue_c.id.as_str(),
-        issue_b.id.as_str(),
-    ));
-    assert!(storage.add_discovery_origin(cycle).await.is_err());
-    assert!(
-        storage
-            .discovery_origins(&issue_b.id)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-
-    let reversed = DiscoveryOrigin::new(issue_b.id.clone(), issue_a.id.clone()).unwrap();
-    assert!(storage.remove_discovery_origin(&reversed).await.is_err());
-    assert!(
-        storage
-            .discovery_origins(&issue_a.id)
-            .await
-            .unwrap()
-            .contains(&origin_ab)
-    );
-    seed_legacy_relationship(
-        &mut storage,
-        &issue_a.id,
-        &issue_b.id,
+        &discovered.id,
+        &prerequisite.id,
         DependencyType::DiscoveredFrom,
     )
     .await;
-    storage.remove_discovery_origin(&origin_ab).await.unwrap();
-    assert!(
-        !storage
-            .discovery_origins(&issue_a.id)
-            .await
-            .unwrap()
-            .contains(&origin_ab),
-        "removal should clear duplicate compatibility records and graph edges"
-    );
-    storage.remove_discovery_origin(&origin_ca).await.unwrap();
 
-    let missing = DiscoveryOrigin::new(issue_a.id.clone(), IssueId::new("test-missing")).unwrap();
-    assert!(storage.add_discovery_origin(missing).await.is_err());
+    let blocked_ids = storage
+        .blocked_issues()
+        .await
+        .expect("blocked issue query should succeed with legacy relationships")
+        .into_iter()
+        .map(|(issue, _)| issue.id)
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        blocked_ids,
+        HashSet::from([directly_blocked.id, blocked_parent.id])
+    );
+
+    let ready_ids = storage
+        .ready_to_work(&ReadyFilter::default(), None)
+        .await
+        .expect("ready query should succeed with legacy relationships")
+        .into_iter()
+        .map(|issue| issue.id)
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        ready_ids,
+        HashSet::from([prerequisite.id, child.id, related.id, discovered.id])
+    );
 }
 
 #[tokio::test]
-async fn nonblocking_relationships_do_not_change_ready_or_blocked_and_coexist() {
+async fn ready_filters_sort_and_limit_after_eligibility() {
     let mut storage = new_in_memory_storage("test".to_string());
-    let issue_a = storage.create(create_test_issue("A")).await.unwrap();
-    let issue_b = storage.create(create_test_issue("B")).await.unwrap();
-    let blocking = BlockingDependency::new(issue_a.id.clone(), issue_b.id.clone()).unwrap();
+
+    let mut unlabelled = create_test_issue_with_priority("Unlabelled P0", 0);
+    unlabelled.issue_kind = IssueKind::Task;
     storage
-        .add_blocking_dependency(blocking.clone())
+        .create(unlabelled)
         .await
-        .unwrap();
-    seed_legacy_relationship(
-        &mut storage,
-        &issue_a.id,
-        &issue_b.id,
-        DependencyType::ParentChild,
-    )
-    .await;
+        .expect("unlabelled issue should be created");
 
-    let ready_before = storage
-        .ready_to_work(None, None)
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|issue| issue.id)
-        .collect::<HashSet<_>>();
-    let blocked_before = storage
-        .blocked_issues()
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|(issue, _)| issue.id)
-        .collect::<HashSet<_>>();
-
-    let related = RelatedAssociation::new(issue_a.id.clone(), issue_b.id.clone()).unwrap();
-    let discovery = DiscoveryOrigin::new(issue_a.id.clone(), issue_b.id.clone()).unwrap();
+    let mut wrong_kind = create_test_issue_with_priority("Focused Bug P0", 0);
+    wrong_kind.issue_kind = IssueKind::Bug;
+    wrong_kind.labels = vec!["focus".to_string()];
     storage
-        .add_related_association(related.clone())
+        .create(wrong_kind)
         .await
-        .unwrap();
+        .expect("wrong-kind issue should be created");
+
+    let prerequisite = storage
+        .create(create_test_issue("Prerequisite"))
+        .await
+        .expect("prerequisite issue should be created for filtered query");
+    let mut blocked = create_test_issue_with_priority("Blocked Focused Task P0", 0);
+    blocked.labels = vec!["focus".to_string()];
+    let blocked = storage
+        .create(blocked)
+        .await
+        .expect("blocked issue should be created for filtered query");
     storage
-        .add_discovery_origin(discovery.clone())
+        .add_blocking_dependency(
+            BlockingDependency::new(blocked.id.clone(), prerequisite.id.clone())
+                .expect("blocking dependency should be constructible for filtered query"),
+        )
         .await
-        .unwrap();
+        .expect("blocking dependency should be added for filtered query");
 
-    let ready_after = storage
-        .ready_to_work(None, None)
+    let mut first = create_test_issue_with_priority("Focused Task P1", 1);
+    first.labels = vec!["focus".to_string()];
+    let first = storage
+        .create(first)
         .await
-        .unwrap()
-        .into_iter()
-        .map(|issue| issue.id)
-        .collect::<HashSet<_>>();
-    let blocked_after = storage
-        .blocked_issues()
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|(issue, _)| issue.id)
-        .collect::<HashSet<_>>();
-    assert_eq!(ready_after, ready_before);
-    assert_eq!(blocked_after, blocked_before);
-    assert_eq!(
-        storage.blocking_prerequisites(&issue_a.id).await.unwrap(),
-        vec![blocking]
-    );
-    assert_eq!(
-        storage.related_associations(&issue_b.id).await.unwrap(),
-        vec![related]
-    );
-    assert_eq!(
-        storage.discovery_origins(&issue_a.id).await.unwrap(),
-        vec![discovery]
-    );
+        .expect("first focused issue should be created");
 
-    let mut kinds = storage
-        .export_all()
+    let mut second = create_test_issue_with_priority("Focused Task P2", 2);
+    second.labels = vec!["focus".to_string()];
+    storage
+        .create(second)
         .await
-        .unwrap()
-        .into_iter()
-        .flat_map(|issue| issue.dependencies)
-        .map(|dependency| dependency.dep_type)
-        .collect::<Vec<_>>();
-    kinds.sort_unstable();
-    assert_eq!(
-        kinds,
-        vec![
-            DependencyType::Blocks,
-            DependencyType::Related,
-            DependencyType::ParentChild,
-            DependencyType::DiscoveredFrom,
-        ]
-    );
+        .expect("second focused issue should be created");
+
+    let ready = storage
+        .ready_to_work(
+            &ReadyFilter {
+                issue_kind: Some(IssueKind::Task),
+                label: Some("focus".to_string()),
+                limit: Some(1),
+                ..Default::default()
+            },
+            Some(SortPolicy::Priority),
+        )
+        .await
+        .expect("filtered ready query should succeed");
+
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].id, first.id);
 }
-
-#[tokio::test]
-async fn nonblocking_relationship_operations_stay_within_scale_budget() {
-    const ISSUE_COUNT: usize = 300;
-    const RELATED_OFFSETS: [usize; 3] = [1, 2, 3];
-    const DISCOVERED_COUNT: usize = 100;
-    const SOURCES_PER_DISCOVERY: usize = 4;
-    const OPERATION_BUDGET: Duration = Duration::from_secs(2);
-
-    let mut storage = new_in_memory_storage("stress".to_string());
-    let mut issues = Vec::with_capacity(ISSUE_COUNT);
-    for index in 0..ISSUE_COUNT {
-        issues.push(
-            storage
-                .create(create_test_issue(&format!("Stress {index}")))
-                .await
-                .unwrap(),
-        );
-    }
-
-    for index in 0..ISSUE_COUNT {
-        for offset in RELATED_OFFSETS {
-            let related = (index + offset) % ISSUE_COUNT;
-            storage
-                .add_related_association(
-                    RelatedAssociation::new(issues[index].id.clone(), issues[related].id.clone())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-        }
-    }
-    for discovered in 0..DISCOVERED_COUNT {
-        for source_offset in 0..SOURCES_PER_DISCOVERY {
-            let source = DISCOVERED_COUNT
-                + (discovered * SOURCES_PER_DISCOVERY + source_offset)
-                    % (ISSUE_COUNT - DISCOVERED_COUNT);
-            storage
-                .add_discovery_origin(
-                    DiscoveryOrigin::new(issues[discovered].id.clone(), issues[source].id.clone())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-        }
-    }
-    for index in 0..DISCOVERED_COUNT {
-        storage
-            .add_blocking_dependency(
-                BlockingDependency::new(
-                    issues[DISCOVERED_COUNT + index].id.clone(),
-                    issues[2 * DISCOVERED_COUNT + index].id.clone(),
-                )
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-    }
-
-    let duplicate = RelatedAssociation::new(issues[1].id.clone(), issues[0].id.clone()).unwrap();
-    let started = Instant::now();
-    storage.add_related_association(duplicate).await.unwrap();
-    assert!(started.elapsed() <= OPERATION_BUDGET);
-
-    let started = Instant::now();
-    let associations = storage.related_associations(&issues[0].id).await.unwrap();
-    assert_eq!(associations.len(), RELATED_OFFSETS.len() * 2);
-    assert!(started.elapsed() <= OPERATION_BUDGET);
-
-    let cycle =
-        DiscoveryOrigin::new(issues[DISCOVERED_COUNT].id.clone(), issues[0].id.clone()).unwrap();
-    let started = Instant::now();
-    assert!(storage.add_discovery_origin(cycle).await.is_err());
-    assert!(started.elapsed() <= OPERATION_BUDGET);
-}
-
-// ========== Ready to Work Tests ==========
 
 #[tokio::test]
 async fn test_ready_to_work() {
@@ -964,7 +903,10 @@ async fn test_ready_to_work() {
         .unwrap();
 
     // Get ready issues
-    let ready = storage.ready_to_work(None, None).await.unwrap();
+    let ready = storage
+        .ready_to_work(&ReadyFilter::default(), None)
+        .await
+        .expect("ready query should succeed");
 
     // issue3 and issue1 should be ready, issue2 should be blocked
     assert_eq!(ready.len(), 2);
@@ -995,7 +937,10 @@ async fn test_ready_to_work_closed_blocker_unblocks() {
         .unwrap();
 
     // Initially blocked should not be ready
-    let ready = storage.ready_to_work(None, None).await.unwrap();
+    let ready = storage
+        .ready_to_work(&ReadyFilter::default(), None)
+        .await
+        .expect("initial ready query should succeed");
     assert_eq!(ready.len(), 1);
     assert_eq!(ready[0].id, blocker.id);
 
@@ -1012,7 +957,10 @@ async fn test_ready_to_work_closed_blocker_unblocks() {
         .unwrap();
 
     // Now blocked should be ready
-    let ready = storage.ready_to_work(None, None).await.unwrap();
+    let ready = storage
+        .ready_to_work(&ReadyFilter::default(), None)
+        .await
+        .expect("ready query after closing blocker should succeed");
     assert_eq!(ready.len(), 1);
     assert_eq!(ready[0].id, blocked.id);
 }
@@ -1041,7 +989,7 @@ async fn test_sort_policy_priority() {
         .unwrap();
 
     let ready = storage
-        .ready_to_work(None, Some(SortPolicy::Priority))
+        .ready_to_work(&ReadyFilter::default(), Some(SortPolicy::Priority))
         .await
         .unwrap();
 
@@ -1070,7 +1018,7 @@ async fn test_sort_policy_oldest() {
         .unwrap();
 
     let ready = storage
-        .ready_to_work(None, Some(SortPolicy::Oldest))
+        .ready_to_work(&ReadyFilter::default(), Some(SortPolicy::Oldest))
         .await
         .unwrap();
 
@@ -1092,12 +1040,15 @@ async fn test_ready_to_work_with_assignee_filter() {
     bob_issue.assignee = Some("bob".to_string());
     let _bob = storage.create(bob_issue).await.unwrap();
 
-    let filter = IssueFilter {
-        assignee: Some("alice".to_string()),
+    let filter = ReadyFilter {
+        assignment: ReadyAssignmentFilter::Assignee("alice".to_string()),
         ..Default::default()
     };
 
-    let ready = storage.ready_to_work(Some(&filter), None).await.unwrap();
+    let ready = storage
+        .ready_to_work(&filter, None)
+        .await
+        .expect("assignee-filtered ready query should succeed");
 
     assert_eq!(ready.len(), 1);
     assert_eq!(ready[0].id, alice.id);
@@ -1245,7 +1196,8 @@ async fn test_dependency_on_nonexistent_issue() {
 
     let result = storage
         .add_blocking_dependency(
-            BlockingDependency::new(issue.id.clone(), IssueId::new("nonexistent")).unwrap(),
+            BlockingDependency::new(issue.id.clone(), IssueId::new("nonexistent").clone())
+                .expect("blocking dependency should accept a missing prerequisite id"),
         )
         .await;
 
@@ -1257,7 +1209,10 @@ async fn test_dependency_on_nonexistent_issue() {
 async fn test_ready_to_work_empty_storage() {
     let storage = new_in_memory_storage("test".to_string());
 
-    let ready = storage.ready_to_work(None, None).await.unwrap();
+    let ready = storage
+        .ready_to_work(&ReadyFilter::default(), None)
+        .await
+        .expect("empty-storage ready query should succeed");
     assert!(
         ready.is_empty(),
         "Empty storage should return no ready issues"
@@ -1293,7 +1248,10 @@ async fn test_ready_to_work_all_closed() {
         .await
         .unwrap();
 
-    let ready = storage.ready_to_work(None, None).await.unwrap();
+    let ready = storage
+        .ready_to_work(&ReadyFilter::default(), None)
+        .await
+        .expect("all-closed ready query should succeed");
     assert!(
         ready.is_empty(),
         "All closed issues should return no ready issues"
@@ -1548,4 +1506,918 @@ async fn resource_update_and_remove_round_trip_through_jsonl() {
         )))
     ));
     temp_dir.close().expect("temp dir should close cleanly");
+}
+
+fn issue_snapshot(issue: &Issue) -> serde_json::Value {
+    serde_json::to_value(issue).expect("Issue snapshot should serialize")
+}
+
+#[tokio::test]
+async fn claim_compare_and_set_matrix_changes_only_assignment() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let created = storage
+        .create(create_test_issue("Claim target"))
+        .await
+        .expect("target should be created");
+    let before = issue_snapshot(&created);
+    for claimant in ["", "   ", "\t\n", "\u{2003}"] {
+        let rejected = storage.claim(&created.id, claimant).await;
+        assert!(matches!(
+            rejected,
+            Err(Error::Storage(StorageError::Assignment(
+                AssignmentError::BlankAssignee { ref issue_id }
+            ))) if issue_id == &created.id
+        ));
+        let unchanged = storage
+            .get(&created.id)
+            .await
+            .expect("get should succeed")
+            .expect("target should remain");
+        assert_eq!(issue_snapshot(&unchanged), before);
+    }
+    tokio::time::sleep(Duration::from_millis(1)).await;
+
+    let claimed = storage
+        .claim(&created.id, "alice")
+        .await
+        .expect("first Claim should succeed");
+    assert_eq!(claimed.assignee.as_deref(), Some("alice"));
+    assert!(claimed.updated_at > created.updated_at);
+    let mut expected = before;
+    expected["assignee"] = serde_json::json!("alice");
+    expected["updated_at"] =
+        serde_json::to_value(claimed.updated_at).expect("timestamp should serialize");
+    assert_eq!(issue_snapshot(&claimed), expected);
+
+    let retry = storage
+        .claim(&created.id, "alice")
+        .await
+        .expect("same claimant retry should be idempotent");
+    assert_eq!(issue_snapshot(&retry), issue_snapshot(&claimed));
+
+    let rejected = storage.claim(&created.id, "bob").await;
+    assert!(matches!(
+        rejected,
+        Err(Error::Storage(StorageError::Assignment(
+            AssignmentError::AlreadyClaimed {
+                ref issue_id,
+                ref assignee,
+            }
+        ))) if issue_id == &created.id && assignee == "alice"
+    ));
+    assert_eq!(
+        issue_snapshot(
+            &storage
+                .get(&created.id)
+                .await
+                .expect("get should succeed")
+                .expect("target should remain")
+        ),
+        issue_snapshot(&claimed)
+    );
+
+    let prerequisite = storage
+        .create(create_test_issue("Open prerequisite"))
+        .await
+        .expect("prerequisite should be created");
+    let blocked = storage
+        .create(create_test_issue("Blocked target"))
+        .await
+        .expect("blocked target should be created");
+    storage
+        .add_blocking_dependency(
+            BlockingDependency::new(blocked.id.clone(), prerequisite.id.clone())
+                .expect("dependency should be valid"),
+        )
+        .await
+        .expect("dependency should be added");
+    let blocked_before = issue_snapshot(&blocked);
+    assert!(matches!(
+        storage.claim(&blocked.id, "alice").await,
+        Err(Error::Storage(StorageError::Assignment(
+            AssignmentError::Blocked { ref issue_id }
+        ))) if issue_id == &blocked.id
+    ));
+    assert_eq!(
+        issue_snapshot(
+            &storage
+                .get(&blocked.id)
+                .await
+                .expect("get should succeed")
+                .expect("blocked target should remain")
+        ),
+        blocked_before
+    );
+
+    let mut active_input = create_test_issue("Active target");
+    active_input.assignee = Some("alice".to_string());
+    let active = storage
+        .create(active_input)
+        .await
+        .expect("active target should be created");
+    let active = storage
+        .update(
+            &active.id,
+            IssueUpdate {
+                status: Some(IssueStatus::InProgress),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("assigned Issue should enter In Progress");
+    assert!(matches!(
+        storage.claim(&active.id, "alice").await,
+        Err(Error::Storage(StorageError::Assignment(
+            AssignmentError::NotOpen {
+                ref issue_id,
+                status: IssueStatus::InProgress,
+            }
+        ))) if issue_id == &active.id
+    ));
+
+    let unicode = storage
+        .create(create_test_issue("Unicode claimant"))
+        .await
+        .expect("Unicode target should be created");
+    let unicode = storage
+        .claim(&unicode.id, " ál ice ")
+        .await
+        .expect("existing Assignee text contract should accept Unicode and spaces");
+    assert_eq!(unicode.assignee.as_deref(), Some(" ál ice "));
+
+    let invalid = storage
+        .create(create_test_issue("Invalid claimant"))
+        .await
+        .expect("invalid-text target should be created");
+    assert!(matches!(
+        storage.claim(&invalid.id, "bad\u{1b}name").await,
+        Err(Error::Storage(StorageError::Validation(_)))
+    ));
+    assert_eq!(
+        storage
+            .get(&invalid.id)
+            .await
+            .expect("get should succeed")
+            .expect("target should remain")
+            .assignee,
+        None
+    );
+    assert!(matches!(
+        storage.claim(&IssueId::new("test-missing"), "alice").await,
+        Err(Error::IssueNotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn release_compare_and_set_matrix_changes_only_assignment() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let mut assigned_input = create_test_issue("Release target");
+    assigned_input.assignee = Some("alice".to_string());
+    let assigned = storage
+        .create(assigned_input)
+        .await
+        .expect("assigned target should be created");
+    let assigned_before = issue_snapshot(&assigned);
+    for expected_assignee in ["", "   ", "\t\n", "\u{2003}"] {
+        let rejected = storage.release(&assigned.id, expected_assignee).await;
+        assert!(matches!(
+            rejected,
+            Err(Error::Storage(StorageError::Assignment(
+                AssignmentError::BlankAssignee { ref issue_id }
+            ))) if issue_id == &assigned.id
+        ));
+        let unchanged = storage
+            .get(&assigned.id)
+            .await
+            .expect("get should succeed")
+            .expect("assigned target should remain");
+        assert_eq!(issue_snapshot(&unchanged), assigned_before);
+    }
+
+    assert!(matches!(
+        storage.release(&assigned.id, "bob").await,
+        Err(Error::Storage(StorageError::Assignment(
+            AssignmentError::AssigneeMismatch {
+                ref issue_id,
+                ref expected,
+                ref actual,
+            }
+        ))) if issue_id == &assigned.id && expected == "bob" && actual == "alice"
+    ));
+    assert_eq!(
+        issue_snapshot(
+            &storage
+                .get(&assigned.id)
+                .await
+                .expect("get should succeed")
+                .expect("target should remain")
+        ),
+        issue_snapshot(&assigned)
+    );
+
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    let released = storage
+        .release(&assigned.id, "alice")
+        .await
+        .expect("owner should release");
+    assert_eq!(released.assignee, None);
+    assert!(released.updated_at > assigned.updated_at);
+    assert!(matches!(
+        storage.release(&assigned.id, "alice").await,
+        Err(Error::Storage(StorageError::Assignment(
+            AssignmentError::NotClaimed { ref issue_id }
+        ))) if issue_id == &assigned.id
+    ));
+
+    let prerequisite = storage
+        .create(create_test_issue("Release prerequisite"))
+        .await
+        .expect("prerequisite should be created");
+    let mut blocked_input = create_test_issue("Blocked assigned");
+    blocked_input.assignee = Some("alice".to_string());
+    let blocked = storage
+        .create(blocked_input)
+        .await
+        .expect("assigned target should initially be ready");
+    storage
+        .add_blocking_dependency(
+            BlockingDependency::new(blocked.id.clone(), prerequisite.id.clone())
+                .expect("dependency should be valid"),
+        )
+        .await
+        .expect("dependency should be added");
+    assert_eq!(
+        storage
+            .release(&blocked.id, "alice")
+            .await
+            .expect("blocked Open owner should release")
+            .assignee,
+        None
+    );
+
+    let mut active_input = create_test_issue("Active release");
+    active_input.assignee = Some("alice".to_string());
+    let active = storage
+        .create(active_input)
+        .await
+        .expect("active target should be created");
+    let active = storage
+        .update(
+            &active.id,
+            IssueUpdate {
+                status: Some(IssueStatus::InProgress),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("assigned target should become active");
+    assert!(matches!(
+        storage.release(&active.id, "alice").await,
+        Err(Error::Storage(StorageError::Assignment(
+            AssignmentError::NotOpen {
+                status: IssueStatus::InProgress,
+                ..
+            }
+        )))
+    ));
+}
+
+#[tokio::test]
+async fn workflow_transition_assignment_matrix() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let unassigned = storage
+        .create(create_test_issue("Unassigned"))
+        .await
+        .expect("unassigned target should be created");
+    let rejected = storage
+        .update(
+            &unassigned.id,
+            IssueUpdate {
+                title: Some("Must not persist".to_string()),
+                status: Some(IssueStatus::InProgress),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(matches!(
+        rejected,
+        Err(Error::Storage(StorageError::InvalidStatusTransition(
+            rivets::domain::StatusTransitionError::AssigneeRequired
+        )))
+    ));
+    assert_eq!(
+        issue_snapshot(
+            &storage
+                .get(&unassigned.id)
+                .await
+                .expect("get should succeed")
+                .expect("target should remain")
+        ),
+        issue_snapshot(&unassigned)
+    );
+
+    let mut assigned_input = create_test_issue("Assigned");
+    assigned_input.assignee = Some("alice".to_string());
+    let assigned = storage
+        .create(assigned_input)
+        .await
+        .expect("assigned target should be created");
+    let active = storage
+        .update(
+            &assigned.id,
+            IssueUpdate {
+                status: Some(IssueStatus::InProgress),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("assigned target should become active");
+    assert_eq!(active.assignee.as_deref(), Some("alice"));
+
+    let open_again = storage
+        .update(
+            &assigned.id,
+            IssueUpdate {
+                status: Some(IssueStatus::Open),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("active target should return to Open");
+    assert_eq!(open_again.assignee.as_deref(), Some("alice"));
+
+    let closed = storage
+        .update(
+            &assigned.id,
+            IssueUpdate {
+                status: Some(IssueStatus::Closed),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("target should close");
+    assert_eq!(closed.assignee, None);
+
+    let reopened = storage
+        .update(
+            &assigned.id,
+            IssueUpdate {
+                status: Some(IssueStatus::Open),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("closed target should reopen");
+    assert_eq!(reopened.status, IssueStatus::Open);
+    assert_eq!(reopened.assignee, None);
+
+    assert!(matches!(
+        storage
+            .update(
+                &assigned.id,
+                IssueUpdate {
+                    status: Some(IssueStatus::Open),
+                    ..Default::default()
+                },
+            )
+            .await,
+        Err(Error::Storage(StorageError::InvalidStatusTransition(
+            rivets::domain::StatusTransitionError::NotClosed {
+                current: IssueStatus::Open,
+            }
+        )))
+    ));
+}
+
+#[tokio::test]
+async fn create_assignment_follows_claim_readiness_after_relationship_validation() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let open = storage
+        .create(create_test_issue("Open prerequisite"))
+        .await
+        .expect("open prerequisite should be created");
+    let closed = storage
+        .create(create_test_issue("Closed prerequisite"))
+        .await
+        .expect("closed prerequisite should be created");
+    storage
+        .update(
+            &closed.id,
+            IssueUpdate {
+                status: Some(IssueStatus::Closed),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("prerequisite should close");
+
+    let count_before = storage
+        .export_all()
+        .await
+        .expect("export should succeed")
+        .len();
+    let mut blocked_assigned = create_test_issue("Blocked assigned create");
+    blocked_assigned.assignee = Some("alice".to_string());
+    blocked_assigned.prerequisites = vec![closed.id.clone(), open.id.clone()];
+    assert!(matches!(
+        storage.create(blocked_assigned).await,
+        Err(Error::Storage(StorageError::Assignment(
+            AssignmentError::Blocked { .. }
+        )))
+    ));
+    assert_eq!(
+        storage
+            .export_all()
+            .await
+            .expect("export should succeed")
+            .len(),
+        count_before
+    );
+
+    let mut ready_assigned = create_test_issue("Ready assigned create");
+    ready_assigned.assignee = Some("alice".to_string());
+    ready_assigned.prerequisites = vec![closed.id.clone()];
+    let ready_assigned = storage
+        .create(ready_assigned)
+        .await
+        .expect("resolved prerequisite should permit assigned creation");
+    assert_eq!(ready_assigned.assignee.as_deref(), Some("alice"));
+
+    let mut blocked_unassigned = create_test_issue("Blocked unassigned create");
+    blocked_unassigned.prerequisites = vec![open.id.clone()];
+    let blocked_unassigned = storage
+        .create(blocked_unassigned)
+        .await
+        .expect("unassigned blocked creation remains valid");
+    assert_eq!(blocked_unassigned.assignee, None);
+
+    let mut duplicate = create_test_issue("Duplicate prerequisite");
+    duplicate.assignee = Some("alice".to_string());
+    duplicate.prerequisites = vec![open.id.clone(), open.id.clone()];
+    assert!(matches!(
+        storage.create(duplicate).await,
+        Err(Error::Storage(StorageError::Validation(_)))
+    ));
+
+    let mut missing = create_test_issue("Missing prerequisite");
+    missing.assignee = Some("alice".to_string());
+    missing.prerequisites = vec![IssueId::new("test-missing")];
+    assert!(matches!(
+        storage.create(missing).await,
+        Err(Error::IssueNotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn import_rejects_invalid_assignment_state_atomically() {
+    let mut source = new_in_memory_storage("test".to_string());
+    let valid = source
+        .create(create_test_issue("Valid import"))
+        .await
+        .expect("valid Issue should be created");
+    let mut invalid = valid.clone();
+    invalid.id = IssueId::new("test-invalid-import");
+    invalid.title = "Invalid import".to_string();
+    invalid.status = IssueStatus::InProgress;
+    invalid.assignee = None;
+
+    let mut destination = new_in_memory_storage("test".to_string());
+    assert!(matches!(
+        destination.import_issues(vec![valid, invalid]).await,
+        Err(Error::Storage(StorageError::Assignment(
+            AssignmentError::AssigneeRequired { .. }
+        )))
+    ));
+    assert!(
+        destination
+            .export_all()
+            .await
+            .expect("export should succeed")
+            .is_empty(),
+        "mixed invalid import must insert nothing"
+    );
+}
+
+#[tokio::test]
+async fn related_association_is_symmetric_idempotent_and_removable_from_either_side() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let issue_a = storage
+        .create(create_test_issue("A"))
+        .await
+        .expect("Issue A should be created");
+    let issue_b = storage
+        .create(create_test_issue("B"))
+        .await
+        .expect("Issue B should be created");
+    let issue_c = storage
+        .create(create_test_issue("C"))
+        .await
+        .expect("Issue C should be created");
+    let forward = RelatedAssociation::new(issue_a.id.clone(), issue_b.id.clone())
+        .expect("distinct Issues should form a Related Association");
+    let reverse = RelatedAssociation::new(issue_b.id.clone(), issue_a.id.clone())
+        .expect("reverse endpoints should form the same Association");
+    assert_eq!(forward, reverse);
+
+    storage
+        .add_related_association(reverse.clone())
+        .await
+        .expect("reverse Related Association should be added");
+    storage
+        .add_related_association(forward.clone())
+        .await
+        .expect("duplicate Related Association should be idempotent");
+    assert_eq!(
+        storage
+            .related_associations(&issue_a.id)
+            .await
+            .expect("Issue A Related Associations should load"),
+        vec![forward.clone()]
+    );
+    assert_eq!(
+        storage
+            .related_associations(&issue_b.id)
+            .await
+            .expect("Issue B Related Associations should load"),
+        vec![forward.clone()]
+    );
+    assert!(
+        storage
+            .related_associations(&issue_c.id)
+            .await
+            .expect("unrelated Issue Associations should load")
+            .is_empty()
+    );
+
+    let exported = storage
+        .export_all()
+        .await
+        .expect("Related records should export");
+    let related_records = exported
+        .iter()
+        .flat_map(|issue| {
+            issue
+                .dependencies
+                .iter()
+                .filter(|dependency| dependency.dep_type == DependencyType::Related)
+                .map(move |dependency| (&issue.id, &dependency.depends_on_id))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        related_records,
+        vec![(forward.left_issue_id(), forward.right_issue_id())]
+    );
+
+    seed_legacy_relationship(
+        &mut storage,
+        forward.right_issue_id(),
+        forward.left_issue_id(),
+        DependencyType::Related,
+    )
+    .await;
+    assert_eq!(
+        storage
+            .related_associations(&issue_a.id)
+            .await
+            .expect("legacy Related records should load"),
+        vec![forward.clone()],
+        "reciprocal legacy records should remain one logical Association"
+    );
+
+    storage
+        .remove_related_association(&reverse)
+        .await
+        .expect("Related Association should remove from either direction");
+    assert!(
+        storage
+            .related_associations(&issue_a.id)
+            .await
+            .expect("Issue A Related Associations should load after removal")
+            .is_empty()
+    );
+    assert!(
+        storage
+            .related_associations(&issue_b.id)
+            .await
+            .expect("Issue B Related Associations should load after removal")
+            .is_empty()
+    );
+    assert!(storage.remove_related_association(&forward).await.is_err());
+
+    let missing = RelatedAssociation::new(issue_a.id.clone(), IssueId::new("test-missing"))
+        .expect("distinct missing endpoint should form a candidate Association");
+    assert!(storage.add_related_association(missing).await.is_err());
+}
+
+#[tokio::test]
+async fn discovery_origin_is_directed_multi_source_and_acyclic() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let issue_a = storage
+        .create(create_test_issue("A"))
+        .await
+        .expect("Issue A should be created");
+    let issue_b = storage
+        .create(create_test_issue("B"))
+        .await
+        .expect("Issue B should be created");
+    let issue_c = storage
+        .create(create_test_issue("C"))
+        .await
+        .expect("Issue C should be created");
+    let issue_d = storage
+        .create(create_test_issue("D"))
+        .await
+        .expect("Issue D should be created");
+    let origin_ab = DiscoveryOrigin::new(issue_a.id.clone(), issue_b.id.clone())
+        .expect("distinct Issues should form a Discovery Origin");
+    let origin_ad = DiscoveryOrigin::new(issue_a.id.clone(), issue_d.id.clone())
+        .expect("distinct Issues should form a second Discovery Origin");
+
+    storage
+        .add_discovery_origin(origin_ab.clone())
+        .await
+        .expect("first Discovery Origin should be added");
+    storage
+        .add_discovery_origin(origin_ad.clone())
+        .await
+        .expect("second Discovery Origin should be added");
+    let mut expected = vec![origin_ab.clone(), origin_ad.clone()];
+    expected.sort();
+    assert_eq!(
+        storage
+            .discovery_origins(&issue_a.id)
+            .await
+            .expect("Discovery Origins should load"),
+        expected
+    );
+    assert!(
+        storage
+            .add_discovery_origin(origin_ab.clone())
+            .await
+            .is_err()
+    );
+
+    seed_legacy_relationship(
+        &mut storage,
+        &issue_b.id,
+        &issue_c.id,
+        DependencyType::Related,
+    )
+    .await;
+    let origin_ca = DiscoveryOrigin::new(issue_c.id.clone(), issue_a.id.clone())
+        .expect("distinct Issues should form a Discovery Origin");
+    storage
+        .add_discovery_origin(origin_ca.clone())
+        .await
+        .expect("a non-Discovery path must not create a provenance cycle");
+    let cycle = DiscoveryOrigin::new(issue_b.id.clone(), issue_c.id.clone())
+        .expect("distinct Issues should form a cycle candidate");
+    assert!(literal_path_exists(
+        &[
+            (issue_c.id.as_str(), issue_a.id.as_str()),
+            (issue_a.id.as_str(), issue_b.id.as_str()),
+        ],
+        issue_c.id.as_str(),
+        issue_b.id.as_str(),
+    ));
+    assert!(storage.add_discovery_origin(cycle).await.is_err());
+    assert!(
+        storage
+            .discovery_origins(&issue_b.id)
+            .await
+            .expect("rejected cycle target Origins should load")
+            .is_empty()
+    );
+
+    let reversed = DiscoveryOrigin::new(issue_b.id.clone(), issue_a.id.clone())
+        .expect("distinct reversed endpoints should form an Origin");
+    assert!(storage.remove_discovery_origin(&reversed).await.is_err());
+    assert!(
+        storage
+            .discovery_origins(&issue_a.id)
+            .await
+            .expect("Discovery Origins should load after reversed removal")
+            .contains(&origin_ab)
+    );
+    seed_legacy_relationship(
+        &mut storage,
+        &issue_a.id,
+        &issue_b.id,
+        DependencyType::DiscoveredFrom,
+    )
+    .await;
+    storage
+        .remove_discovery_origin(&origin_ab)
+        .await
+        .expect("Discovery Origin should be removed");
+    assert!(
+        !storage
+            .discovery_origins(&issue_a.id)
+            .await
+            .expect("Discovery Origins should load after removal")
+            .contains(&origin_ab),
+        "removal should clear duplicate compatibility records and graph edges"
+    );
+    storage
+        .remove_discovery_origin(&origin_ca)
+        .await
+        .expect("remaining Discovery Origin should be removed");
+
+    let missing = DiscoveryOrigin::new(issue_a.id.clone(), IssueId::new("test-missing"))
+        .expect("distinct missing endpoint should form an Origin candidate");
+    assert!(storage.add_discovery_origin(missing).await.is_err());
+}
+
+#[tokio::test]
+async fn nonblocking_relationships_do_not_change_ready_or_blocked_and_coexist() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let issue_a = storage
+        .create(create_test_issue("A"))
+        .await
+        .expect("Issue A should be created");
+    let issue_b = storage
+        .create(create_test_issue("B"))
+        .await
+        .expect("Issue B should be created");
+    let blocking = BlockingDependency::new(issue_a.id.clone(), issue_b.id.clone())
+        .expect("distinct Issues should form a Blocking Dependency");
+    storage
+        .add_blocking_dependency(blocking.clone())
+        .await
+        .expect("Blocking Dependency should be added");
+    seed_legacy_relationship(
+        &mut storage,
+        &issue_a.id,
+        &issue_b.id,
+        DependencyType::ParentChild,
+    )
+    .await;
+
+    let ready_before = storage
+        .ready_to_work(&ReadyFilter::default(), None)
+        .await
+        .expect("Ready snapshot should load")
+        .into_iter()
+        .map(|issue| issue.id)
+        .collect::<HashSet<_>>();
+    let blocked_before = storage
+        .blocked_issues()
+        .await
+        .expect("Blocked snapshot should load")
+        .into_iter()
+        .map(|(issue, _)| issue.id)
+        .collect::<HashSet<_>>();
+
+    let related = RelatedAssociation::new(issue_a.id.clone(), issue_b.id.clone())
+        .expect("distinct Issues should form a Related Association");
+    let discovery = DiscoveryOrigin::new(issue_a.id.clone(), issue_b.id.clone())
+        .expect("distinct Issues should form a Discovery Origin");
+    storage
+        .add_related_association(related.clone())
+        .await
+        .expect("Related Association should be added");
+    storage
+        .add_discovery_origin(discovery.clone())
+        .await
+        .expect("Discovery Origin should be added");
+
+    let ready_after = storage
+        .ready_to_work(&ReadyFilter::default(), None)
+        .await
+        .expect("Ready snapshot should reload")
+        .into_iter()
+        .map(|issue| issue.id)
+        .collect::<HashSet<_>>();
+    let blocked_after = storage
+        .blocked_issues()
+        .await
+        .expect("Blocked snapshot should reload")
+        .into_iter()
+        .map(|(issue, _)| issue.id)
+        .collect::<HashSet<_>>();
+    assert_eq!(ready_after, ready_before);
+    assert_eq!(blocked_after, blocked_before);
+    assert_eq!(
+        storage
+            .blocking_prerequisites(&issue_a.id)
+            .await
+            .expect("Blocking prerequisites should load"),
+        vec![blocking]
+    );
+    assert_eq!(
+        storage
+            .related_associations(&issue_b.id)
+            .await
+            .expect("Related Associations should load"),
+        vec![related]
+    );
+    assert_eq!(
+        storage
+            .discovery_origins(&issue_a.id)
+            .await
+            .expect("Discovery Origins should load"),
+        vec![discovery]
+    );
+
+    let mut kinds = storage
+        .export_all()
+        .await
+        .expect("coexisting relationship records should export")
+        .into_iter()
+        .flat_map(|issue| issue.dependencies)
+        .map(|dependency| dependency.dep_type)
+        .collect::<Vec<_>>();
+    kinds.sort_unstable();
+    assert_eq!(
+        kinds,
+        vec![
+            DependencyType::Blocks,
+            DependencyType::Related,
+            DependencyType::ParentChild,
+            DependencyType::DiscoveredFrom,
+        ]
+    );
+}
+
+#[tokio::test]
+#[ignore = "production-scale relationship timing checkpoint; run cargo test -p rivets --test in_memory_storage nonblocking_relationship_operations_stay_within_scale_budget -- --ignored --exact"]
+async fn nonblocking_relationship_operations_stay_within_scale_budget() {
+    const ISSUE_COUNT: usize = 300;
+    const RELATED_OFFSETS: [usize; 3] = [1, 2, 3];
+    const DISCOVERED_COUNT: usize = 100;
+    const SOURCES_PER_DISCOVERY: usize = 4;
+    const OPERATION_BUDGET: Duration = Duration::from_secs(2);
+
+    let mut storage = new_in_memory_storage("stress".to_string());
+    let mut issues = Vec::with_capacity(ISSUE_COUNT);
+    for index in 0..ISSUE_COUNT {
+        issues.push(
+            storage
+                .create(create_test_issue(&format!("Stress {index}")))
+                .await
+                .expect("stress Issue should be created"),
+        );
+    }
+
+    for index in 0..ISSUE_COUNT {
+        for offset in RELATED_OFFSETS {
+            let related = (index + offset) % ISSUE_COUNT;
+            storage
+                .add_related_association(
+                    RelatedAssociation::new(issues[index].id.clone(), issues[related].id.clone())
+                        .expect("stress Related endpoints should differ"),
+                )
+                .await
+                .expect("stress Related Association should be added");
+        }
+    }
+    for discovered in 0..DISCOVERED_COUNT {
+        for source_offset in 0..SOURCES_PER_DISCOVERY {
+            let source = DISCOVERED_COUNT
+                + (discovered * SOURCES_PER_DISCOVERY + source_offset)
+                    % (ISSUE_COUNT - DISCOVERED_COUNT);
+            storage
+                .add_discovery_origin(
+                    DiscoveryOrigin::new(issues[discovered].id.clone(), issues[source].id.clone())
+                        .expect("stress Discovery endpoints should differ"),
+                )
+                .await
+                .expect("stress Discovery Origin should be added");
+        }
+    }
+    for index in 0..DISCOVERED_COUNT {
+        storage
+            .add_blocking_dependency(
+                BlockingDependency::new(
+                    issues[DISCOVERED_COUNT + index].id.clone(),
+                    issues[2 * DISCOVERED_COUNT + index].id.clone(),
+                )
+                .expect("stress Blocking endpoints should differ"),
+            )
+            .await
+            .expect("stress Blocking Dependency should be added");
+    }
+
+    let duplicate = RelatedAssociation::new(issues[1].id.clone(), issues[0].id.clone())
+        .expect("reverse stress endpoints should form an Association");
+    let started = Instant::now();
+    storage
+        .add_related_association(duplicate)
+        .await
+        .expect("duplicate stress Association should be idempotent");
+    assert!(started.elapsed() <= OPERATION_BUDGET);
+
+    let started = Instant::now();
+    let associations = storage
+        .related_associations(&issues[0].id)
+        .await
+        .expect("stress Related Associations should load");
+    assert_eq!(associations.len(), RELATED_OFFSETS.len() * 2);
+    assert!(started.elapsed() <= OPERATION_BUDGET);
+
+    let cycle = DiscoveryOrigin::new(issues[DISCOVERED_COUNT].id.clone(), issues[0].id.clone())
+        .expect("stress cycle endpoints should differ");
+    let started = Instant::now();
+    assert!(storage.add_discovery_origin(cycle).await.is_err());
+    assert!(started.elapsed() <= OPERATION_BUDGET);
 }

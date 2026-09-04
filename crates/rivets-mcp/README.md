@@ -4,7 +4,7 @@ MCP (Model Context Protocol) server for the Rivets issue tracking system. Enable
 
 ## Features
 
-- **10 MCP tools** for complete issue management
+- **32 MCP tools** for complete issue management
 - **Multi-workspace support** - work with multiple projects in one session
 - **Stdio transport** - works with any MCP-compatible client
 - **Structured tracing** - debug with `RUST_LOG=debug`
@@ -78,19 +78,32 @@ RUST_LOG=debug rivets-mcp
 
 | Tool | Description |
 |------|-------------|
-| `ready` | Find tasks with no blockers, ready to work on |
-| `list` | List issues with optional filters (status, priority, type, assignee, label) |
-| `show` | Show detailed information about a specific issue |
-| `blocked` | Get blocked issues and what's blocking them |
+| `ready` | Find Open Issues without unresolved direct Blocking Dependencies; defaults to unassigned |
+| `list` | List Issues with optional filters (Workflow State, priority, Kind, assignee, label) |
+| `show` | Show detailed information about a specific Issue |
+| `blocked` | Get Issues with direct unresolved Blocking Dependencies and their prerequisites |
+| `stale` | Find Issues not updated within a selected period |
+| `label_list`, `label_list_all` | Read labels |
+| `resource_list` | Read Associated Resources |
+| `blocking_dependency_list`, `blocking_dependency_tree` | Read directed Blocking Dependencies |
+| `related_list` | Read symmetric Related Associations |
+| `discovery_list` | Read directed Discovery Origins |
 
 ### Modification Tools
 
 | Tool | Description |
 |------|-------------|
-| `create` | Create a new issue (bug, feature, task, epic, chore) |
-| `update` | Update an existing issue's fields |
-| `close` | Close/complete an issue |
-| `dep` | Add a dependency between issues |
+| `create` | Create a new Issue |
+| `update` | Update ordinary fields or Workflow State; Assignment is excluded |
+| `claim` | Atomically assign one Open, unblocked Issue |
+| `release` | Atomically unassign one Open Issue from its exact owner |
+| `add_note` | Append an immutable Note |
+| `close`, `reopen` | Apply Workflow State transitions |
+| `label_add`, `label_remove` | Mutate labels |
+| `resource_add`, `resource_update`, `resource_remove` | Mutate Associated Resources |
+| `blocking_dependency_add`, `blocking_dependency_remove` | Mutate directed Blocking Dependencies |
+| `related_add`, `related_remove` | Mutate symmetric Related Associations |
+| `discovery_add`, `discovery_remove` | Mutate directed Discovery Origins |
 
 ## Tool Parameters
 
@@ -106,11 +119,34 @@ Every issue tool also accepts an optional `workspace_root`. Supplying it loads a
 caches that Workspace directly; `set_context` is not required first and the default
 context is not changed.
 
+Mutating tools acquire the same persistent Workspace lock as the CLI before
+initializing or reloading cached storage. If another writer owns that Workspace,
+the JSON-RPC server returns an internal error with
+`{"retryable": true, "workspace_root": "..."}` and writes no Issue bytes.
+Queries and context inspection remain unlocked; different Workspaces remain
+independently writable.
+
+### claim / release
+
+```json
+{
+  "issue_id": "rivets-abc",
+  "assignee": "alice",
+  "workspace_root": "/path/to/your/project"
+}
+```
+
+Claim requires an Open Issue with no unresolved direct Blocking Dependency.
+Repeating the current owner's Claim is an unchanged success; another Assignee
+receives a terminal Already Claimed error. Release requires the exact owner and
+an Open Issue, but remains valid while that Issue is blocked. Only Workspace
+Busy is retryable.
+
 ### list
 
 ```json
 {
-  "status": "open",           // optional: open, in_progress, blocked, closed
+  "status": "open",           // optional: open, in_progress, closed
   "priority": 1,              // optional: 0-4
   "issue_kind": "bug",        // optional: bug, feature, task, epic, chore
   "assignee": "alice",        // optional
@@ -119,6 +155,23 @@ context is not changed.
   "workspace_root": "/path"   // optional, uses current context if omitted
 }
 ```
+
+### ready
+
+```json
+{
+  "assignee": "alice",        // optional exact selector
+  "all_assignees": false,     // optional; conflicts with assignee
+  "priority": 1,              // optional: 0-4
+  "issue_kind": "task",       // optional
+  "label": "ready-for-agent", // optional
+  "limit": 20,                // optional, default 100
+  "workspace_root": "/path"   // optional
+}
+```
+
+Omit both Assignment selectors for unassigned Ready Issues. Set
+`all_assignees` to `true` only when every Assignment should be visible.
 
 ### create
 
@@ -193,14 +246,15 @@ Logs are written to stderr (stdout is reserved for MCP protocol).
    set_context(workspace_root: "/home/user/myproject")
    ```
 
-2. **Find ready work**:
+2. **Find unassigned Ready work**:
    ```
    ready(limit: 5, priority: 1)
    ```
 
-3. **Claim a task**:
+3. **Claim and start a task**:
    ```
-   update(issue_id: "rivets-abc", status: "in_progress", assignee: "me")
+   claim(issue_id: "rivets-abc", assignee: "me")
+   update(issue_id: "rivets-abc", status: "in_progress")
    ```
 
 4. **Complete the task**:

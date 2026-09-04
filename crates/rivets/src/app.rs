@@ -17,9 +17,10 @@
 //! }
 //! ```
 
-use crate::commands::init::{CONFIG_FILE_NAME, RIVETS_DIR_NAME, RivetsConfig, find_rivets_root};
+use crate::commands::init::{CONFIG_FILE_NAME, RivetsConfig, find_rivets_root};
 use crate::error::{ConfigError, Result};
 use crate::storage::{IssueStorage, create_storage};
+use crate::workspace_lock::{RIVETS_DIR_NAME, WorkspaceMutationLock};
 use std::path::{Path, PathBuf};
 
 /// Application context for CLI operations.
@@ -36,6 +37,9 @@ pub struct App {
 
     /// Issue ID prefix from configuration
     prefix: String,
+
+    /// Durable mutation ownership retained through save and error recovery.
+    _mutation_lock: Option<WorkspaceMutationLock>,
 }
 
 impl std::fmt::Debug for App {
@@ -44,6 +48,7 @@ impl std::fmt::Debug for App {
             .field("rivets_dir", &self.rivets_dir)
             .field("prefix", &self.prefix)
             .field("storage", &"<dyn IssueStorage>")
+            .field("mutation_locked", &self._mutation_lock.is_some())
             .finish()
     }
 }
@@ -65,16 +70,34 @@ impl App {
     /// - Configuration cannot be loaded
     /// - Storage initialization fails
     pub async fn from_directory(working_dir: &Path) -> Result<Self> {
-        // Find rivets root directory
         let root_dir = find_rivets_root(working_dir).ok_or(ConfigError::NotInitialized)?;
+        Self::from_root(root_dir, None).await
+    }
 
+    /// Create an App that exclusively owns one existing-Workspace mutation.
+    ///
+    /// The durable lock is acquired before configuration or storage is loaded
+    /// and remains owned until the returned App is dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::error::Error::WorkspaceBusy`] on contention, or the
+    /// same discovery, configuration, and storage errors as
+    /// [`from_directory`](Self::from_directory).
+    pub async fn from_directory_for_mutation(working_dir: &Path) -> Result<Self> {
+        let root_dir = find_rivets_root(working_dir).ok_or(ConfigError::NotInitialized)?;
+        let mutation_lock = WorkspaceMutationLock::try_acquire(&root_dir)?;
+        let canonical_root = mutation_lock.workspace_root().to_path_buf();
+        Self::from_root(canonical_root, Some(mutation_lock)).await
+    }
+
+    async fn from_root(
+        root_dir: PathBuf,
+        mutation_lock: Option<WorkspaceMutationLock>,
+    ) -> Result<Self> {
         let rivets_dir = root_dir.join(RIVETS_DIR_NAME);
         let config_path = rivets_dir.join(CONFIG_FILE_NAME);
-
-        // Load configuration
         let config = RivetsConfig::load(&config_path).await?;
-
-        // Create storage based on configuration
         let backend = config.storage.to_backend(&root_dir)?;
         let storage = create_storage(backend, config.issue_prefix.clone()).await?;
 
@@ -82,6 +105,7 @@ impl App {
             storage,
             rivets_dir,
             prefix: config.issue_prefix,
+            _mutation_lock: mutation_lock,
         })
     }
 
@@ -158,5 +182,24 @@ mod tests {
 
         let err = result.unwrap_err().to_string();
         assert!(err.contains("Not a rivets repository"));
+    }
+
+    #[tokio::test]
+    async fn mutation_app_owns_lock_until_drop() {
+        let temp_dir = TempDir::new().expect("mutation test temporary directory should be created");
+        init::init(temp_dir.path(), Some("test"))
+            .await
+            .expect("mutation test workspace should initialize");
+        let app = App::from_directory_for_mutation(temp_dir.path())
+            .await
+            .expect("mutation App should acquire");
+        assert!(matches!(
+            WorkspaceMutationLock::try_acquire(temp_dir.path()),
+            Err(crate::error::Error::WorkspaceBusy { .. })
+        ));
+        drop(app);
+        let reacquired = WorkspaceMutationLock::try_acquire(temp_dir.path())
+            .expect("dropping App should release");
+        drop(reacquired);
     }
 }

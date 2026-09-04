@@ -9,8 +9,8 @@
 
 use chrono::{DateTime, Utc};
 use rivets::domain::{
-    BlockingDependency, DiscoveryOrigin, Issue, IssueKind, IssueStatus, RelatedAssociation,
-    ResourceTarget, StatusTransitionError, WorkspacePath,
+    AssignmentError, BlockingDependency, DiscoveryOrigin, Issue, IssueKind, IssueStatus,
+    RelatedAssociation, ResourceTarget, StatusTransitionError, WorkspacePath,
 };
 use rivets_mcp::context::Context;
 use rivets_mcp::error::Error;
@@ -22,6 +22,7 @@ use rivets_mcp::tools::Tools;
 use rmcp::model::Content;
 use rstest::rstest;
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::RwLock;
@@ -46,6 +47,7 @@ fn ready_params(
         priority,
         kind: kind_input(issue_kind),
         assignee,
+        all_assignees: false,
         label,
         workspace_root: workspace_root.map(str::to_string),
     }
@@ -97,7 +99,7 @@ fn create_params(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
 fn update_params(
     issue_id: &str,
     title: Option<String>,
@@ -105,25 +107,24 @@ fn update_params(
     status: Option<&str>,
     priority: Option<u8>,
     issue_kind: Option<&str>,
-    assignee: Option<String>,
     design: Option<String>,
     acceptance_criteria: Option<String>,
     labels: Option<Vec<String>>,
     workspace_root: Option<&str>,
 ) -> UpdateParams {
-    UpdateParams {
-        issue_id: issue_id.to_string(),
-        status: status.map(str::to_string),
-        priority,
-        kind: kind_input(issue_kind),
-        assignee,
-        title,
-        description,
-        design,
-        acceptance_criteria,
-        labels,
-        workspace_root: workspace_root.map(str::to_string),
-    }
+    serde_json::from_value(serde_json::json!({
+        "issue_id": issue_id,
+        "status": status,
+        "priority": priority,
+        "issue_kind": issue_kind,
+        "title": title,
+        "description": description,
+        "design": design,
+        "acceptance_criteria": acceptance_criteria,
+        "labels": labels,
+        "workspace_root": workspace_root,
+    }))
+    .expect("update parameters should deserialize")
 }
 
 mod helpers {
@@ -511,7 +512,7 @@ async fn mcp_full_issue_json_golden() {
         "status": "closed",
         "priority": 1,
         "issue_kind": "feature",
-        "assignee": "golden-owner",
+        "assignee": null,
         "labels": ["golden", "wire"],
         "design": "Pin the canonical Issue wire shape.",
         "acceptance_criteria": "- [x] Exact fields\n- [x] Stable nested arrays",
@@ -666,55 +667,27 @@ async fn close_rejects_already_closed_issue_without_mutation() {
     );
 }
 
-/// ADR-0005: the domain rejects reopening a non-closed Issue, and MCP
-/// surfaces the identical observable message the CLI prints.
-#[rstest]
-#[case::open(None, IssueStatus::Open)]
-#[case::in_progress(Some("in_progress"), IssueStatus::InProgress)]
-#[case::blocked(Some("blocked"), IssueStatus::Blocked)]
+/// ADR-0005: reopening an already Open Issue remains a typed rejection.
 #[tokio::test]
-async fn reopen_rejects_non_closed_issue_without_mutation(
-    #[case] setup_status: Option<&str>,
-    #[case] expected_current: IssueStatus,
-) {
+async fn reopen_rejects_open_issue_without_mutation() {
     let workspace = create_temp_workspace();
     let tools = create_tools();
     set_context(&tools, workspace.path()).await;
-    let issue = create_issue(&tools, "Not closed").await;
-    if let Some(status) = setup_status {
-        tools
-            .update(update_params(
-                issue.id.as_str(),
-                None,
-                None,
-                Some(status),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            ))
-            .await
-            .expect("status setup should succeed");
-    }
+    let issue = create_issue(&tools, "Already open").await;
 
     let rejected = tools
         .reopen(issue.id.as_str(), Some("Not done yet".to_string()), None)
         .await
-        .expect_err("reopening a non-closed Issue must be rejected");
-    assert!(
-        matches!(
-            &rejected,
-            Error::InvalidStatusTransition(StatusTransitionError::NotClosed { current })
-                if *current == expected_current
-        ),
-        "unexpected error: {rejected:?}"
-    );
+        .expect_err("reopening an Open Issue must be rejected");
+    assert!(matches!(
+        &rejected,
+        Error::InvalidStatusTransition(StatusTransitionError::NotClosed {
+            current: IssueStatus::Open
+        })
+    ));
     assert_eq!(
         rejected.to_string(),
-        format!("Issue is not closed (status: {expected_current})"),
+        "Issue is not closed (status: open)",
         "MCP must surface the domain message the CLI prints"
     );
 
@@ -722,7 +695,7 @@ async fn reopen_rejects_non_closed_issue_without_mutation(
         .show(issue.id.as_str(), None)
         .await
         .expect("show should succeed after a rejected reopen");
-    assert_eq!(unchanged.status, expected_current);
+    assert_eq!(unchanged.status, IssueStatus::Open);
     assert_eq!(
         unchanged.notes().len(),
         0,
@@ -730,6 +703,285 @@ async fn reopen_rejects_non_closed_issue_without_mutation(
     );
 }
 
+/// Dedicated Reopen is Closed-only; generic Update retains the active-to-Open path.
+#[tokio::test]
+async fn reopen_rejects_in_progress_while_generic_update_returns_to_open() {
+    let workspace = create_temp_workspace();
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+    let issue = tools
+        .create(create_params(
+            "Active work".to_string(),
+            None,
+            None,
+            None,
+            Some("active-owner".to_string()),
+            None,
+            None,
+            None,
+            None,
+        ))
+        .await
+        .expect("create should succeed");
+    let active = tools
+        .update(update_params(
+            issue.id.as_str(),
+            None,
+            None,
+            Some("in_progress"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ))
+        .await
+        .expect("status setup should succeed");
+
+    let rejected = tools
+        .reopen(issue.id.as_str(), Some("Paused".to_string()), None)
+        .await
+        .expect_err("dedicated Reopen must reject In Progress");
+    assert!(matches!(
+        rejected,
+        Error::InvalidStatusTransition(StatusTransitionError::NotClosed {
+            current: IssueStatus::InProgress
+        })
+    ));
+    let unchanged = tools
+        .show(issue.id.as_str(), None)
+        .await
+        .expect("rejected Reopen target should remain readable");
+    assert_eq!(unchanged.status, IssueStatus::InProgress);
+    assert_eq!(unchanged.assignee, active.assignee);
+    assert!(unchanged.notes().is_empty());
+
+    let returned = tools
+        .update(update_params(
+            issue.id.as_str(),
+            None,
+            None,
+            Some("open"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ))
+        .await
+        .expect("generic Update should retain active-to-Open transition");
+    assert_eq!(returned.status, IssueStatus::Open);
+    assert_eq!(returned.assignee, active.assignee);
+}
+#[tokio::test]
+async fn claim_release_contract_survives_context_restart() {
+    let workspace = create_temp_workspace();
+    let workspace_root = workspace.path().to_string_lossy().into_owned();
+    let tools = create_tools();
+
+    assert!(matches!(
+        tools.claim("test-missing", "alice", None).await,
+        Err(Error::NoContext)
+    ));
+
+    let created = tools
+        .create(create_params(
+            "MCP Claim target".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&workspace_root),
+        ))
+        .await
+        .expect("explicit Workspace create should succeed");
+    let claimed = tools
+        .claim(created.id.as_str(), "alice", Some(&workspace_root))
+        .await
+        .expect("explicit Workspace Claim should succeed");
+    assert_eq!(claimed.assignee.as_deref(), Some("alice"));
+    let claimed_at = claimed.updated_at;
+
+    let recreated = create_tools();
+    set_context(&recreated, workspace.path()).await;
+    let durable = recreated
+        .show(created.id.as_str(), None)
+        .await
+        .expect("recreated context should load durable Claim");
+    assert_eq!(durable.assignee.as_deref(), Some("alice"));
+    assert_eq!(
+        recreated
+            .claim(created.id.as_str(), "alice", None)
+            .await
+            .expect("owner retry should be idempotent")
+            .updated_at,
+        claimed_at
+    );
+
+    let conflict = recreated.claim(created.id.as_str(), "bob", None).await;
+    assert!(matches!(
+        &conflict,
+        Err(Error::Assignment(AssignmentError::AlreadyClaimed {
+            issue_id,
+            assignee,
+        })) if issue_id == &created.id && assignee == "alice"
+    ));
+    let mismatch = recreated.release(created.id.as_str(), "bob", None).await;
+    assert!(matches!(
+        &mismatch,
+        Err(Error::Assignment(AssignmentError::AssigneeMismatch {
+            issue_id,
+            expected,
+            actual,
+        })) if issue_id == &created.id && expected == "bob" && actual == "alice"
+    ));
+
+    let released = recreated
+        .release(created.id.as_str(), "alice", None)
+        .await
+        .expect("exact owner should release");
+    assert_eq!(released.assignee, None);
+    let final_context = create_tools();
+    set_context(&final_context, workspace.path()).await;
+    assert_eq!(
+        final_context
+            .show(created.id.as_str(), None)
+            .await
+            .expect("release should persist")
+            .assignee,
+        None
+    );
+}
+
+#[tokio::test]
+async fn claim_and_release_reject_blank_assignees_without_mutation() {
+    let workspace = create_temp_workspace();
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+    let target = create_issue(&tools, "Blank Assignment target").await;
+
+    for assignee in ["", " \t "] {
+        for result in [
+            tools.claim(target.id.as_str(), assignee, None).await,
+            tools.release(target.id.as_str(), assignee, None).await,
+        ] {
+            assert!(matches!(
+                result,
+                Err(Error::Assignment(AssignmentError::BlankAssignee { ref issue_id }))
+                    if issue_id == &target.id
+            ));
+        }
+    }
+    assert_eq!(
+        tools
+            .show(target.id.as_str(), None)
+            .await
+            .expect("blank-input target should remain readable")
+            .assignee,
+        None
+    );
+}
+
+#[tokio::test]
+async fn claim_release_mcp_state_matrix() {
+    let workspace = create_temp_workspace();
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+
+    let missing = tools.claim("test-missing", "alice", None).await;
+    assert!(matches!(
+        &missing,
+        Err(Error::IssueNotFound(issue_id)) if issue_id == "test-missing"
+    ));
+
+    let unassigned = create_issue(&tools, "Unassigned release").await;
+    let not_claimed = tools.release(unassigned.id.as_str(), "alice", None).await;
+    assert!(matches!(
+        &not_claimed,
+        Err(Error::Assignment(AssignmentError::NotClaimed { issue_id }))
+            if issue_id == &unassigned.id
+    ));
+
+    let prerequisite = create_issue(&tools, "Open prerequisite").await;
+    let blocked = create_issue(&tools, "Blocked Claim").await;
+    tools
+        .blocking_dependency_add(blocked.id.as_str(), prerequisite.id.as_str(), None)
+        .await
+        .expect("Blocking Dependency should be added");
+    let blocked_claim = tools.claim(blocked.id.as_str(), "alice", None).await;
+    assert!(matches!(
+        &blocked_claim,
+        Err(Error::Assignment(AssignmentError::Blocked { issue_id }))
+            if issue_id == &blocked.id
+    ));
+
+    let releasable = create_issue(&tools, "Blocked release").await;
+    tools
+        .claim(releasable.id.as_str(), "alice", None)
+        .await
+        .expect("initial Claim should succeed");
+    tools
+        .blocking_dependency_add(releasable.id.as_str(), prerequisite.id.as_str(), None)
+        .await
+        .expect("Issue should become blocked after Claim");
+    assert_eq!(
+        tools
+            .release(releasable.id.as_str(), "alice", None)
+            .await
+            .expect("blocked Open owner should release")
+            .assignee,
+        None
+    );
+
+    let active = tools
+        .create(create_params(
+            "Active target".to_string(),
+            None,
+            None,
+            None,
+            Some("active-owner".to_string()),
+            None,
+            None,
+            None,
+            None,
+        ))
+        .await
+        .expect("assigned active target should be created");
+    tools
+        .update(update_params(
+            active.id.as_str(),
+            None,
+            None,
+            Some("in_progress"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ))
+        .await
+        .expect("assigned target should enter In Progress");
+    for result in [
+        tools.claim(active.id.as_str(), "active-owner", None).await,
+        tools
+            .release(active.id.as_str(), "active-owner", None)
+            .await,
+    ] {
+        assert!(matches!(
+            &result,
+            Err(Error::Assignment(AssignmentError::NotOpen {
+                issue_id,
+                status: IssueStatus::InProgress,
+            })) if issue_id == &active.id
+        ));
+    }
+}
 /// Test complete issue lifecycle: create -> update -> close
 #[tokio::test]
 async fn test_issue_lifecycle_create_update_close() {
@@ -740,7 +992,20 @@ async fn test_issue_lifecycle_create_update_close() {
     set_context(&tools, workspace.path()).await;
 
     // Create issue
-    let created = create_issue(&tools, "Lifecycle Test Issue").await;
+    let created = tools
+        .create(create_params(
+            "Lifecycle Test Issue".to_string(),
+            None,
+            None,
+            None,
+            Some("alice".to_string()),
+            None,
+            None,
+            None,
+            None,
+        ))
+        .await
+        .expect("create should succeed");
     assert_eq!(created.status, IssueStatus::Open);
 
     // Update to in_progress
@@ -752,7 +1017,6 @@ async fn test_issue_lifecycle_create_update_close() {
             Some("in_progress"),
             Some(1),
             None, // issue_kind
-            Some("alice".to_string()),
             None,
             None,
             None, // labels
@@ -989,7 +1253,6 @@ async fn test_update_reclassifies_only_kind_and_persists_across_context_restart(
             None,
             None,
             Some("bug"),
-            None,
             None,
             None,
             None,
@@ -1298,40 +1561,72 @@ async fn test_workspace_root_initializes_without_context() {
     assert!(!context.context_set);
 }
 
-/// Test concurrent first use shares one initialized workspace storage.
+/// Test concurrent first use serializes uncached writers and preserves both Issues.
 #[tokio::test]
 async fn test_concurrent_workspace_root_initialization() {
     let workspace = create_temp_workspace();
     let tools = create_tools();
     let workspace_root = workspace.path().display().to_string();
-    let first_params = create_params(
-        "First concurrent issue".to_string(),
-        None,
-        None,
-        Some("task"),
-        None,
-        None,
-        None,
-        None,
-        Some(&workspace_root),
-    );
-    let second_params = create_params(
-        "Second concurrent issue".to_string(),
-        None,
-        None,
-        Some("task"),
-        None,
-        None,
-        None,
-        None,
-        Some(&workspace_root),
-    );
+    let params = |title: &str| {
+        create_params(
+            title.to_string(),
+            None,
+            None,
+            Some("task"),
+            None,
+            None,
+            None,
+            None,
+            Some(&workspace_root),
+        )
+    };
 
-    let (first, second) = tokio::join!(tools.create(first_params), tools.create(second_params));
-    let first = first.expect("first concurrent create should succeed");
-    let second = second.expect("second concurrent create should succeed");
-    assert_ne!(first.id, second.id);
-
+    let (first, second) = tokio::join!(
+        tools.create(params("First concurrent issue")),
+        tools.create(params("Second concurrent issue"))
+    );
+    let _ = match (first, second) {
+        (Ok(first), Ok(second)) => {
+            assert_ne!(first.id, second.id);
+            first
+        }
+        (
+            Ok(winner),
+            Err(Error::WorkspaceBusy {
+                workspace_root: busy,
+            }),
+        )
+        | (
+            Err(Error::WorkspaceBusy {
+                workspace_root: busy,
+            }),
+            Ok(winner),
+        ) => {
+            assert_eq!(
+                busy,
+                workspace
+                    .path()
+                    .canonicalize()
+                    .expect("contended Workspace path should canonicalize")
+            );
+            let retry_title = if winner.title == "First concurrent issue" {
+                "Second concurrent issue"
+            } else {
+                "First concurrent issue"
+            };
+            let retried = tools
+                .create(params(retry_title))
+                .await
+                .expect("retry should succeed after the winner releases");
+            assert_ne!(winner.id, retried.id);
+            winner
+        }
+        (first, second) => {
+            panic!(
+                "expected two serialized creates or one WorkspaceBusy, got {first:?} and {second:?}"
+            )
+        }
+    };
     let issues = tools
         .list(list_params(
             None,
@@ -1540,7 +1835,6 @@ async fn assert_blocking_input_errors(tools: &Tools, dependent: &Issue) {
         Err(Error::IssueNotFound(issue_id)) if issue_id == "test-missing"
     ));
 }
-
 /// Test adding dependencies between issues.
 #[tokio::test]
 async fn blocking_dependency_mcp_direction_and_context_recreation() {
@@ -1824,6 +2118,103 @@ async fn related_and_discovery_mcp_direction_and_context_recreation() {
         discovery_b,
     )
     .await;
+}
+
+#[tokio::test]
+async fn ready_assignment_visibility() {
+    let workspace = create_temp_workspace();
+    let tools = create_tools();
+    set_context(&tools, workspace.path()).await;
+    let unassigned = create_issue(&tools, "Unassigned").await;
+    let alice = tools
+        .create(create_params(
+            "Alice".to_string(),
+            None,
+            None,
+            Some("task"),
+            Some("alice".to_string()),
+            None,
+            None,
+            None,
+            None,
+        ))
+        .await
+        .expect("assigned Issue creation should succeed");
+
+    let ready_ids = |issues: Vec<Issue>| {
+        issues
+            .into_iter()
+            .map(|issue| issue.id)
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(
+        ready_ids(
+            tools
+                .ready(ready_params(None, None, None, None, None, None))
+                .await
+                .expect("default Ready query should succeed")
+        ),
+        BTreeSet::from([unassigned.id.clone()])
+    );
+    assert_eq!(
+        ready_ids(
+            tools
+                .ready(ready_params(
+                    None,
+                    None,
+                    None,
+                    Some("alice".to_string()),
+                    None,
+                    None,
+                ))
+                .await
+                .expect("assignee Ready query should succeed")
+        ),
+        BTreeSet::from([alice.id.clone()])
+    );
+
+    let all = ReadyParams {
+        all_assignees: true,
+        ..ready_params(None, None, None, None, None, None)
+    };
+    assert_eq!(
+        ready_ids(
+            tools
+                .ready(all.clone())
+                .await
+                .expect("all-assignees Ready query should succeed")
+        ),
+        BTreeSet::from([unassigned.id.clone(), alice.id.clone()])
+    );
+    let conflict = tools
+        .ready(ReadyParams {
+            assignee: Some("alice".to_string()),
+            all_assignees: true,
+            ..ready_params(None, None, None, None, None, None)
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        conflict,
+        Error::InvalidArgument {
+            field: "assignment selector",
+            value,
+            valid_values: "unassigned, assignee, all_assignees",
+        } if value == "assignee and all_assignees"
+    ));
+
+    drop(tools);
+    let restarted = create_tools();
+    set_context(&restarted, workspace.path()).await;
+    assert_eq!(
+        ready_ids(
+            restarted
+                .ready(all)
+                .await
+                .expect("restarted Ready query should succeed")
+        ),
+        BTreeSet::from([unassigned.id, alice.id])
+    );
 }
 
 /// Test ready-to-work excludes blocked issues.
@@ -2282,117 +2673,6 @@ async fn test_list_filters(#[case] test_case: ListFilterCase) {
 }
 
 // ============================================================================
-// Assignee Tests
-// ============================================================================
-
-/// Test assignee clearing with empty string.
-#[tokio::test]
-async fn test_assignee_clearing() {
-    let workspace = create_temp_workspace();
-    let tools = create_tools();
-    set_context(&tools, workspace.path()).await;
-
-    // Create issue with assignee
-    let created = tools
-        .create(create_params(
-            "Assigned Issue".to_string(),
-            None,
-            None,
-            None,
-            Some("alice".to_string()),
-            None,
-            None,
-            None,
-            None,
-        ))
-        .await
-        .unwrap();
-
-    assert_eq!(created.assignee, Some("alice".to_string()));
-
-    // Empty string clears the assignee at the MCP parameter boundary.
-    let updated = tools
-        .update(update_params(
-            created.id.as_str(),
-            None,
-            None,
-            None,
-            None,
-            None, // issue_kind
-            Some(String::new()),
-            None,
-            None,
-            None, // labels
-            None, // workspace_root
-        ))
-        .await
-        .unwrap();
-
-    assert!(updated.assignee.is_none(), "Assignee should be cleared");
-}
-
-/// Test assignee update vs no-op.
-#[tokio::test]
-async fn test_assignee_update_vs_noop() {
-    let workspace = create_temp_workspace();
-    let tools = create_tools();
-    set_context(&tools, workspace.path()).await;
-
-    let created = tools
-        .create(create_params(
-            "Test".to_string(),
-            None,
-            None,
-            None,
-            Some("original".to_string()),
-            None,
-            None,
-            None,
-            None,
-        ))
-        .await
-        .unwrap();
-
-    // Update with None (no change)
-    let unchanged = tools
-        .update(update_params(
-            created.id.as_str(),
-            None,
-            None,
-            None,
-            None,
-            None, // issue_kind
-            None, // None means don't update
-            None,
-            None,
-            None, // labels
-            None, // workspace_root
-        ))
-        .await
-        .unwrap();
-    assert_eq!(unchanged.assignee, Some("original".to_string()));
-
-    // Update the assignee.
-    let changed = tools
-        .update(update_params(
-            created.id.as_str(),
-            None,
-            None,
-            None,
-            None,
-            None, // issue_kind
-            Some("new".to_string()),
-            None,
-            None,
-            None, // labels
-            None, // workspace_root
-        ))
-        .await
-        .unwrap();
-    assert_eq!(changed.assignee, Some("new".to_string()));
-}
-
-// ============================================================================
 // where_am_i Tests
 // ============================================================================
 
@@ -2456,7 +2736,20 @@ async fn test_update_persistence() {
     {
         let tools = create_tools();
         set_context(&tools, workspace.path()).await;
-        let issue = create_issue(&tools, "To Update").await;
+        let issue = tools
+            .create(create_params(
+                "To Update".to_string(),
+                None,
+                None,
+                None,
+                Some("active-owner".to_string()),
+                None,
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("create should succeed");
         issue_id = issue.id.as_str().to_string();
 
         tools
@@ -2467,7 +2760,6 @@ async fn test_update_persistence() {
                 Some("in_progress"),
                 None,
                 None, // issue_kind
-                None,
                 None,
                 None,
                 None, // labels
@@ -3241,22 +3533,7 @@ async fn test_invalid_status_values(#[case] invalid_value: &str, #[case] expecte
         } => {
             assert_eq!(field, expected_field);
             assert_eq!(value, invalid_value);
-            assert!(
-                valid_values.contains("open"),
-                "Error should mention valid status 'open'"
-            );
-            assert!(
-                valid_values.contains("closed"),
-                "Error should mention valid status 'closed'"
-            );
-            assert!(
-                valid_values.contains("in_progress"),
-                "Error should mention valid status 'in_progress'"
-            );
-            assert!(
-                valid_values.contains("blocked"),
-                "Error should mention valid status 'blocked'"
-            );
+            assert_eq!(valid_values, "open, in_progress, closed");
         }
         e => panic!("Expected InvalidArgument error, got: {e:?}"),
     }
@@ -3342,7 +3619,6 @@ async fn test_invalid_status_in_update(#[case] invalid_value: &str) {
             None, // issue_kind
             None,
             None,
-            None,
             None, // labels
             None, // workspace_root
         ))
@@ -3405,7 +3681,7 @@ async fn test_error_message_format() {
 
 /// Test complete issue lifecycle through multiple state transitions.
 #[tokio::test]
-async fn test_complete_issue_lifecycle_all_states() {
+async fn canonical_workflow_state_inputs() {
     let workspace = create_temp_workspace();
     let tools = create_tools();
     set_context(&tools, workspace.path()).await;
@@ -3428,6 +3704,41 @@ async fn test_complete_issue_lifecycle_all_states() {
 
     assert_eq!(created.status, IssueStatus::Open);
     assert!(created.closed_at.is_none());
+    let rejected = tools
+        .update(update_params(
+            created.id.as_str(),
+            None,
+            None,
+            Some("blocked"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ))
+        .await
+        .expect_err("Blocked is derived and must not be accepted as Workflow State");
+    match rejected {
+        Error::InvalidArgument {
+            field,
+            value,
+            valid_values,
+        } => {
+            assert_eq!(field, "status");
+            assert_eq!(value, "blocked");
+            assert_eq!(valid_values, "open, in_progress, closed");
+        }
+        other => panic!("expected InvalidArgument, got {other:?}"),
+    }
+    assert_eq!(
+        tools
+            .show(created.id.as_str(), None)
+            .await
+            .expect("rejected update preserves Issue")
+            .status,
+        IssueStatus::Open
+    );
 
     // Transition to in_progress
     let in_progress = tools
@@ -3440,7 +3751,6 @@ async fn test_complete_issue_lifecycle_all_states() {
             None, // issue_kind
             None,
             None,
-            None,
             None, // labels
             None, // workspace_root
         ))
@@ -3448,51 +3758,6 @@ async fn test_complete_issue_lifecycle_all_states() {
         .expect("update to in_progress should succeed");
 
     assert_eq!(in_progress.status, IssueStatus::InProgress);
-
-    // Transition to blocked
-    let blocked = tools
-        .update(update_params(
-            created.id.as_str(),
-            None,
-            None,
-            Some("blocked"),
-            None,
-            None, // issue_kind
-            None,
-            None,
-            None,
-            None, // labels
-            None, // workspace_root
-        ))
-        .await
-        .expect("update to blocked should succeed");
-
-    assert_eq!(blocked.status, IssueStatus::Blocked);
-
-    // Verify it appears in blocked list
-    let _blocked_issues = tools.blocked(None).await.expect("blocked should succeed");
-    // Note: Issue is blocked by status, not by dependency, so it may or may not appear
-    // in blocked_issues depending on implementation
-
-    // Back to in_progress
-    let resumed = tools
-        .update(update_params(
-            created.id.as_str(),
-            None,
-            None,
-            Some("in_progress"),
-            None,
-            None, // issue_kind
-            None,
-            None,
-            None,
-            None, // labels
-            None, // workspace_root
-        ))
-        .await
-        .expect("update back to in_progress should succeed");
-
-    assert_eq!(resumed.status, IssueStatus::InProgress);
 
     // Close the issue
     let closed = tools
@@ -3551,7 +3816,6 @@ async fn test_update_preserves_unmodified_fields() {
             None, // Don't update status
             None, // Don't update priority
             None, // issue_kind
-            None, // Don't update assignee
             None, // Don't update design
             None, // Don't update acceptance
             None, // labels
@@ -3706,12 +3970,20 @@ async fn test_all_tools_with_storage_backend() {
         .expect("list should succeed");
     assert!(!listed.is_empty());
 
-    // 6. ready
+    // 6. ready (the created Issue is assigned to tester)
     let ready = tools
-        .ready(ready_params(None, None, None, None, None, None))
+        .ready(ready_params(
+            None,
+            None,
+            None,
+            Some("tester".to_string()),
+            None,
+            None,
+        ))
         .await
         .expect("ready should succeed");
-    assert!(!ready.is_empty());
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].id, created.id);
 
     // 7. update
     let updated = tools
@@ -3722,7 +3994,6 @@ async fn test_all_tools_with_storage_backend() {
             Some("in_progress"),
             None,
             None, // issue_kind
-            None,
             None,
             None,
             None, // labels
@@ -3835,7 +4106,7 @@ async fn test_dependency_chain() {
 
 /// Test closing a blocker unblocks dependent issues.
 #[tokio::test]
-async fn test_closing_blocker_unblocks_dependent() {
+async fn ready_and_blocked_survive_context_recreation() {
     let workspace = create_temp_workspace();
     let tools = create_tools();
     set_context(&tools, workspace.path()).await;
@@ -3894,6 +4165,26 @@ async fn test_closing_blocker_unblocks_dependent() {
     assert_eq!(retained.len(), 1);
     assert_eq!(retained[0].dependent_id(), &dependent.id);
     assert_eq!(retained[0].prerequisite_id(), &blocker.id);
+    let ready_after_restart = restarted
+        .ready(ready_params(None, None, None, None, None, None))
+        .await
+        .expect("Ready should be re-derived after context restart");
+    assert!(
+        ready_after_restart
+            .iter()
+            .any(|issue| issue.id == dependent.id),
+        "Dependent should remain Ready after context restart"
+    );
+    let blocked_after_restart = restarted
+        .blocked(None)
+        .await
+        .expect("Blocked should be re-derived after context restart");
+    assert!(
+        !blocked_after_restart
+            .iter()
+            .any(|entry| entry.issue.id == dependent.id),
+        "Closed prerequisite must remain resolved after context restart"
+    );
 }
 
 /// Test stats are accurate after various operations.
@@ -3905,7 +4196,20 @@ async fn test_issue_counts_accurate() {
 
     // Create issues with various states
     let issue1 = create_issue(&tools, "Open Issue").await;
-    let issue2 = create_issue(&tools, "In Progress Issue").await;
+    let issue2 = tools
+        .create(create_params(
+            "In Progress Issue".to_string(),
+            None,
+            None,
+            None,
+            Some("active-owner".to_string()),
+            None,
+            None,
+            None,
+            None,
+        ))
+        .await
+        .expect("create should succeed");
     let issue3 = create_issue(&tools, "To Close").await;
 
     tools
@@ -3916,7 +4220,6 @@ async fn test_issue_counts_accurate() {
             Some("in_progress"),
             None,
             None, // issue_kind
-            None,
             None,
             None,
             None, // labels

@@ -7,7 +7,8 @@ use clap::{Parser, Subcommand};
 
 use super::types::{SortOrderArg, SortPolicyArg};
 use super::validators::{
-    validate_description, validate_issue_id, validate_label, validate_prefix, validate_title,
+    validate_assignee, validate_description, validate_issue_id, validate_label, validate_prefix,
+    validate_title,
 };
 use crate::domain::{IssueKind, IssueStatus, MAX_PRIORITY, MIN_PRIORITY, ResourceRole};
 
@@ -151,17 +152,6 @@ pub struct UpdateArgs {
     #[arg(short = 'k', long = "kind", value_enum)]
     pub issue_kind: Option<IssueKind>,
 
-    /// New assignee
-    ///
-    /// Note: To unassign, use `--no-assignee` flag instead. Clap does not
-    /// support empty strings ("") as argument values by default.
-    #[arg(short, long, conflicts_with = "no_assignee")]
-    pub assignee: Option<String>,
-
-    /// Remove the current assignee (unassign the issue)
-    #[arg(long, conflicts_with = "assignee")]
-    pub no_assignee: bool,
-
     /// New design notes
     #[arg(long, allow_hyphen_values = true)]
     pub design: Option<String>,
@@ -173,6 +163,18 @@ pub struct UpdateArgs {
     /// Note to append
     #[arg(long, allow_hyphen_values = true)]
     pub notes: Option<String>,
+}
+
+/// Arguments for an Assignment Claim or Release.
+#[derive(Parser, Debug, Clone)]
+pub struct AssignmentArgs {
+    /// Issue ID whose Assignment changes.
+    #[arg(value_parser = validate_issue_id)]
+    pub issue_id: String,
+
+    /// Exact Assignee identity to claim as or release.
+    #[arg(short, long, value_parser = validate_assignee)]
+    pub assignee: String,
 }
 
 impl UpdateArgs {
@@ -210,8 +212,6 @@ impl UpdateArgs {
             || self.status.is_some()
             || self.priority.is_some()
             || self.issue_kind.is_some()
-            || self.assignee.is_some()
-            || self.no_assignee
             || self.design.is_some()
             || self.acceptance.is_some()
             || self.notes.is_some()
@@ -257,9 +257,13 @@ pub struct DeleteArgs {
 /// Arguments for the `ready` command
 #[derive(Parser, Debug, Clone)]
 pub struct ReadyArgs {
-    /// Filter by assignee
-    #[arg(short, long)]
+    /// Include only Issues assigned to this exact assignee
+    #[arg(short, long, conflicts_with = "all_assignees")]
     pub assignee: Option<String>,
+
+    /// Include Issues regardless of Assignment
+    #[arg(long, conflicts_with = "assignee")]
+    pub all_assignees: bool,
 
     /// Filter by priority
     #[arg(short, long, value_parser = clap::value_parser!(u8).range(MIN_PRIORITY as i64..=MAX_PRIORITY as i64))]
@@ -324,6 +328,15 @@ pub enum BlockingDependencyAction {
     },
 }
 
+impl BlockingDependencyAction {
+    pub(crate) const fn mutates_workspace(&self) -> bool {
+        match self {
+            Self::Add { .. } | Self::Remove { .. } => true,
+            Self::List(_) | Self::Tree { .. } => false,
+        }
+    }
+}
+
 /// Select exactly one Blocking Dependency endpoint perspective.
 #[derive(Parser, Debug, Clone)]
 #[command(group(
@@ -378,6 +391,15 @@ pub enum RelatedAction {
     },
 }
 
+impl RelatedAction {
+    pub(crate) const fn mutates_workspace(&self) -> bool {
+        match self {
+            Self::Add { .. } | Self::Remove { .. } => true,
+            Self::List { .. } => false,
+        }
+    }
+}
+
 /// Arguments for Discovery Origin operations.
 #[derive(Parser, Debug, Clone)]
 pub struct DiscoveryArgs {
@@ -415,6 +437,14 @@ pub enum DiscoveryAction {
     },
 }
 
+impl DiscoveryAction {
+    pub(crate) const fn mutates_workspace(&self) -> bool {
+        match self {
+            Self::Add { .. } | Self::Remove { .. } => true,
+            Self::List { .. } => false,
+        }
+    }
+}
 /// Arguments for the `blocked` command
 #[derive(Parser, Debug, Clone, Default)]
 pub struct BlockedArgs {
@@ -503,6 +533,15 @@ pub enum LabelAction {
 
     /// List all labels used across all issues
     ListAll,
+}
+
+impl LabelAction {
+    pub(crate) const fn mutates_workspace(&self) -> bool {
+        match self {
+            Self::Add { .. } | Self::Remove { .. } => true,
+            Self::List { .. } | Self::ListAll => false,
+        }
+    }
 }
 
 /// Arguments for the `resource` command.
@@ -598,6 +637,15 @@ pub enum ResourceAction {
     },
 }
 
+impl ResourceAction {
+    pub(crate) const fn mutates_workspace(&self) -> bool {
+        match self {
+            Self::Add { .. } | Self::Update { .. } | Self::Remove { .. } => true,
+            Self::List { .. } => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -613,8 +661,6 @@ mod tests {
                 status: None,
                 priority: None,
                 issue_kind: None,
-                assignee: None,
-                no_assignee: false,
                 design: None,
                 acceptance: None,
                 notes: None,
@@ -663,20 +709,6 @@ mod tests {
         }
 
         #[test]
-        fn test_has_updates_assignee() {
-            let mut args = create_empty_update_args();
-            args.assignee = Some("user@example.com".to_string());
-            assert!(args.has_updates());
-        }
-
-        #[test]
-        fn test_has_updates_no_assignee_flag() {
-            let mut args = create_empty_update_args();
-            args.no_assignee = true;
-            assert!(args.has_updates());
-        }
-
-        #[test]
         fn test_has_updates_design() {
             let mut args = create_empty_update_args();
             args.design = Some("Design notes".to_string());
@@ -720,8 +752,7 @@ mod tests {
                 "--description",
                 "--status",
                 "--priority",
-                "--assignee",
-                "--no-assignee",
+                "--kind",
                 "--design",
                 "--acceptance",
                 "--notes",
@@ -735,6 +766,7 @@ mod tests {
                     help
                 );
             }
+            assert!(!help.contains("assignee"));
         }
 
         #[test]
@@ -755,11 +787,6 @@ mod tests {
             assert!(
                 help.contains("(-p)"),
                 "Expected short flag -p for priority, got: {}",
-                help
-            );
-            assert!(
-                help.contains("(-a)"),
-                "Expected short flag -a for assignee, got: {}",
                 help
             );
         }

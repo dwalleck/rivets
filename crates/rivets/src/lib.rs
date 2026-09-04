@@ -12,6 +12,7 @@ pub mod error;
 pub mod id_generation;
 pub mod output;
 pub mod storage;
+pub mod workspace_lock;
 
 // Public CLI module (needed by binary)
 pub mod cli;

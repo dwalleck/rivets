@@ -264,9 +264,38 @@ fn is_default_next_resource_id(value: &u64) -> bool {
     *value == DEFAULT_NEXT_RESOURCE_ID
 }
 
+/// Persisted Workflow State vocabulary, including the removed legacy value.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PersistedIssueStatus {
+    Open,
+    InProgress,
+    Closed,
+    Blocked,
+}
+
+impl PersistedIssueStatus {
+    fn into_domain(self) -> (IssueStatus, Option<String>) {
+        match self {
+            Self::Open => (IssueStatus::Open, None),
+            Self::InProgress => (IssueStatus::InProgress, None),
+            Self::Closed => (IssueStatus::Closed, None),
+            Self::Blocked => (
+                IssueStatus::Open,
+                Some(
+                    "Migration: changed legacy Blocked Workflow State to Open because Blocked is derived from unresolved Blocking Dependencies"
+                        .to_string(),
+                ),
+            ),
+        }
+    }
+}
+
 pub(super) struct IssueRecordConversion {
     pub(super) issue: Issue,
     pub(super) migration_conflict: Option<MigrationField>,
+    pub(super) workflow_migration: Option<String>,
+    pub(super) assignment_migration: Option<String>,
 }
 
 /// A compatibility DTO for decoding persisted Issue records.
@@ -278,7 +307,7 @@ pub(super) struct IssueRecord {
     id: IssueId,
     title: String,
     description: String,
-    status: IssueStatus,
+    status: PersistedIssueStatus,
     priority: u8,
     /// Canonical field. Optional only while decoding so legacy-only records
     /// can reach `into_domain`.
@@ -335,6 +364,17 @@ impl IssueRecord {
             updated_at,
             closed_at,
         } = self;
+        let (status, workflow_migration) = status.into_domain();
+        let (assignee, blank_assignee_migration) = match assignee {
+            Some(assignee) if assignee.trim().is_empty() => (
+                None,
+                Some(
+                    "Migration: cleared blank Assignee because Assignment requires a nonblank identity"
+                        .to_string(),
+                ),
+            ),
+            assignee => (assignee, None),
+        };
         let (issue_kind, migration_conflict) = match (issue_kind, issue_type) {
             (Some(issue_kind), None) | (None, Some(issue_kind)) => (issue_kind, None),
             (Some(issue_kind), Some(issue_type)) if issue_kind == issue_type => (issue_kind, None),
@@ -422,6 +462,42 @@ impl IssueRecord {
                 }
             }
         }
+        let assignment_migration = match (issue.status, issue.assignee.as_deref()) {
+            (IssueStatus::InProgress, None) => {
+                issue.status = IssueStatus::Open;
+                Some(match blank_assignee_migration {
+                    Some(message) => format!(
+                        "{message}; changed the resulting unassigned In Progress Issue to Open because active work requires an Assignee"
+                    ),
+                    None => {
+                        "Migration: changed unassigned In Progress Issue to Open because active work requires an Assignee"
+                            .to_string()
+                    }
+                })
+            }
+            (IssueStatus::Closed, Some(assignee)) => {
+                let assignee = assignee.to_string();
+                issue.assignee = None;
+                Some(format!(
+                    "Migration: cleared Assignee '{assignee}' from Closed Issue because Closed Issues cannot remain assigned"
+                ))
+            }
+            (IssueStatus::Open | IssueStatus::Closed, None)
+            | (IssueStatus::Open | IssueStatus::InProgress, Some(_)) => blank_assignee_migration,
+        };
+        if let Some(message) = &assignment_migration {
+            let content = NoteContent::new(message.clone())
+                .map_err(|error| invalid_data_error(&issue.id, migration_conflict, error))?;
+            issue.append_note(content, updated_at);
+        }
+        if let Some(message) = &workflow_migration {
+            let content = NoteContent::new(message.clone())
+                .map_err(|error| invalid_data_error(&issue.id, migration_conflict, error))?;
+            issue.append_note(content, updated_at);
+        }
+        issue
+            .validate_assignment_state()
+            .map_err(|error| invalid_data_error(&issue.id, migration_conflict, error))?;
         issue
             .validate()
             .map_err(|error| invalid_data_error(&issue.id, migration_conflict, error))?;
@@ -429,6 +505,8 @@ impl IssueRecord {
         Ok(IssueRecordConversion {
             issue,
             migration_conflict,
+            workflow_migration,
+            assignment_migration,
         })
     }
 }

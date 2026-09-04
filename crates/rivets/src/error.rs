@@ -1,7 +1,7 @@
 //! Error types for rivets CLI operations.
 
-use crate::domain::{IssueId, ResourceError, StatusTransitionError};
-use std::{fmt, io};
+use crate::domain::{AssignmentError, IssueId, ResourceError, StatusTransitionError};
+use std::{fmt, io, path::PathBuf};
 use thiserror::Error;
 
 /// Configuration-related errors.
@@ -207,6 +207,13 @@ pub enum StorageError {
     #[error(transparent)]
     UnsafePartialLoad(#[from] PartialLoadError),
 
+    /// Persistent JSONL changed since this storage instance last synchronized.
+    #[error("Persistent storage changed externally: {}", path.display())]
+    ExternalChange {
+        /// Path whose persisted revision no longer matches the cached revision.
+        path: PathBuf,
+    },
+
     /// JSON serialization failed during storage operations.
     #[error("JSON serialization failed")]
     Serialization(#[source] serde_json::Error),
@@ -222,6 +229,10 @@ pub enum StorageError {
     /// (ADR-0005).
     #[error(transparent)]
     InvalidStatusTransition(#[from] StatusTransitionError),
+
+    /// An Assignment Claim, Release, or canonical state invariant was rejected.
+    #[error(transparent)]
+    Assignment(#[from] AssignmentError),
 
     /// A test-only or otherwise deliberately unsupported storage operation.
     #[error("Storage operation is unsupported: {operation}")]
@@ -251,8 +262,10 @@ impl StorageError {
             | Self::DuplicateDependency { .. }
             | Self::InvalidFormat(_)
             | Self::UnsafePartialLoad(_)
+            | Self::ExternalChange { .. }
             | Self::Serialization(_)
             | Self::InvalidStatusTransition(_)
+            | Self::Assignment(_)
             | Self::UnsupportedOperation { .. }) => Err(error),
         }
     }
@@ -278,8 +291,32 @@ impl StorageError {
             | Self::DuplicateDependency { .. }
             | Self::InvalidFormat(_)
             | Self::UnsafePartialLoad(_)
+            | Self::ExternalChange { .. }
             | Self::Serialization(_)
             | Self::Resource(_)
+            | Self::Assignment(_)
+            | Self::UnsupportedOperation { .. }) => Err(error),
+        }
+    }
+
+    /// Separates an Assignment contract failure from other storage failures.
+    ///
+    /// # Errors
+    ///
+    /// Returns the original error unchanged when it is not an Assignment
+    /// failure.
+    pub fn try_into_assignment_error(self) -> std::result::Result<AssignmentError, Self> {
+        match self {
+            Self::Assignment(source) => Ok(source),
+            error @ (Self::Validation(_)
+            | Self::IdGeneration(_)
+            | Self::DuplicateDependency { .. }
+            | Self::InvalidFormat(_)
+            | Self::UnsafePartialLoad(_)
+            | Self::ExternalChange { .. }
+            | Self::Serialization(_)
+            | Self::Resource(_)
+            | Self::InvalidStatusTransition(_)
             | Self::UnsupportedOperation { .. }) => Err(error),
         }
     }
@@ -291,6 +328,26 @@ pub enum Error {
     /// IO error occurred.
     #[error("IO error: {0}")]
     Io(#[from] io::Error),
+
+    /// Another writer currently owns the Workspace mutation lock.
+    #[error(
+        "Workspace is busy: '{}'; retry the operation",
+        workspace_root.display()
+    )]
+    WorkspaceBusy {
+        /// Canonical root of the contended Workspace.
+        workspace_root: PathBuf,
+    },
+
+    /// The Workspace lock file could not be opened or locked.
+    #[error("Failed to acquire Workspace lock '{}': {source}", lock_path.display())]
+    WorkspaceLock {
+        /// Lock-file path used for the failed operation.
+        lock_path: PathBuf,
+        /// Underlying filesystem or lock error.
+        #[source]
+        source: io::Error,
+    },
 
     /// Configuration error.
     #[error("{0}")]
@@ -491,6 +548,12 @@ mod tests {
         StorageError::InvalidFormat("unexpected field".to_string()),
         "Invalid format: unexpected field"
     )]
+    #[case::external_change(
+        StorageError::ExternalChange {
+            path: PathBuf::from("/workspace/.rivets/issues.jsonl"),
+        },
+        "Persistent storage changed externally: /workspace/.rivets/issues.jsonl"
+    )]
     fn storage_error_display(#[case] error: StorageError, #[case] expected: &str) {
         assert_eq!(error.to_string(), expected);
     }
@@ -679,6 +742,40 @@ mod tests {
         assert!(
             error.source().is_none(),
             "ConfigError::InvalidPrefix should not have a source"
+        );
+    }
+
+    #[test]
+    fn workspace_busy_is_retryable_and_has_no_source() {
+        let error = Error::WorkspaceBusy {
+            workspace_root: PathBuf::from("/workspace"),
+        };
+        assert_eq!(
+            error.to_string(),
+            "Workspace is busy: '/workspace'; retry the operation"
+        );
+        assert!(error.source().is_none());
+    }
+
+    #[test]
+    fn workspace_lock_error_preserves_path_and_source() {
+        let error = Error::WorkspaceLock {
+            lock_path: PathBuf::from("/workspace/.rivets/workspace.lock"),
+            source: io::Error::new(io::ErrorKind::PermissionDenied, "denied"),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("/workspace/.rivets/workspace.lock")
+        );
+        assert_eq!(
+            error
+                .source()
+                .expect("Workspace lock error should expose its source")
+                .downcast_ref::<io::Error>()
+                .expect("source should remain io::Error")
+                .kind(),
+            io::ErrorKind::PermissionDenied
         );
     }
 

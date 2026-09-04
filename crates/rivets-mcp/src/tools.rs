@@ -23,14 +23,16 @@ use crate::models::{
     SetContextResponse, UpdateParams, WhereAmIResponse,
 };
 use rivets::domain::{
-    AssociatedResource, BlockingDependency, DiscoveryOrigin, Issue, IssueFilter, IssueId,
-    IssueKind, IssueStatus, IssueUpdate, NewIssue, NewResource, NoteContent, RelatedAssociation,
-    ResourceId, ResourceLabel, ResourceRole, ResourceTarget, ResourceUpdate, WebUrl, WorkspacePath,
+    AssignmentError, AssociatedResource, BlockingDependency, DiscoveryOrigin, Issue, IssueFilter,
+    IssueId, IssueKind, IssueStatus, IssueUpdate, NewIssue, NewResource, NoteContent,
+    ReadyAssignmentFilter, ReadyFilter, RelatedAssociation, ResourceId, ResourceLabel,
+    ResourceRole, ResourceTarget, ResourceUpdate, WebUrl, WorkspacePath,
 };
 use rivets::storage::IssueStorage;
+use rivets::workspace_lock::WorkspaceMutationLock;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{OwnedRwLockWriteGuard, RwLock};
 use tracing::{debug, instrument};
 
 /// Default limit for list/ready queries when none is specified.
@@ -38,6 +40,12 @@ use tracing::{debug, instrument};
 /// Prevents potential OOM errors with large issue databases by ensuring
 /// queries always have a reasonable upper bound.
 const DEFAULT_QUERY_LIMIT: usize = 100;
+
+#[derive(Clone, Copy)]
+enum AssignmentOperation {
+    Claim,
+    Release,
+}
 
 /// Parse and validate a status string.
 fn validate_status(status: &str) -> Result<IssueStatus> {
@@ -97,6 +105,31 @@ async fn save_or_reload(storage: &mut dyn IssueStorage) -> Result<()> {
     Ok(())
 }
 
+struct MutationStorage {
+    storage: OwnedRwLockWriteGuard<Box<dyn IssueStorage>>,
+    _workspace_lock: Option<WorkspaceMutationLock>,
+}
+
+impl MutationStorage {
+    fn as_mut(&mut self) -> &mut dyn IssueStorage {
+        self.storage.as_mut()
+    }
+}
+
+impl std::ops::Deref for MutationStorage {
+    type Target = dyn IssueStorage;
+
+    fn deref(&self) -> &Self::Target {
+        self.storage.as_ref()
+    }
+}
+
+impl std::ops::DerefMut for MutationStorage {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.storage.as_mut()
+    }
+}
+
 /// Tool implementations for the rivets MCP server.
 pub struct Tools {
     context: Arc<RwLock<Context>>,
@@ -117,7 +150,7 @@ impl Tools {
         let workspace_path = workspace_root.map(Path::new);
         {
             let context = self.context.read().await;
-            match context.storage_for(workspace_path) {
+            match context.storage_for_async(workspace_path).await {
                 Ok(storage) => return Ok(storage),
                 Err(Error::WorkspaceNotInitialized(_)) => {}
                 Err(error) => return Err(error),
@@ -126,6 +159,25 @@ impl Tools {
 
         let mut context = self.context.write().await;
         context.storage_for_or_init(workspace_path).await
+    }
+
+    /// Resolve storage, serialize in-process mutations, then acquire the durable lock.
+    async fn mutation_storage_for(&self, workspace_root: Option<&str>) -> Result<MutationStorage> {
+        let workspace_path = workspace_root.map(Path::new);
+        let storage = self.storage_for(workspace_root).await?;
+        let lock_root = {
+            let context = self.context.read().await;
+            context.mutation_lock_root_async(workspace_path).await?
+        };
+        let storage = storage.write_owned().await;
+        let workspace_lock = match lock_root {
+            Some(root) => Some(WorkspaceMutationLock::try_acquire_async(root).await?),
+            None => None,
+        };
+        Ok(MutationStorage {
+            storage,
+            _workspace_lock: workspace_lock,
+        })
     }
 
     /// Set the workspace context.
@@ -155,23 +207,28 @@ impl Tools {
     /// This function does not currently return errors but returns `Result` for API consistency.
     pub async fn where_am_i(&self) -> Result<WhereAmIResponse> {
         let context = self.context.read().await;
+        let workspace = context.current_workspace().cloned();
+        let db_path = context.current_database_path().cloned();
+        drop(context);
 
-        match context.current_workspace() {
+        match workspace {
             Some(workspace) => {
-                let db_path = context.current_database_path();
-
-                // Try to load the config to get the issue prefix
+                // Try to load the config to get the issue prefix. Use async
+                // metadata so a slow filesystem cannot block the MCP runtime.
                 let config_path = workspace.join(".rivets").join("config.yaml");
-                let issue_prefix = if config_path.exists() {
-                    match rivets::commands::init::RivetsConfig::load(&config_path).await {
+                let issue_prefix = match tokio::fs::metadata(&config_path).await {
+                    Ok(_) => match rivets::commands::init::RivetsConfig::load(&config_path).await {
                         Ok(config) => Some(config.issue_prefix),
-                        Err(e) => {
-                            debug!("Failed to load config for issue_prefix: {}", e);
+                        Err(error) => {
+                            debug!(error = %error, "Failed to load config for issue_prefix");
                             None
                         }
+                    },
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => {
+                        debug!(error = %error, "Failed to inspect config for issue_prefix");
+                        None
                     }
-                } else {
-                    None
                 };
 
                 Ok(WhereAmIResponse {
@@ -197,26 +254,37 @@ impl Tools {
     ///
     /// # Errors
     ///
-    /// Returns an error if no context is set or storage operations fail.
+    /// Returns an error if no context is set, both Assignment selectors are
+    /// provided, or storage operations fail.
     #[instrument(skip(self, params), fields(limit = params.limit, priority = params.priority))]
     pub async fn ready(&self, params: ReadyParams) -> Result<Vec<Issue>> {
         debug!("Finding ready issues");
         let issue_kind = params.kind.resolve("ready");
+        let assignment = match (params.assignee, params.all_assignees) {
+            (Some(_), true) => {
+                return Err(Error::InvalidArgument {
+                    field: "assignment selector",
+                    value: "assignee and all_assignees".to_string(),
+                    valid_values: "unassigned, assignee, all_assignees",
+                });
+            }
+            (Some(assignee), false) => ReadyAssignmentFilter::Assignee(assignee),
+            (None, true) => ReadyAssignmentFilter::All,
+            (None, false) => ReadyAssignmentFilter::Unassigned,
+        };
 
         // Release context lock before acquiring storage lock to prevent deadlocks
         let storage = self.storage_for(params.workspace_root.as_deref()).await?;
         let storage = storage.read().await;
-
-        let filter = IssueFilter {
+        let filter = ReadyFilter {
             priority: params.priority,
             issue_kind,
-            assignee: params.assignee,
+            assignment,
             label: params.label,
             limit: Some(params.limit.unwrap_or(DEFAULT_QUERY_LIMIT)),
-            ..Default::default()
         };
 
-        let issues = storage.ready_to_work(Some(&filter), None).await?;
+        let issues = storage.ready_to_work(&filter, None).await?;
         debug!(count = issues.len(), "Found ready issues");
         Ok(issues)
     }
@@ -298,8 +366,9 @@ impl Tools {
         let issue_kind = params.kind.resolve("create").unwrap_or(IssueKind::Task);
         let initial_note = params.initial_note.map(NoteContent::new).transpose()?;
 
-        let storage = self.storage_for(params.workspace_root.as_deref()).await?;
-        let mut storage = storage.write().await;
+        let mut storage = self
+            .mutation_storage_for(params.workspace_root.as_deref())
+            .await?;
 
         let new_issue = NewIssue {
             title: params.title,
@@ -327,14 +396,27 @@ impl Tools {
     #[instrument(skip(self, params), fields(issue_id = %params.issue_id))]
     pub async fn update(&self, params: UpdateParams) -> Result<Issue> {
         debug!("Updating issue");
+        if params.contains_legacy_assignee() {
+            return Err(Error::InvalidArgument {
+                field: "assignee",
+                value: "legacy assignee field".to_string(),
+                valid_values: "use claim or release",
+            });
+        }
+        if !params.has_updates() {
+            return Err(Error::InvalidArgument {
+                field: "updates",
+                value: "no update fields provided".to_string(),
+                valid_values: "at least one update field",
+            });
+        }
+
         let status = params.status.as_deref().map(validate_status).transpose()?;
         let issue_kind = params.kind.resolve("update");
-        let assignee = params
-            .assignee
-            .map(|value| if value.is_empty() { None } else { Some(value) });
 
-        let storage = self.storage_for(params.workspace_root.as_deref()).await?;
-        let mut storage = storage.write().await;
+        let mut storage = self
+            .mutation_storage_for(params.workspace_root.as_deref())
+            .await?;
 
         let id = IssueId::new(&params.issue_id);
         let updates = IssueUpdate {
@@ -343,7 +425,7 @@ impl Tools {
             status,
             priority: params.priority,
             issue_kind,
-            assignee,
+
             design: params.design,
             acceptance_criteria: params.acceptance_criteria,
             note: None,
@@ -354,6 +436,74 @@ impl Tools {
         save_or_reload(storage.as_mut()).await?;
         debug!("Updated issue");
         Ok(issue)
+    }
+
+    async fn mutate_assignment(
+        &self,
+        issue_id: &str,
+        assignee: &str,
+        workspace_root: Option<&str>,
+        operation: AssignmentOperation,
+    ) -> Result<Issue> {
+        let issue_id = IssueId::new(issue_id);
+        if assignee.trim().is_empty() {
+            return Err(Error::Assignment(AssignmentError::BlankAssignee {
+                issue_id,
+            }));
+        }
+
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
+        let issue = match operation {
+            AssignmentOperation::Claim => storage.claim(&issue_id, assignee).await?,
+            AssignmentOperation::Release => storage.release(&issue_id, assignee).await?,
+        };
+        save_or_reload(storage.as_mut()).await?;
+        Ok(issue)
+    }
+
+    /// Atomically claim one Open, unblocked Issue.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed Assignment error if the Issue is not claimable, or a
+    /// Workspace error if context, locking, loading, or persistence fails.
+    #[instrument(skip(self), fields(%issue_id, %assignee))]
+    pub async fn claim(
+        &self,
+        issue_id: &str,
+        assignee: &str,
+        workspace_root: Option<&str>,
+    ) -> Result<Issue> {
+        self.mutate_assignment(
+            issue_id,
+            assignee,
+            workspace_root,
+            AssignmentOperation::Claim,
+        )
+        .await
+    }
+
+    /// Atomically release one Open Issue from its exact Assignee.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed Assignment error if the expected Assignee does not own
+    /// the Issue, or a Workspace error if context, locking, loading, or
+    /// persistence fails.
+    #[instrument(skip(self), fields(%issue_id, %assignee))]
+    pub async fn release(
+        &self,
+        issue_id: &str,
+        assignee: &str,
+        workspace_root: Option<&str>,
+    ) -> Result<Issue> {
+        self.mutate_assignment(
+            issue_id,
+            assignee,
+            workspace_root,
+            AssignmentOperation::Release,
+        )
+        .await
     }
 
     /// Append an immutable Note to an Issue.
@@ -370,8 +520,7 @@ impl Tools {
         workspace_root: Option<&str>,
     ) -> Result<Issue> {
         let note = NoteContent::new(content)?;
-        let storage = self.storage_for(workspace_root).await?;
-        let mut storage = storage.write().await;
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
 
         let issue = storage
             .update(
@@ -409,8 +558,7 @@ impl Tools {
             role: validate_resource_role(role)?,
             label: label.map(ResourceLabel::new).transpose()?,
         };
-        let storage = self.storage_for(workspace_root).await?;
-        let mut storage = storage.write().await;
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
 
         let issue = storage
             .add_resource(&IssueId::new(issue_id), resource)
@@ -459,8 +607,7 @@ impl Tools {
             role: role.as_deref().map(validate_resource_role).transpose()?,
             label,
         };
-        let storage = self.storage_for(workspace_root.as_deref()).await?;
-        let mut storage = storage.write().await;
+        let mut storage = self.mutation_storage_for(workspace_root.as_deref()).await?;
 
         let issue = storage
             .update_resource(
@@ -488,8 +635,7 @@ impl Tools {
         resource_id: &str,
         workspace_root: Option<&str>,
     ) -> Result<Issue> {
-        let storage = self.storage_for(workspace_root).await?;
-        let mut storage = storage.write().await;
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
 
         let issue = storage
             .remove_resource(&IssueId::new(issue_id), &ResourceId::new(resource_id)?)
@@ -533,8 +679,7 @@ impl Tools {
     ) -> Result<Issue> {
         debug!("Closing issue");
         let note = reason.map(NoteContent::closing_reason).transpose()?;
-        let storage = self.storage_for(workspace_root).await?;
-        let mut storage = storage.write().await;
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
 
         let id = IssueId::new(issue_id);
         let updates = IssueUpdate {
@@ -564,8 +709,7 @@ impl Tools {
     ) -> Result<BlockingDependency> {
         let dependency =
             BlockingDependency::new(IssueId::new(dependent_id), IssueId::new(prerequisite_id))?;
-        let storage = self.storage_for(workspace_root).await?;
-        let mut storage = storage.write().await;
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
         storage.add_blocking_dependency(dependency.clone()).await?;
         save_or_reload(storage.as_mut()).await?;
         Ok(dependency)
@@ -586,8 +730,7 @@ impl Tools {
     ) -> Result<BlockingDependency> {
         let dependency =
             BlockingDependency::new(IssueId::new(dependent_id), IssueId::new(prerequisite_id))?;
-        let storage = self.storage_for(workspace_root).await?;
-        let mut storage = storage.write().await;
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
         storage.remove_blocking_dependency(&dependency).await?;
         save_or_reload(storage.as_mut()).await?;
         Ok(dependency)
@@ -662,8 +805,7 @@ impl Tools {
     ) -> Result<RelatedAssociation> {
         let association =
             RelatedAssociation::new(IssueId::new(issue_id), IssueId::new(related_issue_id))?;
-        let storage = self.storage_for(workspace_root).await?;
-        let mut storage = storage.write().await;
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
         storage.add_related_association(association.clone()).await?;
         save_or_reload(storage.as_mut()).await?;
         Ok(association)
@@ -684,8 +826,7 @@ impl Tools {
     ) -> Result<RelatedAssociation> {
         let association =
             RelatedAssociation::new(IssueId::new(issue_id), IssueId::new(related_issue_id))?;
-        let storage = self.storage_for(workspace_root).await?;
-        let mut storage = storage.write().await;
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
         storage.remove_related_association(&association).await?;
         save_or_reload(storage.as_mut()).await?;
         Ok(association)
@@ -727,8 +868,7 @@ impl Tools {
             IssueId::new(discovered_issue_id),
             IssueId::new(source_issue_id),
         )?;
-        let storage = self.storage_for(workspace_root).await?;
-        let mut storage = storage.write().await;
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
         storage.add_discovery_origin(origin.clone()).await?;
         save_or_reload(storage.as_mut()).await?;
         Ok(origin)
@@ -751,8 +891,7 @@ impl Tools {
             IssueId::new(discovered_issue_id),
             IssueId::new(source_issue_id),
         )?;
-        let storage = self.storage_for(workspace_root).await?;
-        let mut storage = storage.write().await;
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
         storage.remove_discovery_origin(&origin).await?;
         save_or_reload(storage.as_mut()).await?;
         Ok(origin)
@@ -792,10 +931,14 @@ impl Tools {
     ) -> Result<Issue> {
         debug!("Reopening issue");
         let note = reason.map(NoteContent::reopening_reason).transpose()?;
-        let storage = self.storage_for(workspace_root).await?;
-        let mut storage = storage.write().await;
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
 
         let id = IssueId::new(issue_id);
+        let current = storage
+            .get(&id)
+            .await?
+            .ok_or_else(|| Error::IssueNotFound(issue_id.to_string()))?;
+        current.status.validate_reopen()?;
         let updates = IssueUpdate {
             status: Some(IssueStatus::Open),
             note,
@@ -868,8 +1011,7 @@ impl Tools {
         workspace_root: Option<&str>,
     ) -> Result<Issue> {
         debug!("Adding label to issue");
-        let storage = self.storage_for(workspace_root).await?;
-        let mut storage = storage.write().await;
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
 
         let id = IssueId::new(issue_id);
         let issue = storage.add_label(&id, label).await?;
@@ -891,8 +1033,7 @@ impl Tools {
         workspace_root: Option<&str>,
     ) -> Result<Issue> {
         debug!("Removing label from issue");
-        let storage = self.storage_for(workspace_root).await?;
-        let mut storage = storage.write().await;
+        let mut storage = self.mutation_storage_for(workspace_root).await?;
 
         let id = IssueId::new(issue_id);
         let issue = storage.remove_label(&id, label).await?;
@@ -954,6 +1095,7 @@ mod tests {
     use super::*;
     use rivets::storage::in_memory::new_in_memory_storage;
     use rstest::{fixture, rstest};
+    use std::collections::BTreeSet;
     use std::path::PathBuf;
 
     fn kind_input(value: Option<&str>) -> crate::models::IssueKindInput {
@@ -966,7 +1108,6 @@ mod tests {
     #[rstest]
     #[case::open("open", IssueStatus::Open)]
     #[case::in_progress("in_progress", IssueStatus::InProgress)]
-    #[case::blocked("blocked", IssueStatus::Blocked)]
     #[case::closed("closed", IssueStatus::Closed)]
     fn validate_status_accepts_canonical(#[case] input: &str, #[case] expected: IssueStatus) {
         assert_eq!(validate_status(input).expect("canonical status"), expected);
@@ -975,6 +1116,7 @@ mod tests {
     #[rstest]
     #[case::uppercase("OPEN")]
     #[case::cli_alias("in-progress")]
+    #[case::blocked("blocked")]
     #[case::unknown("bogus")]
     #[case::empty("")]
     fn validate_status_rejects_lenient(#[case] lenient: &str) {
@@ -989,7 +1131,7 @@ mod tests {
             } => {
                 assert_eq!(field, "status");
                 assert_eq!(value, lenient);
-                assert_eq!(valid_values, "open, in_progress, blocked, closed");
+                assert_eq!(valid_values, "open, in_progress, closed");
             }
             other => panic!("expected InvalidArgument, got: {other:?}"),
         }
@@ -1008,6 +1150,7 @@ mod tests {
             priority,
             kind: kind_input(issue_kind),
             assignee,
+            all_assignees: false,
             label,
             workspace_root: workspace_root.map(str::to_string),
         }
@@ -1067,7 +1210,6 @@ mod tests {
         status: Option<&str>,
         priority: Option<u8>,
         issue_kind: Option<&str>,
-        assignee: Option<String>,
         design: Option<String>,
         acceptance_criteria: Option<String>,
         labels: Option<Vec<String>>,
@@ -1078,7 +1220,7 @@ mod tests {
             status: status.map(str::to_string),
             priority,
             kind: kind_input(issue_kind),
-            assignee,
+            legacy_assignee: crate::models::LegacyAssigneePresence::default(),
             title,
             description,
             design,
@@ -1194,7 +1336,20 @@ mod tests {
     async fn test_update_issue(#[future] tools: Tools) {
         let tools = tools.await;
 
-        let issue = create_issue(&tools, "Original Title").await;
+        let issue = tools
+            .create(create_params(
+                "Original Title".to_string(),
+                None,
+                None,
+                None,
+                Some("active-owner".to_string()),
+                None,
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("create should succeed");
 
         let updated = tools
             .update(update_params(
@@ -1203,7 +1358,6 @@ mod tests {
                 None,
                 Some("in_progress"),
                 Some(0),
-                None,
                 None,
                 None,
                 None,
@@ -1235,16 +1389,84 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    async fn test_ready_to_work(#[future] tools: Tools) {
+    async fn ready_assignment_selectors(#[future] tools: Tools) {
         let tools = tools.await;
-
-        create_issue(&tools, "Ready Issue").await;
-
-        let ready = tools
-            .ready(ready_params(None, None, None, None, None, None))
+        let unassigned = create_issue(&tools, "Unassigned").await;
+        let alice = tools
+            .create(create_params(
+                "Alice".to_string(),
+                None,
+                None,
+                None,
+                Some("alice".to_string()),
+                None,
+                None,
+                None,
+                None,
+            ))
             .await
-            .unwrap();
-        assert!(!ready.is_empty());
+            .expect("assigned Issue creation should succeed");
+
+        let ready_ids = |issues: Vec<Issue>| {
+            issues
+                .into_iter()
+                .map(|issue| issue.id)
+                .collect::<BTreeSet<_>>()
+        };
+        assert_eq!(
+            ready_ids(
+                tools
+                    .ready(ready_params(None, None, None, None, None, None))
+                    .await
+                    .expect("default Ready query should succeed")
+            ),
+            BTreeSet::from([unassigned.id.clone()])
+        );
+        assert_eq!(
+            ready_ids(
+                tools
+                    .ready(ready_params(
+                        None,
+                        None,
+                        None,
+                        Some("alice".to_string()),
+                        None,
+                        None,
+                    ))
+                    .await
+                    .expect("assignee Ready query should succeed")
+            ),
+            BTreeSet::from([alice.id.clone()])
+        );
+        assert_eq!(
+            ready_ids(
+                tools
+                    .ready(ReadyParams {
+                        all_assignees: true,
+                        ..ready_params(None, None, None, None, None, None)
+                    })
+                    .await
+                    .expect("all-assignees Ready query should succeed")
+            ),
+            BTreeSet::from([unassigned.id, alice.id])
+        );
+
+        let error = tools
+            .ready(ReadyParams {
+                assignee: Some("alice".to_string()),
+                all_assignees: true,
+                ..ready_params(None, None, None, None, None, None)
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::InvalidArgument {
+                field: "assignment selector",
+                value,
+                valid_values: "unassigned, assignee, all_assignees",
+            } if value == "assignee and all_assignees"
+        ));
     }
 
     #[rstest]
@@ -1434,6 +1656,66 @@ mod tests {
             .await
             .expect("reopen should succeed");
         assert_eq!(reopened.status, IssueStatus::Open);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_reopen_rejects_open_and_in_progress_without_mutation(#[future] tools: Tools) {
+        let tools = tools.await;
+
+        let open = create_issue(&tools, "Still open").await;
+        let open_updated_at = open.updated_at;
+        assert!(matches!(
+            tools.reopen(open.id.as_str(), None, None).await,
+            Err(Error::InvalidStatusTransition(_))
+        ));
+        let open_after = tools
+            .show(open.id.as_str(), None)
+            .await
+            .expect("open issue should remain readable");
+        assert_eq!(open_after.status, IssueStatus::Open);
+        assert_eq!(open_after.updated_at, open_updated_at);
+
+        let in_progress = tools
+            .create(create_params(
+                "Already in progress".to_string(),
+                None,
+                None,
+                None,
+                Some("alice".to_string()),
+                None,
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("assigned issue should be created");
+        let in_progress = tools
+            .update(update_params(
+                in_progress.id.as_str(),
+                None,
+                None,
+                Some("in_progress"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("assigned issue should enter progress");
+        let in_progress_updated_at = in_progress.updated_at;
+        assert!(matches!(
+            tools.reopen(in_progress.id.as_str(), None, None).await,
+            Err(Error::InvalidStatusTransition(_))
+        ));
+        let in_progress_after = tools
+            .show(in_progress.id.as_str(), None)
+            .await
+            .expect("in-progress issue should remain readable");
+        assert_eq!(in_progress_after.status, IssueStatus::InProgress);
+        assert_eq!(in_progress_after.updated_at, in_progress_updated_at);
     }
 
     #[rstest]

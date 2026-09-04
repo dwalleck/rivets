@@ -11,6 +11,7 @@ sequenceDiagram
     participant CLI Parser
     participant App
     participant Command
+    participant WorkspaceLock
     participant Storage Trait
     participant Factory
     participant InMemoryStorage
@@ -23,10 +24,14 @@ sequenceDiagram
     main.rs->>CLI Parser: Cli::parse_args()
     CLI Parser-->>main.rs: Commands::Create(args)
 
-    main.rs->>App: App::from_directory(current_dir)
+    main.rs->>App: App::from_directory_for_mutation(current_dir)
     App->>App: find_rivets_root (walk up, max 256 levels)
-    App->>App: RivetsConfig::load(.rivets/config.yaml)
-    App->>Factory: create_storage(config.storage.to_backend(root), prefix)
+    App->>WorkspaceLock: try_lock(.rivets/workspace.lock)
+    alt Another writer owns the Workspace
+        WorkspaceLock-->>User: Workspace Busy (retryable, no load/write)
+    else Lock acquired
+        App->>App: RivetsConfig::load(.rivets/config.yaml)
+        App->>Factory: create_storage(config.storage.to_backend(root), prefix)
     Factory->>InMemoryStorage: load_from_jsonl(path).await
     InMemoryStorage->>JSONL: Open file, read lines
     Note over InMemoryStorage,JSONL: Pass 1: parse compatibility records<br/>Pass 2: import Issues + graph nodes<br/>Pass 3: rebuild dependency edges
@@ -58,8 +63,15 @@ sequenceDiagram
     InMemoryStorage-->>Storage Trait: Ok(())
 
     Storage Trait-->>Command: Ok(())
+    App->>WorkspaceLock: Drop guard after command/save recovery
+    end
     Command-->>User: Created issue: rivets-a3f8
 ```
+
+MCP mutations resolve the same canonical Workspace, acquire the same sidecar
+before lazy cache initialization or cached `reload()`, and retain it through
+`save_or_reload`. MCP queries and context selection do not acquire the mutation
+lock.
 
 ## Configuration Loading (single source)
 
@@ -201,66 +213,47 @@ flowchart TD
     style Display fill:#90EE90
 ```
 
-`--priority` takes a single value 0–4 (not a range); `--status` accepts the
-status vocabulary `open`, `in_progress`, `blocked`, `closed`; `--kind` accepts
-`bug`, `feature`, `task`, `epic`, `chore`.
+`--priority` takes a single value 0–4 (not a range); `--status` accepts exactly
+`open`, `in_progress`, or `closed`; `--kind` accepts `bug`, `feature`, `task`,
+`epic`, or `chore`.
 
 ## Ready Work Algorithm Flow
 
-`ready` is a **graph-derived query**: it computes blocked issues from the
-dependency graph and never consults or writes the `blocked` status value.
+`ready` derives eligibility at query time. It never reads or writes a persisted
+Ready or Blocked flag.
 
 ```mermaid
 flowchart TD
-    Start[rivets ready<br/>--assignee alice] --> InitBlocked[blocked = empty set]
+    Start[rivets ready] --> Open{Workflow State Open?}
+    Open -->|No| Skip[Exclude]
+    Open -->|Yes| Direct{Direct Blocks edge to<br/>a non-Closed prerequisite?}
+    Direct -->|Yes| Skip
+    Direct -->|No| Assignment{Assignment selector}
+    Assignment -->|Default| Unassigned{Unassigned?}
+    Assignment -->|--assignee alice| Alice{Assigned exactly alice?}
+    Assignment -->|--all-assignees| Include[Eligible]
+    Unassigned -->|Yes| Include
+    Unassigned -->|No| Skip
+    Alice -->|Yes| Include
+    Alice -->|No| Skip
+    Include --> Filters[Apply priority, Kind, and label filters]
+    Filters --> Sort[Sort: hybrid / priority / oldest]
+    Sort --> Limit[Apply --limit]
+    Limit --> Display[Display Ready Issues]
 
-    InitBlocked --> Phase1[Phase 1: Direct Blocks]
-    Phase1 --> Iterate1{For each non-closed issue}
-
-    Iterate1 --> CheckDeps{Has outgoing<br/>dependency edges?}
-    CheckDeps -->|Yes| FilterBlocking{Edge type == 'blocks'?}
-    FilterBlocking -->|Yes| CheckBlockerStatus{Blocker is<br/>not closed?}
-    CheckBlockerStatus -->|Yes| AddBlocked[blocked.insert issue]
-    CheckBlockerStatus -->|No| Iterate1
-    FilterBlocking -->|No| Iterate1
-    CheckDeps -->|No| Iterate1
-
-    Iterate1 -->|Done| Phase2[Phase 2: Transitive Blocking]
-
-    Phase2 --> InitQueue[BFS queue = blocked issues]
-    InitQueue --> ProcessQueue{Queue<br/>not empty?}
-
-    ProcessQueue -->|Yes| PopIssue[Pop issue, depth]
-    PopIssue --> CheckDepth{depth < 50?}
-    CheckDepth -->|No| ProcessQueue
-    CheckDepth -->|Yes| FindChildren[Find children via<br/>parent-child edges]
-
-    FindChildren --> MarkChildren[blocked.insert children<br/>queue.push children, depth+1]
-    MarkChildren --> ProcessQueue
-
-    ProcessQueue -->|No| FilterResults[Filter: status ≠ closed<br/>AND id ∉ blocked]
-
-    FilterResults --> ApplyUserFilter{Additional<br/>filters?}
-    ApplyUserFilter -->|Yes| FilterAssignee{assignee == alice?}
-    FilterAssignee -->|Yes| Include[Include in ready]
-    FilterAssignee -->|No| Skip[Skip]
-    ApplyUserFilter -->|No| Include
-
-    Include --> SortResults[Sort by policy<br/>--sort hybrid/priority/oldest]
-    SortResults --> Limit[Truncate to --limit<br/>default 10]
-    Limit --> Display[Display: Ready to work (N issue(s))]
-
+    style Skip fill:#FFB6C1
     style Display fill:#90EE90
 ```
 
-Edge direction reminder: edges point from **dependent → dependency**. For
-`blocks`, the target of the edge is the blocker. Only `blocks` edges block
-directly; `parent-child` edges propagate a blocked parent's result to its children.
+Edges point from **dependent → prerequisite**. Only a direct `blocks` edge to a
+non-Closed prerequisite derives Blocked. Parentage, Related Associations, and
+Discovery Origins never affect Blocked or Ready. Filters, sorting, and limits
+operate only after Open/Blocked/Assignment eligibility.
 
 ## Blocked Query Flow
 
-`rivets blocked` reports issues that are blocked **by the graph**, pairing each
-blocked issue with its direct blockers:
+`rivets blocked` reports Issues with direct unresolved explicit Blocking
+Dependencies, pairing each blocked Issue with its direct prerequisites:
 
 ```mermaid
 flowchart TD
@@ -409,46 +402,44 @@ reviewable diffs) to a `.tmp` file, flushed, then renamed over `issues.jsonl`.
 
 ## State Transitions
 
-Status changes are **explicit only** — via `update --status`, `close`, or
-`reopen`. Dependency operations never change status, and nothing in the system
-auto-transitions an issue to `blocked`.
+Workflow State changes and Assignment changes are separate operations. `claim`
+and `release` mutate only Assignment; `update --status`, `close`, and `reopen`
+mutate Workflow State and apply the domain-owned Assignment side effects.
+Dependency operations never change Workflow State. Open, In Progress, and Closed
+are the only states; Blocked and Ready are derived and never serialized on Issue
+records.
 
-The transition rules are owned by the domain (`IssueStatus::validate_transition`,
-ADR-0005) and enforced at the single storage update site. Only two transitions
-are rejected:
+The transition rules are owned by the domain (`Issue::apply_status_transition`,
+`IssueStatus::validate_transition`, ADR-0005) and enforced at the storage seam:
 
-- `closed → closed` (an issue cannot be closed twice)
-- anything non-closed → `open` (only a closed issue can be reopened)
+- entering In Progress requires an assignee;
+- In Progress → Open retains that Assignment;
+- closing clears Assignment;
+- reopening Closed → Open produces an unassigned Issue;
+- Closed → In Progress is rejected; reopen to Open first;
+- closing Closed and updating Open to Open are rejected.
 
-Every other transition is allowed, including setting the status explicitly.
+Claim is a compare-and-set mutation. It requires an Open, unblocked Issue; an
+unassigned Issue becomes owned by the claimant, the current owner may repeat the
+same claim without changing timestamps, and another claimant receives a typed
+Already Claimed error. Release requires the exact owner and an Open Issue, but
+remains valid when that Open Issue is blocked.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Open: create
-    Open --> InProgress: update --status in_progress
-    Open --> Blocked: update --status blocked (explicit)
-    InProgress --> Blocked: update --status blocked (explicit)
-    Open --> Closed: close
-    InProgress --> Closed: close
-    Blocked --> Closed: close
-    Closed --> Open: reopen
-
-    note right of Blocked
-        'blocked' is a legacy status value that can
-        still be set explicitly, but nothing sets it
-        automatically. Blocked-ness for queries is
-        derived from the dependency graph instead.
-    end note
-
-    note right of Closed
-        Any status can be closed via 'close';
-        only Closed can be reopened.
-    end note
+    Open --> Open: claim / release
+    Open --> InProgress: enter active work (assignee required)
+    InProgress --> Open: return to open (retain assignee)
+    Open --> Closed: close (clear assignee)
+    InProgress --> Closed: close (clear assignee)
+    Closed --> Open: reopen (unassigned)
 ```
 
-The `ready` and `blocked` queries are graph-derived. In `stats`, the `ready` and
-`blocked_by_dependencies` fields use those queries, while `by_status.blocked`
-counts the separately stored legacy status value.
+The `ready` and `blocked` queries derive their conditions from current Workflow
+State, Assignment, and explicit Blocking Dependencies. `stats.by_status`
+contains exactly the three Workflow States; `ready` and
+`blocked_by_dependencies` are separate derived counts.
 
 ## Data Persistence Points
 

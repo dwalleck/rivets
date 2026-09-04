@@ -236,6 +236,45 @@ impl Issue {
         self.notes.push(Note::from_parts(content, created_at));
     }
 
+    pub(crate) fn apply_status_transition(
+        &mut self,
+        target: IssueStatus,
+        changed_at: DateTime<Utc>,
+    ) -> Result<(), StatusTransitionError> {
+        let current = self.status;
+        current.validate_transition(target)?;
+        if target == IssueStatus::InProgress && self.assignee.is_none() {
+            return Err(StatusTransitionError::AssigneeRequired);
+        }
+
+        self.status = target;
+        match target {
+            IssueStatus::Closed => {
+                self.assignee = None;
+                if self.closed_at.is_none() {
+                    self.closed_at = Some(changed_at);
+                }
+            }
+            IssueStatus::Open if current == IssueStatus::Closed => {
+                self.assignee = None;
+            }
+            IssueStatus::Open | IssueStatus::InProgress => {}
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_assignment_state(&self) -> Result<(), AssignmentError> {
+        match (self.status, self.assignee.is_some()) {
+            (IssueStatus::InProgress, false) => Err(AssignmentError::AssigneeRequired {
+                issue_id: self.id.clone(),
+            }),
+            (IssueStatus::Closed, true) => Err(AssignmentError::ClosedCannotBeAssigned {
+                issue_id: self.id.clone(),
+            }),
+            (IssueStatus::Open | IssueStatus::InProgress | IssueStatus::Closed, _) => Ok(()),
+        }
+    }
+
     /// Return Associated Resources in insertion order.
     pub fn resources(&self) -> &[AssociatedResource] {
         &self.resources
@@ -430,16 +469,13 @@ pub(crate) fn join_canonical_names<T: ValueEnum + fmt::Display>() -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum IssueStatus {
-    /// Issue is open and ready to work on
+    /// Issue is open; Ready is derived separately
     Open,
 
     /// Issue is currently being worked on
     #[serde(rename = "in_progress")]
     #[value(name = "in_progress", alias = "in-progress")]
     InProgress,
-
-    /// Issue is blocked by dependencies
-    Blocked,
 
     /// Issue has been completed
     Closed,
@@ -450,7 +486,6 @@ impl fmt::Display for IssueStatus {
         match self {
             Self::Open => write!(f, "open"),
             Self::InProgress => write!(f, "in_progress"),
-            Self::Blocked => write!(f, "blocked"),
             Self::Closed => write!(f, "closed"),
         }
     }
@@ -467,17 +502,14 @@ impl IssueStatus {
         VALUES.get_or_init(join_canonical_names::<Self>)
     }
 
-    /// Validate a status transition per the domain rules (ADR-0005).
-    ///
-    /// The domain owns these rules; adapters and storage implementations
-    /// must not re-validate them.
-    ///
     /// # Invalid Transitions
     ///
     /// - `Closed` → `Closed`: an Issue cannot be closed twice.
-    /// - Any non-`Closed` status → `Open`: only closed Issues can be reopened.
+    /// - `Closed` → `In Progress`: a Closed Issue reopens through `Open`.
+    /// - `Open` → `Open`: only Closed and In Progress Issues can target Open.
     ///
-    /// Every other transition is allowed.
+    /// `In Progress` → `Open` is valid and retains Assignment at the Issue
+    /// transition application seam.
     ///
     /// # Errors
     ///
@@ -487,9 +519,29 @@ impl IssueStatus {
             (Self::Closed, Self::Closed) => {
                 Err(StatusTransitionError::AlreadyClosed { current: self })
             }
-            (Self::Closed, _) => Ok(()),
+            (Self::Closed, Self::InProgress) => {
+                Err(StatusTransitionError::MustReopenToOpen { target })
+            }
+            (Self::Closed | Self::InProgress, Self::Open) => Ok(()),
             (current, Self::Open) => Err(StatusTransitionError::NotClosed { current }),
             _ => Ok(()),
+        }
+    }
+
+    /// Validate the status precondition for reopening an Issue.
+    ///
+    /// Reopening is an intent-specific operation: only a closed Issue may be
+    /// reopened. In particular, an already-open or in-progress Issue is not
+    /// silently moved back to `Open`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StatusTransitionError::NotClosed`] when this status is
+    /// `Open` or `InProgress`.
+    pub const fn validate_reopen(self) -> Result<(), StatusTransitionError> {
+        match self {
+            Self::Closed => Ok(()),
+            current => Err(StatusTransitionError::NotClosed { current }),
         }
     }
 }
@@ -512,6 +564,78 @@ pub enum StatusTransitionError {
         /// The Issue's status when the reopen was rejected.
         current: IssueStatus,
     },
+    /// A Closed Issue must reopen to Open before becoming active.
+    #[error("Closed Issue must reopen to open before entering {target}")]
+    MustReopenToOpen {
+        /// The rejected target status.
+        target: IssueStatus,
+    },
+    /// Active work requires one responsible Assignee.
+    #[error("Entering in_progress requires an Assignee")]
+    AssigneeRequired,
+}
+
+/// An Assignment Claim or Release rejected by the domain contract.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AssignmentError {
+    /// Claim and Release are valid only while the Issue is Open.
+    #[error("Assignment changes require an Open Issue; {issue_id} is {status}")]
+    NotOpen {
+        /// The affected Issue.
+        issue_id: IssueId,
+        /// The current Workflow State.
+        status: IssueStatus,
+    },
+    /// Claim or Release supplied an empty or whitespace-only Assignee.
+    #[error("Assignee for Issue {issue_id} cannot be blank")]
+    BlankAssignee {
+        /// The affected Issue.
+        issue_id: IssueId,
+    },
+    /// An unresolved Blocking Dependency prevents a new Claim.
+    #[error("Issue {issue_id} is Blocked and cannot be claimed")]
+    Blocked {
+        /// The affected Issue.
+        issue_id: IssueId,
+    },
+    /// A different Assignee already owns the Claim.
+    #[error("Issue {issue_id} is already claimed by {assignee}")]
+    AlreadyClaimed {
+        /// The affected Issue.
+        issue_id: IssueId,
+        /// The current Assignee.
+        assignee: String,
+    },
+    /// Release was requested for an unassigned Issue.
+    #[error("Issue {issue_id} is not claimed")]
+    NotClaimed {
+        /// The affected Issue.
+        issue_id: IssueId,
+    },
+    /// Release supplied a claimant other than the current Assignee.
+    #[error(
+        "Issue {issue_id} is claimed by {actual}; release expected current Assignee {expected}"
+    )]
+    AssigneeMismatch {
+        /// The affected Issue.
+        issue_id: IssueId,
+        /// The Assignee supplied by the caller.
+        expected: String,
+        /// The current Assignee.
+        actual: String,
+    },
+    /// A canonical In Progress Issue lacks an Assignee.
+    #[error("In Progress Issue {issue_id} requires an Assignee")]
+    AssigneeRequired {
+        /// The affected Issue.
+        issue_id: IssueId,
+    },
+    /// A canonical Closed Issue still carries an Assignee.
+    #[error("Closed Issue {issue_id} cannot remain assigned")]
+    ClosedCannotBeAssigned {
+        /// The affected Issue.
+        issue_id: IssueId,
+    },
 }
 
 /// A failure to parse an [`IssueStatus`] from a string.
@@ -532,7 +656,6 @@ impl FromStr for IssueStatus {
         match s {
             "open" => Ok(Self::Open),
             "in_progress" => Ok(Self::InProgress),
-            "blocked" => Ok(Self::Blocked),
             "closed" => Ok(Self::Closed),
             _ => Err(IssueStatusError::UnknownStatus {
                 status: s.to_string(),
@@ -612,7 +735,7 @@ pub struct Dependency {
 }
 
 /// Type of dependency relationship
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum DependencyType {
     /// Hard blocker - prevents work
@@ -636,6 +759,17 @@ impl fmt::Display for DependencyType {
             Self::ParentChild => write!(f, "parent-child"),
             Self::DiscoveredFrom => write!(f, "discovered-from"),
         }
+    }
+}
+impl DependencyType {
+    /// Comma-separated canonical dependency-type names, for error messages.
+    ///
+    /// Derived from the enum declaration rather than hand-written, so the
+    /// listed values cannot drift from the accepted vocabulary.
+    #[must_use]
+    pub fn valid_values() -> &'static str {
+        static VALUES: OnceLock<String> = OnceLock::new();
+        VALUES.get_or_init(join_canonical_names::<Self>)
     }
 }
 
@@ -784,12 +918,15 @@ fn validate_text_fields(
             "Description contains invalid control character at position {pos}"
         ));
     }
-    if let Some(val) = assignee
-        && let Some(pos) = find_control_char(val)
-    {
-        return Err(format!(
-            "Assignee contains invalid control character at position {pos}"
-        ));
+    if let Some(val) = assignee {
+        if val.trim().is_empty() {
+            return Err("Assignee cannot be blank".to_string());
+        }
+        if let Some(pos) = find_control_char(val) {
+            return Err(format!(
+                "Assignee contains invalid control character at position {pos}"
+            ));
+        }
     }
     for (i, label) in labels.iter().enumerate() {
         if let Some(pos) = find_control_char(label) {
@@ -913,14 +1050,6 @@ pub struct IssueUpdate {
     /// New issue kind (if reclassifying)
     pub issue_kind: Option<IssueKind>,
 
-    /// New assignee (if updating)
-    ///
-    /// This uses the double-Option pattern to represent three distinct states:
-    /// - `None`: Don't modify the assignee (leave unchanged)
-    /// - `Some(None)`: Clear the assignee (set to unassigned)
-    /// - `Some(Some(name))`: Set assignee to the given name
-    pub assignee: Option<Option<String>>,
-
     /// New design notes (if updating)
     pub design: Option<String>,
 
@@ -932,6 +1061,46 @@ pub struct IssueUpdate {
 
     /// New labels (if updating) - replaces existing labels
     pub labels: Option<Vec<String>>,
+}
+
+/// Assignment visibility for a Ready query.
+///
+/// Ready defaults to unassigned Issues so concurrent workers do not take an
+/// Issue already claimed by another assignee.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ReadyAssignmentFilter {
+    /// Include only Issues without an assignee.
+    #[default]
+    Unassigned,
+    /// Include only Issues assigned to this exact assignee.
+    Assignee(String),
+    /// Include Issues regardless of Assignment.
+    All,
+}
+
+impl ReadyAssignmentFilter {
+    pub(crate) fn allows(&self, assignee: Option<&str>) -> bool {
+        match self {
+            Self::Unassigned => assignee.is_none(),
+            Self::Assignee(expected) => assignee == Some(expected.as_str()),
+            Self::All => true,
+        }
+    }
+}
+
+/// Filter applied after an Issue satisfies the canonical Ready predicate.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ReadyFilter {
+    /// Filter by priority.
+    pub priority: Option<u8>,
+    /// Filter by Issue Kind.
+    pub issue_kind: Option<IssueKind>,
+    /// Select Assignment visibility.
+    pub assignment: ReadyAssignmentFilter,
+    /// Filter by label.
+    pub label: Option<String>,
+    /// Limit the ordered result set.
+    pub limit: Option<usize>,
 }
 
 /// Filter for querying issues
@@ -1185,7 +1354,6 @@ mod tests {
     fn test_issue_status_display() {
         assert_eq!(format!("{}", IssueStatus::Open), "open");
         assert_eq!(format!("{}", IssueStatus::InProgress), "in_progress");
-        assert_eq!(format!("{}", IssueStatus::Blocked), "blocked");
         assert_eq!(format!("{}", IssueStatus::Closed), "closed");
     }
 
@@ -1220,7 +1388,6 @@ mod tests {
         for status in [
             IssueStatus::Open,
             IssueStatus::InProgress,
-            IssueStatus::Blocked,
             IssueStatus::Closed,
         ] {
             assert_eq!(status.to_string().parse::<IssueStatus>(), Ok(status));
@@ -1229,7 +1396,14 @@ mod tests {
 
     #[test]
     fn test_issue_status_from_str_rejects_noncanonical() {
-        for invalid in ["", "OPEN", "in-progress", "in_progress ", "bogus"] {
+        for invalid in [
+            "",
+            "OPEN",
+            "blocked",
+            "in-progress",
+            "in_progress ",
+            "bogus",
+        ] {
             let error = invalid.parse::<IssueStatus>().unwrap_err();
             assert!(matches!(
                 error,
@@ -1296,7 +1470,6 @@ mod tests {
         for status in [
             IssueStatus::Open,
             IssueStatus::InProgress,
-            IssueStatus::Blocked,
             IssueStatus::Closed,
         ] {
             let json = serde_json::to_string(&status).expect("status serializes");
@@ -1339,13 +1512,25 @@ mod tests {
     }
 
     // ===== Valid-Values Fence Tests =====
+    #[test]
+    fn issue_status_canonical_vocabulary() {
+        let actual = IssueStatus::value_variants()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+
+        assert_eq!(actual, ["open", "in_progress", "closed"]);
+        assert!("blocked".parse::<IssueStatus>().is_err());
+        assert!(serde_json::from_str::<IssueStatus>("\"blocked\"").is_err());
+    }
 
     #[test]
     fn test_valid_values_list_every_canonical_name() {
         // Pins the derived error-message lists to the shipped wording.
+        assert_eq!(IssueStatus::valid_values(), "open, in_progress, closed");
         assert_eq!(
-            IssueStatus::valid_values(),
-            "open, in_progress, blocked, closed"
+            DependencyType::valid_values(),
+            "blocks, related, parent-child, discovered-from"
         );
     }
 
@@ -1360,7 +1545,6 @@ mod tests {
         for status in [
             IssueStatus::Open,
             IssueStatus::InProgress,
-            IssueStatus::Blocked,
             IssueStatus::Closed,
         ] {
             let possible = status.to_possible_value().expect("possible value");
@@ -2106,18 +2290,12 @@ mod tests {
         #[rstest]
         #[case::open_to_closed(IssueStatus::Open, IssueStatus::Closed, true)]
         #[case::in_progress_to_closed(IssueStatus::InProgress, IssueStatus::Closed, true)]
-        #[case::blocked_to_closed(IssueStatus::Blocked, IssueStatus::Closed, true)]
         #[case::closed_to_closed(IssueStatus::Closed, IssueStatus::Closed, false)]
         #[case::closed_to_open(IssueStatus::Closed, IssueStatus::Open, true)]
-        #[case::closed_to_in_progress(IssueStatus::Closed, IssueStatus::InProgress, true)]
-        #[case::closed_to_blocked(IssueStatus::Closed, IssueStatus::Blocked, true)]
+        #[case::closed_to_in_progress(IssueStatus::Closed, IssueStatus::InProgress, false)]
         #[case::open_to_open(IssueStatus::Open, IssueStatus::Open, false)]
-        #[case::in_progress_to_open(IssueStatus::InProgress, IssueStatus::Open, false)]
-        #[case::blocked_to_open(IssueStatus::Blocked, IssueStatus::Open, false)]
+        #[case::in_progress_to_open(IssueStatus::InProgress, IssueStatus::Open, true)]
         #[case::open_to_in_progress(IssueStatus::Open, IssueStatus::InProgress, true)]
-        #[case::open_to_blocked(IssueStatus::Open, IssueStatus::Blocked, true)]
-        #[case::in_progress_to_blocked(IssueStatus::InProgress, IssueStatus::Blocked, true)]
-        #[case::blocked_to_in_progress(IssueStatus::Blocked, IssueStatus::InProgress, true)]
         fn transition_matrix(
             #[case] current: IssueStatus,
             #[case] target: IssueStatus,
@@ -2148,11 +2326,9 @@ mod tests {
             );
         }
 
-        #[rstest]
-        #[case::open(IssueStatus::Open)]
-        #[case::in_progress(IssueStatus::InProgress)]
-        #[case::blocked(IssueStatus::Blocked)]
-        fn reopening_a_non_closed_issue_yields_not_closed(#[case] current: IssueStatus) {
+        #[test]
+        fn reopening_an_open_issue_yields_not_closed() {
+            let current = IssueStatus::Open;
             let error = current
                 .validate_transition(IssueStatus::Open)
                 .expect_err("non-Closed -> Open must be rejected");
@@ -2160,6 +2336,19 @@ mod tests {
             assert_eq!(
                 error.to_string(),
                 format!("Issue is not closed (status: {current})")
+            );
+        }
+
+        #[rstest]
+        #[case::closed(IssueStatus::Closed, true)]
+        #[case::open(IssueStatus::Open, false)]
+        #[case::in_progress(IssueStatus::InProgress, false)]
+        fn reopen_intent_matrix(#[case] current: IssueStatus, #[case] should_succeed: bool) {
+            let result = current.validate_reopen();
+            assert_eq!(
+                result.is_ok(),
+                should_succeed,
+                "Reopen from {current:?} expected success={should_succeed}, got {result:?}"
             );
         }
     }

@@ -28,6 +28,7 @@ rivets/
 │   │   │   ├── config.rs          # Configuration management
 │   │   │   ├── error.rs           # Error types
 │   │   │   ├── id_generation.rs   # Hash-based ID generation
+│   │   │   ├── workspace_lock.rs  # Durable Workspace mutation ownership
 │   │   │   ├── cli/
 │   │   │   │   ├── mod.rs         # Argument parsing and command dispatch
 │   │   │   │   ├── args.rs        # Argument structs for all commands
@@ -77,8 +78,10 @@ rivets/
 ├── docs/                          # Architecture, design, and agent docs
 │
 └── .rivets/                       # User workspace (created by init)
-    ├── issues.jsonl
-    └── config.yaml
+    ├── issues.jsonl               # Git-tracked source of truth
+    ├── config.yaml
+    ├── workspace.lock             # Persistent, ignored OS-lock sidecar
+    └── .gitignore
 ```
 
 > **Tethys** (code intelligence engine) has moved to its own repository and is
@@ -168,13 +171,23 @@ Argument parsing and command dispatch, split by responsibility:
 
 ### app.rs
 
-Application context for CLI command execution: locates the workspace, loads
-configuration, and constructs the storage backend commands operate on.
+Application context for CLI command execution: locates the Workspace and
+constructs its storage. Read-only construction remains unlocked; mutation
+construction owns `WorkspaceMutationLock` before configuration/storage load and
+retains it for the App lifetime.
+
+### workspace_lock.rs
+
+Owns canonical Workspace identity and the persistent, nonblocking mutation
+sidecar. `WorkspaceMutationLock::try_acquire` uses Rust's typed standard-library
+file lock, distinguishes retryable contention from causal I/O, and releases on
+guard drop without deleting the sidecar.
 
 ### commands/
 
 Command implementations that do not go through storage-backed dispatch.
-Currently holds `init.rs` (workspace creation).
+Currently holds `init.rs`, which creates the Workspace, empty lock sidecar, and
+metadata ignore entry.
 
 ### domain/
 
@@ -295,10 +308,13 @@ operations, labels, resources, queries, import/export, `save`, `reload`), the `S
 `create_storage` factory.
 
 It also contains `JsonlBackedStorage`, a wrapper that adds guarded file
-persistence to the in-memory backend: after a resilient partial load, reads
-remain available but every mutation and save fails with
-`StorageError::UnsafePartialLoad` (a typed `PartialLoadError` carrying one
-`SkippedIssueRecordCause` per omitted record) until the file is repaired.
+persistence to the in-memory backend. It tracks the raw JSONL source with a
+SHA-256 revision, reloads a completed external change before mutation, and
+returns `StorageError::ExternalChange` if the source changes after mutation but
+before save. After a resilient partial load, reads remain available but every
+mutation and save fails with `StorageError::UnsafePartialLoad` (a typed
+`PartialLoadError` carrying one `SkippedIssueRecordCause` per omitted record)
+until the file is repaired.
 
 #### storage/in_memory/
 
@@ -328,10 +344,10 @@ IDs to prevent collisions.
 | Module | Responsibility |
 |--------|----------------|
 | `server.rs` | MCP server implementation and protocol wiring |
-| `tools.rs` | MCP tool implementations (create, list, show, update, …) |
+| `tools.rs` | MCP tool implementations, including atomic Claim/Release through the durable Workspace mutation gate |
 | `context.rs` | Workspace context management |
-| `models.rs` | MCP request/response models |
-| `error.rs` | MCP error types; classifies storage errors via `StorageError::try_into_resource_error` |
+| `models.rs` | MCP request/response models, including shared Assignment parameters |
+| `error.rs` | MCP error types; preserves typed Assignment failures and marks only Workspace Busy as retryable |
 
 ## Testing Structure
 

@@ -40,17 +40,19 @@ use crate::app::App;
 
 // Re-export argument structs
 pub use args::{
-    BlockedArgs, BlockingDependencyAction, BlockingDependencyArgs, BlockingDependencyListArgs,
-    CloseArgs, CreateArgs, DeleteArgs, DiscoveryAction, DiscoveryArgs, InfoArgs, InitArgs,
-    LabelAction, LabelArgs, ListArgs, ReadyArgs, RelatedAction, RelatedArgs, ReopenArgs,
-    ResourceAction, ResourceArgs, ShowArgs, StaleArgs, StatsArgs, UpdateArgs,
+    AssignmentArgs, BlockedArgs, BlockingDependencyAction, BlockingDependencyArgs,
+    BlockingDependencyListArgs, CloseArgs, CreateArgs, DeleteArgs, DiscoveryAction, DiscoveryArgs,
+    InfoArgs, InitArgs, LabelAction, LabelArgs, ListArgs, ReadyArgs, RelatedAction, RelatedArgs,
+    ReopenArgs, ResourceAction, ResourceArgs, ShowArgs, StaleArgs, StatsArgs, UpdateArgs,
 };
 
 // Re-export types
 pub use types::{BatchError, BatchResult, SortOrderArg, SortPolicyArg};
 
 // Re-export validators for external use
-pub use validators::{validate_description, validate_issue_id, validate_prefix, validate_title};
+pub use validators::{
+    validate_assignee, validate_description, validate_issue_id, validate_prefix, validate_title,
+};
 
 /// Rivets - A Rust-based issue tracking system
 ///
@@ -111,6 +113,11 @@ pub enum Commands {
     /// Modifies one or more fields of an existing issue. Only provided fields
     /// are updated; other fields remain unchanged.
     Update(UpdateArgs),
+    /// Claim an Open, unblocked Issue for one Assignee.
+    Claim(AssignmentArgs),
+
+    /// Release an Open Issue owned by the exact Assignee.
+    Release(AssignmentArgs),
 
     /// Close an issue
     ///
@@ -128,10 +135,10 @@ pub enum Commands {
     /// Use `--force` to skip confirmation.
     Delete(DeleteArgs),
 
-    /// Show issues ready to work on
+    /// Show Open, unblocked Issues matching Assignment visibility
     ///
-    /// Lists issues that are not blocked by dependencies. Issues are sorted
-    /// by priority (hybrid by default) to help you pick what to work on next.
+    /// Defaults to unassigned Issues. Use `--assignee` for one assignee or
+    /// `--all-assignees` to include every Assignment.
     Ready(ReadyArgs),
 
     /// Manage directed Blocking Dependencies with explicit endpoint roles.
@@ -169,13 +176,45 @@ pub enum Commands {
     Stats(StatsArgs),
 }
 
+impl Commands {
+    const fn mutates_workspace(&self) -> bool {
+        match self {
+            Self::Create(_)
+            | Self::Update(_)
+            | Self::Claim(_)
+            | Self::Release(_)
+            | Self::Close(_)
+            | Self::Reopen(_)
+            | Self::Delete(_) => true,
+            Self::BlockingDependency(args) => args.action.mutates_workspace(),
+            Self::Related(args) => args.action.mutates_workspace(),
+            Self::Discovery(args) => args.action.mutates_workspace(),
+            Self::Label(args) => args.action.mutates_workspace(),
+            Self::Resource(args) => args.action.mutates_workspace(),
+            Self::Init(_)
+            | Self::Info(_)
+            | Self::List(_)
+            | Self::Show(_)
+            | Self::Ready(_)
+            | Self::Stale(_)
+            | Self::Blocked(_)
+            | Self::Stats(_) => false,
+        }
+    }
+}
+
 /// Load the App from the current working directory.
 ///
 /// This helper centralizes the common pattern of initializing the App
 /// from `std::env::current_dir()`, reducing duplication in command handlers.
-async fn load_app_from_cwd() -> Result<App> {
-    // Ok(...?) pattern converts crate::error::Error to anyhow::Error
-    Ok(App::from_directory(&std::env::current_dir()?).await?)
+async fn load_app_from_cwd(for_mutation: bool) -> Result<App> {
+    let current_dir = std::env::current_dir()?;
+    let app = if for_mutation {
+        App::from_directory_for_mutation(&current_dir).await?
+    } else {
+        App::from_directory(&current_dir).await?
+    };
+    Ok(app)
 }
 
 impl Cli {
@@ -203,74 +242,100 @@ impl Cli {
             OutputMode::Text
         };
 
+        let mutates_workspace = self
+            .command
+            .as_ref()
+            .is_some_and(Commands::mutates_workspace);
+
         match &self.command {
             Some(Commands::Init(args)) => execute::execute_init(args).await,
             Some(Commands::Info(args)) => {
-                let app = load_app_from_cwd().await?;
+                let app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_info(&app, args, output_mode).await
             }
             Some(Commands::Create(args)) => {
-                let mut app = load_app_from_cwd().await?;
-                execute::execute_create(&mut app, args, output_mode).await
+                let title = execute::resolve_create_title(args)?;
+                let mut app = load_app_from_cwd(mutates_workspace).await?;
+                execute::execute_create(&mut app, args, title, output_mode).await
             }
             Some(Commands::List(args)) => {
-                let app = load_app_from_cwd().await?;
+                let app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_list(&app, args, output_mode).await
             }
             Some(Commands::Show(args)) => {
-                let app = load_app_from_cwd().await?;
+                let app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_show(&app, args, output_mode).await
             }
             Some(Commands::Update(args)) => {
-                let mut app = load_app_from_cwd().await?;
+                let mut app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_update(&mut app, args, output_mode).await
             }
+            Some(Commands::Claim(args)) => {
+                let mut app = load_app_from_cwd(mutates_workspace).await?;
+                execute::execute_claim(&mut app, args, output_mode).await
+            }
+            Some(Commands::Release(args)) => {
+                let mut app = load_app_from_cwd(mutates_workspace).await?;
+                execute::execute_release(&mut app, args, output_mode).await
+            }
             Some(Commands::Close(args)) => {
-                let mut app = load_app_from_cwd().await?;
-                execute::execute_close(&mut app, args, output_mode, self.yes).await
+                if !execute::confirm_batch("Close", args.issue_ids.len(), self.yes)? {
+                    return Ok(());
+                }
+                let mut app = load_app_from_cwd(mutates_workspace).await?;
+                execute::execute_close(&mut app, args, output_mode).await
             }
             Some(Commands::Reopen(args)) => {
-                let mut app = load_app_from_cwd().await?;
-                execute::execute_reopen(&mut app, args, output_mode, self.yes).await
+                if !execute::confirm_batch("Reopen", args.issue_ids.len(), self.yes)? {
+                    return Ok(());
+                }
+                let mut app = load_app_from_cwd(mutates_workspace).await?;
+                execute::execute_reopen(&mut app, args, output_mode).await
             }
             Some(Commands::Delete(args)) => {
-                let mut app = load_app_from_cwd().await?;
-                execute::execute_delete(&mut app, args, output_mode, self.yes).await
+                if !args.force && !self.yes {
+                    let read_app = load_app_from_cwd(false).await?;
+                    if !execute::confirm_delete(&read_app, args, false).await? {
+                        return Ok(());
+                    }
+                }
+                let mut app = load_app_from_cwd(mutates_workspace).await?;
+                execute::execute_delete(&mut app, args, output_mode).await
             }
             Some(Commands::Ready(args)) => {
-                let app = load_app_from_cwd().await?;
+                let app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_ready(&app, args, output_mode).await
             }
             Some(Commands::BlockingDependency(args)) => {
-                let mut app = load_app_from_cwd().await?;
+                let mut app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_blocking_dependency(&mut app, args, output_mode).await
             }
             Some(Commands::Related(args)) => {
-                let mut app = load_app_from_cwd().await?;
+                let mut app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_related(&mut app, args, output_mode).await
             }
             Some(Commands::Discovery(args)) => {
-                let mut app = load_app_from_cwd().await?;
+                let mut app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_discovery(&mut app, args, output_mode).await
             }
             Some(Commands::Label(args)) => {
-                let mut app = load_app_from_cwd().await?;
+                let mut app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_label(&mut app, args, output_mode).await
             }
             Some(Commands::Resource(args)) => {
-                let mut app = load_app_from_cwd().await?;
+                let mut app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_resource(&mut app, args, output_mode).await
             }
             Some(Commands::Stale(args)) => {
-                let app = load_app_from_cwd().await?;
+                let app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_stale(&app, args, output_mode).await
             }
             Some(Commands::Blocked(args)) => {
-                let app = load_app_from_cwd().await?;
+                let app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_blocked(&app, args, output_mode).await
             }
             Some(Commands::Stats(args)) => {
-                let app = load_app_from_cwd().await?;
+                let app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_stats(&app, args, output_mode).await
             }
             None => {
@@ -286,6 +351,121 @@ impl Cli {
 mod tests {
     use super::*;
     use crate::domain::{IssueKind, IssueStatus};
+
+    fn parses_as_mutation(args: &[&str]) -> bool {
+        let argv: Vec<_> = std::iter::once("rivets")
+            .chain(args.iter().copied())
+            .collect();
+        Cli::try_parse_from(argv)
+            .expect("classification fixture should parse")
+            .command
+            .as_ref()
+            .is_some_and(Commands::mutates_workspace)
+    }
+
+    #[test]
+    fn workspace_mutation_lock_classification_is_exhaustive() {
+        for args in [
+            &["create", "--title", "Issue"][..],
+            &["update", "test-abc", "--title", "Updated"],
+            &["close", "test-abc"],
+            &["reopen", "test-abc"],
+            &["delete", "test-abc", "--force"],
+            &["claim", "test-abc", "--assignee", "alice"],
+            &["release", "test-abc", "--assignee", "alice"],
+            &[
+                "blocking-dependency",
+                "add",
+                "--dependent",
+                "test-abc",
+                "--prerequisite",
+                "test-def",
+            ],
+            &[
+                "blocking-dependency",
+                "remove",
+                "--dependent",
+                "test-abc",
+                "--prerequisite",
+                "test-def",
+            ],
+            &[
+                "related",
+                "add",
+                "--issue",
+                "test-abc",
+                "--related",
+                "test-def",
+            ],
+            &[
+                "related",
+                "remove",
+                "--issue",
+                "test-abc",
+                "--related",
+                "test-def",
+            ],
+            &[
+                "discovery",
+                "add",
+                "--discovered",
+                "test-abc",
+                "--source",
+                "test-def",
+            ],
+            &[
+                "discovery",
+                "remove",
+                "--discovered",
+                "test-abc",
+                "--source",
+                "test-def",
+            ],
+            &["label", "add", "urgent", "test-abc"],
+            &["label", "remove", "urgent", "test-abc"],
+            &[
+                "resource",
+                "add",
+                "test-abc",
+                "--url",
+                "https://example.com",
+                "--role",
+                "reference",
+            ],
+            &[
+                "resource",
+                "update",
+                "test-abc",
+                "--resource",
+                "r1",
+                "--label",
+                "Updated",
+            ],
+            &["resource", "remove", "test-abc", "--resource", "r1"],
+        ] {
+            assert!(parses_as_mutation(args), "should lock mutation: {args:?}");
+        }
+
+        for args in [
+            &["init"][..],
+            &["info"],
+            &["list"],
+            &["show", "test-abc"],
+            &["ready"],
+            &["blocking-dependency", "list", "--dependent", "test-abc"],
+            &["blocking-dependency", "tree", "--dependent", "test-abc"],
+            &["related", "list", "--issue", "test-abc"],
+            &["discovery", "list", "--discovered", "test-abc"],
+            &["label", "list", "test-abc"],
+            &["label", "list-all"],
+            &["resource", "list", "test-abc"],
+            &["stale"],
+            &["blocked"],
+            &["stats"],
+        ] {
+            assert!(!parses_as_mutation(args), "should not lock read: {args:?}");
+        }
+    }
 
     // ========== CLI Parsing Tests ==========
 
@@ -683,6 +863,7 @@ mod tests {
         match cli.command {
             Some(Commands::Ready(args)) => {
                 assert!(args.assignee.is_none());
+                assert!(!args.all_assignees);
                 assert_eq!(args.limit, 10); // default
                 assert_eq!(args.sort, SortPolicyArg::Hybrid); // default
             }
@@ -707,11 +888,31 @@ mod tests {
         match cli.command {
             Some(Commands::Ready(args)) => {
                 assert_eq!(args.assignee, Some("alice".to_string()));
+                assert!(!args.all_assignees);
                 assert_eq!(args.limit, 5);
                 assert_eq!(args.sort, SortPolicyArg::Priority);
             }
             _ => panic!("Expected Ready command"),
         }
+    }
+
+    #[test]
+    fn ready_assignment_selectors_are_mutually_exclusive() {
+        let cli = Cli::try_parse_from(["rivets", "ready", "--all-assignees"])
+            .expect("all-assignees Ready syntax should parse");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Ready(ReadyArgs {
+                all_assignees: true,
+                assignee: None,
+                ..
+            }))
+        ));
+
+        assert!(
+            Cli::try_parse_from(["rivets", "ready", "--assignee", "alice", "--all-assignees"])
+                .is_err()
+        );
     }
 
     #[test]
@@ -753,31 +954,50 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_update_no_assignee() {
-        let cli = Cli::try_parse_from(["rivets", "update", "proj-abc", "--no-assignee"]).unwrap();
-        match cli.command {
-            Some(Commands::Update(args)) => {
-                assert!(args.no_assignee);
-                assert!(args.assignee.is_none());
+    fn general_update_rejects_assignment_flags() {
+        for flag in ["--assignee", "--no-assignee"] {
+            let mut argv = vec!["rivets", "update", "proj-abc", flag];
+            if flag == "--assignee" {
+                argv.push("alice");
             }
-            _ => panic!("Expected Update command"),
+            assert!(
+                Cli::try_parse_from(argv).is_err(),
+                "general update must reject {flag}"
+            );
         }
     }
 
     #[test]
-    fn test_parse_update_assignee_and_no_assignee_conflict() {
-        // --assignee and --no-assignee should conflict
-        let result = Cli::try_parse_from([
-            "rivets",
-            "update",
-            "proj-abc",
-            "--assignee",
-            "alice",
-            "--no-assignee",
-        ]);
-        match result {
-            Ok(_) => panic!("Expected a conflict error, but parsing succeeded."),
-            Err(e) => assert!(e.to_string().contains("cannot be used with")),
+    fn claim_and_release_require_one_issue_and_explicit_assignee() {
+        for command in ["claim", "release"] {
+            let parsed =
+                Cli::try_parse_from(["rivets", command, "proj-abc", "--assignee", "alice"])
+                    .expect("intent should parse");
+            let args = match parsed.command {
+                Some(Commands::Claim(args) | Commands::Release(args)) => args,
+                _ => panic!("Expected Assignment command"),
+            };
+            assert_eq!(args.issue_id, "proj-abc");
+            assert_eq!(args.assignee, "alice");
+
+            assert!(Cli::try_parse_from(["rivets", command, "proj-abc"]).is_err());
+            for assignee in ["", " \t "] {
+                let error =
+                    Cli::try_parse_from(["rivets", command, "proj-abc", "--assignee", assignee])
+                        .expect_err("blank Assignee must reject at the CLI seam");
+                assert!(error.to_string().contains("Assignee cannot be blank"));
+            }
+            assert!(
+                Cli::try_parse_from([
+                    "rivets",
+                    command,
+                    "proj-abc",
+                    "proj-def",
+                    "--assignee",
+                    "alice",
+                ])
+                .is_err()
+            );
         }
     }
 }

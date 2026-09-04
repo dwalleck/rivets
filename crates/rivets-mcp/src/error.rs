@@ -1,6 +1,8 @@
 //! Error types for the rivets MCP server.
 
 use rivets::error::Error as RivetsError;
+use rmcp::ErrorData as McpError;
+use std::path::PathBuf;
 use thiserror::Error;
 
 /// Errors that can occur in the rivets MCP server.
@@ -9,6 +11,16 @@ pub enum Error {
     /// No workspace context has been set.
     #[error("No workspace context set. Provide workspace_root or call set_context.")]
     NoContext,
+
+    /// Another writer currently owns the Workspace mutation transaction.
+    #[error(
+        "Workspace is busy: '{}'; retry the operation",
+        workspace_root.display()
+    )]
+    WorkspaceBusy {
+        /// Canonical root of the contended Workspace.
+        workspace_root: PathBuf,
+    },
 
     /// Invalid argument value provided.
     #[error("Invalid {field}: '{value}'. Valid values: {valid_values}")]
@@ -35,6 +47,10 @@ pub enum Error {
     /// error as the CLI (ADR-0005: the domain owns transition rules).
     #[error(transparent)]
     InvalidStatusTransition(#[from] rivets::domain::StatusTransitionError),
+
+    /// An Assignment Claim or Release violated the domain contract.
+    #[error(transparent)]
+    Assignment(#[from] rivets::domain::AssignmentError),
 
     /// The requested issue was not found.
     #[error("Issue not found: {0}")]
@@ -131,6 +147,41 @@ pub enum Error {
     Json(#[from] serde_json::Error),
 }
 
+impl Error {
+    pub(crate) fn to_mcp_error(&self) -> McpError {
+        match self {
+            Self::WorkspaceBusy { workspace_root } => McpError::internal_error(
+                self.to_string(),
+                Some(serde_json::json!({
+                    "retryable": true,
+                    "workspace_root": workspace_root,
+                })),
+            ),
+            Self::NoContext
+            | Self::InvalidArgument { .. }
+            | Self::InvalidNote(_)
+            | Self::InvalidResource(_)
+            | Self::InvalidBlockingDependency(_)
+            | Self::InvalidStatusTransition(_)
+            | Self::Assignment(_)
+            | Self::InvalidRelatedAssociation(_)
+            | Self::InvalidDiscoveryOrigin(_)
+            | Self::RelatedAssociationNotFound { .. }
+            | Self::DuplicateDiscoveryOrigin { .. }
+            | Self::DiscoveryOriginNotFound { .. }
+            | Self::CircularDiscoveryOrigin { .. }
+            | Self::IssueNotFound(_) => McpError::invalid_params(self.to_string(), None),
+            Self::WorkspaceNotFound { .. }
+            | Self::WorkspaceNotInitialized(_)
+            | Self::NoRivetsDirectory(_)
+            | Self::ConfigLoad { .. }
+            | Self::Storage(_)
+            | Self::Io(_)
+            | Self::Json(_) => McpError::internal_error(self.to_string(), None),
+        }
+    }
+}
+
 /// Result type for rivets MCP operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -138,6 +189,7 @@ impl From<RivetsError> for Error {
     fn from(error: RivetsError) -> Self {
         match error {
             RivetsError::IssueNotFound(issue_id) => Self::IssueNotFound(issue_id.to_string()),
+            RivetsError::WorkspaceBusy { workspace_root } => Self::WorkspaceBusy { workspace_root },
             RivetsError::RelatedAssociationNotFound {
                 left_issue_id,
                 right_issue_id,
@@ -170,10 +222,14 @@ impl From<RivetsError> for Error {
                 Ok(source) => Self::InvalidResource(source),
                 Err(storage_error) => match storage_error.try_into_status_transition_error() {
                     Ok(source) => Self::InvalidStatusTransition(source),
-                    Err(storage_error) => Self::Storage(RivetsError::Storage(storage_error)),
+                    Err(storage_error) => match storage_error.try_into_assignment_error() {
+                        Ok(source) => Self::Assignment(source),
+                        Err(storage_error) => Self::Storage(RivetsError::Storage(storage_error)),
+                    },
                 },
             },
             error @ (RivetsError::Io(_)
+            | RivetsError::WorkspaceLock { .. }
             | RivetsError::Config(_)
             | RivetsError::Validation { .. }
             | RivetsError::HasDependents { .. }
@@ -190,7 +246,9 @@ impl From<RivetsError> for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rivets::domain::{IssueId, IssueStatus, ResourceError, StatusTransitionError};
+    use rivets::domain::{
+        AssignmentError, IssueId, IssueStatus, ResourceError, StatusTransitionError,
+    };
     use rivets::error::StorageError;
 
     #[test]
@@ -200,6 +258,38 @@ mod tests {
             error,
             Error::IssueNotFound(issue_id) if issue_id == "test-missing"
         ));
+    }
+
+    #[test]
+    fn core_workspace_busy_maps_to_retryable_mcp_variant() {
+        let workspace_root = PathBuf::from("/tmp/workspace");
+        let error = Error::from(RivetsError::WorkspaceBusy {
+            workspace_root: workspace_root.clone(),
+        });
+        assert!(matches!(
+            error,
+            Error::WorkspaceBusy {
+                workspace_root: actual
+            } if actual == workspace_root
+        ));
+    }
+
+    #[test]
+    fn workspace_busy_protocol_error_is_retryable() {
+        use rmcp::model::ErrorCode;
+
+        let error = Error::WorkspaceBusy {
+            workspace_root: PathBuf::from("/tmp/workspace"),
+        }
+        .to_mcp_error();
+        assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({
+                "retryable": true,
+                "workspace_root": "/tmp/workspace",
+            }))
+        );
     }
 
     #[test]
@@ -220,12 +310,55 @@ mod tests {
                 current: IssueStatus::Open,
             },
         )));
+
         assert!(matches!(
             error,
             Error::InvalidStatusTransition(StatusTransitionError::NotClosed {
                 current: IssueStatus::Open
             })
         ));
+    }
+    #[test]
+    fn assignment_errors_preserve_retry_classification() {
+        use rmcp::model::ErrorCode;
+
+        let issue_id = IssueId::new("test-claimed");
+        let assignment_errors = [
+            AssignmentError::NotOpen {
+                issue_id: issue_id.clone(),
+                status: IssueStatus::InProgress,
+            },
+            AssignmentError::Blocked {
+                issue_id: issue_id.clone(),
+            },
+            AssignmentError::AlreadyClaimed {
+                issue_id: issue_id.clone(),
+                assignee: "alice".to_string(),
+            },
+            AssignmentError::NotClaimed {
+                issue_id: issue_id.clone(),
+            },
+            AssignmentError::AssigneeMismatch {
+                issue_id: issue_id.clone(),
+                expected: "bob".to_string(),
+                actual: "alice".to_string(),
+            },
+            AssignmentError::AssigneeRequired {
+                issue_id: issue_id.clone(),
+            },
+            AssignmentError::BlankAssignee {
+                issue_id: issue_id.clone(),
+            },
+            AssignmentError::ClosedCannotBeAssigned { issue_id },
+        ];
+
+        for source in assignment_errors {
+            let error = Error::from(RivetsError::Storage(StorageError::Assignment(source)));
+            assert!(matches!(error, Error::Assignment(_)));
+            let protocol = error.to_mcp_error();
+            assert_eq!(protocol.code, ErrorCode::INVALID_PARAMS);
+            assert_eq!(protocol.data, None);
+        }
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! Semantic Color Theme:
 //!   - Success/Done:  green   (closed status, completed actions)
 //!   - Warning/Active: yellow (in_progress, P1 priority)
-//!   - Error/Blocked: red     (blocked status, P0 priority, bugs)
+//!   - Error/Urgent: red      (P0 priority, bugs)
 //!   - Info/Reference: cyan   (issue IDs, root tree node)
 //!   - Accent:        magenta (labels, epics)
 //!   - Muted:         dimmed  (field labels, connectors, chores)
@@ -56,7 +56,6 @@ pub(crate) fn colorize_status(status: IssueStatus, config: &OutputConfig) -> Str
     match status {
         IssueStatus::Open => text.white().to_string(),
         IssueStatus::InProgress => text.yellow().to_string(),
-        IssueStatus::Blocked => text.red().to_string(),
         IssueStatus::Closed => text.green().to_string(),
     }
 }
@@ -100,14 +99,12 @@ pub(crate) fn colored_status_icon(status: IssueStatus, config: &OutputConfig) ->
         match status {
             IssueStatus::Open => "o",
             IssueStatus::InProgress => ">",
-            IssueStatus::Blocked => "x",
             IssueStatus::Closed => "+",
         }
     } else {
         match status {
             IssueStatus::Open => "○",
             IssueStatus::InProgress => "▶",
-            IssueStatus::Blocked => "✗",
             IssueStatus::Closed => "✓",
         }
     };
@@ -119,7 +116,6 @@ pub(crate) fn colored_status_icon(status: IssueStatus, config: &OutputConfig) ->
     match status {
         IssueStatus::Open => icon.white().to_string(),
         IssueStatus::InProgress => icon.yellow().to_string(),
-        IssueStatus::Blocked => icon.red().to_string(),
         IssueStatus::Closed => icon.green().to_string(),
     }
 }
@@ -233,22 +229,16 @@ mod tests {
             let config = OutputConfig::new(80, false, true);
             let open = colorize_status(IssueStatus::Open, &config);
             let in_progress = colorize_status(IssueStatus::InProgress, &config);
-            let blocked = colorize_status(IssueStatus::Blocked, &config);
             let closed = colorize_status(IssueStatus::Closed, &config);
 
             assert!(open.contains("open"));
             assert!(in_progress.contains("in_progress"));
-            assert!(blocked.contains("blocked"));
             assert!(closed.contains("closed"));
 
             assert!(open.contains("\x1b["), "Open status should have ANSI codes");
             assert!(
                 in_progress.contains("\x1b["),
                 "InProgress status should have ANSI codes"
-            );
-            assert!(
-                blocked.contains("\x1b["),
-                "Blocked status should have ANSI codes"
             );
             assert!(
                 closed.contains("\x1b["),

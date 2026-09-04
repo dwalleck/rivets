@@ -1,7 +1,35 @@
-# The domain owns status-transition rules
+# The domain owns Workflow State and Assignment transitions
 
-Status-transition rules — an Issue cannot be closed twice, and only a closed Issue can be reopened — live in the domain (`IssueStatus::validate_transition`, returning a typed `StatusTransitionError`) and fire at the single site where an `IssueUpdate` is applied to an Issue, inside the storage update path. Throughout, "status" is the code-and-wire name (`IssueStatus`, the `status` field) for the glossary's Workflow State (`CONTEXT.md`). We chose this over adapter-local checks because the previous arrangement enforced the rules only in the CLI's close/reopen commands: the MCP tools and the generic status-update path accepted transitions the CLI rejected, and every future rule-bearing mutation would inherit the same divergence. With the rule behind the seam, every adapter inherits it through the existing `IssueStorage` interface.
+Workflow State and Assignment invariants live in the domain and are applied
+atomically by the storage seam. `IssueStatus::validate_transition` and
+`Issue::apply_status_transition` own the status matrix and its Assignment side
+effects; `IssueStorage::claim` and `IssueStorage::release` own Assignment
+compare-and-set behavior. Throughout, `status` is the code-and-wire name
+(`IssueStatus`, the `status` field) for the glossary's Workflow State
+(`CONTEXT.md`).
+
+This seam prevents adapter drift. CLI, MCP, and future adapters delegate to the
+same mutation: claim requires an Open, unblocked Issue; repeated claim by the
+same owner is an unchanged success; another owner receives a typed Already
+Claimed error; release requires the exact owner and Open state but permits an
+Open, blocked Issue. Entering In Progress requires an assignee, returning to
+Open retains it, closing clears it, and reopening creates an unassigned Open
+Issue.
 
 ## Consequences
 
-Adapters (CLI, MCP) and storage implementations must not re-validate transitions; the storage update path invokes the domain rule once at the application site, which is enforcement, not re-validation. `StatusTransitionError` displays the complete user-facing message and every wrapping error variant (`StorageError::InvalidStatusTransition`, the MCP `Error::InvalidStatusTransition`) is `#[error(transparent)]`, so CLI and MCP reject a transition with the identical observable error; MCP integration tests pin both rejected transitions and that message parity. Because the rule now guards the generic update path, setting `--status open` on a non-closed Issue (or `--status closed` on a closed one) is rejected everywhere, not just through the dedicated close/reopen commands — the transition matrix in the domain unit tests is the single authority. That matrix currently spans every `IssueStatus` variant, including `Blocked`, the workflow state ADR-0002 slates for removal; deleting the variant shrinks the matrix without moving ownership of the rules.
+Adapters must not read an Issue and then implement Assignment with a generic
+update. That read-then-write sequence is not atomic and allows two claimants to
+overwrite one another. They call `claim` or `release`; persistent adapters hold
+the Workspace mutation lock across load, compare-and-set, and atomic JSONL
+save.
+
+Every wrapping error preserves the typed domain cause. CLI and MCP may format
+the error at their outer boundaries, but neither matches error strings nor
+reimplements the transition matrix.
+
+Persisted legacy records that violate the canonical matrix are repaired at the
+JSONL compatibility seam. In Progress without an assignee migrates to Open;
+Closed with an assignee clears Assignment. Each repair appends an immutable
+migration Note and emits a load warning. Canonical records are unchanged on a
+second load/save cycle.

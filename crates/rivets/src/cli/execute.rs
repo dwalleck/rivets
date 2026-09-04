@@ -7,10 +7,10 @@ use std::io::Write;
 use anyhow::{Context, Result};
 
 use super::args::{
-    BlockedArgs, BlockingDependencyAction, BlockingDependencyArgs, CloseArgs, CreateArgs,
-    DeleteArgs, DiscoveryAction, DiscoveryArgs, InfoArgs, InitArgs, LabelAction, LabelArgs,
-    ListArgs, ReadyArgs, RelatedAction, RelatedArgs, ReopenArgs, ResourceAction, ResourceArgs,
-    ShowArgs, StaleArgs, StatsArgs, UpdateArgs,
+    AssignmentArgs, BlockedArgs, BlockingDependencyAction, BlockingDependencyArgs, CloseArgs,
+    CreateArgs, DeleteArgs, DiscoveryAction, DiscoveryArgs, InfoArgs, InitArgs, LabelAction,
+    LabelArgs, ListArgs, ReadyArgs, RelatedAction, RelatedArgs, ReopenArgs, ResourceAction,
+    ResourceArgs, ShowArgs, StaleArgs, StatsArgs, UpdateArgs,
 };
 use super::types::{SortOrderArg, SortPolicyArg};
 use crate::output::OutputMode;
@@ -98,7 +98,6 @@ pub async fn execute_info(
                     "total": counts.total,
                     "open": counts.open,
                     "in_progress": counts.in_progress,
-                    "blocked": counts.blocked,
                     "closed": counts.closed
                 }
             }))?;
@@ -111,8 +110,8 @@ pub async fn execute_info(
             println!("Issue prefix: {}", issue_prefix);
             println!();
             println!(
-                "Issues: {} total ({} open, {} in progress, {} blocked, {} closed)",
-                counts.total, counts.open, counts.in_progress, counts.blocked, counts.closed
+                "Issues: {} total ({} open, {} in progress, {} closed)",
+                counts.total, counts.open, counts.in_progress, counts.closed
             );
         }
     }
@@ -120,20 +119,11 @@ pub async fn execute_info(
     Ok(())
 }
 
-/// Execute the create command
-pub async fn execute_create(
-    app: &mut crate::app::App,
-    args: &CreateArgs,
-    output_mode: OutputMode,
-) -> Result<()> {
-    use crate::domain::{IssueId, NewIssue, NoteContent};
-    use crate::output;
-
-    // Get title (interactive prompt if not provided)
-    let title = match &args.title {
-        Some(t) => t.clone(),
+/// Resolve a create title, including interactive input, before a mutation lock.
+pub(super) fn resolve_create_title(args: &CreateArgs) -> Result<String> {
+    match &args.title {
+        Some(title) => Ok(title.clone()),
         None => {
-            // Interactive mode: prompt for title
             eprint!("Title: ");
             std::io::stderr()
                 .flush()
@@ -142,15 +132,26 @@ pub async fn execute_create(
             std::io::stdin()
                 .read_line(&mut input)
                 .context("Failed to read title from stdin")?;
-            // Apply same validation as CLI argument parsing
-            super::validators::validate_title(input.trim()).map_err(|e| {
+            super::validators::validate_title(input.trim()).map_err(|reason| {
                 crate::error::Error::Validation {
                     field: "title",
-                    reason: e,
+                    reason,
                 }
-            })?
+                .into()
+            })
         }
-    };
+    }
+}
+
+/// Execute the create command
+pub async fn execute_create(
+    app: &mut crate::app::App,
+    args: &CreateArgs,
+    title: String,
+    output_mode: OutputMode,
+) -> Result<()> {
+    use crate::domain::{IssueId, NewIssue, NoteContent};
+    use crate::output;
 
     let prerequisites = args
         .prerequisites
@@ -345,11 +346,6 @@ pub async fn execute_update(
             status: args.status,
             priority: args.priority,
             issue_kind: args.issue_kind,
-            assignee: if args.no_assignee {
-                Some(None) // Clear the assignee
-            } else {
-                args.assignee.clone().map(Some)
-            },
             design: args.design.clone(),
             acceptance_criteria: args.acceptance.clone(),
             note: note.clone(),
@@ -362,6 +358,61 @@ pub async fn execute_update(
 
     output_batch_result(&result, "Updated", output_mode)?;
     bail_on_batch_failures(&result, "update")
+}
+#[derive(Clone, Copy)]
+enum AssignmentOperation {
+    Claim,
+    Release,
+}
+
+async fn execute_assignment(
+    app: &mut crate::app::App,
+    args: &AssignmentArgs,
+    output_mode: OutputMode,
+    operation: AssignmentOperation,
+) -> Result<()> {
+    use crate::domain::IssueId;
+    use crate::output;
+
+    let issue_id = IssueId::new(&args.issue_id);
+    let issue = match operation {
+        AssignmentOperation::Claim => app.storage_mut().claim(&issue_id, &args.assignee).await?,
+        AssignmentOperation::Release => {
+            app.storage_mut().release(&issue_id, &args.assignee).await?
+        }
+    };
+    app.save().await?;
+
+    match output_mode {
+        OutputMode::Json => output::print_json(&issue)?,
+        OutputMode::Text => match operation {
+            AssignmentOperation::Claim => {
+                println!("Claimed issue {} for {}", issue.id, args.assignee);
+            }
+            AssignmentOperation::Release => {
+                println!("Released issue {} from {}", issue.id, args.assignee);
+            }
+        },
+    }
+    Ok(())
+}
+
+/// Atomically claim one Open, unblocked Issue.
+pub async fn execute_claim(
+    app: &mut crate::app::App,
+    args: &AssignmentArgs,
+    output_mode: OutputMode,
+) -> Result<()> {
+    execute_assignment(app, args, output_mode, AssignmentOperation::Claim).await
+}
+
+/// Atomically release one Open Issue from its exact Assignee.
+pub async fn execute_release(
+    app: &mut crate::app::App,
+    args: &AssignmentArgs,
+    output_mode: OutputMode,
+) -> Result<()> {
+    execute_assignment(app, args, output_mode, AssignmentOperation::Release).await
 }
 
 /// Handle save-or-record-failure for batch operations.
@@ -477,7 +528,6 @@ struct StatusCounts {
     total: usize,
     open: usize,
     in_progress: usize,
-    blocked: usize,
     closed: usize,
 }
 
@@ -492,7 +542,6 @@ fn count_by_status(issues: &[crate::domain::Issue]) -> StatusCounts {
             match issue.status {
                 IssueStatus::Open => counts.open += 1,
                 IssueStatus::InProgress => counts.in_progress += 1,
-                IssueStatus::Blocked => counts.blocked += 1,
                 IssueStatus::Closed => counts.closed += 1,
             }
             counts
@@ -525,13 +574,39 @@ fn confirm_action(prompt: &str) -> Result<bool> {
 ///
 /// Returns `Ok(true)` to proceed, `Ok(false)` if the user cancelled.
 /// Skips the prompt when `skip_confirm` is true or only one issue is affected.
-fn confirm_batch(action: &str, count: usize, skip_confirm: bool) -> Result<bool> {
+pub(super) fn confirm_batch(action: &str, count: usize, skip_confirm: bool) -> Result<bool> {
     if count > 1 && !skip_confirm {
         let prompt = format!("{action} {count} issues?");
         if !confirm_action(&prompt)? {
             println!("{action} cancelled.");
             return Ok(false);
         }
+    }
+    Ok(true)
+}
+
+/// Resolve an interactive delete confirmation before a mutation lock.
+pub(super) async fn confirm_delete(
+    app: &crate::app::App,
+    args: &DeleteArgs,
+    skip_confirm: bool,
+) -> Result<bool> {
+    use crate::domain::IssueId;
+
+    if args.force || skip_confirm {
+        return Ok(true);
+    }
+
+    let issue_id = IssueId::new(&args.issue_id);
+    let issue = app
+        .storage()
+        .get(&issue_id)
+        .await?
+        .ok_or(crate::error::Error::IssueNotFound(issue_id))?;
+    let prompt = format!("Delete issue '{}' ({})?", issue.id, issue.title);
+    if !confirm_action(&prompt)? {
+        println!("Deletion cancelled.");
+        return Ok(false);
     }
     Ok(true)
 }
@@ -549,14 +624,9 @@ pub async fn execute_close(
     app: &mut crate::app::App,
     args: &CloseArgs,
     output_mode: OutputMode,
-    skip_confirm: bool,
 ) -> Result<()> {
     use super::types::BatchResult;
     use crate::domain::{IssueId, IssueStatus, IssueUpdate, NoteContent};
-
-    if !confirm_batch("Close", args.issue_ids.len(), skip_confirm)? {
-        return Ok(());
-    }
 
     let note = args
         .reason
@@ -597,14 +667,9 @@ pub async fn execute_reopen(
     app: &mut crate::app::App,
     args: &ReopenArgs,
     output_mode: OutputMode,
-    skip_confirm: bool,
 ) -> Result<()> {
     use super::types::BatchResult;
     use crate::domain::{IssueId, IssueStatus, IssueUpdate, NoteContent};
-
-    if !confirm_batch("Reopen", args.issue_ids.len(), skip_confirm)? {
-        return Ok(());
-    }
 
     let note = args
         .reason
@@ -622,9 +687,16 @@ pub async fn execute_reopen(
             ..Default::default()
         };
 
-        // Missing issues and invalid transitions are rejected by the
-        // storage/domain seam (ADR-0005); no adapter-local checks here.
-        let storage_result = app.storage_mut().update(&issue_id, update).await;
+        let storage_result = match app.storage().get(&issue_id).await {
+            Ok(Some(issue)) => match issue.status.validate_reopen() {
+                Ok(()) => app.storage_mut().update(&issue_id, update).await,
+                Err(source) => Err(crate::error::Error::Storage(
+                    crate::error::StorageError::InvalidStatusTransition(source),
+                )),
+            },
+            Ok(None) => Err(crate::error::Error::IssueNotFound(issue_id.clone())),
+            Err(error) => Err(error),
+        };
         save_or_record_failure(app, &mut result, id_str, storage_result).await;
     }
 
@@ -637,28 +709,11 @@ pub async fn execute_delete(
     app: &mut crate::app::App,
     args: &DeleteArgs,
     output_mode: OutputMode,
-    skip_confirm: bool,
 ) -> Result<()> {
     use crate::domain::IssueId;
     use crate::output;
 
     let issue_id = IssueId::new(&args.issue_id);
-
-    // Verify the issue exists first
-    let issue = app
-        .storage()
-        .get(&issue_id)
-        .await?
-        .ok_or_else(|| crate::error::Error::IssueNotFound(issue_id.clone()))?;
-
-    // Confirm deletion unless --force or --yes is used
-    if !args.force && !skip_confirm {
-        let prompt = format!("Delete issue '{}' ({})?", issue.id, issue.title);
-        if !confirm_action(&prompt)? {
-            println!("Deletion cancelled.");
-            return Ok(());
-        }
-    }
 
     app.storage_mut().delete(&issue_id).await?;
     app.save().await?;
@@ -684,24 +739,22 @@ pub async fn execute_ready(
     args: &ReadyArgs,
     output_mode: OutputMode,
 ) -> Result<()> {
-    use crate::domain::{IssueFilter, SortPolicy};
+    use crate::domain::{ReadyAssignmentFilter, ReadyFilter, SortPolicy};
     use crate::output;
 
-    // Only create filter if we have filtering criteria; limit is applied after via truncate
-    let filter = if args.assignee.is_some()
-        || args.priority.is_some()
-        || args.issue_kind.is_some()
-        || args.label.is_some()
-    {
-        Some(IssueFilter {
-            assignee: args.assignee.clone(),
-            priority: args.priority,
-            issue_kind: args.issue_kind,
-            label: args.label.clone(),
-            ..Default::default()
-        })
+    let assignment = if args.all_assignees {
+        ReadyAssignmentFilter::All
+    } else if let Some(assignee) = &args.assignee {
+        ReadyAssignmentFilter::Assignee(assignee.clone())
     } else {
-        None
+        ReadyAssignmentFilter::Unassigned
+    };
+    let filter = ReadyFilter {
+        priority: args.priority,
+        issue_kind: args.issue_kind,
+        assignment,
+        label: args.label.clone(),
+        limit: Some(args.limit),
     };
 
     let sort_policy = match args.sort {
@@ -710,13 +763,10 @@ pub async fn execute_ready(
         SortPolicyArg::Oldest => SortPolicy::Oldest,
     };
 
-    let mut issues = app
+    let issues = app
         .storage()
-        .ready_to_work(filter.as_ref(), Some(sort_policy))
+        .ready_to_work(&filter, Some(sort_policy))
         .await?;
-
-    // Apply limit
-    issues.truncate(args.limit);
 
     match output_mode {
         output::OutputMode::Json => {
@@ -1460,15 +1510,19 @@ pub async fn execute_stats(
     args: &StatsArgs,
     output_mode: OutputMode,
 ) -> Result<()> {
-    use crate::domain::IssueFilter;
+    use crate::domain::{IssueFilter, ReadyFilter};
     use crate::output;
 
     // Get all issues and count by status
     let all_issues = app.storage().list(&IssueFilter::default()).await?;
     let counts = count_by_status(&all_issues);
 
-    // Ready issues (not blocked by dependencies)
-    let ready = app.storage().ready_to_work(None, None).await?.len();
+    // Ready defaults to unassigned Issues.
+    let ready = app
+        .storage()
+        .ready_to_work(&ReadyFilter::default(), None)
+        .await?
+        .len();
 
     // Blocked issues (by dependencies)
     let blocked_by_deps = app.storage().blocked_issues().await?.len();
@@ -1480,7 +1534,6 @@ pub async fn execute_stats(
                 "by_status": {
                     "open": counts.open,
                     "in_progress": counts.in_progress,
-                    "blocked": counts.blocked,
                     "closed": counts.closed
                 },
                 "ready": ready,
@@ -1513,7 +1566,6 @@ pub async fn execute_stats(
             println!("By Status:");
             println!("  Open:        {}", counts.open);
             println!("  In Progress: {}", counts.in_progress);
-            println!("  Blocked:     {}", counts.blocked);
             println!("  Closed:      {}", counts.closed);
             println!();
             println!("Ready to Work: {}", ready);
@@ -1754,7 +1806,6 @@ mod tests {
             assert_eq!(counts.total, 0);
             assert_eq!(counts.open, 0);
             assert_eq!(counts.in_progress, 0);
-            assert_eq!(counts.blocked, 0);
             assert_eq!(counts.closed, 0);
         }
 
@@ -1766,7 +1817,6 @@ mod tests {
             assert_eq!(counts.total, 1);
             assert_eq!(counts.open, 0);
             assert_eq!(counts.in_progress, 1);
-            assert_eq!(counts.blocked, 0);
             assert_eq!(counts.closed, 0);
         }
 
@@ -1783,15 +1833,14 @@ mod tests {
             issues[0].status = IssueStatus::Open;
             issues[1].status = IssueStatus::Open;
             issues[2].status = IssueStatus::InProgress;
-            issues[3].status = IssueStatus::Blocked;
+            issues[3].status = IssueStatus::InProgress;
             issues[4].status = IssueStatus::Closed;
             issues[5].status = IssueStatus::Closed;
 
             let counts = count_by_status(&issues);
             assert_eq!(counts.total, 6);
             assert_eq!(counts.open, 2);
-            assert_eq!(counts.in_progress, 1);
-            assert_eq!(counts.blocked, 1);
+            assert_eq!(counts.in_progress, 2);
             assert_eq!(counts.closed, 2);
         }
 
@@ -1800,7 +1849,7 @@ mod tests {
             let issues: Vec<_> = (1..=5)
                 .map(|i| {
                     let mut issue = create_test_issue(&format!("test-{}", i));
-                    issue.status = IssueStatus::Blocked;
+                    issue.status = IssueStatus::InProgress;
                     issue
                 })
                 .collect();
@@ -1808,8 +1857,7 @@ mod tests {
             let counts = count_by_status(&issues);
             assert_eq!(counts.total, 5);
             assert_eq!(counts.open, 0);
-            assert_eq!(counts.in_progress, 0);
-            assert_eq!(counts.blocked, 5);
+            assert_eq!(counts.in_progress, 5);
             assert_eq!(counts.closed, 0);
         }
     }
@@ -1915,8 +1963,6 @@ mod tests {
                 status: None,
                 priority: None,
                 issue_kind: None,
-                assignee: None,
-                no_assignee: false,
                 design: None,
                 acceptance: None,
                 notes: None,
@@ -1978,7 +2024,7 @@ mod tests {
                 reason: None,
             };
 
-            let result = execute_close(&mut app, &args, OutputMode::Text, true).await;
+            let result = execute_close(&mut app, &args, OutputMode::Text).await;
 
             assert!(result.is_err());
             let error_msg = result.unwrap_err().to_string();
@@ -2021,7 +2067,7 @@ mod tests {
                 reason: None,
             };
 
-            let result = execute_reopen(&mut app, &args, OutputMode::Text, true).await;
+            let result = execute_reopen(&mut app, &args, OutputMode::Text).await;
 
             assert!(result.is_err());
             let error_msg = result.unwrap_err().to_string();
@@ -2033,7 +2079,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_reopen_in_progress_issue_returns_error() {
+        async fn test_reopen_in_progress_issue_is_rejected_without_mutation() {
             use crate::domain::{IssueStatus, IssueUpdate};
 
             let temp_dir = TempDir::new().unwrap();
@@ -2045,35 +2091,40 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Create an issue and set it to in_progress
             let new_issue = NewIssue {
                 title: "Test issue".to_string(),
+                assignee: Some("alice".to_string()),
                 ..Default::default()
             };
             let issue = app.storage_mut().create(new_issue).await.unwrap();
-
-            let update = IssueUpdate {
-                status: Some(IssueStatus::InProgress),
-                ..Default::default()
-            };
-            app.storage_mut().update(&issue.id, update).await.unwrap();
+            app.storage_mut()
+                .update(
+                    &issue.id,
+                    IssueUpdate {
+                        status: Some(IssueStatus::InProgress),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("assigned Issue should enter In Progress");
             app.save().await.unwrap();
 
-            // Try to reopen an in_progress issue
             let args = ReopenArgs {
                 issue_ids: vec![issue.id.to_string()],
                 reason: None,
             };
+            execute_reopen(&mut app, &args, OutputMode::Text)
+                .await
+                .expect_err("In Progress is not a Closed Issue");
 
-            let result = execute_reopen(&mut app, &args, OutputMode::Text, true).await;
-
-            assert!(result.is_err());
-            let error_msg = result.unwrap_err().to_string();
-            assert!(
-                error_msg.contains("failed"),
-                "Error should indicate failure, got: {}",
-                error_msg
-            );
+            let reopened = app
+                .storage()
+                .get(&issue.id)
+                .await
+                .expect("issue lookup should succeed")
+                .expect("Issue should remain");
+            assert_eq!(reopened.status, IssueStatus::InProgress);
+            assert_eq!(reopened.assignee.as_deref(), Some("alice"));
         }
     }
 }

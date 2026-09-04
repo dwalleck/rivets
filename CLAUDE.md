@@ -46,10 +46,13 @@ rivets ready --limit 5
 # 2. View issue details
 rivets show rivets-xyz
 
-# 3. Update status when starting
+# 3. Claim the next action before starting
+rivets claim rivets-xyz --assignee <agent-id>
+
+# 4. Move the claimed Issue into active work
 rivets update rivets-xyz --status in_progress
 
-# 4. Close when done
+# 5. Close when done
 rivets close rivets-xyz --reason "Implemented in commit abc123"
 ```
 

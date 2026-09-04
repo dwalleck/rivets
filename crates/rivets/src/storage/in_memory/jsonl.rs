@@ -10,7 +10,7 @@ use super::issue_record::{
 };
 use crate::domain::{DependencyType, IssueId, ResourceError};
 use crate::error::{Error, Result, StorageError};
-use crate::storage::IssueStorage;
+use crate::storage::{IssueStorage, RevisionHasher};
 use rivets_jsonl::{Warning as JsonlWarning, read_jsonl_resilient_with_line_numbers};
 use std::path::Path;
 use std::sync::Arc;
@@ -76,6 +76,16 @@ use tokio::sync::Mutex;
 ///                 field.accepted_migration_name()
 ///             );
 ///         }
+///         rivets::storage::in_memory::LoadWarning::AssignmentStateMigrated {
+///             issue_id, message, ..
+///         } => {
+///             eprintln!("Migrated Assignment state for issue {}: {}", issue_id, message);
+///         }
+///         rivets::storage::in_memory::LoadWarning::WorkflowStateMigrated {
+///             issue_id, message, ..
+///         } => {
+///             eprintln!("Migrated Workflow State for issue {}: {}", issue_id, message);
+///         }
 ///     }
 /// }
 /// # Ok(())
@@ -119,6 +129,28 @@ pub enum LoadWarning {
         issue_id: IssueId,
         line_number: usize,
         field: MigrationField,
+    },
+
+    /// A persisted lifecycle/Assignment combination was repaired during load.
+    #[error("line {line_number}: migrated Assignment state for Issue {issue_id}: {message}")]
+    AssignmentStateMigrated {
+        /// Repaired Issue.
+        issue_id: IssueId,
+        /// Source line containing the compatibility record.
+        line_number: usize,
+        /// Human-readable repair also appended to the Issue as a migration Note.
+        message: String,
+    },
+
+    /// A removed persisted Workflow State was repaired during load.
+    #[error("line {line_number}: migrated Workflow State for Issue {issue_id}: {message}")]
+    WorkflowStateMigrated {
+        /// Repaired Issue.
+        issue_id: IssueId,
+        /// Source line containing the compatibility record.
+        line_number: usize,
+        /// Human-readable repair also appended to the Issue as a migration Note.
+        message: String,
     },
 
     /// Issue data failed validation (invalid priority, title length, etc.)
@@ -228,43 +260,70 @@ pub async fn load_from_jsonl(
     // Convert and validate persisted records at the compatibility boundary.
     let mut issues = Vec::new();
     for (line_number, record) in parsed_records {
-        let (issue_id, migration_conflict, outcome) = match record.into_domain() {
-            Ok(IssueRecordConversion {
-                issue,
-                migration_conflict,
-            }) => (issue.id.clone(), migration_conflict, Ok(issue)),
-            Err(IssueRecordError::InvalidData {
-                issue_id,
-                error,
-                migration_conflict,
-            }) => (
-                issue_id.clone(),
-                migration_conflict,
-                Err(LoadWarning::InvalidIssueData {
+        let (issue_id, migration_conflict, workflow_migration, assignment_migration, outcome) =
+            match record.into_domain() {
+                Ok(IssueRecordConversion {
+                    issue,
+                    migration_conflict,
+                    workflow_migration,
+                    assignment_migration,
+                }) => (
+                    issue.id.clone(),
+                    migration_conflict,
+                    workflow_migration,
+                    assignment_migration,
+                    Ok(issue),
+                ),
+                Err(IssueRecordError::InvalidData {
                     issue_id,
-                    line_number,
                     error,
-                }),
-            ),
-            Err(IssueRecordError::InvalidResource {
-                issue_id,
-                source,
-                migration_conflict,
-            }) => (
-                issue_id.clone(),
-                migration_conflict,
-                Err(LoadWarning::InvalidResourceData {
+                    migration_conflict,
+                }) => (
+                    issue_id.clone(),
+                    migration_conflict,
+                    None,
+                    None,
+                    Err(LoadWarning::InvalidIssueData {
+                        issue_id,
+                        line_number,
+                        error,
+                    }),
+                ),
+                Err(IssueRecordError::InvalidResource {
                     issue_id,
-                    line_number,
                     source,
-                }),
-            ),
-        };
+                    migration_conflict,
+                }) => (
+                    issue_id.clone(),
+                    migration_conflict,
+                    None,
+                    None,
+                    Err(LoadWarning::InvalidResourceData {
+                        issue_id,
+                        line_number,
+                        source,
+                    }),
+                ),
+            };
         if let Some(field) = migration_conflict {
             warnings.push(LoadWarning::MigrationConflict {
-                issue_id,
+                issue_id: issue_id.clone(),
                 line_number,
                 field,
+            });
+        }
+        if let Some(message) = workflow_migration {
+            warnings.push(LoadWarning::WorkflowStateMigrated {
+                issue_id: issue_id.clone(),
+                line_number,
+                message,
+            });
+        }
+        if let Some(message) = assignment_migration {
+            warnings.push(LoadWarning::AssignmentStateMigrated {
+                issue_id: issue_id.clone(),
+                line_number,
+                message,
             });
         }
         match outcome {
@@ -349,46 +408,36 @@ pub async fn load_from_jsonl(
 /// The function uses a write-then-rename pattern which is atomic on POSIX systems.
 /// If the process crashes or is interrupted, the original file remains unchanged.
 pub async fn save_to_jsonl(storage: &dyn IssueStorage, path: &Path) -> Result<()> {
-    // Create temp file path
-    let temp_path = path.with_extension("tmp");
+    save_to_jsonl_with_revision(storage, path).await?;
+    Ok(())
+}
 
-    // Open temp file
+/// Save atomically and return the SHA-256 revision of the bytes written.
+pub(crate) async fn save_to_jsonl_with_revision(
+    storage: &dyn IssueStorage,
+    path: &Path,
+) -> Result<[u8; 32]> {
+    let temp_path = path.with_extension("tmp");
     let file = File::create(&temp_path).await.map_err(Error::Io)?;
     let mut writer = BufWriter::new(file);
-
-    // Export all issues
+    let mut hasher = RevisionHasher::new();
     let mut issues = storage.export_all().await?;
-
-    // Sort issues by id for deterministic serialization.
-    // `export_all` collects from a `HashMap`, so line order otherwise varies between
-    // saves even when nothing changed. Because `.rivets/issues.jsonl` is committed to
-    // git, that reshuffle makes every mutation look like a whole-file rewrite: real
-    // diffs become unreviewable, and two branches that each touched one issue collide
-    // across the entire file instead of on the lines they actually changed.
     issues.sort_by(|a, b| a.id.cmp(&b.id));
 
-    // Write each issue as a JSON line
     for mut issue in issues {
-        // Sort dependencies for deterministic serialization.
-        // This ensures consistent JSONL output across saves, preventing spurious
-        // diffs in version control when dependencies are added/removed in different orders.
         issue.dependencies.sort();
-
         let record = CanonicalIssueRecord::from(issue);
         let json = serde_json::to_string(&record).map_err(StorageError::Serialization)?;
-
-        writer.write_all(json.as_bytes()).await.map_err(Error::Io)?;
-
+        let bytes = json.as_bytes();
+        writer.write_all(bytes).await.map_err(Error::Io)?;
         writer.write_all(b"\n").await.map_err(Error::Io)?;
+        hasher.update(bytes);
+        hasher.update(b"\n");
     }
 
-    // Flush and close
     writer.flush().await.map_err(Error::Io)?;
-
-    // Atomic rename
     tokio::fs::rename(&temp_path, path)
         .await
         .map_err(Error::Io)?;
-
-    Ok(())
+    Ok(hasher.finalize())
 }

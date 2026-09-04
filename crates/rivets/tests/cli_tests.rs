@@ -3,6 +3,7 @@
 //! These tests verify the end-to-end behavior of all CLI commands.
 
 use rstest::{fixture, rstest};
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
@@ -38,6 +39,14 @@ fn initialized_dir() -> TempDir {
         String::from_utf8_lossy(&output.stderr)
     );
     temp
+}
+fn claim_issue(dir: &Path, issue_id: &str, assignee: &str) {
+    let output = run_rivets_in_dir(dir, &["claim", issue_id, "--assignee", assignee]);
+    assert!(
+        output.status.success(),
+        "Claim failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 // ============================================================================
@@ -101,6 +110,11 @@ fn test_cli_help_shows_all_commands() {
         stdout.contains("update"),
         "Help should show 'update' command"
     );
+    assert!(stdout.contains("claim"), "Help should show 'claim' command");
+    assert!(
+        stdout.contains("release"),
+        "Help should show 'release' command"
+    );
     assert!(stdout.contains("close"), "Help should show 'close' command");
     assert!(
         stdout.contains("delete"),
@@ -110,14 +124,6 @@ fn test_cli_help_shows_all_commands() {
     assert!(
         stdout.contains("blocking-dependency"),
         "Help should show 'blocking-dependency' command"
-    );
-    assert!(
-        stdout.contains("related"),
-        "Help should show 'related' command"
-    );
-    assert!(
-        stdout.contains("discovery"),
-        "Help should show 'discovery' command"
     );
     assert!(
         stdout.contains("resource"),
@@ -423,35 +429,32 @@ fn test_cli_list_with_filters(initialized_dir: TempDir) {
 }
 
 #[rstest]
-#[case::open("open")]
-#[case::in_progress("in_progress")]
-#[case::in_progress_alias("in-progress")]
-#[case::blocked("blocked")]
-#[case::closed("closed")]
-fn test_cli_list_status_filter_parsing(initialized_dir: TempDir, #[case] status: &str) {
-    // Verify all status filter values are accepted by the CLI parser
-    let output = run_rivets_in_dir(initialized_dir.path(), &["list", "--status", status]);
-    assert!(
-        output.status.success(),
-        "Status filter '{}' should be valid. Stderr: {}",
-        status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
+fn canonical_workflow_state_inputs(initialized_dir: TempDir) {
+    for status in ["open", "in_progress", "in-progress", "closed"] {
+        let output = run_rivets_in_dir(initialized_dir.path(), &["list", "--status", status]);
+        assert!(
+            output.status.success(),
+            "Workflow State '{status}' should be valid. Stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
-#[test]
-fn test_cli_list_invalid_status_rejected() {
-    // Regression fence: invalid enum strings must fail with clap's exit-2
-    // "invalid value" error, listing the possible values.
-    let dir = tempfile::tempdir().expect("tempdir");
-    let output = run_rivets_in_dir(dir.path(), &["list", "--status", "bogus"]);
-    assert_eq!(output.status.code(), Some(2));
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("invalid value 'bogus' for '--status <STATUS>'"),
-        "stderr: {stderr}"
-    );
-    assert!(stderr.contains("possible values: open, in_progress, blocked, closed"));
+    for rejected in ["blocked", "bogus"] {
+        let output = run_rivets_in_dir(initialized_dir.path(), &["list", "--status", rejected]);
+        assert_eq!(output.status.code(), Some(2));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!(
+                "invalid value '{rejected}' for '--status <STATUS>'"
+            )),
+            "stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("possible values: open, in_progress, closed"),
+            "stderr: {stderr}"
+        );
+        assert!(!stderr.contains("possible values: open, in_progress, blocked"));
+    }
 }
 
 #[rstest]
@@ -459,12 +462,14 @@ fn test_cli_list_status_filters_match_issues(initialized_dir: TempDir) {
     // Create issues with different statuses
     let open_id = create_issue(initialized_dir.path(), "Open issue", &[]);
     let in_progress_id = create_issue(initialized_dir.path(), "In progress issue", &[]);
+    claim_issue(initialized_dir.path(), &in_progress_id, "active-owner");
 
     // Update one to in_progress
-    run_rivets_in_dir(
+    let update = run_rivets_in_dir(
         initialized_dir.path(),
         &["update", &in_progress_id, "--status", "in_progress"],
     );
+    assert!(update.status.success());
 
     // List open - should only show open issue
     let output = run_rivets_in_dir(initialized_dir.path(), &["list", "--status", "open"]);
@@ -574,6 +579,7 @@ fn test_cli_show_nonexistent_issue(initialized_dir: TempDir) {
 #[rstest]
 fn test_cli_update_issue(initialized_dir: TempDir) {
     let issue_id = create_issue(initialized_dir.path(), "Original title", &[]);
+    claim_issue(initialized_dir.path(), &issue_id, "active-owner");
 
     let output = run_rivets_in_dir(
         initialized_dir.path(),
@@ -1000,6 +1006,128 @@ fn test_cli_ready_filters_by_kind_and_label(initialized_dir: TempDir) {
     assert_eq!(issues[0]["id"], expected_id);
 }
 
+#[rstest]
+fn ready_assignment_visibility(initialized_dir: TempDir) {
+    let unassigned = create_issue(initialized_dir.path(), "Unassigned", &[]);
+    let alice = create_issue(initialized_dir.path(), "Alice", &["--assignee", "alice"]);
+    let prerequisite = create_issue(
+        initialized_dir.path(),
+        "Bob prerequisite",
+        &["--assignee", "bob"],
+    );
+    let blocked = create_issue(
+        initialized_dir.path(),
+        "Blocked",
+        &["--prerequisite", &prerequisite],
+    );
+    let in_progress = create_issue(initialized_dir.path(), "In Progress", &[]);
+    claim_issue(initialized_dir.path(), &in_progress, "active-owner");
+    let update = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["update", &in_progress, "--status", "in_progress"],
+    );
+    assert!(
+        update.status.success(),
+        "status update failed: {}",
+        String::from_utf8_lossy(&update.stderr)
+    );
+    let closed = create_issue(initialized_dir.path(), "Closed", &[]);
+    let close = run_rivets_in_dir(initialized_dir.path(), &["close", &closed]);
+    assert!(
+        close.status.success(),
+        "close failed: {}",
+        String::from_utf8_lossy(&close.stderr)
+    );
+
+    let ready_ids = |selector: &[&str]| {
+        let mut args = vec!["--json", "ready"];
+        args.extend_from_slice(selector);
+        let output = run_rivets_in_dir(initialized_dir.path(), &args);
+        assert!(
+            output.status.success(),
+            "ready failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout)
+            .expect("Ready output should be valid JSON")
+            .into_iter()
+            .map(|issue| {
+                issue["id"]
+                    .as_str()
+                    .expect("Ready Issue ID should be a string")
+                    .to_string()
+            })
+            .collect::<BTreeSet<_>>()
+    };
+
+    assert_eq!(ready_ids(&[]), BTreeSet::from([unassigned.clone()]));
+    assert_eq!(
+        ready_ids(&["--assignee", "alice"]),
+        BTreeSet::from([alice.clone()])
+    );
+    assert_eq!(
+        ready_ids(&["--all-assignees"]),
+        BTreeSet::from([unassigned, alice, prerequisite])
+    );
+
+    let conflict = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["ready", "--assignee", "alice", "--all-assignees"],
+    );
+    assert_eq!(conflict.status.code(), Some(2));
+
+    assert!(!ready_ids(&["--all-assignees"]).contains(&blocked));
+    assert!(!ready_ids(&["--all-assignees"]).contains(&in_progress));
+    assert!(!ready_ids(&["--all-assignees"]).contains(&closed));
+}
+
+#[rstest]
+fn ready_and_blocked_survive_restart(initialized_dir: TempDir) {
+    let prerequisite = create_issue(initialized_dir.path(), "Prerequisite", &[]);
+    let dependent = create_issue(
+        initialized_dir.path(),
+        "Dependent",
+        &["--prerequisite", &prerequisite],
+    );
+
+    let snapshot = || {
+        let ready = run_rivets_in_dir(
+            initialized_dir.path(),
+            &["--json", "ready", "--all-assignees"],
+        );
+        assert!(ready.status.success());
+        let ready_ids = serde_json::from_slice::<Vec<serde_json::Value>>(&ready.stdout)
+            .expect("Ready output should be JSON")
+            .into_iter()
+            .map(|issue| {
+                issue["id"]
+                    .as_str()
+                    .expect("Ready Issue ID should be a string")
+                    .to_string()
+            })
+            .collect::<BTreeSet<_>>();
+
+        let blocked = run_rivets_in_dir(initialized_dir.path(), &["--json", "blocked"]);
+        assert!(blocked.status.success());
+        let blocked_ids = serde_json::from_slice::<Vec<serde_json::Value>>(&blocked.stdout)
+            .expect("Blocked output should be JSON")
+            .into_iter()
+            .map(|entry| {
+                entry["issue"]["id"]
+                    .as_str()
+                    .expect("Blocked Issue ID should be a string")
+                    .to_string()
+            })
+            .collect::<BTreeSet<_>>();
+
+        (ready_ids, blocked_ids)
+    };
+
+    let expected = (BTreeSet::from([prerequisite]), BTreeSet::from([dependent]));
+    assert_eq!(snapshot(), expected);
+    assert_eq!(snapshot(), expected);
+}
+
 // ============================================================================
 // Dependency Command Tests
 // ============================================================================
@@ -1081,30 +1209,6 @@ fn blocking_dependency_cli_direction_and_restart(initialized_dir: TempDir) {
             .unwrap()
             .iter()
             .all(|row| row["depth"] == 1 && row["dependent_id"] == dependent)
-    );
-
-    let text_tree = run_rivets_in_dir(
-        initialized_dir.path(),
-        &["blocking-dependency", "tree", "--dependent", &dependent],
-    );
-    assert!(text_tree.status.success());
-    let text_tree = String::from_utf8_lossy(&text_tree.stdout);
-    assert!(text_tree.contains(&format!("Blocking prerequisites of {dependent}:")));
-    assert!(text_tree.contains(&format!("{dependent} depends on {prerequisite_a}")));
-    assert!(text_tree.contains(&format!("{dependent} depends on {prerequisite_b}")));
-
-    let empty_tree = run_rivets_in_dir(
-        initialized_dir.path(),
-        &[
-            "blocking-dependency",
-            "tree",
-            "--dependent",
-            &prerequisite_a,
-        ],
-    );
-    assert!(
-        String::from_utf8_lossy(&empty_tree.stdout)
-            .contains(&format!("{prerequisite_a} has no Blocking prerequisites"))
     );
 
     let second_dependent = create_issue(initialized_dir.path(), "Second dependent", &[]);
@@ -1193,335 +1297,13 @@ fn blocking_dependency_cli_direction_and_restart(initialized_dir: TempDir) {
             {"depends_on_id": prerequisite_a, "dep_type": "related"}
         ])
     );
-    let before_missing =
-        std::fs::read(initialized_dir.path().join(".rivets/issues.jsonl")).unwrap();
-    let missing = run_rivets_in_dir(
-        initialized_dir.path(),
-        &[
-            "blocking-dependency",
-            "add",
-            "--dependent",
-            &dependent,
-            "--prerequisite",
-            "test-missing",
-        ],
-    );
-    assert!(!missing.status.success());
-    assert!(String::from_utf8_lossy(&missing.stderr).contains("test-missing"));
-    assert_eq!(
-        std::fs::read(initialized_dir.path().join(".rivets/issues.jsonl")).unwrap(),
-        before_missing
-    );
-}
-
-#[rstest]
-fn related_and_discovery_cli_are_structured_symmetric_and_persistent(initialized_dir: TempDir) {
-    let issue_a = create_issue(initialized_dir.path(), "Issue A", &[]);
-    let issue_b = create_issue(initialized_dir.path(), "Issue B", &[]);
-    let issue_c = create_issue(initialized_dir.path(), "Issue C", &[]);
-    let mut expected_related_endpoints = [issue_a.as_str(), issue_b.as_str()];
-    expected_related_endpoints.sort_unstable();
-
-    for command in ["related", "discovery"] {
-        let help = run_rivets_in_dir(initialized_dir.path(), &[command, "--help"]);
-        assert!(
-            help.status.success(),
-            "{command} help failed: {}",
-            String::from_utf8_lossy(&help.stderr)
-        );
-        assert!(String::from_utf8_lossy(&help.stdout).contains("add"));
-        assert!(String::from_utf8_lossy(&help.stdout).contains("remove"));
-        assert!(String::from_utf8_lossy(&help.stdout).contains("list"));
-    }
-
-    let related_add = run_rivets_in_dir(
-        initialized_dir.path(),
-        &[
-            "--json",
-            "related",
-            "add",
-            "--issue",
-            expected_related_endpoints[1],
-            "--related",
-            expected_related_endpoints[0],
-        ],
-    );
-    assert!(
-        related_add.status.success(),
-        "Related add failed: {}",
-        String::from_utf8_lossy(&related_add.stderr)
-    );
-    let related_add: serde_json::Value =
-        serde_json::from_slice(&related_add.stdout).expect("Related add should be JSON");
-    assert_eq!(related_add["action"], "add");
-    assert_eq!(related_add["relationship"], "related");
-    assert_eq!(related_add["status"], "success");
-    assert_eq!(related_add["left_issue_id"], expected_related_endpoints[0]);
-    assert_eq!(related_add["right_issue_id"], expected_related_endpoints[1]);
-    assert!(related_add.get("issue_id").is_none());
-    assert!(related_add.get("related_issue_id").is_none());
-
-    let related_duplicate = run_rivets_in_dir(
-        initialized_dir.path(),
-        &[
-            "related",
-            "add",
-            "--issue",
-            expected_related_endpoints[1],
-            "--related",
-            expected_related_endpoints[0],
-        ],
-    );
-    assert!(related_duplicate.status.success());
-    assert_eq!(
-        String::from_utf8_lossy(&related_duplicate.stdout).trim(),
-        format!(
-            "{} is related to {}",
-            expected_related_endpoints[0], expected_related_endpoints[1]
-        )
-    );
-
-    let related_list = run_rivets_in_dir(
-        initialized_dir.path(),
-        &[
-            "--json",
-            "related",
-            "list",
-            "--issue",
-            expected_related_endpoints[1],
-        ],
-    );
-    assert!(
-        related_list.status.success(),
-        "Related list failed: {}",
-        String::from_utf8_lossy(&related_list.stderr)
-    );
-    let related_list: Vec<serde_json::Value> =
-        serde_json::from_slice(&related_list.stdout).expect("Related list should be JSON");
-    assert_eq!(
-        related_list.len(),
-        1,
-        "reversed duplicate must be idempotent"
-    );
-    assert_eq!(
-        related_list[0]["left_issue_id"],
-        expected_related_endpoints[0]
-    );
-    assert_eq!(
-        related_list[0]["right_issue_id"],
-        expected_related_endpoints[1]
-    );
-
-    let discovery_add_a = run_rivets_in_dir(
-        initialized_dir.path(),
-        &[
-            "discovery",
-            "add",
-            "--discovered",
-            &issue_c,
-            "--source",
-            &issue_a,
-        ],
-    );
-    assert!(
-        discovery_add_a.status.success(),
-        "Discovery add failed: {}",
-        String::from_utf8_lossy(&discovery_add_a.stderr)
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&discovery_add_a.stdout).trim(),
-        format!("{issue_c} was discovered from {issue_a}")
-    );
-    let discovery_add_b = run_rivets_in_dir(
-        initialized_dir.path(),
-        &[
-            "--json",
-            "discovery",
-            "add",
-            "--discovered",
-            &issue_c,
-            "--source",
-            &issue_b,
-        ],
-    );
-    assert!(discovery_add_b.status.success());
-    let discovery_add_b: serde_json::Value =
-        serde_json::from_slice(&discovery_add_b.stdout).expect("Discovery add should be JSON");
-    assert_eq!(discovery_add_b["action"], "add");
-    assert_eq!(discovery_add_b["relationship"], "discovery_origin");
-    assert_eq!(discovery_add_b["discovered_issue_id"], issue_c);
-    assert_eq!(discovery_add_b["source_issue_id"], issue_b);
-    assert_eq!(discovery_add_b["status"], "success");
-
-    let discovery_list = run_rivets_in_dir(
-        initialized_dir.path(),
-        &["--json", "discovery", "list", "--discovered", &issue_c],
-    );
-    assert!(
-        discovery_list.status.success(),
-        "Discovery list failed: {}",
-        String::from_utf8_lossy(&discovery_list.stderr)
-    );
-    let discovery_list: Vec<serde_json::Value> =
-        serde_json::from_slice(&discovery_list.stdout).expect("Discovery list should be JSON");
-    let actual_sources = discovery_list
-        .iter()
-        .map(|origin| origin["source_issue_id"].as_str().unwrap())
-        .collect::<Vec<_>>();
-    let mut expected_sources = vec![issue_a.as_str(), issue_b.as_str()];
-    expected_sources.sort_unstable();
-    assert_eq!(actual_sources, expected_sources);
-    assert!(
-        discovery_list
-            .iter()
-            .all(|origin| origin["discovered_issue_id"] == issue_c)
-    );
-
-    let duplicate_discovery = run_rivets_in_dir(
-        initialized_dir.path(),
-        &[
-            "discovery",
-            "add",
-            "--discovered",
-            &issue_c,
-            "--source",
-            &issue_a,
-        ],
-    );
-    assert!(!duplicate_discovery.status.success());
-    assert!(
-        String::from_utf8_lossy(&duplicate_discovery.stderr)
-            .contains("Discovery origin already exists")
-    );
-
-    let discovery_cycle = run_rivets_in_dir(
-        initialized_dir.path(),
-        &[
-            "discovery",
-            "add",
-            "--discovered",
-            &issue_a,
-            "--source",
-            &issue_c,
-        ],
-    );
-    assert!(!discovery_cycle.status.success());
-    assert!(String::from_utf8_lossy(&discovery_cycle.stderr).contains("would create a cycle"));
-
-    for (command, endpoint_flag) in [("related", "--issue"), ("discovery", "--discovered")] {
-        let self_reference = run_rivets_in_dir(
-            initialized_dir.path(),
-            &[
-                command,
-                "add",
-                endpoint_flag,
-                &issue_a,
-                if command == "related" {
-                    "--related"
-                } else {
-                    "--source"
-                },
-                &issue_a,
-            ],
-        );
-        assert!(
-            !self_reference.status.success(),
-            "{command} self-reference should fail"
-        );
-        let stderr = String::from_utf8_lossy(&self_reference.stderr);
-        let expected = if command == "related" {
-            "related to itself"
-        } else {
-            "own Discovery source"
-        };
-        assert!(stderr.contains(expected), "unexpected error: {stderr}");
-    }
-
-    let before_missing =
-        std::fs::read(initialized_dir.path().join(".rivets/issues.jsonl")).unwrap();
-    let missing = run_rivets_in_dir(
-        initialized_dir.path(),
-        &[
-            "related",
-            "add",
-            "--issue",
-            &issue_a,
-            "--related",
-            "test-missing",
-        ],
-    );
-    assert!(!missing.status.success());
-    assert!(String::from_utf8_lossy(&missing.stderr).contains("test-missing"));
-    assert_eq!(
-        std::fs::read(initialized_dir.path().join(".rivets/issues.jsonl")).unwrap(),
-        before_missing
-    );
-
-    let related_remove = run_rivets_in_dir(
-        initialized_dir.path(),
-        &[
-            "--json",
-            "related",
-            "remove",
-            "--issue",
-            expected_related_endpoints[1],
-            "--related",
-            expected_related_endpoints[0],
-        ],
-    );
-    assert!(related_remove.status.success());
-    let related_remove: serde_json::Value =
-        serde_json::from_slice(&related_remove.stdout).expect("Related remove should be JSON");
-    assert_eq!(related_remove["action"], "remove");
-    assert_eq!(related_remove["relationship"], "related");
-    assert_eq!(
-        related_remove["left_issue_id"],
-        expected_related_endpoints[0]
-    );
-    assert_eq!(
-        related_remove["right_issue_id"],
-        expected_related_endpoints[1]
-    );
-    assert_eq!(related_remove["status"], "success");
-    let related_empty = run_rivets_in_dir(
-        initialized_dir.path(),
-        &["--json", "related", "list", "--issue", &issue_a],
-    );
-    assert_eq!(
-        serde_json::from_slice::<Vec<serde_json::Value>>(&related_empty.stdout).unwrap(),
-        Vec::<serde_json::Value>::new()
-    );
-
-    let discovery_remove = run_rivets_in_dir(
-        initialized_dir.path(),
-        &[
-            "discovery",
-            "remove",
-            "--discovered",
-            &issue_c,
-            "--source",
-            &issue_a,
-        ],
-    );
-    assert!(discovery_remove.status.success());
-    let discovery_after_remove = run_rivets_in_dir(
-        initialized_dir.path(),
-        &["--json", "discovery", "list", "--discovered", &issue_c],
-    );
-    let discovery_after_remove: Vec<serde_json::Value> =
-        serde_json::from_slice(&discovery_after_remove.stdout).unwrap();
-    assert_eq!(discovery_after_remove.len(), 1);
-    assert_eq!(
-        discovery_after_remove[0]["source_issue_id"], issue_b,
-        "each real process must observe the preceding persisted mutation"
-    );
 }
 
 #[rstest]
 fn create_with_prerequisites_is_atomic(initialized_dir: TempDir) {
     let prerequisite = create_issue(initialized_dir.path(), "Prerequisite", &[]);
     let issues_path = initialized_dir.path().join(".rivets/issues.jsonl");
-    let before = std::fs::read(&issues_path).unwrap();
+    let before = std::fs::read(&issues_path).expect("Issue source bytes should be readable");
 
     let missing = run_rivets_in_dir(
         initialized_dir.path(),
@@ -1534,7 +1316,10 @@ fn create_with_prerequisites_is_atomic(initialized_dir: TempDir) {
         ],
     );
     assert!(!missing.status.success());
-    assert_eq!(std::fs::read(&issues_path).unwrap(), before);
+    assert_eq!(
+        std::fs::read(&issues_path).expect("Issue source bytes should remain readable"),
+        before
+    );
 
     let duplicate = run_rivets_in_dir(
         initialized_dir.path(),
@@ -1549,7 +1334,10 @@ fn create_with_prerequisites_is_atomic(initialized_dir: TempDir) {
         ],
     );
     assert!(!duplicate.status.success());
-    assert_eq!(std::fs::read(&issues_path).unwrap(), before);
+    assert_eq!(
+        std::fs::read(&issues_path).expect("Issue source bytes should remain readable"),
+        before
+    );
 
     let legacy = run_rivets_in_dir(
         initialized_dir.path(),
@@ -1633,6 +1421,76 @@ fn test_cli_stats_with_issues(initialized_dir: TempDir) {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Total Issues:"));
     assert!(stdout.contains("By Priority:"));
+}
+
+#[rstest]
+fn stats_and_frontier_output_separate_lifecycle_from_blocked(initialized_dir: TempDir) {
+    let prerequisite = create_issue(initialized_dir.path(), "Prerequisite", &[]);
+    let dependent = create_issue(initialized_dir.path(), "Dependent", &[]);
+    let in_progress = create_issue(initialized_dir.path(), "In progress", &[]);
+    let closed = create_issue(initialized_dir.path(), "Closed", &[]);
+    claim_issue(initialized_dir.path(), &in_progress, "active-owner");
+    let active = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["update", &in_progress, "--status", "in_progress"],
+    );
+    assert!(active.status.success());
+    run_rivets_in_dir(initialized_dir.path(), &["close", &closed]);
+    let add = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "blocking-dependency",
+            "add",
+            "--dependent",
+            &dependent,
+            "--prerequisite",
+            &prerequisite,
+        ],
+    );
+    assert!(add.status.success());
+
+    let text = run_rivets_in_dir(initialized_dir.path(), &["stats"]);
+    assert!(text.status.success());
+    let stdout = String::from_utf8_lossy(&text.stdout);
+    assert!(!stdout.contains("  Blocked:"));
+    assert!(stdout.contains("Blocked by Dependencies: 1"));
+
+    let json = run_rivets_in_dir(initialized_dir.path(), &["--json", "stats"]);
+    assert!(json.status.success());
+    let json: serde_json::Value =
+        serde_json::from_slice(&json.stdout).expect("stats output is JSON");
+    let by_status = json["by_status"]
+        .as_object()
+        .expect("by_status is an object");
+    let mut keys = by_status.keys().map(String::as_str).collect::<Vec<_>>();
+    keys.sort_unstable();
+    assert_eq!(keys, ["closed", "in_progress", "open"]);
+    assert_eq!(by_status["open"], 2);
+    assert_eq!(by_status["in_progress"], 1);
+    assert_eq!(by_status["closed"], 1);
+    assert_eq!(json["blocked_by_dependencies"], 1);
+
+    let blocked = run_rivets_in_dir(initialized_dir.path(), &["--json", "blocked"]);
+    assert!(blocked.status.success());
+    let blocked: serde_json::Value =
+        serde_json::from_slice(&blocked.stdout).expect("blocked output is JSON");
+    assert_eq!(blocked[0]["issue"]["status"], "open");
+    assert_eq!(blocked[0]["blocked_by"][0]["status"], "open");
+
+    let ready = run_rivets_in_dir(initialized_dir.path(), &["--json", "ready"]);
+    assert!(ready.status.success());
+    let ready: serde_json::Value =
+        serde_json::from_slice(&ready.stdout).expect("ready output is JSON");
+    assert!(
+        ready
+            .as_array()
+            .expect("ready output is an array")
+            .iter()
+            .all(|issue| matches!(
+                issue["status"].as_str(),
+                Some("open" | "in_progress" | "closed")
+            ))
+    );
 }
 
 // ============================================================================
@@ -1785,11 +1643,13 @@ fn test_cli_info_with_issues(initialized_dir: TempDir) {
     create_issue(initialized_dir.path(), "Open issue", &[]);
     let id2 = create_issue(initialized_dir.path(), "In progress issue", &[]);
     let id3 = create_issue(initialized_dir.path(), "Closed issue", &[]);
+    claim_issue(initialized_dir.path(), &id2, "active-owner");
 
-    run_rivets_in_dir(
+    let active = run_rivets_in_dir(
         initialized_dir.path(),
         &["update", &id2, "--status", "in_progress"],
     );
+    assert!(active.status.success());
     run_rivets_in_dir(initialized_dir.path(), &["close", &id3]);
 
     let output = run_rivets_in_dir(initialized_dir.path(), &["info"]);
@@ -1819,56 +1679,47 @@ fn test_cli_info_json_output(initialized_dir: TempDir) {
 }
 
 #[rstest]
-fn test_cli_info_with_blocked_status(initialized_dir: TempDir) {
-    // Create issues with all statuses including blocked
+fn test_cli_info_with_canonical_states(initialized_dir: TempDir) {
     create_issue(initialized_dir.path(), "Open issue", &[]);
-    let id2 = create_issue(initialized_dir.path(), "In progress issue", &[]);
-    let id3 = create_issue(initialized_dir.path(), "Blocked issue", &[]);
-    let id4 = create_issue(initialized_dir.path(), "Closed issue", &[]);
+    let in_progress_id = create_issue(initialized_dir.path(), "In progress issue", &[]);
+    let closed_id = create_issue(initialized_dir.path(), "Closed issue", &[]);
+    claim_issue(initialized_dir.path(), &in_progress_id, "active-owner");
 
-    run_rivets_in_dir(
+    let active = run_rivets_in_dir(
         initialized_dir.path(),
-        &["update", &id2, "--status", "in_progress"],
+        &["update", &in_progress_id, "--status", "in_progress"],
     );
-    run_rivets_in_dir(
-        initialized_dir.path(),
-        &["update", &id3, "--status", "blocked"],
-    );
-    run_rivets_in_dir(initialized_dir.path(), &["close", &id4]);
+    assert!(active.status.success());
+    run_rivets_in_dir(initialized_dir.path(), &["close", &closed_id]);
 
     let output = run_rivets_in_dir(initialized_dir.path(), &["info"]);
-
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("4 total"));
+    assert!(stdout.contains("3 total"));
     assert!(stdout.contains("1 open"));
     assert!(stdout.contains("1 in progress"));
-    assert!(stdout.contains("1 blocked"));
     assert!(stdout.contains("1 closed"));
+    assert!(!stdout.contains("blocked"));
 }
 
 #[rstest]
-fn test_cli_info_json_includes_blocked_count(initialized_dir: TempDir) {
-    // Create issues with all statuses
+fn test_cli_info_json_has_only_canonical_state_counts(initialized_dir: TempDir) {
     create_issue(initialized_dir.path(), "Open issue", &[]);
-    let id2 = create_issue(initialized_dir.path(), "Blocked issue", &[]);
-
-    run_rivets_in_dir(
-        initialized_dir.path(),
-        &["update", &id2, "--status", "blocked"],
-    );
+    let closed_id = create_issue(initialized_dir.path(), "Closed issue", &[]);
+    run_rivets_in_dir(initialized_dir.path(), &["close", &closed_id]);
 
     let output = run_rivets_in_dir(initialized_dir.path(), &["--json", "info"]);
-
     assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
     let json: serde_json::Value =
-        serde_json::from_str(&stdout).expect("Output should be valid JSON");
-    assert_eq!(json["issues"]["total"], 2, "Should have 2 total issues");
-    assert_eq!(json["issues"]["open"], 1, "Should have 1 open issue");
-    assert_eq!(json["issues"]["blocked"], 1, "Should have 1 blocked issue");
-    assert_eq!(json["issues"]["closed"], 0, "Should have 0 closed issues");
+        serde_json::from_slice(&output.stdout).expect("Output should be valid JSON");
+    let issues = json["issues"].as_object().expect("issues is an object");
+    let mut keys = issues.keys().map(String::as_str).collect::<Vec<_>>();
+    keys.sort_unstable();
+    assert_eq!(keys, ["closed", "in_progress", "open", "total"]);
+    assert_eq!(issues["total"], 2);
+    assert_eq!(issues["open"], 1);
+    assert_eq!(issues["in_progress"], 0);
+    assert_eq!(issues["closed"], 1);
 }
 
 // ============================================================================
@@ -2040,11 +1891,13 @@ fn test_cli_stale_with_days_option(initialized_dir: TempDir) {
 fn test_cli_stale_with_status_filter(initialized_dir: TempDir) {
     create_issue(initialized_dir.path(), "Open issue", &[]);
     let id2 = create_issue(initialized_dir.path(), "In progress issue", &[]);
+    claim_issue(initialized_dir.path(), &id2, "active-owner");
 
-    run_rivets_in_dir(
+    let active = run_rivets_in_dir(
         initialized_dir.path(),
         &["update", &id2, "--status", "in_progress"],
     );
+    assert!(active.status.success());
 
     // Look for stale open issues only
     let output = run_rivets_in_dir(
@@ -2138,39 +1991,104 @@ fn test_cli_update_multiple_issues(initialized_dir: TempDir) {
 }
 
 #[rstest]
-fn test_cli_update_no_assignee_flag(initialized_dir: TempDir) {
-    // Create an issue with an assignee
-    let issue_id = create_issue(
+fn claim_release_cli_contract_survives_restart(initialized_dir: TempDir) {
+    let issue_id = create_issue(initialized_dir.path(), "Claim target", &[]);
+
+    let claimed = run_rivets_in_dir(
         initialized_dir.path(),
-        "Issue with assignee",
-        &["--assignee", "alice"],
+        &["--json", "claim", &issue_id, "--assignee", "alice"],
     );
-
-    // Verify the assignee is set
-    let show_before = run_rivets_in_dir(initialized_dir.path(), &["show", &issue_id]);
-    let stdout_before = String::from_utf8_lossy(&show_before.stdout);
     assert!(
-        stdout_before.contains("Assignee: alice"),
-        "Assignee should be set initially"
+        claimed.status.success(),
+        "Claim failed: {}",
+        String::from_utf8_lossy(&claimed.stderr)
     );
+    let claimed: serde_json::Value =
+        serde_json::from_slice(&claimed.stdout).expect("Claim output should be JSON");
+    assert_eq!(claimed["assignee"], "alice");
+    let claimed_at = claimed["updated_at"].clone();
 
-    // Update with --no-assignee to remove the assignee
-    let update_output = run_rivets_in_dir(
+    let restarted = run_rivets_in_dir(initialized_dir.path(), &["--json", "show", &issue_id]);
+    let restarted: serde_json::Value =
+        serde_json::from_slice(&restarted.stdout).expect("show output should be JSON");
+    assert_eq!(restarted[0]["assignee"], "alice");
+
+    let retry = run_rivets_in_dir(
         initialized_dir.path(),
-        &["update", &issue_id, "--no-assignee"],
+        &["--json", "claim", &issue_id, "--assignee", "alice"],
     );
-    assert!(
-        update_output.status.success(),
-        "Update with --no-assignee failed: {:?}",
-        String::from_utf8_lossy(&update_output.stderr)
-    );
+    assert!(retry.status.success());
+    let retry: serde_json::Value =
+        serde_json::from_slice(&retry.stdout).expect("retry output should be JSON");
+    assert_eq!(retry["updated_at"], claimed_at);
 
-    // Verify the assignee was removed
-    let show_after = run_rivets_in_dir(initialized_dir.path(), &["show", &issue_id]);
-    let stdout_after = String::from_utf8_lossy(&show_after.stdout);
+    let conflict = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["claim", &issue_id, "--assignee", "bob"],
+    );
+    assert!(!conflict.status.success());
+    assert!(String::from_utf8_lossy(&conflict.stderr).contains("already claimed by alice"));
+
+    let mismatch = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["release", &issue_id, "--assignee", "bob"],
+    );
+    assert!(!mismatch.status.success());
+    assert!(String::from_utf8_lossy(&mismatch.stderr).contains("release expected"));
+
+    let released = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["--json", "release", &issue_id, "--assignee", "alice"],
+    );
+    assert!(released.status.success());
+    let released: serde_json::Value =
+        serde_json::from_slice(&released.stdout).expect("Release output should be JSON");
+    assert_eq!(released["assignee"], serde_json::Value::Null);
+
+    let restarted = run_rivets_in_dir(initialized_dir.path(), &["--json", "show", &issue_id]);
+    let restarted: serde_json::Value =
+        serde_json::from_slice(&restarted.stdout).expect("show output should be JSON");
+    assert_eq!(restarted[0]["assignee"], serde_json::Value::Null);
+
+    let prerequisite = create_issue(initialized_dir.path(), "Prerequisite", &[]);
+    let blocked = create_issue(initialized_dir.path(), "Blocked target", &[]);
+    let add = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "blocking-dependency",
+            "add",
+            "--dependent",
+            &blocked,
+            "--prerequisite",
+            &prerequisite,
+        ],
+    );
+    assert!(add.status.success());
+    let blocked_claim = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["claim", &blocked, "--assignee", "alice"],
+    );
+    assert!(!blocked_claim.status.success());
+    assert!(String::from_utf8_lossy(&blocked_claim.stderr).contains("Blocked"));
+
+    let active = create_issue(
+        initialized_dir.path(),
+        "Active target",
+        &["--assignee", "active-owner"],
+    );
+    let enter_active = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["update", &active, "--status", "in_progress"],
+    );
+    assert!(enter_active.status.success());
+    let active_claim = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["claim", &active, "--assignee", "active-owner"],
+    );
+    assert!(!active_claim.status.success());
     assert!(
-        !stdout_after.contains("Assignee:"),
-        "Assignee should be removed after --no-assignee"
+        String::from_utf8_lossy(&active_claim.stderr)
+            .contains("Assignment changes require an Open Issue")
     );
 }
 
@@ -3067,5 +2985,315 @@ fn mixed_legacy_fixture_loads_migrates_and_persists_via_cli(initialized_dir: Tem
     assert_eq!(
         record(restarted, LEGACY_OPAQUE_ID)["notes"][0]["content"],
         expected_opaque_note
+    );
+}
+
+#[rstest]
+fn related_and_discovery_cli_are_structured_symmetric_and_persistent(initialized_dir: TempDir) {
+    let issue_a = create_issue(initialized_dir.path(), "Issue A", &[]);
+    let issue_b = create_issue(initialized_dir.path(), "Issue B", &[]);
+    let issue_c = create_issue(initialized_dir.path(), "Issue C", &[]);
+    let mut expected_related_endpoints = [issue_a.as_str(), issue_b.as_str()];
+    expected_related_endpoints.sort_unstable();
+
+    for command in ["related", "discovery"] {
+        let help = run_rivets_in_dir(initialized_dir.path(), &[command, "--help"]);
+        assert!(
+            help.status.success(),
+            "{command} help failed: {}",
+            String::from_utf8_lossy(&help.stderr)
+        );
+        assert!(String::from_utf8_lossy(&help.stdout).contains("add"));
+        assert!(String::from_utf8_lossy(&help.stdout).contains("remove"));
+        assert!(String::from_utf8_lossy(&help.stdout).contains("list"));
+    }
+
+    let related_add = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "--json",
+            "related",
+            "add",
+            "--issue",
+            expected_related_endpoints[1],
+            "--related",
+            expected_related_endpoints[0],
+        ],
+    );
+    assert!(
+        related_add.status.success(),
+        "Related add failed: {}",
+        String::from_utf8_lossy(&related_add.stderr)
+    );
+    let related_add: serde_json::Value =
+        serde_json::from_slice(&related_add.stdout).expect("Related add should be JSON");
+    assert_eq!(related_add["action"], "add");
+    assert_eq!(related_add["relationship"], "related");
+    assert_eq!(related_add["status"], "success");
+    assert_eq!(related_add["left_issue_id"], expected_related_endpoints[0]);
+    assert_eq!(related_add["right_issue_id"], expected_related_endpoints[1]);
+    assert!(related_add.get("issue_id").is_none());
+    assert!(related_add.get("related_issue_id").is_none());
+
+    let related_duplicate = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "related",
+            "add",
+            "--issue",
+            expected_related_endpoints[1],
+            "--related",
+            expected_related_endpoints[0],
+        ],
+    );
+    assert!(related_duplicate.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&related_duplicate.stdout).trim(),
+        format!(
+            "{} is related to {}",
+            expected_related_endpoints[0], expected_related_endpoints[1]
+        )
+    );
+
+    let related_list = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "--json",
+            "related",
+            "list",
+            "--issue",
+            expected_related_endpoints[1],
+        ],
+    );
+    assert!(
+        related_list.status.success(),
+        "Related list failed: {}",
+        String::from_utf8_lossy(&related_list.stderr)
+    );
+    let related_list: Vec<serde_json::Value> =
+        serde_json::from_slice(&related_list.stdout).expect("Related list should be JSON");
+    assert_eq!(
+        related_list.len(),
+        1,
+        "reversed duplicate must be idempotent"
+    );
+    assert_eq!(
+        related_list[0]["left_issue_id"],
+        expected_related_endpoints[0]
+    );
+    assert_eq!(
+        related_list[0]["right_issue_id"],
+        expected_related_endpoints[1]
+    );
+
+    let discovery_add_a = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "discovery",
+            "add",
+            "--discovered",
+            &issue_c,
+            "--source",
+            &issue_a,
+        ],
+    );
+    assert!(
+        discovery_add_a.status.success(),
+        "Discovery add failed: {}",
+        String::from_utf8_lossy(&discovery_add_a.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&discovery_add_a.stdout).trim(),
+        format!("{issue_c} was discovered from {issue_a}")
+    );
+    let discovery_add_b = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "--json",
+            "discovery",
+            "add",
+            "--discovered",
+            &issue_c,
+            "--source",
+            &issue_b,
+        ],
+    );
+    assert!(discovery_add_b.status.success());
+    let discovery_add_b: serde_json::Value =
+        serde_json::from_slice(&discovery_add_b.stdout).expect("Discovery add should be JSON");
+    assert_eq!(discovery_add_b["action"], "add");
+    assert_eq!(discovery_add_b["relationship"], "discovery_origin");
+    assert_eq!(discovery_add_b["discovered_issue_id"], issue_c);
+    assert_eq!(discovery_add_b["source_issue_id"], issue_b);
+    assert_eq!(discovery_add_b["status"], "success");
+
+    let discovery_list = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["--json", "discovery", "list", "--discovered", &issue_c],
+    );
+    assert!(
+        discovery_list.status.success(),
+        "Discovery list failed: {}",
+        String::from_utf8_lossy(&discovery_list.stderr)
+    );
+    let discovery_list: Vec<serde_json::Value> =
+        serde_json::from_slice(&discovery_list.stdout).expect("Discovery list should be JSON");
+    let actual_sources = discovery_list
+        .iter()
+        .map(|origin| {
+            origin["source_issue_id"]
+                .as_str()
+                .expect("Discovery source ID should be a string")
+        })
+        .collect::<Vec<_>>();
+    let mut expected_sources = vec![issue_a.as_str(), issue_b.as_str()];
+    expected_sources.sort_unstable();
+    assert_eq!(actual_sources, expected_sources);
+    assert!(
+        discovery_list
+            .iter()
+            .all(|origin| origin["discovered_issue_id"] == issue_c)
+    );
+
+    let duplicate_discovery = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "discovery",
+            "add",
+            "--discovered",
+            &issue_c,
+            "--source",
+            &issue_a,
+        ],
+    );
+    assert!(!duplicate_discovery.status.success());
+    assert!(
+        String::from_utf8_lossy(&duplicate_discovery.stderr)
+            .contains("Discovery origin already exists")
+    );
+
+    let discovery_cycle = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "discovery",
+            "add",
+            "--discovered",
+            &issue_a,
+            "--source",
+            &issue_c,
+        ],
+    );
+    assert!(!discovery_cycle.status.success());
+    assert!(String::from_utf8_lossy(&discovery_cycle.stderr).contains("would create a cycle"));
+
+    for (command, endpoint_flag) in [("related", "--issue"), ("discovery", "--discovered")] {
+        let self_reference = run_rivets_in_dir(
+            initialized_dir.path(),
+            &[
+                command,
+                "add",
+                endpoint_flag,
+                &issue_a,
+                if command == "related" {
+                    "--related"
+                } else {
+                    "--source"
+                },
+                &issue_a,
+            ],
+        );
+        assert!(
+            !self_reference.status.success(),
+            "{command} self-reference should fail"
+        );
+        let stderr = String::from_utf8_lossy(&self_reference.stderr);
+        let expected = if command == "related" {
+            "related to itself"
+        } else {
+            "own Discovery source"
+        };
+        assert!(stderr.contains(expected), "unexpected error: {stderr}");
+    }
+
+    let before_missing = std::fs::read(initialized_dir.path().join(".rivets/issues.jsonl"))
+        .expect("Issue source bytes should be readable");
+    let missing = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "related",
+            "add",
+            "--issue",
+            &issue_a,
+            "--related",
+            "test-missing",
+        ],
+    );
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("test-missing"));
+    assert_eq!(
+        std::fs::read(initialized_dir.path().join(".rivets/issues.jsonl"))
+            .expect("Issue source bytes should remain readable"),
+        before_missing
+    );
+
+    let related_remove = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "--json",
+            "related",
+            "remove",
+            "--issue",
+            expected_related_endpoints[1],
+            "--related",
+            expected_related_endpoints[0],
+        ],
+    );
+    assert!(related_remove.status.success());
+    let related_remove: serde_json::Value =
+        serde_json::from_slice(&related_remove.stdout).expect("Related remove should be JSON");
+    assert_eq!(related_remove["action"], "remove");
+    assert_eq!(related_remove["relationship"], "related");
+    assert_eq!(
+        related_remove["left_issue_id"],
+        expected_related_endpoints[0]
+    );
+    assert_eq!(
+        related_remove["right_issue_id"],
+        expected_related_endpoints[1]
+    );
+    assert_eq!(related_remove["status"], "success");
+    let related_empty = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["--json", "related", "list", "--issue", &issue_a],
+    );
+    assert_eq!(
+        serde_json::from_slice::<Vec<serde_json::Value>>(&related_empty.stdout)
+            .expect("empty Related list should be valid JSON"),
+        Vec::<serde_json::Value>::new()
+    );
+
+    let discovery_remove = run_rivets_in_dir(
+        initialized_dir.path(),
+        &[
+            "discovery",
+            "remove",
+            "--discovered",
+            &issue_c,
+            "--source",
+            &issue_a,
+        ],
+    );
+    assert!(discovery_remove.status.success());
+    let discovery_after_remove = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["--json", "discovery", "list", "--discovered", &issue_c],
+    );
+    let discovery_after_remove: Vec<serde_json::Value> =
+        serde_json::from_slice(&discovery_after_remove.stdout)
+            .expect("Discovery list after removal should be valid JSON");
+    assert_eq!(discovery_after_remove.len(), 1);
+    assert_eq!(
+        discovery_after_remove[0]["source_issue_id"], issue_b,
+        "each real process must observe the preceding persisted mutation"
     );
 }

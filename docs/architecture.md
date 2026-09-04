@@ -16,7 +16,7 @@ The current implementation is a three-crate Cargo workspace:
 
 - **`rivets`**: CLI application, domain model, and storage layer (the `crates/rivets` crate)
 - **`rivets-jsonl`**: Generic JSON Lines (JSONL) library providing resilient, line-numbered parsing and atomic writes (the `crates/rivets-jsonl` crate)
-- **`rivets-mcp`**: MCP (Model Context Protocol) server exposing the tracker as 21 tools (the `crates/rivets-mcp` crate)
+- **`rivets-mcp`**: MCP (Model Context Protocol) server exposing the tracker as 32 tools (the `crates/rivets-mcp` crate)
 
 Earlier design research (rivets-fk9 for JSONL library design, rivets-kr3 for workspace structure) informed the original two-crate layout; the workspace has since grown to three crates with the addition of `rivets-mcp`.
 
@@ -27,11 +27,11 @@ graph TB
     subgraph "CLI Layer (rivets)"
         CLI[CLI Entry Point<br/>main.rs]
         Args[Argument Parser<br/>clap]
-        Commands[Command Handlers<br/>16 top-level commands]
+        Commands[Command Handlers<br/>20 top-level commands]
     end
 
     subgraph "MCP Layer (rivets-mcp)"
-        Mcp[rivets-mcp server<br/>21 tools]
+        Mcp[rivets-mcp server<br/>32 tools]
     end
 
     subgraph "Application Layer (rivets)"
@@ -79,15 +79,16 @@ graph TB
 
 - **Entry Point**: `main.rs` with `#[tokio::main(flavor = "current_thread")]`
 - **Argument Parsing**: Clap derive API for type-safe CLI arguments
-- **Commands** (16 top-level): init, info, create, list, show, update, close, reopen, delete, ready, blocking-dependency, label, resource, stale, blocked, stats
+- **Commands** (20 top-level): init, info, create, list, show, update, claim, release, close, reopen, delete, ready, blocking-dependency, related, discovery, label, resource, stale, blocked, stats
 - **Validation**: Priority 0-4, enum types (status, kind), explicit Blocking endpoint roles, ID format validation, prefix validation (2-20 alphanumeric characters)
 
 ### 2. Application Layer (`rivets`)
 
-- **App Struct**: Manages storage lifecycle and command execution; `App::from_directory` searches upward (max depth 256) for the `.rivets/` directory, loads configuration, and creates storage from it
-- **Configuration**: `.rivets/config.yaml` is the **single** configuration source: `issue-prefix` plus a `storage` section (`backend` and `data_file`). There is no config layering, no environment-variable merge, and no user-level config. Defaults (prefix `proj`, backend `jsonl`, data file `.rivets/issues.jsonl`) are baked into `init`
-- **Auto-save**: Mutating commands persist after execution. Batch `update`/`close`/`reopen` and label mutations reload storage after a failed save; `create`, `delete`, Blocking Dependency mutations, and resource mutations return the save error without reloading that process's in-memory state
-- **Async Runtime**: Tokio current-thread for sequential CLI operations
+- **App Struct**: Manages storage lifecycle and command execution. `App::from_directory` searches upward (max depth 256) for the `.rivets/` directory and is read-only; `App::from_directory_for_mutation` acquires the canonical Workspace sidecar before configuration/storage load and retains it through save.
+- **Configuration**: `.rivets/config.yaml` is the **single** configuration source: `issue-prefix` plus a `storage` section (`backend` and `data_file`). There is no config layering, no environment-variable merge, and no user-level config. Defaults (prefix `proj`, backend `jsonl`, data file `.rivets/issues.jsonl`) are baked into `init`.
+- **Durable mutation ownership**: Existing-Workspace CLI and MCP writers use nonblocking `.rivets/workspace.lock`. Contention returns typed retryable Workspace Busy; different canonical Workspace roots lock independently.
+- **Auto-save**: Mutating commands persist after execution while retaining durable ownership. Batch `update`/`close`/`reopen` and label mutations reload storage after a failed save; `create`, `delete`, relationship mutations, and resource mutations return the save error without reusing that process's App.
+- **Async Runtime**: Tokio current-thread for sequential CLI operations.
 
 ### 3. Storage Abstraction (`rivets`)
 
@@ -109,7 +110,7 @@ pub trait IssueStorage: Send + Sync {
 
     // Queries
     async fn list(&self, filter: &IssueFilter) -> Result<Vec<Issue>>;
-    async fn ready_to_work(&self, filter: Option<&IssueFilter>, sort_policy: Option<SortPolicy>) -> Result<Vec<Issue>>;
+    async fn ready_to_work(&self, filter: &ReadyFilter, sort_policy: Option<SortPolicy>) -> Result<Vec<Issue>>;
     async fn blocked_issues(&self) -> Result<Vec<(Issue, Vec<Issue>)>>;
 
     // Atomic label operations
@@ -131,10 +132,10 @@ pub trait IssueStorage: Send + Sync {
 
 ### 4. Domain Layer (`rivets`)
 
-- **Core Types**: Issue, NewIssue, IssueUpdate, IssueFilter, BlockingDependency, Note, AssociatedResource, ResourceId
+- **Core Types**: Issue, NewIssue, IssueUpdate, IssueFilter, ReadyFilter, ReadyAssignmentFilter, BlockingDependency, RelatedAssociation, DiscoveryOrigin, Note, AssociatedResource, ResourceId
 - **Issue fields**: id, title, description, status, priority (0-4), issue_kind, assignee, labels, design notes, acceptance criteria, ordered append-only Notes, ordered Associated Resources, legacy relationship records for persistence, and creation/update/close timestamps
 - **Enums**:
-  - `IssueStatus`: `open`, `in_progress`, `blocked` (legacy), `closed`. The stored `blocked` status is a legacy field: the `ready`/`blocked` queries are **graph-derived** and do not read it. Status transitions are validated by the domain.
+  - `IssueStatus`: exactly `open`, `in_progress`, `closed`. Blocked and Ready are derived conditions and are never serialized on Issue records. Status transitions are validated by the domain.
   - `IssueKind`: `bug`, `feature`, `task`, `epic`, `chore` — mutable via `update`
   - `DependencyType`: compatibility-only persisted kinds until canonical relationship migration
   - `ResourceRole`: `implementation`, `documentation`, `evidence`, `successor`, `reference` — resources are URL or path targets with a stable, never-reused identifier
@@ -160,8 +161,9 @@ graph LR
 - `InMemoryStorageInner`: HashMap for issues, petgraph DiGraph for dependencies, ID generator state
 - `Arc<tokio::sync::Mutex<>>`: async-compatible exclusive access
 - **Load** (three stages): (1) resiliently parse compatibility records line-by-line with line numbers, converting them into domain Issues at the compatibility boundary; (2) import all Issues and create graph nodes, registering IDs with the generator; (3) rebuild dependency relationships with orphan and cycle detection
-- **Save**: atomic writes (temp file + rename); rejected when loading omitted any Issue record, preserving the source file byte-for-byte
-- **Reload**: re-reads the file and rebuilds in-memory state, used after a failed save
+- **Mutation freshness**: SHA-256 tracks the loaded source revision. A completed external change is reloaded before mutation; a change after mutation returns typed `StorageError::ExternalChange` before any write.
+- **Save**: atomic writes (temp file + rename); rejected when loading omitted any Issue record or when the persisted revision changed after mutation, preserving the source file byte-for-byte
+- **Reload**: re-reads the file, rebuilds in-memory state, and advances the tracked source revision
 
 #### InMemory (ephemeral)
 
@@ -205,20 +207,25 @@ results.
 
 ```mermaid
 graph TD
-    Start[All non-closed Issues] --> Direct[Directly blocked?<br/>unclosed blocks edge to blocker]
-    Direct --> Transitive[Propagate blocked down<br/>parent-child chains<br/>BFS with depth limit 50]
-    Transitive --> Filter[Exclude blocked issues]
+    Start[All Issues] --> Open{Workflow State Open?}
+    Open -->|No| Exclude[Exclude]
+    Open -->|Yes| Blocked{Direct Blocks edge to<br/>a non-Closed prerequisite?}
+    Blocked -->|Yes| Exclude
+    Blocked -->|No| Assignment{Assignment selector matches?<br/>Unassigned / Assignee / All}
+    Assignment -->|No| Exclude
+    Assignment -->|Yes| Filter[Priority, Kind, and label filters]
     Filter --> Sort[Sort by policy<br/>hybrid/priority/oldest]
-    Sort --> Result[Ready Issues]
+    Sort --> Limit[Apply limit]
+    Limit --> Result[Ready Issues]
 ```
 
 `ready_to_work` semantics:
 
-1. **Directly blocked**: an issue with a `blocks` edge to an unclosed issue
-2. **Transitively blocked**: children of a blocked parent (via `parent-child`) are blocked, propagated breadth-first with a depth limit of 50
-3. **Ready** = not closed and not blocked
-4. Optional filter by status, priority, kind, assignee, or label; optional limit
-5. Sort policies: **hybrid** (default; issues created within 48h sorted by priority, older issues by age), **priority** (strict P0→P1→P2→P3→P4), **oldest** (creation date ascending)
+1. **Blocked**: an Issue with a direct `blocks` edge to a prerequisite whose Workflow State is not Closed
+2. Parentage, Related Associations, and Discovery Origins never affect Blocked or Ready
+3. **Ready eligibility**: Workflow State Open, not Blocked, and selected by `Unassigned` (default), exact `Assignee`, or `All`
+4. Apply optional priority, Issue Kind, and label filters only after eligibility
+5. Sort by **hybrid** (default), **priority**, or **oldest**, then apply the result limit
 
 ## Data Flow
 
@@ -253,7 +260,7 @@ sequenceDiagram
 - ✅ Single-source YAML configuration (`.rivets/config.yaml`)
 - ✅ Labels (add/remove, atomic), immutable Notes, Associated Resources (add/update/remove with typed roles), mutable Issue Kind
 - ✅ `stats`, `stale`, `info` commands
-- ✅ MCP server (`rivets-mcp`) with 21 tools and per-call `workspace_root` overrides / `set_context` default workspace
+- ✅ MCP server (`rivets-mcp`) with 32 tools and per-call `workspace_root` overrides / `set_context` default workspace
 - ✅ Auto-save after mutations with reload-on-save-failure recovery
 
 ### Not Implemented
@@ -306,23 +313,24 @@ sequenceDiagram
 
 - **Delete with dependents**: fails with a clear error listing the dependent issues
 - **Cycle creation**: pre-checked before adding a dependency
-- **Concurrent access**: `Arc<Mutex<>>` prevents data races
-- **Failed saves**: storage `reload()`s from disk so in-memory state never drifts from the on-disk truth
+- **Concurrent access**: process-local Tokio locks protect in-memory values; the persistent Workspace sidecar serializes cooperating CLI/MCP writers across processes from load/reload through atomic save.
+- **Failed saves**: MCP reloads while still holding durable ownership so cached state returns to the on-disk truth; one-shot CLI Apps terminate and release ownership.
 
 ## Thread Safety
 
 ```mermaid
 graph TD
-    CLI1[CLI Command 1] --> Lock[Arc&lt;tokio::sync::Mutex&lt;Storage&gt;&gt;]
-    CLI2[CLI Command 2] --> Lock
-    Lock --> Inner[InMemoryStorageInner<br/>Single-threaded access]
+    CLI1[CLI process] --> Durable[.rivets/workspace.lock]
+    MCP1[MCP process] --> Durable
+    Durable --> Cache[Per-process storage RwLock]
+    Cache --> Inner[InMemoryStorageInner<br/>Tokio Mutex]
 ```
 
-- **Pattern**: `Arc<tokio::sync::Mutex<InMemoryStorageInner>>`
-- **Guarantee**: Only one operation at a time modifies storage
-- **Async**: `tokio::sync::Mutex` for async-compatible locking
-- **MCP server**: workspace context guarded by `tokio::sync::RwLock`
-- **Rationale**: Simple, correct, sufficient for the CLI and MCP use cases
+- **Cross-process pattern**: persistent sidecar plus nonblocking exclusive standard-library file lock
+- **Process-local pattern**: MCP cache `RwLock` and in-memory `tokio::sync::Mutex`
+- **Guarantee**: one cooperating writer owns load/reload→mutation→atomic save for a canonical Workspace
+- **Async behavior**: acquisition never waits; contention returns retryable Workspace Busy
+- **Scope**: different Workspaces remain independent; reads and context selection remain unlocked
 
 ## Design Decisions and Rationale
 
@@ -408,9 +416,9 @@ graph TD
 **Decision**: Support `blocks`, `related`, `parent-child`, `discovered-from`
 
 **Rationale**:
-- **blocks**: Essential for the graph-derived "ready work" algorithm
+- **blocks**: The only relationship that affects the graph-derived Blocked condition
 - **related**: Informational links (soft, doesn't block)
-- **parent-child**: Hierarchical organization (epics → tasks); children of blocked parents are blocked transitively
+- **parent-child**: Hierarchical organization (epics → tasks); never affects Blocked or Ready
 - **discovered-from**: Captures work discovery process
 
 **Alternative considered**: Only "blocks"
@@ -431,15 +439,17 @@ graph TD
 
 ### 9. Auto-Save After Mutations
 
-**Decision**: Automatically persist to JSONL after every mutating CLI command. Batch `update`/`close`/`reopen` and label mutations reload from disk after a failed save; other CLI mutation paths return the save error without reloading.
+**Decision**: Automatically persist to JSONL after every mutating CLI command under one durable Workspace mutation lock. MCP uses the same sidecar and reloads its cached storage after acquisition. Batch `update`/`close`/`reopen` and label mutations reload from disk after a failed save; other CLI mutation paths return the save error and terminate.
 
 **Rationale**:
 - **Data safety**: No manual save command needed
+- **Cross-process serialization**: cooperating CLI/MCP writers cannot load the same revision and overwrite one another
+- **Retryable contention**: a second writer receives immediate Workspace Busy rather than waiting
 - **Simplicity**: User can't forget to save
-- **Crash resistance**: Latest state always on disk
-- **Atomic writes**: Temp file + rename prevents corruption
+- **Crash resistance**: Latest successful state is on disk; process exit releases the OS lock
+- **Atomic writes**: Temp file + rename prevents readers from observing partial target content
 - **Partial-load guard**: Auto-save is disabled when resilient loading omitted an Issue record
-- **Consistency**: The reload-enabled batch and label paths restore on-disk state after a save failure. Other CLI paths terminate with the save error; a library caller that keeps the storage alive must call `reload()` before reuse.
+- **Consistency**: MCP save recovery reloads before releasing the durable guard; CLI Apps are not reused after command failure.
 
 **Alternative considered**: Manual save command
 **Why rejected**: Easy to forget, data loss risk

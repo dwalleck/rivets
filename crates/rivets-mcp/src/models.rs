@@ -8,7 +8,23 @@
 
 use rivets::domain::{Issue, IssueKind};
 use schemars::JsonSchema;
+use serde::de::{Deserializer, IgnoredAny};
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum LegacyAssigneePresence {
+    #[default]
+    Absent,
+    Present,
+}
+
+fn deserialize_legacy_assignee<'de, D>(deserializer: D) -> Result<LegacyAssigneePresence, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    IgnoredAny::deserialize(deserializer)?;
+    Ok(LegacyAssigneePresence::Present)
+}
 
 // ============================================================================
 // Tool Input Parameters
@@ -106,6 +122,10 @@ pub struct ReadyParams {
     /// Filter by assignee.
     pub assignee: Option<String>,
 
+    /// Include Issues regardless of Assignment.
+    #[serde(default)]
+    pub all_assignees: bool,
+
     /// Filter by label.
     pub label: Option<String>,
 
@@ -192,7 +212,13 @@ pub struct CreateParams {
 }
 
 /// Parameters for the `update` tool.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+///
+/// Assignment is intentionally not an update operation. The historical
+/// `assignee` key is still deserialized into a presence marker at this
+/// adapter boundary so callers can receive an explicit rejection rather than
+/// silently executing a no-op; it is absent from canonical serialization and
+/// generated MCP schemas.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct UpdateParams {
     /// The issue ID to update.
     pub issue_id: String,
@@ -207,9 +233,15 @@ pub struct UpdateParams {
     #[serde(flatten)]
     pub kind: IssueKindInput,
 
-    /// New assignee.
-    pub assignee: Option<String>,
-
+    /// Historical assignment input, retained only to reject old MCP clients.
+    #[serde(
+        default,
+        rename = "assignee",
+        deserialize_with = "deserialize_legacy_assignee",
+        skip_serializing
+    )]
+    #[schemars(skip)]
+    pub(crate) legacy_assignee: LegacyAssigneePresence,
     /// New title.
     pub title: Option<String>,
 
@@ -229,6 +261,44 @@ pub struct UpdateParams {
     pub workspace_root: Option<String>,
 }
 
+/// Parameters for atomic Assignment Claim and Release tools.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AssignmentParams {
+    /// Issue ID whose Assignment changes.
+    pub issue_id: String,
+
+    /// Exact Assignee identity to claim as or release.
+    pub assignee: String,
+
+    /// Optional workspace root (uses current context if not specified).
+    pub workspace_root: Option<String>,
+}
+
+impl UpdateParams {
+    /// Whether the request supplied the historical `assignee` key.
+    #[must_use]
+    pub(crate) fn contains_legacy_assignee(&self) -> bool {
+        self.legacy_assignee == LegacyAssigneePresence::Present
+    }
+
+    /// Whether the request contains any supported update.
+    ///
+    /// The historical `assignee` marker is intentionally excluded; callers
+    /// should check [`Self::contains_legacy_assignee`] first so old requests
+    /// are rejected explicitly instead of being accepted as no-ops.
+    #[must_use]
+    pub(crate) fn has_updates(&self) -> bool {
+        self.status.is_some()
+            || self.priority.is_some()
+            || self.kind.issue_kind.is_some()
+            || self.kind.legacy_issue_type.is_some()
+            || self.title.is_some()
+            || self.description.is_some()
+            || self.design.is_some()
+            || self.acceptance_criteria.is_some()
+            || self.labels.is_some()
+    }
+}
 /// Parameters for the `add_note` tool.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AddNoteParams {
@@ -573,6 +643,19 @@ mod tests {
     }
 
     #[test]
+    fn ready_params_default_and_explicit_all_assignees() {
+        let default: ReadyParams =
+            serde_json::from_value(serde_json::json!({})).expect("empty Ready input should parse");
+        assert!(!default.all_assignees);
+
+        let all: ReadyParams = serde_json::from_value(serde_json::json!({
+            "all_assignees": true
+        }))
+        .expect("explicit all_assignees should parse");
+        assert!(all.all_assignees);
+    }
+
+    #[test]
     fn list_params_read_legacy_issue_type() {
         let params: ListParams = serde_json::from_value(serde_json::json!({
             "issue_type": "feature"
@@ -689,6 +772,105 @@ mod tests {
         .map(ToString::to_string)
         .collect();
         assert_eq!(enum_values, expected);
+    }
+    #[test]
+    fn update_params_detects_every_present_legacy_assignee_shape() {
+        let absent: UpdateParams = serde_json::from_value(serde_json::json!({
+            "issue_id": "rivets-test"
+        }))
+        .expect("assignee omission should deserialize");
+        assert!(
+            !absent.contains_legacy_assignee(),
+            "omitted assignee must not be treated as historical input"
+        );
+
+        for assignee in [
+            serde_json::json!("alice"),
+            serde_json::json!(""),
+            serde_json::Value::Null,
+        ] {
+            let mut input = serde_json::json!({ "issue_id": "rivets-test" });
+            input["assignee"] = assignee;
+            let params: UpdateParams =
+                serde_json::from_value(input).expect("historical assignee shape should parse");
+            assert!(
+                params.contains_legacy_assignee(),
+                "present historical assignee must be detected"
+            );
+            assert!(
+                !params.has_updates(),
+                "historical assignee must not count as a supported update"
+            );
+        }
+    }
+
+    #[test]
+    fn update_params_has_updates_for_supported_fields_only() {
+        for input in [
+            serde_json::json!({ "status": "open" }),
+            serde_json::json!({ "priority": 0 }),
+            serde_json::json!({ "issue_kind": "bug" }),
+            serde_json::json!({ "issue_type": "bug" }),
+            serde_json::json!({ "title": "" }),
+            serde_json::json!({ "description": "" }),
+            serde_json::json!({ "design": "" }),
+            serde_json::json!({ "acceptance_criteria": "" }),
+            serde_json::json!({ "labels": [] }),
+        ] {
+            let mut with_id = serde_json::json!({ "issue_id": "rivets-test" });
+            for (key, value) in input.as_object().expect("test input should be an object") {
+                with_id
+                    .as_object_mut()
+                    .expect("test input should remain an object")
+                    .insert(key.clone(), value.clone());
+            }
+            let params: UpdateParams =
+                serde_json::from_value(with_id).expect("supported update should parse");
+            assert!(
+                params.has_updates(),
+                "supported field should count as an update: {input}"
+            );
+        }
+
+        let params: UpdateParams = serde_json::from_value(serde_json::json!({
+            "issue_id": "rivets-test",
+            "workspace_root": "/tmp/workspace"
+        }))
+        .expect("workspace context should parse");
+        assert!(
+            !params.has_updates(),
+            "issue identity and workspace context are not updates"
+        );
+    }
+
+    #[test]
+    fn update_params_schema_and_serialization_exclude_legacy_assignee() {
+        use schemars::schema_for;
+
+        let schema = schema_for!(UpdateParams);
+        let schema_json = serde_json::to_value(&schema).expect("schema serializes");
+        let properties = schema_json["properties"]
+            .as_object()
+            .expect("Update schema should expose properties");
+        assert!(
+            !properties.contains_key("assignee"),
+            "historical assignee must not be published in the Update schema"
+        );
+
+        let params: UpdateParams = serde_json::from_value(serde_json::json!({
+            "issue_id": "rivets-test",
+            "assignee": null,
+            "title": "Updated"
+        }))
+        .expect("historical input should still deserialize for rejection");
+        let serialized = serde_json::to_value(params).expect("Update params serialize");
+        assert!(
+            !serialized
+                .as_object()
+                .expect("serialized Update params should be an object")
+                .contains_key("assignee"),
+            "historical assignee must not be serialized"
+        );
     }
 }
 

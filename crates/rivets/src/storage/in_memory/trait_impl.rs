@@ -3,13 +3,14 @@
 use super::InMemoryStorage;
 use super::graph::{
     blocking_dependency_tree_impl, discovery_origins_impl, find_blocked_issues, find_blocking_edge,
-    find_edge, has_blocking_cycle_impl, has_cycle_for_type_impl, related_associations_impl,
+    find_edge, has_blocking_cycle_impl, has_cycle_for_type_impl,
+    has_unresolved_blocking_dependency, related_associations_impl,
 };
 use super::sorting::sort_by_policy;
 use crate::domain::{
-    BlockingDependency, Dependency, DependencyType, DiscoveryOrigin, Issue, IssueFilter, IssueId,
-    IssueStatus, IssueUpdate, MAX_PRIORITY, NewIssue, NewResource, Note, RelatedAssociation,
-    ResourceId, ResourceUpdate, SortPolicy,
+    AssignmentError, BlockingDependency, Dependency, DependencyType, DiscoveryOrigin, Issue,
+    IssueFilter, IssueId, IssueKind, IssueStatus, IssueUpdate, MAX_PRIORITY, NewIssue, NewResource,
+    Note, ReadyFilter, RelatedAssociation, ResourceId, ResourceUpdate, SortPolicy,
 };
 use crate::error::{Error, Result, StorageError};
 use crate::storage::IssueStorage;
@@ -19,30 +20,45 @@ use petgraph::Direction;
 use petgraph::visit::EdgeRef;
 use std::collections::HashSet;
 
-/// Check if an issue matches all criteria in the filter.
-///
-/// This is shared logic used by both `list()` and `ready_to_work()` to apply
-/// optional filters for status, priority, kind, assignee, and label.
+/// Check whether an Issue matches every common list or Ready criterion.
+fn matches_common_filter(
+    issue: &Issue,
+    priority: Option<u8>,
+    issue_kind: Option<&IssueKind>,
+    label: Option<&str>,
+) -> bool {
+    priority.is_none_or(|priority| issue.priority == priority)
+        && issue_kind.is_none_or(|issue_kind| &issue.issue_kind == issue_kind)
+        && label.is_none_or(|label| issue.labels.iter().any(|issue_label| issue_label == label))
+}
+
+/// Check whether an Issue matches every generic list criterion.
 fn matches_filter(issue: &Issue, filter: &IssueFilter) -> bool {
     filter
         .status
         .as_ref()
         .is_none_or(|status| &issue.status == status)
-        && filter
-            .priority
-            .is_none_or(|priority| issue.priority == priority)
-        && filter
-            .issue_kind
-            .as_ref()
-            .is_none_or(|issue_kind| &issue.issue_kind == issue_kind)
+        && matches_common_filter(
+            issue,
+            filter.priority,
+            filter.issue_kind.as_ref(),
+            filter.label.as_deref(),
+        )
         && filter
             .assignee
             .as_ref()
             .is_none_or(|assignee| issue.assignee.as_ref() == Some(assignee))
-        && filter
-            .label
-            .as_ref()
-            .is_none_or(|label| issue.labels.contains(label))
+}
+
+/// Check post-eligibility Ready query criteria.
+fn matches_ready_filter(issue: &Issue, filter: &ReadyFilter) -> bool {
+    filter.assignment.allows(issue.assignee.as_deref())
+        && matches_common_filter(
+            issue,
+            filter.priority,
+            filter.issue_kind.as_ref(),
+            filter.label.as_deref(),
+        )
 }
 
 #[async_trait]
@@ -85,6 +101,17 @@ impl IssueStorage for InMemoryStorage {
                     to: prerequisite_id.clone(),
                 });
             }
+        }
+
+        if new_issue.assignee.is_some()
+            && new_issue
+                .prerequisites
+                .iter()
+                .any(|prerequisite_id| inner.issues[prerequisite_id].status != IssueStatus::Closed)
+        {
+            inner.graph.remove_node(temp_node);
+            inner.node_map.remove(&id);
+            return Err(StorageError::Assignment(AssignmentError::Blocked { issue_id: id }).into());
         }
 
         // === Phase 4: Create issue (all validations passed) ===
@@ -159,18 +186,7 @@ impl IssueStorage for InMemoryStorage {
         if let Some(description) = updates.description {
             candidate.description = description;
         }
-        if let Some(status) = updates.status {
-            // The domain owns transition rules (ADR-0005); this is the single
-            // application site, not a storage-local re-validation.
-            candidate
-                .status
-                .validate_transition(status)
-                .map_err(StorageError::InvalidStatusTransition)?;
-            candidate.status = status;
-            if status == IssueStatus::Closed && candidate.closed_at.is_none() {
-                candidate.closed_at = Some(now);
-            }
-        }
+        let status = updates.status;
         if let Some(priority) = updates.priority {
             if priority > MAX_PRIORITY {
                 return Err(Error::InvalidPriority(priority));
@@ -180,8 +196,12 @@ impl IssueStorage for InMemoryStorage {
         if let Some(issue_kind) = updates.issue_kind {
             candidate.issue_kind = issue_kind;
         }
-        if let Some(assignee) = updates.assignee {
-            candidate.assignee = assignee;
+        if let Some(status) = status {
+            // The domain owns transition and Assignment coupling (ADRs 0002
+            // and 0005); this is the single application site.
+            candidate
+                .apply_status_transition(status, now)
+                .map_err(StorageError::InvalidStatusTransition)?;
         }
         if let Some(design) = updates.design {
             candidate.design = Some(design);
@@ -197,8 +217,113 @@ impl IssueStorage for InMemoryStorage {
         }
 
         candidate.validate().map_err(StorageError::Validation)?;
+        candidate
+            .validate_assignment_state()
+            .map_err(StorageError::Assignment)?;
         candidate.updated_at = now;
 
+        *stored = candidate.clone();
+        Ok(candidate)
+    }
+
+    async fn claim(&mut self, id: &IssueId, claimant: &str) -> Result<Issue> {
+        let mut inner = self.lock().await;
+        {
+            let issue = inner
+                .issues
+                .get(id)
+                .ok_or_else(|| Error::IssueNotFound(id.clone()))?;
+            if claimant.trim().is_empty() {
+                return Err(StorageError::Assignment(AssignmentError::BlankAssignee {
+                    issue_id: id.clone(),
+                })
+                .into());
+            }
+            if issue.status != IssueStatus::Open {
+                return Err(StorageError::Assignment(AssignmentError::NotOpen {
+                    issue_id: id.clone(),
+                    status: issue.status,
+                })
+                .into());
+            }
+            match issue.assignee.as_deref() {
+                Some(current) if current == claimant => return Ok(issue.clone()),
+                Some(current) => {
+                    return Err(StorageError::Assignment(AssignmentError::AlreadyClaimed {
+                        issue_id: id.clone(),
+                        assignee: current.to_string(),
+                    })
+                    .into());
+                }
+                None => {}
+            }
+        }
+
+        if has_unresolved_blocking_dependency(&inner.graph, &inner.node_map, &inner.issues, id)? {
+            return Err(StorageError::Assignment(AssignmentError::Blocked {
+                issue_id: id.clone(),
+            })
+            .into());
+        }
+
+        let stored = inner
+            .issues
+            .get_mut(id)
+            .ok_or_else(|| Error::IssueNotFound(id.clone()))?;
+        let mut candidate = stored.clone();
+        candidate.assignee = Some(claimant.to_string());
+        candidate.validate().map_err(StorageError::Validation)?;
+        candidate.updated_at = Utc::now();
+        *stored = candidate.clone();
+        Ok(candidate)
+    }
+
+    async fn release(&mut self, id: &IssueId, expected_assignee: &str) -> Result<Issue> {
+        let mut inner = self.lock().await;
+        {
+            let stored = inner
+                .issues
+                .get(id)
+                .ok_or_else(|| Error::IssueNotFound(id.clone()))?;
+            if expected_assignee.trim().is_empty() {
+                return Err(StorageError::Assignment(AssignmentError::BlankAssignee {
+                    issue_id: id.clone(),
+                })
+                .into());
+            }
+            if stored.status != IssueStatus::Open {
+                return Err(StorageError::Assignment(AssignmentError::NotOpen {
+                    issue_id: id.clone(),
+                    status: stored.status,
+                })
+                .into());
+            }
+            match stored.assignee.as_deref() {
+                None => {
+                    return Err(StorageError::Assignment(AssignmentError::NotClaimed {
+                        issue_id: id.clone(),
+                    })
+                    .into());
+                }
+                Some(actual) if actual != expected_assignee => {
+                    return Err(StorageError::Assignment(AssignmentError::AssigneeMismatch {
+                        issue_id: id.clone(),
+                        expected: expected_assignee.to_string(),
+                        actual: actual.to_string(),
+                    })
+                    .into());
+                }
+                Some(_) => {}
+            }
+        }
+
+        let stored = inner
+            .issues
+            .get_mut(id)
+            .ok_or_else(|| Error::IssueNotFound(id.clone()))?;
+        let mut candidate = stored.clone();
+        candidate.assignee = None;
+        candidate.updated_at = Utc::now();
         *stored = candidate.clone();
         Ok(candidate)
     }
@@ -598,7 +723,6 @@ impl IssueStorage for InMemoryStorage {
         let inner = self.lock().await;
         discovery_origins_impl(&inner.graph, &inner.node_map, discovered_issue_id)
     }
-
     async fn list(&self, filter: &IssueFilter) -> Result<Vec<Issue>> {
         let inner = self.lock().await;
 
@@ -622,35 +746,25 @@ impl IssueStorage for InMemoryStorage {
 
     async fn ready_to_work(
         &self,
-        filter: Option<&IssueFilter>,
+        filter: &ReadyFilter,
         sort_policy: Option<SortPolicy>,
     ) -> Result<Vec<Issue>> {
         let inner = self.lock().await;
-
-        // Find all blocked issues using BFS traversal
         let blocked = find_blocked_issues(&inner.graph, &inner.node_map, &inner.issues);
 
-        // Filter out blocked and closed issues
-        let mut ready: Vec<Issue> = inner
+        let mut ready = inner
             .issues
             .values()
-            .filter(|issue| issue.status != IssueStatus::Closed && !blocked.contains(&issue.id))
+            .filter(|issue| {
+                issue.status == IssueStatus::Open
+                    && !blocked.contains(&issue.id)
+                    && matches_ready_filter(issue, filter)
+            })
             .cloned()
-            .collect();
+            .collect::<Vec<_>>();
 
-        // Apply additional filter if provided
-        if let Some(filter) = filter {
-            ready.retain(|issue| matches_filter(issue, filter));
-        }
-
-        // Apply sort policy
-        let policy = sort_policy.unwrap_or_default();
-        sort_by_policy(&mut ready, policy);
-
-        // Apply limit if specified
-        if let Some(filter) = filter
-            && let Some(limit) = filter.limit
-        {
+        sort_by_policy(&mut ready, sort_policy.unwrap_or_default());
+        if let Some(limit) = filter.limit {
             ready.truncate(limit);
         }
 
@@ -726,6 +840,12 @@ impl IssueStorage for InMemoryStorage {
 
     async fn import_issues(&mut self, issues: Vec<Issue>) -> Result<()> {
         let mut inner = self.lock().await;
+        for issue in &issues {
+            issue.validate().map_err(StorageError::Validation)?;
+            issue
+                .validate_assignment_state()
+                .map_err(StorageError::Assignment)?;
+        }
 
         // First pass: Add all issues and create nodes
         for issue in &issues {
@@ -785,8 +905,13 @@ impl IssueStorage for InMemoryStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{IssueFilter, IssueKind, IssueStatus};
+    use crate::domain::{IssueFilter, IssueKind, IssueStatus, ReadyAssignmentFilter};
+    use crate::storage::in_memory::inner::InMemoryStorageInner;
     use rstest::rstest;
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use tokio::sync::Mutex;
 
     fn create_test_issue() -> Issue {
         Issue {
@@ -902,5 +1027,161 @@ mod tests {
             ..Default::default()
         };
         assert!(!matches_filter(&issue, &filter));
+    }
+
+    #[tokio::test]
+    #[ignore = "production-scale 10k/50k Ready timing checkpoint; run cargo test -p rivets storage::in_memory::trait_impl::tests::ready_stress_fixture_matches_oracle_within_budget -- --ignored --exact"]
+    async fn ready_stress_fixture_matches_oracle_within_budget() {
+        const ISSUE_COUNT: usize = 10_000;
+        const EDGE_COUNT: usize = 50_000;
+
+        let mut inner = InMemoryStorageInner::new("test".to_string());
+        let timestamp = chrono::Utc::now();
+        for index in 0..ISSUE_COUNT {
+            let id = IssueId::new(format!("stress-{index:05}"));
+            let node = inner.graph.add_node(id.clone());
+            inner.node_map.insert(id.clone(), node);
+            let status = if index < 3 {
+                IssueStatus::Open
+            } else {
+                match index % 10 {
+                    0 => IssueStatus::InProgress,
+                    1 => IssueStatus::Closed,
+                    _ => IssueStatus::Open,
+                }
+            };
+            let assignee = match index % 3 {
+                0 => None,
+                1 => Some("alice".to_string()),
+                _ => Some("bob".to_string()),
+            };
+            inner.issues.insert(
+                id.clone(),
+                Issue {
+                    id,
+                    title: format!("Stress Issue {index}"),
+                    description: String::new(),
+                    status,
+                    priority: (index % 5) as u8,
+                    issue_kind: if index % 2 == 0 {
+                        IssueKind::Task
+                    } else {
+                        IssueKind::Bug
+                    },
+                    assignee,
+                    labels: if index % 2 == 0 {
+                        vec!["even".to_string()]
+                    } else {
+                        vec!["odd".to_string()]
+                    },
+                    design: None,
+                    acceptance_criteria: None,
+                    notes: Vec::new(),
+                    resources: Vec::new(),
+                    next_resource_id: 1,
+                    dependencies: Vec::new(),
+                    created_at: timestamp,
+                    updated_at: timestamp,
+                    closed_at: None,
+                },
+            );
+        }
+
+        let mut blocking_edges = Vec::with_capacity(EDGE_COUNT / 4);
+        for edge_index in 0..EDGE_COUNT {
+            let source_index = 3 + edge_index % (ISSUE_COUNT - 3);
+            let mut target_index = (edge_index * 37 + 11) % ISSUE_COUNT;
+            if target_index == source_index {
+                target_index = (target_index + 1) % ISSUE_COUNT;
+            }
+            let source_id = IssueId::new(format!("stress-{source_index:05}"));
+            let target_id = IssueId::new(format!("stress-{target_index:05}"));
+            let kind = match edge_index % 4 {
+                0 => DependencyType::Blocks,
+                1 => DependencyType::Related,
+                2 => DependencyType::ParentChild,
+                _ => DependencyType::DiscoveredFrom,
+            };
+            inner
+                .graph
+                .add_edge(inner.node_map[&source_id], inner.node_map[&target_id], kind);
+            if kind == DependencyType::Blocks {
+                blocking_edges.push((source_id, target_id));
+            }
+        }
+        assert_eq!(inner.graph.edge_count(), EDGE_COUNT);
+
+        let unresolved = blocking_edges
+            .iter()
+            .filter(|(_, prerequisite_id)| {
+                inner.issues[prerequisite_id].status != IssueStatus::Closed
+            })
+            .map(|(dependent_id, _)| dependent_id.clone())
+            .collect::<HashSet<_>>();
+        let oracle_issues = inner
+            .issues
+            .values()
+            .map(|issue| (issue.id.clone(), issue.status, issue.assignee.clone()))
+            .collect::<Vec<_>>();
+        let storage: InMemoryStorage = Arc::new(Mutex::new(inner));
+
+        enum OracleAssignment {
+            Unassigned,
+            Assignee(&'static str),
+            All,
+        }
+
+        for (assignment, oracle_assignment) in [
+            (
+                ReadyAssignmentFilter::Unassigned,
+                OracleAssignment::Unassigned,
+            ),
+            (
+                ReadyAssignmentFilter::Assignee("alice".to_string()),
+                OracleAssignment::Assignee("alice"),
+            ),
+            (ReadyAssignmentFilter::All, OracleAssignment::All),
+        ] {
+            let expected = oracle_issues
+                .iter()
+                .filter(|(id, status, assignee)| {
+                    *status == IssueStatus::Open
+                        && !unresolved.contains(id)
+                        && match oracle_assignment {
+                            OracleAssignment::Unassigned => assignee.is_none(),
+                            OracleAssignment::Assignee(expected) => {
+                                assignee.as_deref() == Some(expected)
+                            }
+                            OracleAssignment::All => true,
+                        }
+                })
+                .map(|(id, _, _)| id.clone())
+                .collect::<BTreeSet<_>>();
+            assert!(
+                !expected.is_empty(),
+                "each Assignment mode needs a positive control"
+            );
+
+            let started = Instant::now();
+            let actual = storage
+                .ready_to_work(
+                    &ReadyFilter {
+                        assignment,
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .await
+                .expect("ready stress fixture query should succeed")
+                .into_iter()
+                .map(|issue| issue.id)
+                .collect::<BTreeSet<_>>();
+            let elapsed = started.elapsed();
+            assert_eq!(actual, expected);
+            assert!(
+                elapsed <= Duration::from_secs(2),
+                "Ready query took {elapsed:?}"
+            );
+        }
     }
 }

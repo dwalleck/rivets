@@ -5,12 +5,12 @@
 use crate::context::Context;
 use crate::error::Error;
 use crate::models::{
-    AddNoteParams, BlockedParams, BlockingDependencyListParams, BlockingDependencyPairParams,
-    BlockingDependencyTreeParams, CloseParams, CreateParams, DiscoveryListParams,
-    DiscoveryPairParams, LabelAddParams, LabelListAllParams, LabelListParams, LabelRemoveParams,
-    ListParams, ReadyParams, RelatedListParams, RelatedPairParams, ReopenParams, ResourceAddParams,
-    ResourceListParams, ResourceRemoveParams, ResourceUpdateParams, SetContextParams, ShowParams,
-    StaleParams, UpdateParams,
+    AddNoteParams, AssignmentParams, BlockedParams, BlockingDependencyListParams,
+    BlockingDependencyPairParams, BlockingDependencyTreeParams, CloseParams, CreateParams,
+    DiscoveryListParams, DiscoveryPairParams, LabelAddParams, LabelListAllParams, LabelListParams,
+    LabelRemoveParams, ListParams, ReadyParams, RelatedListParams, RelatedPairParams, ReopenParams,
+    ResourceAddParams, ResourceListParams, ResourceRemoveParams, ResourceUpdateParams,
+    SetContextParams, ShowParams, StaleParams, UpdateParams,
 };
 use crate::tools::Tools;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -24,25 +24,12 @@ use rmcp::{
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Maps user-correctable request and relationship errors to `invalid_params`;
-/// infrastructure and serialization failures remain `internal_error`.
-fn to_mcp_error(e: &Error) -> McpError {
-    match e {
-        Error::NoContext
-        | Error::InvalidArgument { .. }
-        | Error::InvalidNote(_)
-        | Error::InvalidResource(_)
-        | Error::InvalidBlockingDependency(_)
-        | Error::InvalidRelatedAssociation(_)
-        | Error::InvalidDiscoveryOrigin(_)
-        | Error::RelatedAssociationNotFound { .. }
-        | Error::DuplicateDiscoveryOrigin { .. }
-        | Error::DiscoveryOriginNotFound { .. }
-        | Error::CircularDiscoveryOrigin { .. }
-        | Error::InvalidStatusTransition(_)
-        | Error::IssueNotFound(_) => McpError::invalid_params(e.to_string(), None),
-        _ => McpError::internal_error(e.to_string(), None),
-    }
+/// Maps typed errors to MCP protocol errors:
+/// - Invalid user inputs and missing Issues -> `invalid_params`
+/// - Workspace contention -> retryable `internal_error` data
+/// - Other failures -> `internal_error`
+fn to_mcp_error(error: &Error) -> McpError {
+    error.to_mcp_error()
 }
 
 /// The rivets MCP server.
@@ -83,9 +70,9 @@ impl RivetsMcpServer {
         }
     }
 
-    /// Find issues ready to work on.
+    /// Find Ready Issues.
     #[tool(
-        description = "Find tasks that have no blockers and are ready to be worked on. Returns up to 100 results by default if no limit specified. Uses workspace_root if provided, otherwise uses current context."
+        description = "Find Open Issues without unresolved direct Blocking Dependencies. Omitting assignee and all_assignees returns unassigned Issues; assignee selects one exact assignee, and all_assignees includes every Assignment. Returns up to 100 results by default if no limit is specified. Uses workspace_root if provided, otherwise uses current context."
     )]
     async fn ready(
         &self,
@@ -159,7 +146,7 @@ impl RivetsMcpServer {
 
     /// Update an existing issue.
     #[tool(
-        description = "Update an existing issue's status, priority, kind, assignee, labels, description, design notes, or acceptance criteria. Use empty string for assignee to clear it. Labels replace existing labels when provided. Uses workspace_root if provided, otherwise uses current context."
+        description = "Update an existing issue's status, priority, kind, labels, description, design notes, or acceptance criteria. Assignment changes use claim or release. Labels replace existing labels when provided. Uses workspace_root if provided, otherwise uses current context."
     )]
     async fn update(
         &self,
@@ -168,6 +155,50 @@ impl RivetsMcpServer {
         match self.tools.update(params).await {
             Ok(issue) => Ok(CallToolResult::success(vec![Content::json(issue)?])),
             Err(e) => Err(to_mcp_error(&e)),
+        }
+    }
+
+    /// Atomically claim an Open, unblocked Issue.
+    #[tool(
+        description = "Atomically assign one Open Issue without unresolved direct Blocking Dependencies. A same-Assignee retry is idempotent only while the Issue remains Open; a different Assignee receives Already Claimed. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn claim(
+        &self,
+        Parameters(params): Parameters<AssignmentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .tools
+            .claim(
+                &params.issue_id,
+                &params.assignee,
+                params.workspace_root.as_deref(),
+            )
+            .await
+        {
+            Ok(issue) => Ok(CallToolResult::success(vec![Content::json(issue)?])),
+            Err(error) => Err(to_mcp_error(&error)),
+        }
+    }
+
+    /// Atomically release an Open Issue from its exact Assignee.
+    #[tool(
+        description = "Atomically clear Assignment from one Open Issue when assignee exactly matches its current owner. Release remains valid while the Open Issue is blocked. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn release(
+        &self,
+        Parameters(params): Parameters<AssignmentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .tools
+            .release(
+                &params.issue_id,
+                &params.assignee,
+                params.workspace_root.as_deref(),
+            )
+            .await
+        {
+            Ok(issue) => Ok(CallToolResult::success(vec![Content::json(issue)?])),
+            Err(error) => Err(to_mcp_error(&error)),
         }
     }
 
@@ -1090,6 +1121,41 @@ mod tests {
         let server = RivetsMcpServer::new();
         let tools = server.tool_router.list_all();
 
+        // Verify all expected tools are registered
+        let tool_names: Vec<&str> = tools.iter().map(|t| &*t.name).collect();
+
+        assert!(tool_names.contains(&"set_context"));
+        assert!(tool_names.contains(&"where_am_i"));
+        assert!(tool_names.contains(&"ready"));
+        assert!(tool_names.contains(&"list"));
+        assert!(tool_names.contains(&"show"));
+        assert!(tool_names.contains(&"blocked"));
+        assert!(tool_names.contains(&"create"));
+        assert!(tool_names.contains(&"update"));
+        assert!(tool_names.contains(&"claim"));
+        assert!(tool_names.contains(&"release"));
+        assert!(tool_names.contains(&"add_note"));
+        assert!(tool_names.contains(&"close"));
+        assert!(tool_names.contains(&"reopen"));
+        assert!(tool_names.contains(&"stale"));
+        assert!(tool_names.contains(&"label_add"));
+        assert!(tool_names.contains(&"label_remove"));
+        assert!(tool_names.contains(&"label_list"));
+        assert!(tool_names.contains(&"label_list_all"));
+        assert!(tool_names.contains(&"resource_add"));
+        assert!(tool_names.contains(&"resource_list"));
+        assert!(tool_names.contains(&"resource_update"));
+        assert!(tool_names.contains(&"resource_remove"));
+        assert!(tool_names.contains(&"blocking_dependency_add"));
+        assert!(tool_names.contains(&"blocking_dependency_remove"));
+        assert!(tool_names.contains(&"blocking_dependency_list"));
+        assert!(tool_names.contains(&"blocking_dependency_tree"));
+        assert!(tool_names.contains(&"related_add"));
+        assert!(tool_names.contains(&"related_remove"));
+        assert!(tool_names.contains(&"related_list"));
+        assert!(tool_names.contains(&"discovery_add"));
+        assert!(tool_names.contains(&"discovery_remove"));
+        assert!(tool_names.contains(&"discovery_list"));
         let input_properties = |name: &str| {
             tools
                 .iter()
@@ -1100,6 +1166,13 @@ mod tests {
         };
         assert!(input_properties("create").contains_key("initial_note"));
         assert!(!input_properties("update").contains_key("notes"));
+        assert!(!input_properties("update").contains_key("assignee"));
+        for tool_name in ["claim", "release"] {
+            let properties = input_properties(tool_name);
+            assert!(properties.contains_key("issue_id"));
+            assert!(properties.contains_key("assignee"));
+            assert!(properties.contains_key("workspace_root"));
+        }
         assert!(input_properties("add_note").contains_key("content"));
         assert!(input_properties("resource_add").contains_key("url"));
         assert!(input_properties("resource_add").contains_key("path"));
@@ -1113,6 +1186,18 @@ mod tests {
             assert!(!properties.contains_key("issue_id"));
             assert!(!properties.contains_key("depends_on_id"));
         }
+        assert!(input_properties("blocking_dependency_list").contains_key("query"));
+        let tree = input_properties("blocking_dependency_tree");
+        assert!(tree.contains_key("dependent_id"));
+        assert!(tree.contains_key("depth"));
+        let list_tool = tools
+            .iter()
+            .find(|tool| tool.name == "blocking_dependency_list")
+            .expect("Blocking list tool should be registered");
+        let list_schema = serde_json::to_string(&list_tool.input_schema)
+            .expect("Blocking Dependency list schema should serialize");
+        assert!(list_schema.contains("prerequisites_of"));
+        assert!(list_schema.contains("dependents_of"));
         for tool_name in ["related_add", "related_remove"] {
             let properties = input_properties(tool_name);
             assert!(properties.contains_key("issue_id"));
@@ -1133,17 +1218,7 @@ mod tests {
         let discovery_list = input_properties("discovery_list");
         assert!(discovery_list.contains_key("discovered_issue_id"));
         assert!(!discovery_list.contains_key("source_issue_id"));
-        assert!(input_properties("blocking_dependency_list").contains_key("query"));
-        let tree = input_properties("blocking_dependency_tree");
-        assert!(tree.contains_key("dependent_id"));
-        assert!(tree.contains_key("depth"));
-        let list_tool = tools
-            .iter()
-            .find(|tool| tool.name == "blocking_dependency_list")
-            .expect("Blocking list tool should be registered");
-        let list_schema = serde_json::to_string(&list_tool.input_schema).unwrap();
-        assert!(list_schema.contains("prerequisites_of"));
-        assert!(list_schema.contains("dependents_of"));
+        assert_eq!(tools.len(), 32);
     }
 
     #[test]

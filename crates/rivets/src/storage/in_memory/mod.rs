@@ -44,19 +44,16 @@
 //! - **Related**: If issue X is related to issue Y, edge is `X -> Y` with weight `Related`
 //! - **DiscoveredFrom**: If bug D was discovered from task T, edge is `D -> T` with weight `DiscoveredFrom`
 //!
-//! ## Blocking Semantics
+//! ## Blocking and Ready Semantics
 //!
-//! An issue is considered **blocked** and not ready to work on if:
+//! An Issue is blocked only when it has an explicit `Blocks` dependency on an
+//! unresolved prerequisite. A prerequisite is resolved exactly when its
+//! Workflow State is Closed. Parentage, Related Associations, and Discovery
+//! Origins never affect blockedness.
 //!
-//! 1. **Direct blocking**: The issue has a `Blocks` dependency on an unclosed issue
-//! 2. **Transitive blocking via ParentChild**: The issue's parent (via `ParentChild`) is blocked
-//!
-//! **Non-blocking dependency types:**
-//! - `Related`: Informational link only, does not block work
-//! - `DiscoveredFrom`: Provenance tracking only, does not block work
-//!
-//! The blocking propagation is limited to 50 levels of depth to prevent infinite loops
-//! and handle extremely deep hierarchies gracefully.
+//! Ready eligibility additionally requires Workflow State Open and the
+//! query's Assignment selector. Priority, Issue Kind, label, sorting, and
+//! limit are applied after eligibility.
 //!
 //! # Thread Safety
 //!
@@ -87,6 +84,7 @@ use tokio::sync::Mutex;
 
 // Re-export public API
 pub use issue_record::MigrationField;
+pub(crate) use jsonl::save_to_jsonl_with_revision;
 pub use jsonl::{LoadWarning, load_from_jsonl, save_to_jsonl};
 
 /// Thread-safe in-memory storage.
