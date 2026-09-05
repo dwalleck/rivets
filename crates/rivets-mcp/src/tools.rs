@@ -25,8 +25,8 @@ use crate::models::{
 use rivets::domain::{
     AssignmentError, AssociatedResource, BlockingDependency, DiscoveryOrigin, Issue, IssueFilter,
     IssueId, IssueKind, IssueStatus, IssueUpdate, NewIssue, NewResource, NoteContent, Parentage,
-    ReadyAssignmentFilter, ReadyFilter, RelatedAssociation, ResourceId, ResourceLabel, ResourceRole,
-    ResourceTarget, ResourceUpdate, WebUrl, WorkspacePath,
+    ReadyAssignmentFilter, ReadyFilter, RelatedAssociation, ResourceId, ResourceLabel,
+    ResourceRole, ResourceTarget, ResourceUpdate, WebUrl, WorkspacePath,
 };
 use rivets::storage::IssueStorage;
 use rivets::workspace_lock::WorkspaceMutationLock;
@@ -914,7 +914,7 @@ impl Tools {
         Ok(storage
             .discovery_origins(&IssueId::new(discovered_issue_id))
             .await?)
-}
+    }
     /// Attach one unparented child to an Epic.
     ///
     /// # Errors
@@ -968,7 +968,7 @@ impl Tools {
     ) -> Result<Parentage> {
         let parentage = Parentage::new(IssueId::new(child_id), IssueId::new(parent_id))?;
         let mut storage = self.mutation_storage_for(workspace_root).await?;
-        let parentage = storage.move_parent(parentage).await?;
+        storage.move_parent(parentage.clone()).await?;
         save_or_reload(storage.as_mut()).await?;
         Ok(parentage)
     }

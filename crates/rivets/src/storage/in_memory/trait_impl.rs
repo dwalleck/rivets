@@ -921,7 +921,7 @@ impl IssueStorage for InMemoryStorage {
             depends_on_id: parentage.parent_id().clone(),
             dep_type: DependencyType::ParentChild,
         });
-        Ok(parentage)
+        Ok(existing)
     }
 
     async fn parent_of(&self, child_id: &IssueId) -> Result<Option<Parentage>> {

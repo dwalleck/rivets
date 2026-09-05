@@ -238,6 +238,9 @@ pub trait IssueStorage: Send + Sync {
     async fn clear_parent(&mut self, child_id: &IssueId) -> Result<Parentage>;
 
     /// Atomically validate and replace one child's existing Parentage.
+    ///
+    /// Returns the previous Parentage from the same atomic operation. A retry
+    /// targeting the current parent returns that unchanged Parentage.
     async fn move_parent(&mut self, parentage: Parentage) -> Result<Parentage>;
 
     /// Return one child's Parentage, or `None` when the existing child is unparented.

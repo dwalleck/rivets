@@ -2217,6 +2217,20 @@ async fn parentage_mcp_contract_context_recreation_and_locking() {
     let non_epic = create_issue(&tools, "Not an Epic").await;
     let first_parent = create_epic(&tools, "First Epic").await;
     let second_parent = create_epic(&tools, "Second Epic").await;
+    let before_self_move = std::fs::read(&issues_path).expect("fixture should be readable");
+    for child_id in [child.id.as_str(), "test-missing"] {
+        let rejected = tools.parent_move(child_id, child_id, None).await;
+        assert!(matches!(
+            rejected,
+            Err(Error::InvalidParentage(
+                rivets::domain::ParentageError::SelfReference { issue_id }
+            )) if issue_id.as_str() == child_id
+        ));
+        assert_eq!(
+            std::fs::read(&issues_path).expect("fixture should remain readable"),
+            before_self_move
+        );
+    }
     tools
         .blocking_dependency_add(child.id.as_str(), first_parent.id.as_str(), None)
         .await

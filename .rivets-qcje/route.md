@@ -40,7 +40,7 @@ Structural — every downstream artifact satisfies its owning stage's completion
 
 ## Terminal disposition
 
-Complete. Slice gates for C1-C11 recorded no FAIL:
+Original implementation checkpoint, superseded by the review verification below:
 
 - `29039e1` — typed Parentage, atomic storage operations, persistence, and C1-C5/C9 falsifiers.
 - `f85ddb3` — Epic lifecycle invariants, Parentage-independent readiness, and C6-C8 falsifiers.
@@ -51,3 +51,23 @@ Final proof: `cargo fmt --all -- --check`, Clippy with all targets/features and
 warnings denied, and `cargo test -p rivets -p rivets-mcp` passed with 861 tests
 and 5 ignored production-scale fences. Both Parentage production-scale fences
 were run explicitly and passed their 100 ms assertions.
+
+### Review completion — 2026-09-05
+
+Complete after F1-F4 resolution; see `review-decisions.md` for the per-finding
+dispositions and both review-fix checkpoints. The five Parentage commits were
+replayed onto fetched default-branch revision `cc0b2ad`; the original tip remains
+at `backup/qcje-pre-review-20260905`.
+
+- Mixed-kind restart now preserves both opposing relationships and exact
+  Ready/Blocked results in either record order and through a second save/reload.
+- Atomic move returns prior ownership to the CLI without an adapter pre-check;
+  CLI/MCP self-parent requests report the same typed rejection.
+- All 261 unrelated upstream tracker records were preserved byte-for-byte.
+- Workspace formatting and all-target/all-feature Clippy with warnings denied
+  passed; `cargo test --workspace` passed 1,177 tests with 8 ignored.
+- Both explicit Parentage scale fences passed; parity reference regeneration
+  check and the real CLI restart/move smoke passed.
+- Independent final integration review found no actionable defects.
+
+No push or merge to the default branch was performed.

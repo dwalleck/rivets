@@ -1075,7 +1075,7 @@ pub async fn execute_parent(
     args: &ParentArgs,
     output_mode: OutputMode,
 ) -> Result<()> {
-    use crate::domain::{IssueId, Parentage, ParentageError};
+    use crate::domain::{IssueId, Parentage};
     use crate::output;
 
     match &args.action {
@@ -1117,14 +1117,8 @@ pub async fn execute_parent(
             }
         }
         ParentAction::Move { child, parent } => {
-            let child_id = IssueId::new(child);
-            let previous = app.storage().parent_of(&child_id).await?.ok_or_else(|| {
-                ParentageError::NoParent {
-                    child_id: child_id.clone(),
-                }
-            })?;
-            let parentage = Parentage::new(child_id, IssueId::new(parent))?;
-            app.storage_mut().move_parent(parentage.clone()).await?;
+            let parentage = Parentage::new(IssueId::new(child), IssueId::new(parent))?;
+            let previous = app.storage_mut().move_parent(parentage.clone()).await?;
             app.save().await?;
             match output_mode {
                 OutputMode::Json => output::print_json(&serde_json::json!({
@@ -1725,6 +1719,50 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             closed_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn parent_move_rejects_self_before_parent_lookup() {
+        use crate::domain::ParentageError;
+        use crate::output::OutputMode;
+
+        let directory = TempDir::new().expect("temporary Workspace should exist");
+        crate::commands::init::init(directory.path(), Some("test"))
+            .await
+            .expect("Workspace should initialize");
+        let mut app = crate::app::App::from_directory_for_mutation(directory.path())
+            .await
+            .expect("Workspace mutation guard should load");
+        app.storage_mut()
+            .import_issues(vec![create_test_issue("test-existing")])
+            .await
+            .expect("unparented Issue should import");
+        app.save().await.expect("fixture should persist");
+        let path = directory.path().join(".rivets/issues.jsonl");
+        let before = std::fs::read(&path).expect("fixture should be readable");
+
+        for child in ["test-existing", "test-missing"] {
+            let args = ParentArgs {
+                action: ParentAction::Move {
+                    child: child.to_string(),
+                    parent: child.to_string(),
+                },
+            };
+            let error = execute_parent(&mut app, &args, OutputMode::Json)
+                .await
+                .expect_err("a self-parent request must be rejected");
+            assert!(
+                matches!(
+                    error.downcast_ref::<ParentageError>(),
+                    Some(ParentageError::SelfReference { issue_id }) if issue_id.as_str() == child
+                ),
+                "wrong rejection: {error:?}"
+            );
+            assert_eq!(
+                std::fs::read(&path).expect("records should remain readable"),
+                before
+            );
         }
     }
 

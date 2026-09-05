@@ -27,3 +27,34 @@ delimiters were repaired, existing Assignment/Related/Discovery behavior retaine
 and the four Parentage operations were classified in the current parity registry.
 The registry's broader ID-parsing and parent-and-direct-children roadmap targets
 remain explicitly classified rather than falsely marked conformant.
+
+## Slice 6 checkpoint — F3
+
+| Gate | Result |
+|---|---|
+| Affected tests | PASS — atomic storage move, CLI handler rejection, and real-storage MCP Parentage integration. |
+| Pending falsifier | PASS — real CLI unparented self-move now reports SelfReference, matching MCP. |
+| Stress fixture | PASS — existing/missing self-parent requests preserve bytes; valid moves return prior ownership; same-parent retry remains idempotent. |
+| Independent oracle | PASS — literal old/new parent IDs and typed SelfReference rejection. |
+| Production-scale budget | N/A — one adapter lookup removed, no new loop or runtime phase. |
+| Regression fence | PASS — storage return-value and CLI rejection fences; MCP success still reports new ownership. |
+| Named mutations | PASS — original requested-parent return failed the new prior-parent assertion; original CLI preflight failed the SelfReference assertion with NoParent. |
+| Restored fences | PASS — corrected storage return and single CLI transition passed both fences. |
+
+Caller audit: `IssueStorage::move_parent`, its JSONL wrapper and MockStorage
+implementation, in-memory implementation, CLI `execute_parent`, MCP
+`Tools::parent_move`, and storage integration callers. LSP returned no references
+even after reload; scoped text search enumerated all callsites. No trait signature
+or MCP success shape changed.
+
+## Final integration
+
+- PASS: `cargo fmt --all`, workspace Clippy with all targets/features and warnings denied.
+- PASS: `cargo test --workspace` — 1,177 passed, 8 ignored.
+- PASS: both explicit Parentage scale fences, including 10,000 direct children.
+- PASS: `python3 scripts/render-cli-mcp-parity.py --check`.
+- PASS: real CLI smoke covering reverse-kind restart, atomic move old/new IDs,
+  preservation of the independent Blocking edge, and self-move rejection.
+- Removed redundant schema registration assertions already covered by the exact
+  parity inventory and dedicated Parentage schema fence; no lint suppression.
+- No push or merge to the default branch; original history remains at the backup ref.

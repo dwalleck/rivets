@@ -754,9 +754,13 @@ async fn parent_move_validates_before_atomic_replacement() {
         storage.move_parent(cyclic).await,
         Err(Error::InvalidParentage(ParentageError::Cycle { .. }))
     ));
-    assert_eq!(storage.parent_of(&child.id).await.unwrap(), Some(first));
+    assert_eq!(
+        storage.parent_of(&child.id).await.unwrap(),
+        Some(first.clone())
+    );
 
     let moved = Parentage::new(child.id.clone(), second_parent.id.clone()).unwrap();
+    assert_eq!(storage.move_parent(moved.clone()).await.unwrap(), first);
     assert_eq!(storage.move_parent(moved.clone()).await.unwrap(), moved);
     assert_eq!(
         storage.parent_of(&child.id).await.unwrap(),
