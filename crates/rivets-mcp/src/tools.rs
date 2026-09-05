@@ -24,9 +24,9 @@ use crate::models::{
 };
 use rivets::domain::{
     AssignmentError, AssociatedResource, BlockingDependency, DiscoveryOrigin, Issue, IssueFilter,
-    IssueId, IssueKind, IssueStatus, IssueUpdate, Label, NewIssue, NewResource, NoteContent,
-    Parentage, ReadyAssignmentFilter, ReadyFilter, RelatedAssociation, ResourceId, ResourceLabel,
-    ResourceRole, ResourceTarget, ResourceUpdate, WebUrl, WorkspacePath,
+    IssueId, IssueKind, IssueStatus, IssueUpdate, Label, ListQuery, NewIssue, NewResource,
+    NoteContent, Parentage, ReadyAssignmentFilter, ReadyFilter, RelatedAssociation, ResourceId,
+    ResourceLabel, ResourceRole, ResourceTarget, ResourceUpdate, StaleQuery, WebUrl, WorkspacePath,
 };
 use rivets::storage::IssueStorage;
 use rivets::workspace_lock::WorkspaceMutationLock;
@@ -35,11 +35,11 @@ use std::sync::Arc;
 use tokio::sync::{OwnedRwLockWriteGuard, RwLock};
 use tracing::{debug, instrument};
 
-/// Default limit for list/ready queries when none is specified.
+/// Default limit for Ready queries when none is specified.
 ///
 /// Prevents potential OOM errors with large issue databases by ensuring
-/// queries always have a reasonable upper bound.
-const DEFAULT_QUERY_LIMIT: usize = 100;
+/// Ready queries always have a reasonable upper bound.
+const DEFAULT_READY_QUERY_LIMIT: usize = 100;
 
 #[derive(Clone, Copy)]
 enum AssignmentOperation {
@@ -267,8 +267,8 @@ impl Tools {
 
     /// Get issues ready to work on.
     ///
-    /// If no limit is specified, defaults to [`DEFAULT_QUERY_LIMIT`] (100) to prevent
-    /// potential OOM errors with large issue databases.
+    /// If no limit is specified, defaults to [`DEFAULT_READY_QUERY_LIMIT`] (100) to
+    /// prevent potential OOM errors with large issue databases.
     ///
     /// # Errors
     ///
@@ -300,7 +300,7 @@ impl Tools {
             issue_kind,
             assignment,
             label,
-            limit: Some(params.limit.unwrap_or(DEFAULT_QUERY_LIMIT)),
+            limit: Some(params.limit.unwrap_or(DEFAULT_READY_QUERY_LIMIT)),
         };
 
         let issues = storage.ready_to_work(&filter, None).await?;
@@ -310,17 +310,17 @@ impl Tools {
 
     /// List issues with optional filters.
     ///
-    /// If no limit is specified, defaults to [`DEFAULT_QUERY_LIMIT`] (100) to prevent
-    /// potential OOM errors with large issue databases.
+    /// The MCP boundary requires a positive explicit limit. All filter
+    /// validation and selection policy is owned by the canonical domain query.
     ///
     /// # Errors
     ///
-    /// Returns an error if no context is set, status is invalid, or storage operations fail.
+    /// Returns an error if no context is set, a filter value is invalid, or
+    /// storage operations fail.
     #[instrument(skip(self, params), fields(limit = params.limit, priority = params.priority))]
     pub async fn list(&self, params: ListParams) -> Result<Vec<Issue>> {
         debug!("Listing issues");
         let status = params.status.as_deref().map(validate_status).transpose()?;
-        let issue_kind = params.kind.resolve("list");
         let label = params.label.map(Label::try_from).transpose()?;
 
         let storage = self.storage_for(params.workspace_root.as_deref()).await?;
@@ -329,13 +329,14 @@ impl Tools {
         let filter = IssueFilter {
             status,
             priority: params.priority,
-            issue_kind,
+            issue_kind: params.issue_kind,
             assignee: params.assignee,
             label,
-            limit: Some(params.limit.unwrap_or(DEFAULT_QUERY_LIMIT)),
+            limit: Some(params.limit.get()),
         };
+        let query = ListQuery::try_from(filter)?;
 
-        let issues = storage.list(&filter).await?;
+        let issues = storage.list_issues(&query).await?;
         debug!(count = issues.len(), "Listed issues");
         Ok(issues)
     }
@@ -1056,49 +1057,33 @@ impl Tools {
 
     /// Find stale issues that haven't been updated recently.
     ///
-    /// # Performance Note
-    ///
-    /// This method loads all issues matching the optional status filter into memory,
-    /// then filters by `updated_at` timestamp. For very large issue databases (10,000+),
-    /// consider adding a storage-level query method that filters at the database layer.
+    /// The MCP boundary requires a positive explicit limit. Cutoff arithmetic,
+    /// status selection, ordering, and truncation are owned by the canonical
+    /// domain query and storage implementation.
     ///
     /// # Errors
     ///
-    /// Returns an error if no context is set or storage operations fail.
+    /// Returns an error if no context is set, a filter value is invalid, or
+    /// storage operations fail.
     #[instrument(skip(self), fields(days, ?status, limit))]
     pub async fn stale(
         &self,
         days: Option<u32>,
         status: Option<&str>,
-        limit: Option<usize>,
+        limit: std::num::NonZeroUsize,
         workspace_root: Option<&str>,
     ) -> Result<Vec<Issue>> {
         debug!("Finding stale issues");
         let status = status.map(validate_status).transpose()?;
         let days = days.unwrap_or(30);
-        let limit = limit.unwrap_or(DEFAULT_QUERY_LIMIT);
+        let query = StaleQuery::new(limit, status, days, chrono::Utc::now())?;
 
         let storage = self.storage_for(workspace_root).await?;
         let storage = storage.read().await;
+        let issues = storage.stale_issues(&query).await?;
 
-        // Get all issues with optional status filter
-        let filter = IssueFilter {
-            status,
-            ..Default::default()
-        };
-
-        let cutoff = chrono::Utc::now() - chrono::Duration::days(i64::from(days));
-        let issues = storage.list(&filter).await?;
-
-        // Filter by updated_at timestamp and apply limit
-        let stale_issues: Vec<Issue> = issues
-            .into_iter()
-            .filter(|issue| issue.updated_at < cutoff)
-            .take(limit)
-            .collect();
-
-        debug!(count = stale_issues.len(), "Found stale issues");
-        Ok(stale_issues)
+        debug!(count = issues.len(), "Found stale issues");
+        Ok(issues)
     }
 
     /// Add a label to an issue.
@@ -1217,7 +1202,6 @@ mod tests {
     fn validate_status_accepts_canonical(#[case] input: &str, #[case] expected: IssueStatus) {
         assert_eq!(validate_status(input).expect("canonical status"), expected);
     }
-
     #[rstest]
     #[case::uppercase("OPEN")]
     #[case::cli_alias("in-progress")]
@@ -1267,16 +1251,16 @@ mod tests {
         issue_kind: Option<&str>,
         assignee: Option<String>,
         label: Option<String>,
-        limit: Option<usize>,
+        limit: usize,
         workspace_root: Option<&str>,
     ) -> ListParams {
         ListParams {
             status: status.map(str::to_string),
             priority,
-            kind: kind_input(issue_kind),
+            issue_kind: kind_input(issue_kind).issue_kind,
             assignee,
             label,
-            limit,
+            limit: std::num::NonZeroUsize::new(limit).expect("List test limit should be positive"),
             workspace_root: workspace_root.map(str::to_string),
         }
     }
@@ -1376,7 +1360,7 @@ mod tests {
 
         let result = tokio::time::timeout(
             std::time::Duration::from_millis(100),
-            tools.list(list_params(None, None, None, None, None, None, None)),
+            tools.list(list_params(None, None, None, None, None, 100, None)),
         )
         .await;
 
@@ -1430,7 +1414,7 @@ mod tests {
         create_issue(&tools, "Issue 2").await;
 
         let issues = tools
-            .list(list_params(None, None, None, None, None, None, None))
+            .list(list_params(None, None, None, None, None, 100, None))
             .await
             .unwrap();
         assert_eq!(issues.len(), 2);
@@ -1645,7 +1629,7 @@ mod tests {
         let tools = Tools::new(context);
 
         let result = tools
-            .list(list_params(None, None, None, None, None, None, None))
+            .list(list_params(None, None, None, None, None, 100, None))
             .await;
         assert!(result.is_err());
     }
@@ -1663,7 +1647,7 @@ mod tests {
 
         // List with limit of 2
         let issues = tools
-            .list(list_params(None, None, None, None, None, Some(2), None))
+            .list(list_params(None, None, None, None, None, 2, None))
             .await
             .unwrap();
         assert_eq!(issues.len(), 2, "list should respect explicit limit");
@@ -1697,7 +1681,7 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 for _ in 0..10 {
                     let _ = tools
-                        .list(list_params(None, None, None, None, None, None, None))
+                        .list(list_params(None, None, None, None, None, 100, None))
                         .await;
                     let _ = tools
                         .ready(ready_params(None, None, None, None, None, None))
@@ -1939,12 +1923,28 @@ mod tests {
 
         // Finding stale issues from the last 30 days should return empty
         // (issue was just created, so it's not stale)
-        let stale = tools.stale(Some(30), None, None, None).await.unwrap();
+        let stale = tools
+            .stale(
+                Some(30),
+                None,
+                std::num::NonZeroUsize::new(100).expect("positive limit"),
+                None,
+            )
+            .await
+            .unwrap();
         assert_eq!(stale.len(), 0, "Newly created issue should not be stale");
 
         // Finding stale issues from 0 days should return the issue
         // (0 days means anything older than right now)
-        let stale = tools.stale(Some(0), None, None, None).await.unwrap();
+        let stale = tools
+            .stale(
+                Some(0),
+                None,
+                std::num::NonZeroUsize::new(100).expect("positive limit"),
+                None,
+            )
+            .await
+            .unwrap();
         assert_eq!(
             stale.len(),
             1,
@@ -1969,7 +1969,12 @@ mod tests {
 
         // Find stale open issues with 0-day threshold
         let stale_open = tools
-            .stale(Some(0), Some("open"), None, None)
+            .stale(
+                Some(0),
+                Some("open"),
+                std::num::NonZeroUsize::new(100).expect("positive limit"),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(stale_open.len(), 1);
@@ -1977,7 +1982,12 @@ mod tests {
 
         // Find stale closed issues with 0-day threshold
         let stale_closed = tools
-            .stale(Some(0), Some("closed"), None, None)
+            .stale(
+                Some(0),
+                Some("closed"),
+                std::num::NonZeroUsize::new(100).expect("positive limit"),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(stale_closed.len(), 1);

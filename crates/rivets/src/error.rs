@@ -1,7 +1,7 @@
 //! Error types for rivets CLI operations.
 
 use crate::domain::{
-    AssignmentError, IssueId, ParentageError, ResourceError, StatusTransitionError,
+    AssignmentError, IssueId, ParentageError, QueryError, ResourceError, StatusTransitionError,
 };
 use std::{fmt, io, path::PathBuf};
 use thiserror::Error;
@@ -354,6 +354,10 @@ pub enum Error {
     /// Configuration error.
     #[error("{0}")]
     Config(#[from] ConfigError),
+
+    /// A bounded List or Stale query failed domain validation.
+    #[error(transparent)]
+    Query(#[from] QueryError),
 
     /// Storage error.
     #[error("{0}")]

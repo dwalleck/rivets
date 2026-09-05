@@ -68,16 +68,16 @@ fn list_params(
     issue_kind: Option<&str>,
     assignee: Option<String>,
     label: Option<String>,
-    limit: Option<usize>,
+    limit: usize,
     workspace_root: Option<&str>,
 ) -> ListParams {
     ListParams {
         status: status.map(str::to_string),
         priority,
-        kind: kind_input(issue_kind),
+        issue_kind: kind_input(issue_kind).issue_kind,
         assignee,
         label,
-        limit,
+        limit: std::num::NonZeroUsize::new(limit).expect("List test limit should be positive"),
         workspace_root: workspace_root.map(str::to_string),
     }
 }
@@ -376,7 +376,7 @@ impl InvalidLabelOperation {
                     None,
                     None,
                     Some(label.to_string()),
-                    None,
+                    100,
                     None,
                 ))
                 .await
@@ -495,14 +495,27 @@ storage:
     }
 
     /// Filter parameters for list/ready tests.
-    #[derive(Debug, Clone, Default)]
+    #[derive(Debug, Clone)]
     pub struct FilterParams {
         pub status: Option<&'static str>,
         pub priority: Option<u8>,
         pub issue_kind: Option<&'static str>,
         pub assignee: Option<&'static str>,
         pub label: Option<&'static str>,
-        pub limit: Option<usize>,
+        pub limit: usize,
+    }
+
+    impl Default for FilterParams {
+        fn default() -> Self {
+            Self {
+                status: None,
+                priority: None,
+                issue_kind: None,
+                assignee: None,
+                label: None,
+                limit: 100,
+            }
+        }
     }
 
     impl FilterParams {
@@ -536,7 +549,7 @@ storage:
         }
 
         pub fn with_limit(mut self, n: usize) -> Self {
-            self.limit = Some(n);
+            self.limit = n;
             self
         }
     }
@@ -1466,7 +1479,7 @@ async fn test_create_all_issue_kinds() {
                 Some(issue_kind),
                 None,
                 None,
-                None,
+                100,
                 None,
             ))
             .await
@@ -1479,7 +1492,7 @@ async fn test_create_all_issue_kinds() {
     let restarted = create_tools();
     set_context(&restarted, workspace.path()).await;
     let list = restarted
-        .list(list_params(None, None, None, None, None, None, None))
+        .list(list_params(None, None, None, None, None, 100, None))
         .await
         .expect("list after restart should succeed");
     assert_eq!(list.len(), 5);
@@ -1580,7 +1593,7 @@ async fn test_multi_workspace_context_switching() {
 
     // Verify workspace B has only one issue
     let issues_b = tools
-        .list(list_params(None, None, None, None, None, None, None))
+        .list(list_params(None, None, None, None, None, 100, None))
         .await
         .expect("list should succeed");
     assert_eq!(issues_b.len(), 1);
@@ -1589,7 +1602,7 @@ async fn test_multi_workspace_context_switching() {
     // Switch back to workspace A
     set_context(&tools, workspace_a.path()).await;
     let issues_a = tools
-        .list(list_params(None, None, None, None, None, None, None))
+        .list(list_params(None, None, None, None, None, 100, None))
         .await
         .expect("list should succeed");
     assert_eq!(issues_a.len(), 1);
@@ -1618,7 +1631,7 @@ async fn test_workspace_root_parameter_override() {
             None,
             None,
             None,
-            None,
+            100,
             Some(&workspace_a.path().display().to_string()),
         ))
         .await
@@ -1649,14 +1662,14 @@ async fn test_workspace_isolation() {
 
     // Verify counts
     let issues_b = tools
-        .list(list_params(None, None, None, None, None, None, None))
+        .list(list_params(None, None, None, None, None, 100, None))
         .await
         .unwrap();
     assert_eq!(issues_b.len(), 2);
 
     set_context(&tools, workspace_a.path()).await;
     let issues_a = tools
-        .list(list_params(None, None, None, None, None, None, None))
+        .list(list_params(None, None, None, None, None, 100, None))
         .await
         .unwrap();
     assert_eq!(issues_a.len(), 3);
@@ -1672,7 +1685,7 @@ async fn test_error_no_context() {
     let tools = create_tools();
 
     let result = tools
-        .list(list_params(None, None, None, None, None, None, None))
+        .list(list_params(None, None, None, None, None, 100, None))
         .await;
 
     assert!(result.is_err());
@@ -1696,7 +1709,7 @@ async fn test_error_invalid_status() {
             None,
             None,
             None,
-            None,
+            100,
             None,
         ))
         .await;
@@ -1889,7 +1902,9 @@ async fn cli_and_mcp_label_parsing_have_the_same_semantics() {
     ];
 
     for (input, valid) in cases {
-        let cli_result = rivets::cli::Cli::try_parse_from(["rivets", "list", "--label", input]);
+        let cli_result = rivets::cli::Cli::try_parse_from([
+            "rivets", "list", "--limit", "100", "--label", input,
+        ]);
         let mcp_result = tools
             .list(list_params(
                 None,
@@ -1897,7 +1912,7 @@ async fn cli_and_mcp_label_parsing_have_the_same_semantics() {
                 None,
                 None,
                 Some(input.to_string()),
-                None,
+                100,
                 None,
             ))
             .await;
@@ -1959,7 +1974,7 @@ async fn test_error_no_rivets_directory() {
             None,
             None,
             None,
-            None,
+            100,
             Some(&workspace_root),
         ))
         .await;
@@ -2001,7 +2016,7 @@ async fn test_workspace_root_initializes_without_context() {
             None,
             None,
             None,
-            None,
+            100,
             Some(&workspace_root),
         ))
         .await
@@ -2088,7 +2103,7 @@ async fn test_concurrent_workspace_root_initialization() {
             None,
             None,
             None,
-            None,
+            100,
             Some(&workspace_root),
         ))
         .await
@@ -2114,7 +2129,7 @@ async fn test_explicit_workspace_cache_eviction_preserves_current_context() {
                 None,
                 None,
                 None,
-                None,
+                100,
                 Some(&workspace_root),
             ))
             .await
@@ -2132,7 +2147,7 @@ async fn test_explicit_workspace_cache_eviction_preserves_current_context() {
     );
 
     let current_issues = tools
-        .list(list_params(None, None, None, None, None, None, None))
+        .list(list_params(None, None, None, None, None, 100, None))
         .await
         .expect("current context should remain cached");
     assert_eq!(current_issues.len(), 1);
@@ -3342,7 +3357,7 @@ async fn test_persistence_across_sessions() {
         set_context(&tools, workspace.path()).await;
 
         let issues = tools
-            .list(list_params(None, None, None, None, None, None, None))
+            .list(list_params(None, None, None, None, None, 100, None))
             .await
             .expect("list should succeed");
 
@@ -3679,7 +3694,7 @@ async fn test_ready_filters(#[case] test_case: ReadyFilterCase) {
     // Apply filter
     let results = tools
         .ready(ready_params(
-            test_case.filter.limit,
+            Some(test_case.filter.limit),
             test_case.filter.priority,
             test_case.filter.issue_kind,
             test_case.filter.assignee.map(str::to_string),
@@ -3753,7 +3768,7 @@ async fn test_empty_filter_results() {
             Some("epic"), // Epic Kind - none of our issues have this
             Some("nonexistent-user".to_string()),
             Some("nonexistent-label".to_string()),
-            None,
+            100,
             None,
         ))
         .await
@@ -3810,7 +3825,7 @@ async fn test_multiple_labels_filter() {
             None,
             None,
             Some("backend".to_string()),
-            None,
+            100,
             None,
         ))
         .await
@@ -3835,7 +3850,7 @@ async fn test_multiple_labels_filter() {
             None,
             None,
             Some("frontend".to_string()),
-            None,
+            100,
             None,
         ))
         .await
@@ -3855,7 +3870,7 @@ async fn test_multiple_labels_filter() {
             None,
             None,
             Some("urgent".to_string()),
-            None,
+            100,
             None,
         ))
         .await
@@ -3902,7 +3917,7 @@ async fn test_assignee_case_sensitivity() {
             None,
             Some("Alice".to_string()),
             None,
-            None,
+            100,
             None,
         ))
         .await
@@ -3922,7 +3937,7 @@ async fn test_assignee_case_sensitivity() {
             None,
             Some("alice".to_string()),
             None,
-            None,
+            100,
             None,
         ))
         .await
@@ -3944,7 +3959,7 @@ async fn test_assignee_case_sensitivity() {
             None,
             Some("ALICE".to_string()),
             None,
-            None,
+            100,
             None,
         ))
         .await
@@ -4017,7 +4032,7 @@ async fn test_unicode_support() {
             None,
             None,
             Some("🔥hotfix".to_string()),
-            None,
+            100,
             None,
         ))
         .await
@@ -4053,7 +4068,7 @@ async fn test_unicode_support() {
             None,
             Some("José García".to_string()),
             None,
-            None,
+            100,
             None,
         ))
         .await
@@ -4064,7 +4079,7 @@ async fn test_unicode_support() {
 
     // Verify all issues are in the list
     let all_issues = tools
-        .list(list_params(None, None, None, None, None, None, None))
+        .list(list_params(None, None, None, None, None, 100, None))
         .await
         .expect("list all should succeed");
 
@@ -4110,7 +4125,7 @@ async fn test_unicode_titles_in_list() {
 
     // List all and verify they're all present
     let all_issues = tools
-        .list(list_params(None, None, None, None, None, None, None))
+        .list(list_params(None, None, None, None, None, 100, None))
         .await
         .expect("list should succeed");
 
@@ -4152,7 +4167,7 @@ async fn test_invalid_status_values(#[case] invalid_value: &str, #[case] expecte
             None,
             None,
             None,
-            None,
+            100,
             None,
         ))
         .await;
@@ -4288,7 +4303,7 @@ async fn test_error_message_format() {
             None,
             None,
             None,
-            None,
+            100,
             None,
         ))
         .await;
@@ -4497,7 +4512,7 @@ async fn test_rapid_workspace_context_switching() {
             set_context(&tools, workspace.path()).await;
 
             let issues = tools
-                .list(list_params(None, None, None, None, None, None, None))
+                .list(list_params(None, None, None, None, None, 100, None))
                 .await
                 .expect("list should succeed");
 
@@ -4515,7 +4530,7 @@ async fn test_error_response_formats() {
 
     // Test NoContext error format
     let no_context_err = tools
-        .list(list_params(None, None, None, None, None, None, None))
+        .list(list_params(None, None, None, None, None, 100, None))
         .await
         .unwrap_err();
     let no_context_msg = no_context_err.to_string();
@@ -4543,7 +4558,7 @@ async fn test_error_response_formats() {
             None,
             None,
             None,
-            None,
+            100,
             None,
         ))
         .await
@@ -4604,7 +4619,7 @@ async fn test_all_tools_with_storage_backend() {
 
     // 5. list
     let listed = tools
-        .list(list_params(None, None, None, None, None, None, None))
+        .list(list_params(None, None, None, None, None, 100, None))
         .await
         .expect("list should succeed");
     assert!(!listed.is_empty());
@@ -4874,21 +4889,13 @@ async fn test_issue_counts_accurate() {
 
     // Verify counts
     let all = tools
-        .list(list_params(None, None, None, None, None, None, None))
+        .list(list_params(None, None, None, None, None, 100, None))
         .await
         .unwrap();
     assert_eq!(all.len(), 3, "Should have 3 total issues");
 
     let open = tools
-        .list(list_params(
-            Some("open"),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        ))
+        .list(list_params(Some("open"), None, None, None, None, 100, None))
         .await
         .unwrap();
     assert_eq!(open.len(), 1, "Should have 1 open issue");
@@ -4901,7 +4908,7 @@ async fn test_issue_counts_accurate() {
             None,
             None,
             None,
-            None,
+            100,
             None,
         ))
         .await
@@ -4916,7 +4923,7 @@ async fn test_issue_counts_accurate() {
             None,
             None,
             None,
-            None,
+            100,
             None,
         ))
         .await
@@ -5547,7 +5554,7 @@ async fn assert_migrated_mcp_content(tools: &Tools, fixture: &[serde_json::Value
 
 async fn assert_reloaded_mcp_content(tools: &Tools, expected_long_note: &str) {
     let reloaded = tools
-        .list(list_params(None, None, None, None, None, None, None))
+        .list(list_params(None, None, None, None, None, 100, None))
         .await
         .expect("fresh MCP context should reload every canonical record");
     assert_eq!(reloaded.len(), MIXED_ISSUE_COUNT);
@@ -5612,7 +5619,7 @@ async fn mixed_legacy_fixture_migrates_through_mcp_and_context_recreation() {
     let tools = create_tools();
     set_context(&tools, workspace.path()).await;
     let listed = tools
-        .list(list_params(None, None, None, None, None, None, None))
+        .list(list_params(None, None, None, None, None, 100, None))
         .await
         .expect("MCP list should load every mixed legacy record");
     assert_eq!(listed.len(), MIXED_ISSUE_COUNT);

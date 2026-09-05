@@ -5,11 +5,19 @@
 
 use clap::{Parser, Subcommand};
 
-use super::types::{SortOrderArg, SortPolicyArg};
+use std::num::NonZeroUsize;
+
+use super::types::SortPolicyArg;
 use super::validators::{
     validate_assignee, validate_description, validate_issue_id, validate_prefix, validate_title,
 };
 use crate::domain::{IssueKind, IssueStatus, Label, MAX_PRIORITY, MIN_PRIORITY, ResourceRole};
+
+fn parse_canonical_status(value: &str) -> Result<IssueStatus, String> {
+    value
+        .parse::<IssueStatus>()
+        .map_err(|error| error.to_string())
+}
 
 /// Arguments for the `init` command
 #[derive(Parser, Debug, Clone)]
@@ -80,7 +88,7 @@ pub struct CreateArgs {
 #[derive(Parser, Debug, Clone)]
 pub struct ListArgs {
     /// Filter by status
-    #[arg(short, long, value_enum)]
+    #[arg(short, long, value_parser = parse_canonical_status)]
     pub status: Option<IssueStatus>,
 
     /// Filter by priority
@@ -100,12 +108,8 @@ pub struct ListArgs {
     pub label: Option<Label>,
 
     /// Maximum number of issues to display
-    #[arg(short = 'n', long, default_value = "50")]
-    pub limit: usize,
-
-    /// Sort order
-    #[arg(long, value_enum, default_value = "priority")]
-    pub sort: SortOrderArg,
+    #[arg(short = 'n', long)]
+    pub limit: NonZeroUsize,
 }
 
 /// Arguments for the `show` command
@@ -516,12 +520,12 @@ pub struct StaleArgs {
     pub days: u32,
 
     /// Filter by status
-    #[arg(short, long, value_enum)]
+    #[arg(short, long, value_parser = parse_canonical_status)]
     pub status: Option<IssueStatus>,
 
     /// Maximum number of issues to display
-    #[arg(short = 'n', long, default_value = "50")]
-    pub limit: usize,
+    #[arg(short = 'n', long)]
+    pub limit: NonZeroUsize,
 }
 
 /// Arguments for the `label` command

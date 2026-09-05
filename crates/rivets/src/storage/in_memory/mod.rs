@@ -74,6 +74,7 @@ mod graph;
 mod inner;
 mod issue_record;
 mod jsonl;
+mod query;
 mod sorting;
 mod trait_impl;
 

@@ -70,9 +70,9 @@
 //! ```
 
 use crate::domain::{
-    BlockingDependency, DiscoveryOrigin, Issue, IssueFilter, IssueId, IssueUpdate, Label, NewIssue,
-    NewResource, Parentage, ReadyFilter, RelatedAssociation, ResourceId, ResourceUpdate,
-    SortPolicy,
+    BlockingDependency, DiscoveryOrigin, Issue, IssueFilter, IssueId, IssueUpdate, Label,
+    ListQuery, NewIssue, NewResource, Parentage, ReadyFilter, RelatedAssociation, ResourceId,
+    ResourceUpdate, SortPolicy, StaleQuery,
 };
 use crate::error::{PartialLoadError, Result, SkippedIssueRecordCause, StorageError};
 use async_trait::async_trait;
@@ -245,11 +245,20 @@ pub trait IssueStorage: Send + Sync {
 
     /// Return one child's Parentage, or `None` when the existing child is unparented.
     async fn parent_of(&self, child_id: &IssueId) -> Result<Option<Parentage>>;
-    // ========== Queries ==========
+    // ========== Canonical bounded queries ==========
+
+    /// List Issues using the shared, validated List query contract.
+    async fn list_issues(&self, query: &ListQuery) -> Result<Vec<Issue>>;
+
+    /// List stale Issues using the shared, validated Stale query contract.
+    async fn stale_issues(&self, query: &StaleQuery) -> Result<Vec<Issue>>;
+
+    // ========== Legacy generic query ==========
 
     /// List issues matching the given filter.
     ///
-    /// If no filter is provided, returns all non-closed issues.
+    /// The generic enumeration remains unbounded and includes every Workflow
+    /// State; bounded List/Stale policy belongs to the typed methods above.
     async fn list(&self, filter: &IssueFilter) -> Result<Vec<Issue>>;
 
     /// Find issues ready to work on.
@@ -694,6 +703,14 @@ impl IssueStorage for JsonlBackedStorage {
     async fn parent_of(&self, child_id: &IssueId) -> Result<Option<Parentage>> {
         self.inner.parent_of(child_id).await
     }
+    async fn list_issues(&self, query: &ListQuery) -> Result<Vec<Issue>> {
+        self.inner.list_issues(query).await
+    }
+
+    async fn stale_issues(&self, query: &StaleQuery) -> Result<Vec<Issue>> {
+        self.inner.stale_issues(query).await
+    }
+
     async fn list(&self, filter: &IssueFilter) -> Result<Vec<Issue>> {
         self.inner.list(filter).await
     }
@@ -1090,6 +1107,14 @@ impl IssueStorage for MockStorage {
     async fn parent_of(&self, _child_id: &IssueId) -> Result<Option<Parentage>> {
         Ok(None)
     }
+    async fn list_issues(&self, _query: &ListQuery) -> Result<Vec<Issue>> {
+        Ok(vec![])
+    }
+
+    async fn stale_issues(&self, _query: &StaleQuery) -> Result<Vec<Issue>> {
+        Ok(vec![])
+    }
+
     async fn list(&self, _filter: &IssueFilter) -> Result<Vec<Issue>> {
         Ok(vec![])
     }

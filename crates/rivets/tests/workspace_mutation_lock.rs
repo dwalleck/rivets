@@ -119,7 +119,7 @@ async fn workspace_mutation_lock_blocks_cli_writes_but_not_reads() {
         before
     );
 
-    let list = run(workspace.path(), &["list", "--json"]);
+    let list = run(workspace.path(), &["list", "--json", "--limit", "10"]);
     assert!(
         list.status.success(),
         "read should not acquire mutation lock"

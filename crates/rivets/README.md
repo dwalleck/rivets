@@ -29,8 +29,12 @@ rivets create
 ### List issues
 
 ```bash
-rivets list
+rivets list --limit 50
 ```
+
+List requires a positive limit and orders newest-created first, with ascending
+Issue-ID ties. Stale also requires `--limit` and returns oldest-updated Issues;
+Closed Issues appear only with an explicit `--status closed` filter.
 
 ### Show issue details
 

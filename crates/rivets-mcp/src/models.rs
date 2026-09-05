@@ -30,6 +30,23 @@ where
 // Tool Input Parameters
 // ============================================================================
 
+/// Schema-only stand-in for the domain [`IssueStatus`] wire vocabulary.
+///
+/// schemars cannot derive `JsonSchema` for the domain type from another crate
+/// (orphan rule), so this local type renders the canonical status values in
+/// tool schemas. It performs no parsing; runtime status validation remains
+/// owned by the domain parser.
+#[derive(JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum McpIssueStatusSchema {
+    /// Issue is open.
+    Open,
+    /// Issue is in progress.
+    InProgress,
+    /// Issue is closed.
+    Closed,
+}
+
 /// Schema-only stand-in for the domain [`IssueKind`] wire vocabulary.
 ///
 /// schemars cannot derive `JsonSchema` for the domain type from another
@@ -138,17 +155,21 @@ pub struct ReadyParams {
 }
 
 /// Parameters for the `list` tool.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ListParams {
-    /// Filter by status.
+    /// Filter by canonical status.
+    #[schemars(with = "Option<McpIssueStatusSchema>")]
     pub status: Option<String>,
 
-    /// Filter by priority level.
+    /// Filter by priority level (0-4).
+    #[schemars(range(max = 4))]
     pub priority: Option<u8>,
 
-    /// Filter by Issue Kind.
-    #[serde(flatten)]
-    pub kind: IssueKindInput,
+    /// Filter by canonical Issue Kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<McpIssueKindSchema>")]
+    pub issue_kind: Option<IssueKind>,
 
     /// Filter by assignee.
     pub assignee: Option<String>,
@@ -160,8 +181,9 @@ pub struct ListParams {
     )]
     pub label: Option<String>,
 
-    /// Maximum number of issues to return.
-    pub limit: Option<usize>,
+    /// Maximum number of issues to return; must be positive.
+    #[schemars(range(min = 1))]
+    pub limit: std::num::NonZeroUsize,
 
     /// Optional workspace root (uses current context if not specified).
     pub workspace_root: Option<String>,
@@ -534,22 +556,23 @@ pub struct ReopenParams {
 
     /// Reason for reopening.
     pub reason: Option<String>,
-
     /// Optional workspace root (uses current context if not specified).
     pub workspace_root: Option<String>,
 }
 
 /// Parameters for the `stale` tool.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct StaleParams {
     /// Number of days since last update to consider stale (default: 30).
     pub days: Option<u32>,
 
-    /// Filter by status.
+    /// Filter by canonical status.
+    #[schemars(with = "Option<McpIssueStatusSchema>")]
     pub status: Option<String>,
 
-    /// Maximum number of issues to return.
-    pub limit: Option<usize>,
+    /// Maximum number of issues to return; must be positive.
+    #[schemars(range(min = 1))]
+    pub limit: std::num::NonZeroUsize,
 
     /// Optional workspace root (uses current context if not specified).
     pub workspace_root: Option<String>,
@@ -700,13 +723,23 @@ mod tests {
     }
 
     #[test]
-    fn list_params_read_legacy_issue_type() {
-        let params: ListParams = serde_json::from_value(serde_json::json!({
-            "issue_type": "feature"
+    fn list_params_reject_legacy_issue_type() {
+        let error = serde_json::from_value::<ListParams>(serde_json::json!({
+            "issue_type": "feature",
+            "limit": 1
         }))
-        .expect("legacy issue_type should deserialize");
+        .expect_err("legacy issue_type must be rejected for List");
 
-        assert_eq!(params.kind.resolve("list"), Some(IssueKind::Feature));
+        assert!(error.to_string().contains("unknown field"));
+        assert!(error.to_string().contains("issue_type"));
+    }
+
+    #[test]
+    fn list_params_require_positive_limit() {
+        for input in [serde_json::json!({}), serde_json::json!({ "limit": 0 })] {
+            serde_json::from_value::<ListParams>(input)
+                .expect_err("List limit must be explicit and positive");
+        }
     }
 
     #[test]

@@ -12,7 +12,7 @@ use super::args::{
     LabelArgs, ListArgs, ParentAction, ParentArgs, ReadyArgs, RelatedAction, RelatedArgs,
     ReopenArgs, ResourceAction, ResourceArgs, ShowArgs, StaleArgs, StatsArgs, UpdateArgs,
 };
-use super::types::{SortOrderArg, SortPolicyArg};
+use super::types::SortPolicyArg;
 use crate::output::OutputMode;
 
 /// Execute the init command
@@ -194,43 +194,19 @@ pub async fn execute_list(
     args: &ListArgs,
     output_mode: OutputMode,
 ) -> Result<()> {
-    use crate::domain::IssueFilter;
+    use crate::domain::{IssueFilter, ListQuery};
     use crate::output;
 
-    // Don't apply limit in filter - we need to sort first, then limit
     let filter = IssueFilter {
         status: args.status,
         priority: args.priority,
         issue_kind: args.issue_kind,
         assignee: args.assignee.clone(),
         label: args.label.clone(),
-        limit: None,
+        limit: Some(args.limit.get()),
     };
-
-    let mut issues = app.storage().list(&filter).await?;
-
-    // Sort before limiting to get correct results
-    match args.sort {
-        SortOrderArg::Priority => {
-            issues.sort_by(|a, b| {
-                a.priority
-                    .cmp(&b.priority)
-                    .then_with(|| b.created_at.cmp(&a.created_at))
-            });
-        }
-        SortOrderArg::Newest => {
-            issues.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-        }
-        SortOrderArg::Oldest => {
-            issues.sort_by(|a, b| a.created_at.cmp(&b.created_at));
-        }
-        SortOrderArg::Updated => {
-            issues.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        }
-    }
-
-    // Apply limit after sorting
-    issues.truncate(args.limit);
+    let query = ListQuery::try_from(filter).map_err(crate::error::Error::from)?;
+    let issues = app.storage().list_issues(&query).await?;
 
     output::print_issues(&issues, output_mode)?;
 
@@ -1522,37 +1498,13 @@ pub async fn execute_stale(
     args: &StaleArgs,
     output_mode: OutputMode,
 ) -> Result<()> {
-    use crate::domain::{IssueFilter, IssueStatus};
+    use crate::domain::StaleQuery;
     use crate::output;
-    use chrono::{Duration, Utc};
+    use chrono::Utc;
 
-    let cutoff = Utc::now() - Duration::days(i64::from(args.days));
-
-    // Build filter based on status if provided
-    let filter = IssueFilter {
-        status: args.status,
-        ..Default::default()
-    };
-
-    let all_issues = app.storage().list(&filter).await?;
-
-    // Filter to stale issues (not updated since cutoff)
-    // When no status filter is provided, exclude closed issues by default
-    // When a status filter IS provided (e.g., --status closed), respect it
-    let mut stale_issues: Vec<_> = all_issues
-        .into_iter()
-        .filter(|i| {
-            let is_stale = i.updated_at < cutoff;
-            let include_issue = args.status.is_some() || i.status != IssueStatus::Closed;
-            is_stale && include_issue
-        })
-        .collect();
-
-    // Sort by updated_at (oldest first)
-    stale_issues.sort_by(|a, b| a.updated_at.cmp(&b.updated_at));
-
-    // Apply limit
-    stale_issues.truncate(args.limit);
+    let query = StaleQuery::new(args.limit, args.status, args.days, Utc::now())
+        .map_err(crate::error::Error::from)?;
+    let stale_issues = app.storage().stale_issues(&query).await?;
 
     match output_mode {
         output::OutputMode::Json => {

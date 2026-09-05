@@ -87,7 +87,7 @@ impl RivetsMcpServer {
 
     /// List issues with optional filters.
     #[tool(
-        description = "List all issues with optional filters (status, priority, kind, assignee, label). Returns up to 100 results by default if no limit specified. Uses workspace_root if provided, otherwise uses current context."
+        description = "List all issues with optional filters (status, priority, kind, assignee, label) and a required positive limit. Uses workspace_root if provided, otherwise uses current context."
     )]
     async fn list(
         &self,
@@ -641,7 +641,7 @@ impl RivetsMcpServer {
 
     /// Find stale issues.
     #[tool(
-        description = "Find issues that haven't been updated recently. Default is 30 days. Useful for identifying forgotten work or issues needing attention. Uses workspace_root if provided, otherwise uses current context."
+        description = "Find issues that haven't been updated recently using an optional status and days filter and a required positive limit. Uses workspace_root if provided, otherwise uses current context."
     )]
     async fn stale(
         &self,
@@ -1052,22 +1052,6 @@ mod tests {
                 "{operation_id} should meet its target contract"
             );
         }
-        for operation_id in [
-            "create_issue",
-            "list_issues",
-            "update_issue",
-            "ready_issues",
-        ] {
-            let operation = registry
-                .operations
-                .iter()
-                .find(|operation| operation.id == operation_id)
-                .expect("broader Label-aware operation must be classified");
-            assert_ne!(
-                operation.target_status, "conformant",
-                "{operation_id} still has non-Label parity gaps"
-            );
-        }
     }
 
     fn classify_registry_operations(registry: &ParityRegistry) -> ClassifiedSurfaces {
@@ -1397,6 +1381,60 @@ mod tests {
     }
 
     #[test]
+    fn query_tool_schemas_require_positive_limits_and_publish_canonical_filters() {
+        let tools = RivetsMcpServer::new().tool_router.list_all();
+        for tool_name in ["list", "stale"] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool.name == tool_name)
+                .expect("query tool should be registered");
+            let schema = &tool.input_schema;
+            let properties = schema["properties"]
+                .as_object()
+                .expect("query schema should expose properties");
+            let required = schema["required"]
+                .as_array()
+                .expect("query schema should expose required fields");
+
+            assert!(
+                required.iter().any(|field| field == "limit"),
+                "{tool_name} limit must be required"
+            );
+            assert_eq!(
+                properties["limit"]["minimum"],
+                serde_json::json!(1),
+                "{tool_name} limit must publish minimum 1"
+            );
+            assert!(
+                properties["limit"].get("default").is_none(),
+                "{tool_name} limit must not advertise a default"
+            );
+
+            let schema_json = serde_json::to_string(schema).expect("query schema should serialize");
+            assert!(schema_json.contains("\"open\""));
+            assert!(schema_json.contains("\"in_progress\""));
+            assert!(schema_json.contains("\"closed\""));
+            assert!(!schema_json.contains("\"blocked\""));
+            assert!(!schema_json.contains("\"in-progress\""));
+        }
+
+        let list = tools
+            .iter()
+            .find(|tool| tool.name == "list")
+            .expect("List tool should be registered");
+        assert_eq!(list.input_schema["properties"]["priority"]["maximum"], 4);
+        let list_schema =
+            serde_json::to_string(&list.input_schema).expect("List schema should serialize");
+        for kind in ["bug", "feature", "task", "epic", "chore"] {
+            assert!(list_schema.contains(&format!("\"{kind}\"")));
+        }
+        assert!(list_schema.contains(r#""pattern":"^[a-z0-9]+(?:[-_][a-z0-9]+)*$""#));
+        assert!(list_schema.contains(r#""minLength":1"#));
+        assert!(list_schema.contains(r#""maxLength":50"#));
+        assert!(!list_schema.contains("\"issue_type\""));
+    }
+
+    #[test]
     fn parentage_tool_router_and_schemas() {
         let tools = RivetsMcpServer::new().tool_router.list_all();
         for (tool_name, has_parent_id) in [
@@ -1503,7 +1541,17 @@ mod tests {
     #[tokio::test]
     async fn test_list_without_context_returns_invalid_params() {
         let server = RivetsMcpServer::new();
-        let result = server.list(Parameters(ListParams::default())).await;
+        let result = server
+            .list(Parameters(ListParams {
+                status: None,
+                priority: None,
+                issue_kind: None,
+                assignee: None,
+                label: None,
+                limit: std::num::NonZeroUsize::new(1).expect("one is nonzero"),
+                workspace_root: None,
+            }))
+            .await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -1567,7 +1615,12 @@ mod tests {
         let result = server
             .list(Parameters(ListParams {
                 status: Some("invalid_status".to_string()),
-                ..Default::default()
+                priority: None,
+                issue_kind: None,
+                assignee: None,
+                label: None,
+                limit: std::num::NonZeroUsize::new(1).expect("one is nonzero"),
+                workspace_root: None,
             }))
             .await;
 
