@@ -5,11 +5,12 @@
 //! - Direct blocked issue detection
 
 use crate::domain::{
-    BlockingDependency, DependencyType, DiscoveryOrigin, Issue, IssueId, IssueStatus,
+    BlockingDependency, DependencyType, DiscoveryOrigin, Issue, IssueId, IssueStatus, Parentage,
     RelatedAssociation,
 };
 use crate::error::{Error, Result};
 use petgraph::Direction;
+
 use petgraph::graph::{DiGraph, EdgeIndex, NodeIndex};
 use petgraph::visit::EdgeRef;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -65,6 +66,88 @@ pub(super) fn has_unresolved_blocking_dependency(
             return Ok(true);
         }
     }
+    Ok(false)
+}
+
+/// Find one Parentage edge for an exact child/parent pair.
+pub(super) fn find_parentage_edge(
+    graph: &DiGraph<IssueId, DependencyType>,
+    child_node: NodeIndex,
+    parent_node: NodeIndex,
+) -> Option<EdgeIndex> {
+    graph
+        .edges_connecting(child_node, parent_node)
+        .find(|edge| *edge.weight() == DependencyType::ParentChild)
+        .map(|edge| edge.id())
+}
+
+/// Return one existing child's Parentage.
+pub(super) fn parentage_of_impl(
+    graph: &DiGraph<IssueId, DependencyType>,
+    node_map: &HashMap<IssueId, NodeIndex>,
+    child_id: &IssueId,
+) -> Result<Option<Parentage>> {
+    let child_node = node_map
+        .get(child_id)
+        .ok_or_else(|| Error::IssueNotFound(child_id.clone()))?;
+    let mut parents = graph
+        .edges(*child_node)
+        .filter(|edge| *edge.weight() == DependencyType::ParentChild)
+        .map(|edge| Parentage::from_valid_parts(child_id.clone(), graph[edge.target()].clone()))
+        .collect::<Vec<_>>();
+    parents.sort();
+    Ok(parents.into_iter().next())
+}
+
+/// Return direct Parentage edges owned by one existing parent.
+pub(super) fn parentage_children_impl(
+    graph: &DiGraph<IssueId, DependencyType>,
+    node_map: &HashMap<IssueId, NodeIndex>,
+    parent_id: &IssueId,
+) -> Result<Vec<Parentage>> {
+    let parent_node = node_map
+        .get(parent_id)
+        .ok_or_else(|| Error::IssueNotFound(parent_id.clone()))?;
+    let mut children = graph
+        .edges_directed(*parent_node, Direction::Incoming)
+        .filter(|edge| *edge.weight() == DependencyType::ParentChild)
+        .map(|edge| Parentage::from_valid_parts(graph[edge.source()].clone(), parent_id.clone()))
+        .collect::<Vec<_>>();
+    children.sort();
+    Ok(children)
+}
+
+/// Check whether one child-to-parent edge would create a Parentage-only cycle.
+pub(super) fn has_parentage_cycle_impl(
+    graph: &DiGraph<IssueId, DependencyType>,
+    node_map: &HashMap<IssueId, NodeIndex>,
+    child_id: &IssueId,
+    parent_id: &IssueId,
+) -> Result<bool> {
+    let child_node = node_map
+        .get(child_id)
+        .ok_or_else(|| Error::IssueNotFound(child_id.clone()))?;
+    let parent_node = node_map
+        .get(parent_id)
+        .ok_or_else(|| Error::IssueNotFound(parent_id.clone()))?;
+    let mut visited = HashSet::new();
+    let mut stack = vec![*parent_node];
+
+    while let Some(node) = stack.pop() {
+        if node == *child_node {
+            return Ok(true);
+        }
+        if !visited.insert(node) {
+            continue;
+        }
+        stack.extend(
+            graph
+                .edges(node)
+                .filter(|edge| *edge.weight() == DependencyType::ParentChild)
+                .map(|edge| edge.target()),
+        );
+    }
+
     Ok(false)
 }
 
@@ -414,6 +497,90 @@ mod tests {
         assert!(
             ready_elapsed <= Duration::from_secs(2),
             "Ready derivation took {ready_elapsed:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "production-scale Parentage checkpoint"]
+    fn parentage_graph_stays_within_scale_budget() {
+        const ISSUE_COUNT: usize = 10_000;
+        const EDGE_COUNT: usize = 50_000;
+        const PARENTAGE_COUNT: usize = 5_000;
+        let mut graph = DiGraph::new();
+        let mut node_map = HashMap::with_capacity(ISSUE_COUNT);
+        let issue_ids = (0..ISSUE_COUNT)
+            .map(|index| IssueId::new(format!("test-{index:05}")))
+            .collect::<Vec<_>>();
+        let nodes = issue_ids
+            .iter()
+            .map(|issue_id| {
+                let node = graph.add_node(issue_id.clone());
+                node_map.insert(issue_id.clone(), node);
+                node
+            })
+            .collect::<Vec<_>>();
+
+        for index in 1..PARENTAGE_COUNT {
+            graph.add_edge(nodes[index], nodes[index - 1], DependencyType::ParentChild);
+        }
+        for index in 0..(EDGE_COUNT - (PARENTAGE_COUNT - 1)) {
+            graph.add_edge(
+                nodes[PARENTAGE_COUNT + index % (ISSUE_COUNT - PARENTAGE_COUNT)],
+                nodes[index % PARENTAGE_COUNT],
+                DependencyType::Related,
+            );
+        }
+        assert_eq!(graph.edge_count(), EDGE_COUNT);
+
+        let started = Instant::now();
+        assert!(
+            !has_parentage_cycle_impl(
+                &graph,
+                &node_map,
+                &issue_ids[PARENTAGE_COUNT],
+                &issue_ids[PARENTAGE_COUNT - 1],
+            )
+            .unwrap()
+        );
+        let acyclic_elapsed = started.elapsed();
+        assert!(
+            acyclic_elapsed <= Duration::from_millis(100),
+            "acyclic Parentage query took {acyclic_elapsed:?}"
+        );
+
+        let started = Instant::now();
+        assert!(
+            has_parentage_cycle_impl(
+                &graph,
+                &node_map,
+                &issue_ids[0],
+                &issue_ids[PARENTAGE_COUNT - 1],
+            )
+            .unwrap()
+        );
+        let cyclic_elapsed = started.elapsed();
+        assert!(
+            cyclic_elapsed <= Duration::from_millis(100),
+            "cyclic Parentage query took {cyclic_elapsed:?}"
+        );
+
+        let started = Instant::now();
+        let parentage =
+            parentage_of_impl(&graph, &node_map, &issue_ids[PARENTAGE_COUNT - 1]).unwrap();
+        let lookup_elapsed = started.elapsed();
+        assert_eq!(
+            parentage,
+            Some(
+                Parentage::new(
+                    issue_ids[PARENTAGE_COUNT - 1].clone(),
+                    issue_ids[PARENTAGE_COUNT - 2].clone(),
+                )
+                .unwrap()
+            )
+        );
+        assert!(
+            lookup_elapsed <= Duration::from_millis(100),
+            "Parentage lookup took {lookup_elapsed:?}"
         );
     }
 }

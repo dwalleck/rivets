@@ -134,6 +134,10 @@ pub enum Error {
         source_issue_id: String,
     },
 
+    /// A Parentage invariant or transition was rejected.
+    #[error(transparent)]
+    InvalidParentage(#[from] rivets::domain::ParentageError),
+
     /// An error from the rivets storage layer.
     #[error("Storage error: {0}")]
     Storage(#[source] RivetsError),
@@ -162,6 +166,7 @@ impl Error {
             | Self::InvalidNote(_)
             | Self::InvalidResource(_)
             | Self::InvalidBlockingDependency(_)
+            | Self::InvalidParentage(_)
             | Self::InvalidStatusTransition(_)
             | Self::Assignment(_)
             | Self::InvalidRelatedAssociation(_)
@@ -228,6 +233,7 @@ impl From<RivetsError> for Error {
                     },
                 },
             },
+            RivetsError::InvalidParentage(source) => Self::InvalidParentage(source),
             error @ (RivetsError::Io(_)
             | RivetsError::WorkspaceLock { .. }
             | RivetsError::Config(_)
@@ -247,7 +253,8 @@ impl From<RivetsError> for Error {
 mod tests {
     use super::*;
     use rivets::domain::{
-        AssignmentError, IssueId, IssueStatus, ResourceError, StatusTransitionError,
+        AssignmentError, IssueId, IssueKind, IssueStatus, ParentageError, ResourceError,
+        StatusTransitionError,
     };
     use rivets::error::StorageError;
 
@@ -371,5 +378,52 @@ mod tests {
             Error::Storage(RivetsError::Storage(StorageError::InvalidFormat(message)))
                 if message == "bad record"
         ));
+    }
+
+    #[test]
+    fn parentage_tool_errors_are_invalid_params() {
+        use rmcp::model::ErrorCode;
+
+        let child_id = IssueId::new("test-child");
+        let parent_id = IssueId::new("test-parent");
+        let errors = [
+            ParentageError::SelfReference {
+                issue_id: child_id.clone(),
+            },
+            ParentageError::ParentNotEpic {
+                parent_id: parent_id.clone(),
+                actual_kind: IssueKind::Task,
+            },
+            ParentageError::AlreadyParented {
+                child_id: child_id.clone(),
+                parent_id: parent_id.clone(),
+            },
+            ParentageError::NoParent {
+                child_id: child_id.clone(),
+            },
+            ParentageError::Cycle {
+                child_id: child_id.clone(),
+                parent_id: parent_id.clone(),
+            },
+            ParentageError::ClosedParent {
+                child_id: child_id.clone(),
+                parent_id: parent_id.clone(),
+            },
+            ParentageError::ActiveChildren {
+                epic_id: parent_id.clone(),
+                child_ids: vec![child_id.clone()],
+            },
+            ParentageError::ParentHasChildren {
+                parent_id,
+                child_ids: vec![child_id],
+            },
+        ];
+
+        for error in errors {
+            assert_eq!(
+                Error::InvalidParentage(error).to_mcp_error().code,
+                ErrorCode::INVALID_PARAMS
+            );
+        }
     }
 }

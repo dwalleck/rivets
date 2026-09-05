@@ -336,6 +336,48 @@ impl BlockingDependencyAction {
         }
     }
 }
+/// Arguments for canonical Parentage operations.
+#[derive(Parser, Debug, Clone)]
+pub struct ParentArgs {
+    /// Parentage subcommand.
+    #[command(subcommand)]
+    pub action: ParentAction,
+}
+
+/// Canonical Parentage actions.
+#[derive(Subcommand, Debug, Clone)]
+pub enum ParentAction {
+    /// Attach an unparented child to an Epic.
+    Set {
+        /// Issue owned by the Epic.
+        #[arg(long, value_parser = validate_issue_id)]
+        child: String,
+        /// Epic that owns the child.
+        #[arg(long, value_parser = validate_issue_id)]
+        parent: String,
+    },
+    /// Remove one child's Parentage.
+    Clear {
+        /// Child whose Parentage is removed.
+        #[arg(long, value_parser = validate_issue_id)]
+        child: String,
+    },
+    /// Replace one child's existing Epic parent.
+    Move {
+        /// Child whose Parentage is replaced.
+        #[arg(long, value_parser = validate_issue_id)]
+        child: String,
+        /// New Epic parent.
+        #[arg(long, value_parser = validate_issue_id)]
+        parent: String,
+    },
+    /// Show one child's current Epic parent.
+    Show {
+        /// Child whose Parentage is shown.
+        #[arg(long, value_parser = validate_issue_id)]
+        child: String,
+    },
+}
 
 /// Select exactly one Blocking Dependency endpoint perspective.
 #[derive(Parser, Debug, Clone)]

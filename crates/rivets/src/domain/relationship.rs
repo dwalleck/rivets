@@ -1,6 +1,6 @@
 //! Typed Issue Relationship values.
 
-use super::IssueId;
+use super::{IssueId, IssueKind};
 use serde::{Deserialize, Serialize};
 
 /// A directed relationship from an Issue that depends on work to its prerequisite.
@@ -218,6 +218,145 @@ pub enum DiscoveryOriginError {
     SelfReference { issue_id: IssueId },
 }
 
+/// A directed ownership relationship from a child Issue to one Epic parent.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct Parentage {
+    child_id: IssueId,
+    parent_id: IssueId,
+}
+
+impl<'de> Deserialize<'de> for Parentage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            child_id: IssueId,
+            parent_id: IssueId,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Self::new(wire.child_id, wire.parent_id).map_err(serde::de::Error::custom)
+    }
+}
+
+impl Parentage {
+    /// Constructs Parentage with explicit child and parent roles.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ParentageError::SelfReference`] when both roles name the same
+    /// Issue. Workspace-level parent Kind, cardinality, cycle, and lifecycle
+    /// invariants are enforced by the storage interface.
+    pub fn new(child_id: IssueId, parent_id: IssueId) -> Result<Self, ParentageError> {
+        if child_id == parent_id {
+            return Err(ParentageError::SelfReference { issue_id: child_id });
+        }
+
+        Ok(Self {
+            child_id,
+            parent_id,
+        })
+    }
+
+    pub(crate) fn from_valid_parts(child_id: IssueId, parent_id: IssueId) -> Self {
+        debug_assert_ne!(child_id, parent_id);
+        Self {
+            child_id,
+            parent_id,
+        }
+    }
+
+    /// Returns the Issue owned by the parent Epic.
+    #[must_use]
+    pub const fn child_id(&self) -> &IssueId {
+        &self.child_id
+    }
+
+    /// Returns the Epic that owns the child.
+    #[must_use]
+    pub const fn parent_id(&self) -> &IssueId {
+        &self.parent_id
+    }
+}
+
+/// A rejected Parentage value or Workspace Parentage transition.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ParentageError {
+    /// An Issue cannot own itself.
+    #[error("Issue {issue_id} cannot be its own parent")]
+    SelfReference {
+        /// The Issue occupying both endpoint roles.
+        issue_id: IssueId,
+    },
+
+    /// Only an Epic may own child Issues.
+    #[error("Issue {parent_id} cannot be a parent because its kind is {actual_kind}, not epic")]
+    ParentNotEpic {
+        /// The rejected candidate parent.
+        parent_id: IssueId,
+        /// The candidate parent's current Kind.
+        actual_kind: IssueKind,
+    },
+
+    /// A set operation tried to assign a second parent.
+    #[error("Issue {child_id} already has parent {parent_id}; use parent move to change it")]
+    AlreadyParented {
+        /// The child that already has a parent.
+        child_id: IssueId,
+        /// The child's current parent.
+        parent_id: IssueId,
+    },
+
+    /// An operation requires Parentage that is absent.
+    #[error("Issue {child_id} has no parent")]
+    NoParent {
+        /// The unparented child.
+        child_id: IssueId,
+    },
+
+    /// A proposed edge would make Parentage cyclic.
+    #[error(
+        "Parentage cycle detected: setting parent of {child_id} to {parent_id} would create a cycle"
+    )]
+    Cycle {
+        /// The proposed child.
+        child_id: IssueId,
+        /// The proposed parent.
+        parent_id: IssueId,
+    },
+
+    /// A non-Closed child cannot be owned by a Closed Epic.
+    #[error("Cannot attach non-Closed child {child_id} to Closed Epic {parent_id}")]
+    ClosedParent {
+        /// The non-Closed child.
+        child_id: IssueId,
+        /// The Closed candidate parent.
+        parent_id: IssueId,
+    },
+
+    /// An Epic cannot close while direct children remain non-Closed.
+    #[error("Cannot close Epic {epic_id}: non-Closed direct children: {child_ids:?}")]
+    ActiveChildren {
+        /// The Epic whose close was rejected.
+        epic_id: IssueId,
+        /// Deterministically ordered non-Closed direct children.
+        child_ids: Vec<IssueId>,
+    },
+
+    /// An Epic with children cannot become a non-Epic Kind.
+    #[error(
+        "Cannot change Epic {parent_id} to a non-Epic kind while it has children: {child_ids:?}"
+    )]
+    ParentHasChildren {
+        /// The owning Epic whose reclassification was rejected.
+        parent_id: IssueId,
+        /// Deterministically ordered direct children.
+        child_ids: Vec<IssueId>,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,6 +480,39 @@ mod tests {
         assert!(
             self_reference.is_err(),
             "deserialization must preserve the self-reference invariant"
+        );
+    }
+
+    #[test]
+    fn parentage_constructor_and_deserialization_reject_self_reference() {
+        let parentage = Parentage::new(IssueId::new("test-child"), IssueId::new("test-parent"))
+            .expect("distinct endpoint roles should be valid");
+
+        assert_eq!(parentage.child_id().as_str(), "test-child");
+        assert_eq!(parentage.parent_id().as_str(), "test-parent");
+        assert_eq!(
+            serde_json::to_value(&parentage).expect("Parentage should serialize"),
+            serde_json::json!({
+                "child_id": "test-child",
+                "parent_id": "test-parent"
+            })
+        );
+        assert_eq!(
+            Parentage::new(IssueId::new("test-self"), IssueId::new("test-self")),
+            Err(ParentageError::SelfReference {
+                issue_id: IssueId::new("test-self")
+            })
+        );
+
+        let deserialization_error = serde_json::from_value::<Parentage>(serde_json::json!({
+            "child_id": "test-self",
+            "parent_id": "test-self"
+        }))
+        .expect_err("deserialization must enforce the self-reference invariant");
+        assert!(
+            deserialization_error
+                .to_string()
+                .contains("cannot be its own parent")
         );
     }
 }

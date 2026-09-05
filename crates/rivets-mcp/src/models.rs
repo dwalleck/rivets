@@ -414,6 +414,26 @@ pub struct BlockingDependencyPairParams {
     pub workspace_root: Option<String>,
 }
 
+/// Parameters shared by Parentage set and move tools.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ParentPairParams {
+    /// Issue owned by the Epic.
+    pub child_id: String,
+    /// Epic that owns the child.
+    pub parent_id: String,
+    /// Optional workspace root (uses current context if not specified).
+    pub workspace_root: Option<String>,
+}
+
+/// Parameters shared by Parentage clear and show tools.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ParentChildParams {
+    /// Child whose Parentage is mutated or queried.
+    pub child_id: String,
+    /// Optional workspace root (uses current context if not specified).
+    pub workspace_root: Option<String>,
+}
+
 /// One valid perspective for listing Blocking Dependencies.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]

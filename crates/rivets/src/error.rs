@@ -1,6 +1,8 @@
 //! Error types for rivets CLI operations.
 
-use crate::domain::{AssignmentError, IssueId, ResourceError, StatusTransitionError};
+use crate::domain::{
+    AssignmentError, IssueId, ParentageError, ResourceError, StatusTransitionError,
+};
 use std::{fmt, io, path::PathBuf};
 use thiserror::Error;
 
@@ -356,6 +358,10 @@ pub enum Error {
     /// Storage error.
     #[error("{0}")]
     Storage(#[from] StorageError),
+
+    /// A Parentage invariant or transition was rejected.
+    #[error(transparent)]
+    InvalidParentage(#[from] ParentageError),
 
     /// CLI input validation error.
     ///

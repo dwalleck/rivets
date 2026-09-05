@@ -19,6 +19,10 @@ classDiagram
         +blocking_prerequisites(IssueId) Future~Vec~BlockingDependency~~
         +blocking_dependents(IssueId) Future~Vec~BlockingDependency~~
         +blocking_dependency_tree(IssueId, Option~usize~) Future~Vec~(BlockingDependency, usize)~~
+        +set_parent(Parentage) Future~Parentage~
+        +clear_parent(IssueId) Future~Parentage~
+        +move_parent(Parentage) Future~Parentage~
+        +parent_of(IssueId) Future~Option~Parentage~~
         +list(IssueFilter) Future~Vec~Issue~~
         +ready_to_work(ReadyFilter, Option~SortPolicy~) Future~Vec~Issue~~
         +blocked_issues() Future~Vec~(Issue, Vec~Issue~)~~
@@ -66,7 +70,7 @@ classDiagram
 ### Public and private seams
 
 - **Public API** (`rivets::storage`): the `IssueStorage` trait, the `StorageBackend` enum, the `create_storage(backend, prefix)` factory, and the `in_memory` module's free functions `new_in_memory_storage(prefix)`, `load_from_jsonl(path, prefix)`, `save_to_jsonl(storage, path)`, plus `LoadWarning` and `MigrationField`. `MockStorage` (a stateless test double returning hardcoded data for `test-1`) is available under `cfg(test)` or the `test-util` feature.
-- **Private implementation**: `InMemoryStorage` is a `pub(crate)` type alias (`Arc<Mutex<InMemoryStorageInner>>`), not a public struct; there is no public `InMemoryStorage::new()` / `load_from_jsonl()` / `save_to_jsonl()` method pair. The persistence guard `JsonlBackedStorage`, the inner storage struct, the `IssueRecord`/`CanonicalIssueRecord` DTOs, and the graph helpers (`has_cycle_impl`, `find_blocked_issues`) are all private.
+- **Private implementation**: `InMemoryStorage` is a `pub(crate)` type alias (`Arc<Mutex<InMemoryStorageInner>>`), not a public struct; there is no public `InMemoryStorage::new()` / `load_from_jsonl()` / `save_to_jsonl()` method pair. The persistence guard `JsonlBackedStorage`, the inner storage struct, the `IssueRecord`/`CanonicalIssueRecord` DTOs, and graph helpers for Blocking and Parentage reachability are all private.
 - **No `PostgresStorage`**: the `StorageBackend::PostgreSQL(String)` enum variant is a placeholder (`#[allow(dead_code)]`); both config resolution (`StorageConfig::to_backend`) and `create_storage` reject it with `ConfigError::UnsupportedBackend("PostgreSQL")`.
 
 ## InMemoryStorage Structure

@@ -65,6 +65,7 @@ rivets close "$ID"
 | `blocking-dependency` | Blocking Dependencies: `add`/`remove --dependent <id> --prerequisite <id>`, `list --dependent|--prerequisite <id>`, `tree --dependent <id> [--depth N]` |
 | `related` | Symmetric Related Associations: `add`/`remove --issue <id> --related <id>`, `list --issue <id>` |
 | `discovery` | Directed Discovery Origins: `add`/`remove --discovered <id> --source <id>`, `list --discovered <id>` |
+| `parent` | Parentage: `set`/`move --child <id> --parent <epic-id>`, `clear`/`show --child <id>` |
 | `label` | Labels: `add <label> [<issue-id>]`, `remove`, `list <issue-id>`, `list-all`; use `--ids` for batches |
 | `resource` | Associated Resources: `add`, `list`, `update`, `remove` (see below) |
 | `stale` | Issues not updated in N days (`--days`, default 30) |
@@ -134,6 +135,21 @@ Discovery-only cycles. Neither relationship affects Blocked or Ready status.
 The MCP equivalents are `related_add`, `related_remove`, `related_list`,
 `discovery_add`, `discovery_remove`, and `discovery_list`, with the same
 endpoint names and semantics.
+
+### Parentage
+
+```bash
+rivets parent set --child demo-a3f8 --parent demo-b2c9
+rivets parent show --child demo-a3f8
+rivets parent move --child demo-a3f8 --parent demo-c4d1
+rivets parent clear --child demo-a3f8
+```
+
+Each child has at most one parent, and only an Epic can be the parent. Use
+`move` rather than `set` to replace an existing parent. Nested Epics are
+allowed, but Parentage cycles are rejected. A non-Closed child cannot attach
+to a Closed Epic or reopen beneath one, and an Epic cannot close while it has
+non-Closed direct children. Parentage never changes Blocked or Ready.
 
 ### Labels
 

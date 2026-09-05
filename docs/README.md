@@ -6,9 +6,9 @@ Rivets is a Rust issue tracker (edition 2024, MSRV 1.94.0) that stores Issues as
 
 - `rivets` — CLI application and core issue-tracking domain
 - `rivets-jsonl` — JSONL reading/writing library
-- `rivets-mcp` — MCP server for AI assistants (32 tools)
+- `rivets-mcp` — MCP server for AI assistants (36 tools)
 
-The CLI exposes 20 top-level commands: `init`, `info`, `create`, `list`, `show`, `update`, `claim`, `release`, `close`, `reopen`, `delete`, `ready`, `blocking-dependency`, `related`, `discovery`, `label`, `resource`, `stale`, `blocked`, and `stats`.
+The CLI exposes 21 top-level commands: `init`, `info`, `create`, `list`, `show`, `update`, `claim`, `release`, `close`, `reopen`, `delete`, `ready`, `blocking-dependency`, `related`, `discovery`, `parent`, `label`, `resource`, `stale`, `blocked`, and `stats`.
 
 **Current behavior:**
 
@@ -17,7 +17,8 @@ The CLI exposes 20 top-level commands: `init`, `info`, `create`, `list`, `show`,
 - JSONL loading has three stages: parse compatibility records, import Issues, then rebuild relationships.
 - Issue IDs combine a prefix with an adaptive hash whose inputs include a timestamp and nonce; they are not content-addressed.
 - `blocking-dependency add/remove/list/tree` uses explicit dependent and prerequisite roles. The same typed storage interface backs equivalent MCP tools; relationship changes never auto-mutate Issue status.
-- Implemented surfaces include atomic Assignment Claim/Release, canonical Blocking Dependencies, symmetric Related Associations, directed Discovery Origins, Associated Resources, immutable Notes, mutable Issue Kind, labels, `stats`/`stale`/`info`, and MCP multi-workspace support. Most MCP issue operations accept an optional `workspace_root`; otherwise they use the context selected by `set_context`.
+- `parent set/clear/move/show` and MCP `parent_set`/`parent_clear`/`parent_move`/`parent_show` use explicit child and Epic-parent roles, enforce one acyclic parent per child, and never change Blocked or Ready.
+- Implemented surfaces include atomic Assignment Claim/Release, canonical Blocking Dependencies, single-Epic Parentage, symmetric Related Associations, directed Discovery Origins, Associated Resources, immutable Notes, mutable Issue Kind, labels, `stats`/`stale`/`info`, and MCP multi-workspace support. Most MCP issue operations accept an optional `workspace_root`; otherwise they use the context selected by `set_context`.
 
 This index separates **current reference documentation** (describes the implemented system) from **accepted decisions** (ADRs, some of which the implementation intentionally lags) and **historical artifacts** (pre-implementation plans and research, not the work frontier).
 
@@ -43,7 +44,7 @@ This index separates **current reference documentation** (describes the implemen
 - [ADR-0005: The domain owns Workflow State and Assignment transitions](./adr/0005-domain-owned-status-transitions.md) — lifecycle side effects and atomic Claim/Release rules live behind the shared domain/storage seam.
 - [ADR-0006: CLI and MCP share semantic Interface Parity](./adr/0006-semantic-interface-parity.md) — shared intents preserve observable domain behavior while adapter-specific invocation and presentation mechanics remain explicit.
 
-**Implementation lags some accepted decisions.** Blocking Dependency mutation, Related Associations, Discovery Origins, direct Blocked derivation, canonical Workflow State, and Assignment-aware Ready queries now use canonical typed interfaces. Parentage and canonical `relationships` persistence remain in their tracked ADR-0002 slices. Issue Kind is mutable (Bug, Feature, Task, Epic, Chore); “Issue type” is legacy vocabulary. Legacy singular Notes, External References, Workflow State spellings, and generic relationship records are accepted only at compatibility seams; do not document them as canonical.
+**Implementation lags some accepted decisions.** Blocking Dependency mutation, single-Epic Parentage, Related Associations, Discovery Origins, direct Blocked derivation, canonical Workflow State, and Assignment-aware Ready queries now use canonical typed interfaces. Canonical `relationships` persistence remains in its tracked ADR-0002 slice. Issue Kind is mutable (Bug, Feature, Task, Epic, Chore); “Issue type” is legacy vocabulary. Legacy singular Notes, External References, Workflow State spellings, and generic relationship records are accepted only at compatibility seams; do not document them as canonical.
 
 ## Agent Documentation
 
