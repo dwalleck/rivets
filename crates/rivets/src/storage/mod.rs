@@ -70,7 +70,7 @@
 //! ```
 
 use crate::domain::{
-    BlockingDependency, DiscoveryOrigin, Issue, IssueFilter, IssueId, IssueUpdate, NewIssue,
+    BlockingDependency, DiscoveryOrigin, Issue, IssueFilter, IssueId, IssueUpdate, Label, NewIssue,
     NewResource, Parentage, ReadyFilter, RelatedAssociation, ResourceId, ResourceUpdate,
     SortPolicy,
 };
@@ -295,7 +295,7 @@ pub trait IssueStorage: Send + Sync {
     /// # Errors
     ///
     /// - `Error::IssueNotFound` if the issue doesn't exist
-    async fn add_label(&mut self, id: &IssueId, label: &str) -> Result<Issue>;
+    async fn add_label(&mut self, id: &IssueId, label: &Label) -> Result<Issue>;
 
     /// Atomically remove a label from an issue.
     ///
@@ -305,7 +305,7 @@ pub trait IssueStorage: Send + Sync {
     /// # Errors
     ///
     /// - `Error::IssueNotFound` if the issue doesn't exist
-    async fn remove_label(&mut self, id: &IssueId, label: &str) -> Result<Issue>;
+    async fn remove_label(&mut self, id: &IssueId, label: &Label) -> Result<Issue>;
 
     // ========== Associated Resource Operations ==========
 
@@ -710,12 +710,12 @@ impl IssueStorage for JsonlBackedStorage {
         self.inner.blocked_issues().await
     }
 
-    async fn add_label(&mut self, id: &IssueId, label: &str) -> Result<Issue> {
+    async fn add_label(&mut self, id: &IssueId, label: &Label) -> Result<Issue> {
         self.prepare_mutation().await?;
         self.inner.add_label(id, label).await
     }
 
-    async fn remove_label(&mut self, id: &IssueId, label: &str) -> Result<Issue> {
+    async fn remove_label(&mut self, id: &IssueId, label: &Label) -> Result<Issue> {
         self.prepare_mutation().await?;
         self.inner.remove_label(id, label).await
     }
@@ -1106,11 +1106,11 @@ impl IssueStorage for MockStorage {
         Ok(vec![])
     }
 
-    async fn add_label(&mut self, _id: &IssueId, _label: &str) -> Result<Issue> {
+    async fn add_label(&mut self, _id: &IssueId, _label: &Label) -> Result<Issue> {
         Self::unsupported("MockStorage::add_label")
     }
 
-    async fn remove_label(&mut self, _id: &IssueId, _label: &str) -> Result<Issue> {
+    async fn remove_label(&mut self, _id: &IssueId, _label: &Label) -> Result<Issue> {
         Self::unsupported("MockStorage::remove_label")
     }
 

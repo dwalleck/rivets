@@ -1,9 +1,9 @@
 //! Compatibility boundary between persisted JSONL issue records and the domain model.
 
 use crate::domain::{
-    AssociatedResource, Dependency, Issue, IssueId, IssueKind, IssueStatus, NewResource, Note,
-    NoteContent, NoteError, ResourceError, ResourceId, ResourceLabel, ResourceRole, ResourceTarget,
-    WebUrl, WorkspacePath, is_unsafe_multiline_control,
+    AssociatedResource, Dependency, Issue, IssueId, IssueKind, IssueStatus, Label, NewResource,
+    Note, NoteContent, NoteError, ResourceError, ResourceId, ResourceLabel, ResourceRole,
+    ResourceTarget, WebUrl, WorkspacePath, is_unsafe_multiline_control,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -387,6 +387,11 @@ impl IssueRecord {
                 ));
             }
         };
+        let labels = labels
+            .into_iter()
+            .map(Label::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| invalid_data_error(&id, migration_conflict, error))?;
 
         let note_error = |error: NoteError| invalid_data_error(&id, migration_conflict, error);
         let notes = match notes {
@@ -521,7 +526,7 @@ pub(super) struct CanonicalIssueRecord {
     priority: u8,
     issue_kind: IssueKind,
     assignee: Option<String>,
-    labels: Vec<String>,
+    labels: Vec<Label>,
     design: Option<String>,
     acceptance_criteria: Option<String>,
     notes: PersistedNotes,

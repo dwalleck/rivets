@@ -114,8 +114,8 @@ pub trait IssueStorage: Send + Sync {
     async fn blocked_issues(&self) -> Result<Vec<(Issue, Vec<Issue>)>>;
 
     // Atomic label operations
-    async fn add_label(&mut self, id: &IssueId, label: &str) -> Result<Issue>;
-    async fn remove_label(&mut self, id: &IssueId, label: &str) -> Result<Issue>;
+    async fn add_label(&mut self, id: &IssueId, label: &Label) -> Result<Issue>;
+    async fn remove_label(&mut self, id: &IssueId, label: &Label) -> Result<Issue>;
 
     // Associated Resource operations
     async fn add_resource(&mut self, id: &IssueId, resource: NewResource) -> Result<Issue>;

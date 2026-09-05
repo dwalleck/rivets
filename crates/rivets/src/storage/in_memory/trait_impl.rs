@@ -10,9 +10,9 @@ use super::sorting::sort_by_policy;
 use super::{InMemoryStorage, InMemoryStorageInner};
 use crate::domain::{
     AssignmentError, BlockingDependency, Dependency, DependencyType, DiscoveryOrigin, Issue,
-    IssueFilter, IssueId, IssueKind, IssueStatus, IssueUpdate, MAX_PRIORITY, NewIssue, NewResource,
-    Note, Parentage, ParentageError, ReadyFilter, RelatedAssociation, ResourceId, ResourceUpdate,
-    SortPolicy,
+    IssueFilter, IssueId, IssueKind, IssueStatus, IssueUpdate, Label, MAX_PRIORITY, NewIssue,
+    NewResource, Note, Parentage, ParentageError, ReadyFilter, RelatedAssociation, ResourceId,
+    ResourceUpdate, SortPolicy,
 };
 use crate::error::{Error, Result, StorageError};
 use crate::storage::IssueStorage;
@@ -79,7 +79,7 @@ fn matches_common_filter(
     issue: &Issue,
     priority: Option<u8>,
     issue_kind: Option<&IssueKind>,
-    label: Option<&str>,
+    label: Option<&Label>,
 ) -> bool {
     priority.is_none_or(|priority| issue.priority == priority)
         && issue_kind.is_none_or(|issue_kind| &issue.issue_kind == issue_kind)
@@ -96,7 +96,7 @@ fn matches_filter(issue: &Issue, filter: &IssueFilter) -> bool {
             issue,
             filter.priority,
             filter.issue_kind.as_ref(),
-            filter.label.as_deref(),
+            filter.label.as_ref(),
         )
         && filter
             .assignee
@@ -111,7 +111,7 @@ fn matches_ready_filter(issue: &Issue, filter: &ReadyFilter) -> bool {
             issue,
             filter.priority,
             filter.issue_kind.as_ref(),
-            filter.label.as_deref(),
+            filter.label.as_ref(),
         )
 }
 
@@ -1008,7 +1008,7 @@ impl IssueStorage for InMemoryStorage {
         Ok(blocked_list)
     }
 
-    async fn add_label(&mut self, id: &IssueId, label: &str) -> Result<Issue> {
+    async fn add_label(&mut self, id: &IssueId, label: &Label) -> Result<Issue> {
         let mut inner = self.lock().await;
 
         let issue = inner
@@ -1016,16 +1016,15 @@ impl IssueStorage for InMemoryStorage {
             .get_mut(id)
             .ok_or_else(|| Error::IssueNotFound(id.clone()))?;
 
-        // Only add if not already present (idempotent)
-        if !issue.labels.contains(&label.to_string()) {
-            issue.labels.push(label.to_string());
+        if !issue.labels.contains(label) {
+            issue.labels.push(label.clone());
             issue.updated_at = chrono::Utc::now();
         }
 
         Ok(issue.clone())
     }
 
-    async fn remove_label(&mut self, id: &IssueId, label: &str) -> Result<Issue> {
+    async fn remove_label(&mut self, id: &IssueId, label: &Label) -> Result<Issue> {
         let mut inner = self.lock().await;
 
         let issue = inner
@@ -1110,7 +1109,7 @@ impl IssueStorage for InMemoryStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{IssueFilter, IssueKind, IssueStatus, ReadyAssignmentFilter};
+    use crate::domain::{IssueFilter, IssueKind, IssueStatus, Label, ReadyAssignmentFilter};
     use crate::storage::in_memory::inner::InMemoryStorageInner;
     use rstest::rstest;
     use std::collections::BTreeSet;
@@ -1127,7 +1126,10 @@ mod tests {
             priority: 2,
             issue_kind: IssueKind::Task,
             assignee: Some("alice".to_string()),
-            labels: vec!["bug".to_string(), "urgent".to_string()],
+            labels: ["bug", "urgent"]
+                .into_iter()
+                .map(|value| Label::new(value).expect("canonical test Label"))
+                .collect(),
             design: None,
             acceptance_criteria: None,
             notes: vec![],
@@ -1199,12 +1201,12 @@ mod tests {
     }
 
     #[rstest]
-    #[case::label_matches(Some("bug".to_string()), true)]
-    #[case::label_does_not_match(Some("feature".to_string()), false)]
-    fn test_matches_filter_label(#[case] label: Option<String>, #[case] expected: bool) {
+    #[case::label_matches(Some("bug"), true)]
+    #[case::label_does_not_match(Some("feature"), false)]
+    fn test_matches_filter_label(#[case] label: Option<&str>, #[case] expected: bool) {
         let issue = create_test_issue();
         let filter = IssueFilter {
-            label,
+            label: label.map(|value| Label::new(value).expect("canonical test Label")),
             ..Default::default()
         };
         assert_eq!(matches_filter(&issue, &filter), expected);
@@ -1220,7 +1222,7 @@ mod tests {
             priority: Some(2),
             issue_kind: Some(IssueKind::Task),
             assignee: Some("alice".to_string()),
-            label: Some("bug".to_string()),
+            label: Some(Label::new("bug").expect("canonical test Label")),
             limit: None,
         };
         assert!(matches_filter(&issue, &filter));
@@ -1275,9 +1277,9 @@ mod tests {
                     },
                     assignee,
                     labels: if index % 2 == 0 {
-                        vec!["even".to_string()]
+                        vec![Label::new("even").expect("canonical Label")]
                     } else {
-                        vec!["odd".to_string()]
+                        vec![Label::new("odd").expect("canonical Label")]
                     },
                     design: None,
                     acceptance_criteria: None,

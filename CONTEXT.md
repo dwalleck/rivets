@@ -43,7 +43,7 @@ _Avoid_: Feature, Task when the work is specifically maintenance
 ### Issue record
 
 **Issue ID**:
-A stable identifier unique within a Workspace and retained for the lifetime of an Issue.
+A stable identifier unique within a Workspace and retained for the lifetime of an Issue. Its canonical spelling is a 2-20 byte ASCII-alphanumeric prefix followed by one or more ASCII-alphanumeric suffix segments separated by single hyphens.
 _Avoid_: Ticket number, issue number
 
 **Note**:

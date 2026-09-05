@@ -10,7 +10,7 @@
 //!   - Emphasis:      bold    (section headers, P0)
 //!   - Default:       white   (open status)
 
-use crate::domain::{IssueKind, IssueStatus};
+use crate::domain::{IssueKind, IssueStatus, Label};
 use colored::Colorize;
 
 use super::OutputConfig;
@@ -82,11 +82,22 @@ pub(crate) fn colorize_id(id: &str, config: &OutputConfig) -> String {
 }
 
 /// Colorize labels (magenta).
-pub(crate) fn colorize_labels(labels: &[String], config: &OutputConfig) -> String {
+pub(crate) fn colorize_labels(labels: &[Label], config: &OutputConfig) -> String {
     if labels.is_empty() {
         return String::new();
     }
-    let text = labels.join(", ");
+    let capacity = labels
+        .iter()
+        .map(|label| label.as_str().len())
+        .sum::<usize>()
+        + (labels.len() - 1) * 2;
+    let mut text = String::with_capacity(capacity);
+    for (index, label) in labels.iter().enumerate() {
+        if index != 0 {
+            text.push_str(", ");
+        }
+        text.push_str(label.as_str());
+    }
     if !config.use_colors {
         return text;
     }

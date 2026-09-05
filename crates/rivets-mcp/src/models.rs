@@ -127,6 +127,10 @@ pub struct ReadyParams {
     pub all_assignees: bool,
 
     /// Filter by label.
+    #[schemars(
+        length(min = 1, max = 50),
+        regex(pattern = r"^[a-z0-9]+(?:[-_][a-z0-9]+)*$")
+    )]
     pub label: Option<String>,
 
     /// Optional workspace root (uses current context if not specified).
@@ -150,6 +154,10 @@ pub struct ListParams {
     pub assignee: Option<String>,
 
     /// Filter by label.
+    #[schemars(
+        length(min = 1, max = 50),
+        regex(pattern = r"^[a-z0-9]+(?:[-_][a-z0-9]+)*$")
+    )]
     pub label: Option<String>,
 
     /// Maximum number of issues to return.
@@ -196,6 +204,10 @@ pub struct CreateParams {
     pub assignee: Option<String>,
 
     /// Labels.
+    #[schemars(inner(
+        length(min = 1, max = 50),
+        regex(pattern = r"^[a-z0-9]+(?:[-_][a-z0-9]+)*$")
+    ))]
     pub labels: Option<Vec<String>>,
 
     /// Design notes.
@@ -255,6 +267,10 @@ pub struct UpdateParams {
     pub acceptance_criteria: Option<String>,
 
     /// New labels (replaces existing labels).
+    #[schemars(inner(
+        length(min = 1, max = 50),
+        regex(pattern = r"^[a-z0-9]+(?:[-_][a-z0-9]+)*$")
+    ))]
     pub labels: Option<Vec<String>>,
 
     /// Optional workspace root (uses current context if not specified).
@@ -546,6 +562,10 @@ pub struct LabelAddParams {
     pub issue_id: String,
 
     /// The label to add.
+    #[schemars(
+        length(min = 1, max = 50),
+        regex(pattern = r"^[a-z0-9]+(?:[-_][a-z0-9]+)*$")
+    )]
     pub label: String,
 
     /// Optional workspace root (uses current context if not specified).
@@ -559,6 +579,10 @@ pub struct LabelRemoveParams {
     pub issue_id: String,
 
     /// The label to remove.
+    #[schemars(
+        length(min = 1, max = 50),
+        regex(pattern = r"^[a-z0-9]+(?:[-_][a-z0-9]+)*$")
+    )]
     pub label: String,
 
     /// Optional workspace root (uses current context if not specified).

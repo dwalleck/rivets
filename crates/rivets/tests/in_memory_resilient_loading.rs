@@ -13,7 +13,7 @@
 
 use chrono::Utc;
 use rivets::domain::{
-    BlockingDependency, DiscoveryOrigin, IssueId, IssueKind, IssueStatus, NewIssue,
+    BlockingDependency, DiscoveryOrigin, IssueId, IssueKind, IssueStatus, Label, NewIssue,
     RelatedAssociation, ResourceError, ResourceRole,
 };
 use rivets::storage::in_memory::{
@@ -461,6 +461,45 @@ mod load_from_jsonl_tests {
     }
 
     #[tokio::test]
+    async fn noncanonical_persisted_label_is_invalid_issue_data() {
+        let now = Utc::now().to_rfc3339();
+        let invalid_issue = format!(
+            r#"{{"id":"test-invalid-label","title":"Invalid Label","description":"Test","status":"open","priority":2,"issue_kind":"task","assignee":null,"labels":["valid","DRY"],"design":null,"acceptance_criteria":null,"notes":[],"resources":[],"dependencies":[],"created_at":"{}","updated_at":"{}","closed_at":null}}"#,
+            now, now
+        );
+        let valid_issue = create_valid_issue_json("test-valid", "Valid Issue");
+        let file = create_temp_jsonl_file(&format!("{invalid_issue}\n{valid_issue}"));
+
+        let (storage, warnings) = load_from_jsonl(file.path(), "test".to_string())
+            .await
+            .expect("resilient load should succeed");
+
+        assert!(matches!(
+            warnings.as_slice(),
+            [LoadWarning::InvalidIssueData {
+                issue_id,
+                line_number: 1,
+                error,
+            }] if issue_id.as_str() == "test-invalid-label"
+                && error.contains("Label must be lowercase")
+        ));
+        assert!(
+            storage
+                .get(&IssueId::new("test-invalid-label"))
+                .await
+                .expect("lookup should succeed")
+                .is_none()
+        );
+        assert!(
+            storage
+                .get(&IssueId::new("test-valid"))
+                .await
+                .expect("lookup should succeed")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
     async fn load_with_mixed_warnings() {
         let now = Utc::now().to_rfc3339();
 
@@ -566,7 +605,10 @@ mod load_from_jsonl_tests {
         assert_eq!(loaded.priority, 1);
         assert_eq!(loaded.issue_kind, IssueKind::Feature);
         assert_eq!(loaded.assignee, Some("alice".to_string()));
-        assert_eq!(loaded.labels, vec!["backend", "urgent"]);
+        assert_eq!(
+            loaded.labels.iter().map(Label::as_str).collect::<Vec<_>>(),
+            vec!["backend", "urgent"]
+        );
         assert_eq!(loaded.design, Some("Design notes here".to_string()));
         assert!(loaded.resources().is_empty());
         assert_eq!(loaded.notes().len(), 2);

@@ -362,7 +362,7 @@ impl Cli {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{IssueKind, IssueStatus};
+    use crate::domain::{IssueKind, IssueStatus, Label};
 
     fn parses_as_mutation(args: &[&str]) -> bool {
         let argv: Vec<_> = std::iter::once("rivets")
@@ -668,7 +668,10 @@ mod tests {
                 assert_eq!(args.priority, 1);
                 assert_eq!(args.issue_kind, IssueKind::Bug);
                 assert_eq!(args.assignee, Some("alice".to_string()));
-                assert_eq!(args.labels, vec!["urgent", "backend"]);
+                assert_eq!(
+                    args.labels.iter().map(Label::as_str).collect::<Vec<_>>(),
+                    vec!["urgent", "backend"]
+                );
             }
             _ => panic!("Expected Create command"),
         }
@@ -773,6 +776,199 @@ mod tests {
     fn test_parse_show_invalid_id() {
         let result = Cli::try_parse_from(["rivets", "show", "invalid"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn all_issue_id_inputs_use_domain_parser() {
+        let mut cases = vec![
+            vec![
+                "rivets",
+                "create",
+                "--title",
+                "Title",
+                "--prerequisite",
+                "invalid",
+            ],
+            vec!["rivets", "show", "invalid"],
+            vec!["rivets", "update", "invalid", "--title", "Title"],
+            vec!["rivets", "close", "invalid"],
+            vec!["rivets", "reopen", "invalid"],
+            vec!["rivets", "delete", "invalid"],
+            vec![
+                "rivets",
+                "blocking-dependency",
+                "add",
+                "--dependent",
+                "invalid",
+                "--prerequisite",
+                "ab-1",
+            ],
+            vec![
+                "rivets",
+                "blocking-dependency",
+                "add",
+                "--dependent",
+                "ab-1",
+                "--prerequisite",
+                "invalid",
+            ],
+            vec![
+                "rivets",
+                "blocking-dependency",
+                "list",
+                "--dependent",
+                "invalid",
+            ],
+            vec![
+                "rivets",
+                "blocking-dependency",
+                "list",
+                "--prerequisite",
+                "invalid",
+            ],
+            vec![
+                "rivets",
+                "blocking-dependency",
+                "tree",
+                "--dependent",
+                "invalid",
+            ],
+            vec!["rivets", "label", "add", "urgent", "invalid"],
+            vec!["rivets", "label", "remove", "urgent", "invalid"],
+            vec!["rivets", "label", "list", "invalid"],
+            vec![
+                "rivets",
+                "resource",
+                "add",
+                "invalid",
+                "--url",
+                "https://example.com",
+                "--role",
+                "reference",
+            ],
+            vec![
+                "rivets",
+                "resource",
+                "update",
+                "invalid",
+                "--resource",
+                "r1",
+                "--role",
+                "evidence",
+            ],
+            vec![
+                "rivets",
+                "resource",
+                "remove",
+                "invalid",
+                "--resource",
+                "r1",
+            ],
+            vec!["rivets", "resource", "list", "invalid"],
+        ];
+
+        for action in ["claim", "release"] {
+            cases.push(vec!["rivets", action, "invalid", "--assignee", "agent"]);
+        }
+        for (command, action, first_role, second_role) in [
+            (
+                "blocking-dependency",
+                "remove",
+                "--dependent",
+                "--prerequisite",
+            ),
+            ("parent", "set", "--child", "--parent"),
+            ("parent", "move", "--child", "--parent"),
+            ("related", "add", "--issue", "--related"),
+            ("related", "remove", "--issue", "--related"),
+            ("discovery", "add", "--discovered", "--source"),
+            ("discovery", "remove", "--discovered", "--source"),
+        ] {
+            for (first, second) in [("invalid", "ab-1"), ("ab-1", "invalid")] {
+                cases.push(vec![
+                    "rivets",
+                    command,
+                    action,
+                    first_role,
+                    first,
+                    second_role,
+                    second,
+                ]);
+            }
+        }
+        for (command, action, role) in [
+            ("parent", "clear", "--child"),
+            ("parent", "show", "--child"),
+            ("related", "list", "--issue"),
+            ("discovery", "list", "--discovered"),
+        ] {
+            cases.push(vec!["rivets", command, action, role, "invalid"]);
+        }
+
+        for invalid_args in cases {
+            let error = Cli::try_parse_from(&invalid_args)
+                .expect_err("malformed Issue ID should fail at the CLI boundary");
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "unexpected error for {invalid_args:?}: {error}"
+            );
+
+            let valid_args = invalid_args
+                .into_iter()
+                .map(|argument| {
+                    if argument == "invalid" {
+                        "abcdefghijklmnopqrst-feature-123"
+                    } else {
+                        argument
+                    }
+                })
+                .collect::<Vec<_>>();
+            Cli::try_parse_from(&valid_args)
+                .unwrap_or_else(|error| panic!("valid control failed for {valid_args:?}: {error}"));
+        }
+    }
+
+    #[test]
+    fn all_issue_label_inputs_use_domain_parser() {
+        let cases = [
+            vec![
+                "rivets",
+                "create",
+                "--title",
+                "Title",
+                "--labels",
+                "bad label",
+            ],
+            vec!["rivets", "list", "--label", "bad label"],
+            vec!["rivets", "ready", "--label", "bad label"],
+            vec!["rivets", "label", "add", "bad label", "ab-1"],
+            vec!["rivets", "label", "remove", "bad label", "ab-1"],
+        ];
+
+        for invalid_args in cases {
+            let error = Cli::try_parse_from(&invalid_args)
+                .expect_err("noncanonical Label should fail at the CLI boundary");
+            assert!(
+                error
+                    .to_string()
+                    .contains("Label must contain only lowercase letters"),
+                "unexpected error for {invalid_args:?}: {error}"
+            );
+
+            let valid_args = invalid_args
+                .into_iter()
+                .map(|argument| {
+                    if argument == "bad label" {
+                        "ready-for-agent"
+                    } else {
+                        argument
+                    }
+                })
+                .collect::<Vec<_>>();
+            Cli::try_parse_from(&valid_args)
+                .unwrap_or_else(|error| panic!("valid control failed for {valid_args:?}: {error}"));
+        }
     }
 
     #[test]

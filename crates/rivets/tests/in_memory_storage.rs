@@ -6,9 +6,10 @@
 
 use rivets::domain::{
     AssignmentError, BlockingDependency, Dependency, DependencyType, DiscoveryOrigin, Issue,
-    IssueId, IssueKind, IssueStatus, IssueUpdate, MAX_PRIORITY, NewIssue, NewResource, NoteContent,
-    Parentage, ParentageError, ReadyAssignmentFilter, ReadyFilter, RelatedAssociation, ResourceId,
-    ResourceLabel, ResourceRole, ResourceTarget, ResourceUpdate, SortPolicy, WebUrl, WorkspacePath,
+    IssueId, IssueKind, IssueStatus, IssueUpdate, Label, MAX_PRIORITY, NewIssue, NewResource,
+    NoteContent, Parentage, ParentageError, ReadyAssignmentFilter, ReadyFilter, RelatedAssociation,
+    ResourceId, ResourceLabel, ResourceRole, ResourceTarget, ResourceUpdate, SortPolicy, WebUrl,
+    WorkspacePath,
 };
 use rivets::error::{Error, StorageError};
 use rivets::storage::IssueStorage;
@@ -1500,7 +1501,7 @@ async fn ready_filters_sort_and_limit_after_eligibility() {
 
     let mut wrong_kind = create_test_issue_with_priority("Focused Bug P0", 0);
     wrong_kind.issue_kind = IssueKind::Bug;
-    wrong_kind.labels = vec!["focus".to_string()];
+    wrong_kind.labels = vec![Label::new("focus").expect("canonical Label")];
     storage
         .create(wrong_kind)
         .await
@@ -1511,7 +1512,7 @@ async fn ready_filters_sort_and_limit_after_eligibility() {
         .await
         .expect("prerequisite issue should be created for filtered query");
     let mut blocked = create_test_issue_with_priority("Blocked Focused Task P0", 0);
-    blocked.labels = vec!["focus".to_string()];
+    blocked.labels = vec![Label::new("focus").expect("canonical Label")];
     let blocked = storage
         .create(blocked)
         .await
@@ -1525,14 +1526,14 @@ async fn ready_filters_sort_and_limit_after_eligibility() {
         .expect("blocking dependency should be added for filtered query");
 
     let mut first = create_test_issue_with_priority("Focused Task P1", 1);
-    first.labels = vec!["focus".to_string()];
+    first.labels = vec![Label::new("focus").expect("canonical Label")];
     let first = storage
         .create(first)
         .await
         .expect("first focused issue should be created");
 
     let mut second = create_test_issue_with_priority("Focused Task P2", 2);
-    second.labels = vec!["focus".to_string()];
+    second.labels = vec![Label::new("focus").expect("canonical Label")];
     storage
         .create(second)
         .await
@@ -1542,7 +1543,7 @@ async fn ready_filters_sort_and_limit_after_eligibility() {
         .ready_to_work(
             &ReadyFilter {
                 issue_kind: Some(IssueKind::Task),
-                label: Some("focus".to_string()),
+                label: Some(Label::new("focus").expect("canonical Label")),
                 limit: Some(1),
                 ..Default::default()
             },
@@ -3089,4 +3090,56 @@ async fn nonblocking_relationship_operations_stay_within_scale_budget() {
     let started = Instant::now();
     assert!(storage.add_discovery_origin(cycle).await.is_err());
     assert!(started.elapsed() <= OPERATION_BUDGET);
+}
+#[tokio::test]
+async fn label_mutations_preserve_order_and_no_op_timestamps() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let issue = storage
+        .create(create_test_issue("Label semantics"))
+        .await
+        .expect("create should succeed");
+    let first = Label::new("first").expect("canonical Label");
+    let second = Label::new("second").expect("canonical Label");
+    let absent = Label::new("absent").expect("canonical Label");
+
+    let added_first = storage
+        .add_label(&issue.id, &first)
+        .await
+        .expect("first add should succeed");
+    let added_second = storage
+        .add_label(&issue.id, &second)
+        .await
+        .expect("second add should succeed");
+    assert_eq!(
+        added_second
+            .labels
+            .iter()
+            .map(Label::as_str)
+            .collect::<Vec<_>>(),
+        vec!["first", "second"]
+    );
+
+    let duplicate = storage
+        .add_label(&issue.id, &first)
+        .await
+        .expect("duplicate add should be idempotent");
+    assert_eq!(duplicate.labels, added_second.labels);
+    assert_eq!(duplicate.updated_at, added_second.updated_at);
+
+    let absent_remove = storage
+        .remove_label(&issue.id, &absent)
+        .await
+        .expect("absent remove should be idempotent");
+    assert_eq!(absent_remove.labels, duplicate.labels);
+    assert_eq!(absent_remove.updated_at, duplicate.updated_at);
+
+    let removed = storage
+        .remove_label(&issue.id, &first)
+        .await
+        .expect("present remove should succeed");
+    assert_eq!(
+        removed.labels.iter().map(Label::as_str).collect::<Vec<_>>(),
+        vec!["second"]
+    );
+    assert!(added_first.labels.contains(&first));
 }
