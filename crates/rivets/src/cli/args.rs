@@ -7,10 +7,9 @@ use clap::{Parser, Subcommand};
 
 use super::types::{SortOrderArg, SortPolicyArg};
 use super::validators::{
-    validate_assignee, validate_description, validate_issue_id, validate_label, validate_prefix,
-    validate_title,
+    validate_assignee, validate_description, validate_issue_id, validate_prefix, validate_title,
 };
-use crate::domain::{IssueKind, IssueStatus, MAX_PRIORITY, MIN_PRIORITY, ResourceRole};
+use crate::domain::{IssueKind, IssueStatus, Label, MAX_PRIORITY, MIN_PRIORITY, ResourceRole};
 
 /// Arguments for the `init` command
 #[derive(Parser, Debug, Clone)]
@@ -58,7 +57,7 @@ pub struct CreateArgs {
 
     /// Labels (comma-separated)
     #[arg(short, long, value_delimiter = ',')]
-    pub labels: Vec<String>,
+    pub labels: Vec<Label>,
 
     /// Blocking prerequisite Issue IDs. Repeat for multiple prerequisites.
     #[arg(long = "prerequisite", value_parser = validate_issue_id)]
@@ -98,7 +97,7 @@ pub struct ListArgs {
 
     /// Filter by label
     #[arg(short, long)]
-    pub label: Option<String>,
+    pub label: Option<Label>,
 
     /// Maximum number of issues to display
     #[arg(short = 'n', long, default_value = "50")]
@@ -275,7 +274,7 @@ pub struct ReadyArgs {
 
     /// Filter by label
     #[arg(short, long)]
-    pub label: Option<String>,
+    pub label: Option<Label>,
 
     /// Maximum number of issues to display
     #[arg(short = 'n', long, default_value = "10")]
@@ -539,8 +538,7 @@ pub enum LabelAction {
     /// Add a label to one or more issues
     Add {
         /// Label to add (lowercase, alphanumeric with hyphens/underscores)
-        #[arg(value_parser = validate_label)]
-        label: String,
+        label: Label,
 
         /// Issue ID (for single issue)
         #[arg(value_parser = validate_issue_id)]
@@ -554,8 +552,7 @@ pub enum LabelAction {
     /// Remove a label from one or more issues
     Remove {
         /// Label to remove (lowercase, alphanumeric with hyphens/underscores)
-        #[arg(value_parser = validate_label)]
-        label: String,
+        label: Label,
 
         /// Issue ID (for single issue)
         #[arg(value_parser = validate_issue_id)]

@@ -295,6 +295,44 @@ fn test_cli_refuses_to_save_after_skipped_issue_records(
 }
 
 #[rstest]
+fn test_cli_refuses_to_save_after_noncanonical_persisted_label(initialized_dir: TempDir) {
+    use std::io::Write as _;
+
+    let data_path = initialized_dir.path().join(".rivets/issues.jsonl");
+    let skipped_record = r#"{"id":"test-invalid-label","title":"Invalid Label","description":"Schema mismatch","status":"open","priority":2,"issue_kind":"task","assignee":null,"labels":["DRY"],"design":null,"acceptance_criteria":null,"notes":[],"resources":[],"dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null}"#;
+    let mut data_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&data_path)
+        .expect("test should open the JSONL data file");
+    writeln!(data_file, "{skipped_record}").expect("test should append a skipped record");
+    drop(data_file);
+    let before = std::fs::read(&data_path).expect("test should read the original JSONL bytes");
+
+    let create = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["create", "--title", "Must not be persisted"],
+    );
+
+    assert!(
+        !create.status.success(),
+        "mutation after an invalid persisted Label must be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&create.stderr);
+    assert!(
+        stderr.contains("1 issue record")
+            && stderr.contains("line 1")
+            && stderr.contains("Label must be lowercase"),
+        "error should report the skipped Label record: {stderr}"
+    );
+    let after = std::fs::read(&data_path).expect("test should reread the JSONL bytes");
+    assert_eq!(
+        after, before,
+        "a refused save must not rewrite the JSONL file"
+    );
+}
+
+#[rstest]
 fn test_cli_create_with_full_options(initialized_dir: TempDir) {
     let output = run_rivets_in_dir(
         initialized_dir.path(),
