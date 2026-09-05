@@ -285,7 +285,7 @@ pub enum Error {
 
 | Error | Cause | Resolution |
 |-------|-------|------------|
-| `IssueNotFound` | ID doesn't exist | Verify ID with `rivets list` |
+| `IssueNotFound` | ID doesn't exist | Verify ID with `rivets list --limit 50` |
 | `CircularDependency` | Would create cycle | Restructure dependencies |
 | `HasDependents` | Issue has blockers | Remove dependencies first |
 

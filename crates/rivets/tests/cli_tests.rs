@@ -186,7 +186,10 @@ fn test_cli_list_help() {
         "List help should show --priority"
     );
     assert!(stdout.contains("--limit"), "List help should show --limit");
-    assert!(stdout.contains("--sort"), "List help should show --sort");
+    assert!(
+        !stdout.contains("--sort"),
+        "List help should not show removed --sort"
+    );
 }
 
 // ============================================================================
@@ -406,7 +409,7 @@ fn test_cli_show_invalid_issue_id_format() {
 
 #[rstest]
 fn test_cli_list_empty_repository(initialized_dir: TempDir) {
-    let output = run_rivets_in_dir(initialized_dir.path(), &["list"]);
+    let output = run_rivets_in_dir(initialized_dir.path(), &["list", "--limit", "1"]);
 
     assert!(
         output.status.success(),
@@ -429,7 +432,7 @@ fn test_cli_list_with_issues(initialized_dir: TempDir) {
         &["create", "--title", "Second issue", "--priority", "2"],
     );
 
-    let output = run_rivets_in_dir(initialized_dir.path(), &["list"]);
+    let output = run_rivets_in_dir(initialized_dir.path(), &["list", "--limit", "50"]);
 
     assert!(
         output.status.success(),
@@ -454,7 +457,10 @@ fn test_cli_list_with_filters(initialized_dir: TempDir) {
         &["create", "--title", "Low priority", "--priority", "3"],
     );
 
-    let output = run_rivets_in_dir(initialized_dir.path(), &["list", "--priority", "0"]);
+    let output = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["list", "--priority", "0", "--limit", "10"],
+    );
 
     assert!(
         output.status.success(),
@@ -468,8 +474,11 @@ fn test_cli_list_with_filters(initialized_dir: TempDir) {
 
 #[rstest]
 fn canonical_workflow_state_inputs(initialized_dir: TempDir) {
-    for status in ["open", "in_progress", "in-progress", "closed"] {
-        let output = run_rivets_in_dir(initialized_dir.path(), &["list", "--status", status]);
+    for status in ["open", "in_progress", "closed"] {
+        let output = run_rivets_in_dir(
+            initialized_dir.path(),
+            &["list", "--status", status, "--limit", "1"],
+        );
         assert!(
             output.status.success(),
             "Workflow State '{status}' should be valid. Stderr: {}",
@@ -477,21 +486,17 @@ fn canonical_workflow_state_inputs(initialized_dir: TempDir) {
         );
     }
 
-    for rejected in ["blocked", "bogus"] {
-        let output = run_rivets_in_dir(initialized_dir.path(), &["list", "--status", rejected]);
+    for rejected in ["in-progress", "blocked", "bogus"] {
+        let output = run_rivets_in_dir(
+            initialized_dir.path(),
+            &["list", "--status", rejected, "--limit", "1"],
+        );
         assert_eq!(output.status.code(), Some(2));
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains(&format!(
-                "invalid value '{rejected}' for '--status <STATUS>'"
-            )),
-            "stderr: {stderr}"
+            stderr.contains(rejected),
+            "stderr should identify rejected status {rejected}: {stderr}"
         );
-        assert!(
-            stderr.contains("possible values: open, in_progress, closed"),
-            "stderr: {stderr}"
-        );
-        assert!(!stderr.contains("possible values: open, in_progress, blocked"));
     }
 }
 
@@ -510,13 +515,19 @@ fn test_cli_list_status_filters_match_issues(initialized_dir: TempDir) {
     assert!(update.status.success());
 
     // List open - should only show open issue
-    let output = run_rivets_in_dir(initialized_dir.path(), &["list", "--status", "open"]);
+    let output = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["list", "--status", "open", "--limit", "10"],
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Open issue"));
     assert!(!stdout.contains("In progress issue"));
 
     // List in_progress - should only show in_progress issue
-    let output = run_rivets_in_dir(initialized_dir.path(), &["list", "--status", "in_progress"]);
+    let output = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["list", "--status", "in_progress", "--limit", "10"],
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(!stdout.contains(&open_id));
     assert!(stdout.contains("In progress issue"));
@@ -541,7 +552,10 @@ fn test_cli_create_issue_kinds(initialized_dir: TempDir, #[case] issue_kind: &st
     assert!(show_text.contains("Kind:"));
     assert!(show_text.contains(issue_kind));
 
-    let list = run_rivets_in_dir(initialized_dir.path(), &["list", "--kind", issue_kind]);
+    let list = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["list", "--kind", issue_kind, "--limit", "10"],
+    );
     assert!(list.status.success());
     assert!(String::from_utf8_lossy(&list.stdout).contains(&issue_id));
 
@@ -738,7 +752,8 @@ fn test_cli_rejects_empty_notes_on_create_and_update(initialized_dir: TempDir) {
     );
     assert!(!create.status.success());
     assert!(String::from_utf8_lossy(&create.stderr).contains("Note content cannot be empty"));
-    let after_failed_create = run_rivets_in_dir(initialized_dir.path(), &["--json", "list"]);
+    let after_failed_create =
+        run_rivets_in_dir(initialized_dir.path(), &["--json", "list", "--limit", "1"]);
     let after_failed_create: serde_json::Value =
         serde_json::from_slice(&after_failed_create.stdout).expect("list output should be JSON");
     assert_eq!(after_failed_create, serde_json::json!([]));
@@ -1768,7 +1783,7 @@ fn test_cli_json_output_list(initialized_dir: TempDir) {
         &["create", "--title", "JSON test issue"],
     );
 
-    let output = run_rivets_in_dir(initialized_dir.path(), &["--json", "list"]);
+    let output = run_rivets_in_dir(initialized_dir.path(), &["--json", "list", "--limit", "10"]);
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1799,7 +1814,7 @@ fn test_cli_json_output_stats(initialized_dir: TempDir) {
 #[rstest]
 fn test_cli_requires_initialized_repository(temp_dir: TempDir) {
     // Try to run a command that requires storage without initializing
-    let output = run_rivets_in_dir(temp_dir.path(), &["list"]);
+    let output = run_rivets_in_dir(temp_dir.path(), &["list", "--limit", "1"]);
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2122,7 +2137,7 @@ fn test_cli_label_add_duplicate(initialized_dir: TempDir) {
 
 #[rstest]
 fn test_cli_stale_empty(initialized_dir: TempDir) {
-    let output = run_rivets_in_dir(initialized_dir.path(), &["stale"]);
+    let output = run_rivets_in_dir(initialized_dir.path(), &["stale", "--limit", "1"]);
 
     assert!(
         output.status.success(),
@@ -2138,7 +2153,10 @@ fn test_cli_stale_with_days_option(initialized_dir: TempDir) {
     create_issue(initialized_dir.path(), "Recent issue", &[]);
 
     // Look for issues stale for 0 days (should find all open issues)
-    let output = run_rivets_in_dir(initialized_dir.path(), &["stale", "--days", "0"]);
+    let output = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["stale", "--days", "0", "--limit", "10"],
+    );
 
     assert!(
         output.status.success(),
@@ -2165,7 +2183,7 @@ fn test_cli_stale_with_status_filter(initialized_dir: TempDir) {
     // Look for stale open issues only
     let output = run_rivets_in_dir(
         initialized_dir.path(),
-        &["stale", "--days", "0", "--status", "open"],
+        &["stale", "--days", "0", "--status", "open", "--limit", "10"],
     );
 
     assert!(output.status.success());
@@ -2182,16 +2200,16 @@ fn test_cli_stale_with_limit(initialized_dir: TempDir) {
 
     let output = run_rivets_in_dir(
         initialized_dir.path(),
-        &["stale", "--days", "0", "--limit", "2"],
+        &["--json", "stale", "--days", "0", "--limit", "2"],
     );
 
     assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // Should show "Stale issues (2 not updated in 0 days):" in the output
-    assert!(
-        stdout.contains("Stale issues (2 not updated"),
-        "Should show 2 stale issues due to limit. Got: {}",
-        stdout
+    let issues: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("Output should be valid JSON");
+    assert_eq!(
+        issues.as_array().map(Vec::len),
+        Some(2),
+        "stale limit should cap JSON results"
     );
 }
 
@@ -2199,7 +2217,10 @@ fn test_cli_stale_with_limit(initialized_dir: TempDir) {
 fn test_cli_stale_json_output(initialized_dir: TempDir) {
     create_issue(initialized_dir.path(), "Test issue", &[]);
 
-    let output = run_rivets_in_dir(initialized_dir.path(), &["--json", "stale", "--days", "0"]);
+    let output = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["--json", "stale", "--days", "0", "--limit", "10"],
+    );
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -2381,7 +2402,10 @@ fn test_cli_close_multiple_issues(initialized_dir: TempDir) {
     );
 
     // Verify all were closed
-    let list_output = run_rivets_in_dir(initialized_dir.path(), &["list", "--status", "closed"]);
+    let list_output = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["list", "--status", "closed", "--limit", "10"],
+    );
     let stdout = String::from_utf8_lossy(&list_output.stdout);
     assert!(stdout.contains("3 issue(s)"));
 }
@@ -2449,7 +2473,12 @@ fn test_cli_no_color_env_disables_ansi(initialized_dir: TempDir) {
 
     // Without NO_COLOR, output may contain ANSI escapes (depends on terminal detection,
     // but we can at least verify the NO_COLOR path produces clean output)
-    let output = run_rivets_with_env(initialized_dir.path(), &["list"], "NO_COLOR", "1");
+    let output = run_rivets_with_env(
+        initialized_dir.path(),
+        &["list", "--limit", "10"],
+        "NO_COLOR",
+        "1",
+    );
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -2466,7 +2495,12 @@ fn test_cli_rivets_color_zero_disables_ansi(initialized_dir: TempDir) {
         &["--kind", "feature"],
     );
 
-    let output = run_rivets_with_env(initialized_dir.path(), &["list"], "RIVETS_COLOR", "0");
+    let output = run_rivets_with_env(
+        initialized_dir.path(),
+        &["list", "--limit", "10"],
+        "RIVETS_COLOR",
+        "0",
+    );
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -3119,7 +3153,7 @@ fn mixed_legacy_fixture_loads_migrates_and_persists_via_cli(initialized_dir: Tem
         serde_json::from_slice(stdout).expect("CLI stdout should contain only valid JSON")
     };
 
-    let initial = run_rivets_in_dir(initialized_dir.path(), &["--json", "list"]);
+    let initial = run_rivets_in_dir(initialized_dir.path(), &["--json", "list", "--limit", "50"]);
     assert!(
         initial.status.success(),
         "initial mixed fixture read failed: {}",

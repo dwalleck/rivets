@@ -52,7 +52,7 @@ rivets close "$ID"
 | `init` | Initialize a repository (`.rivets/` and `config.yaml`); `--prefix <name>` sets the ID prefix |
 | `info` | Repository info: database path, prefix, and summary counts |
 | `create` | Create an issue (`--title`, `--kind`, `--priority`, `--assignee`, `--labels`, repeatable `--prerequisite`, `--design`, `--acceptance`, `--notes`) |
-| `list` | List issues; filter with `--status`, `--priority`, `--kind`, `--assignee`, `--label`; `--sort` and `--limit` |
+| `list` | Newest-created Issues, with ascending Issue-ID ties; required positive `--limit`; filters: `--status`, `--priority`, `--kind`, `--assignee`, `--label` |
 | `show` | Show one or more issues with their Blocking prerequisites/dependents and resources |
 | `update` | Update status, Kind, design, acceptance criteria, or append a Note; Assignment uses `claim`/`release`, labels use `label` |
 | `claim` | Atomically assign one Open, unblocked Issue (`<issue-id> --assignee <name>`) |
@@ -68,7 +68,7 @@ rivets close "$ID"
 | `parent` | Parentage: `set`/`move --child <id> --parent <epic-id>`, `clear`/`show --child <id>` |
 | `label` | Labels: `add <label> [<issue-id>]`, `remove`, `list <issue-id>`, `list-all`; use `--ids` for batches |
 | `resource` | Associated Resources: `add`, `list`, `update`, `remove` (see below) |
-| `stale` | Issues not updated in N days (`--days`, default 30) |
+| `stale` | Oldest-updated Issues not updated in N days (`--days`, default 30); required positive `--limit`; excludes Closed unless `--status closed` |
 | `stats` | Project statistics (`--detailed` for a breakdown) |
 
 Global flags include `--json` for data-command output and `-y`/`--yes` to skip confirmation prompts.
@@ -82,9 +82,9 @@ Replace them with IDs printed by `rivets create` in your repository.
 
 ```bash
 rivets create --title "Fix login bug" --kind bug --priority 1
-rivets list                              # All Workflow States (priority-sorted, max 50)
-rivets list --status open                # Filter to open issues
-rivets list --status in_progress         # Filter by status
+rivets list --limit 50                    # All Workflow States, newest-created first
+rivets list --status open --limit 50      # Filter to Open Issues
+rivets list --status in_progress --limit 50
 rivets show demo-a3f8                    # View issue details
 rivets update demo-a3f8 --priority 2     # Update fields
 rivets claim demo-a3f8 --assignee alice  # Atomically claim Ready work
@@ -158,7 +158,7 @@ rivets label add urgent demo-a3f8         # Syntax: label add <label> <issue-id>
 rivets label remove urgent demo-a3f8
 rivets label list demo-a3f8               # Labels on one issue
 rivets label list-all                     # Every label in the repository
-rivets list --label backend
+rivets list --label backend --limit 50
 ```
 
 ### Associated Resources
@@ -193,7 +193,7 @@ are fine.
 Data commands accept `--json` for scripting (init always prints text):
 
 ```bash
-rivets list --json | jq '.[] | select(.priority == 1)'
+rivets list --limit 50 --json | jq '.[] | select(.priority == 1)'
 ID=$(rivets create --title "Fix login bug" --json | jq -r '.id')
 ```
 

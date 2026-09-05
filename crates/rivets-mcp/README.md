@@ -79,10 +79,10 @@ RUST_LOG=debug rivets-mcp
 | Tool | Description |
 |------|-------------|
 | `ready` | Find Open Issues without unresolved direct Blocking Dependencies; defaults to unassigned |
-| `list` | List Issues with optional filters (Workflow State, priority, Kind, assignee, label) |
+| `list` | Newest-created Issues with optional filters and a required positive limit |
 | `show` | Show detailed information about a specific Issue |
 | `blocked` | Get Issues with direct unresolved Blocking Dependencies and their prerequisites |
-| `stale` | Find Issues not updated within a selected period |
+| `stale` | Oldest-updated Issues beyond the selected age, with a required positive limit; excludes Closed unless explicitly filtered |
 | `label_list`, `label_list_all` | Read labels |
 | `resource_list` | Read Associated Resources |
 | `blocking_dependency_list`, `blocking_dependency_tree` | Read directed Blocking Dependencies |
@@ -151,10 +151,30 @@ Busy is retryable.
   "issue_kind": "bug",        // optional: bug, feature, task, epic, chore
   "assignee": "alice",        // optional
   "label": "urgent",          // optional
-  "limit": 20,                // optional, default 100
+  "limit": 20,                // required, positive integer
   "workspace_root": "/path"   // optional, uses current context if omitted
 }
 ```
+
+List includes every Workflow State unless filtered and orders newest-created
+first, then ascending Issue ID. Use canonical `issue_kind`; `issue_type` is rejected.
+
+### stale
+
+```json
+{
+  "days": 30,
+  "status": "open",
+  "limit": 20,
+  "workspace_root": "/path"
+}
+```
+
+`limit` is required and positive. `days` defaults to 30; `status` and
+`workspace_root` are optional. Stale uses a strict age cutoff and orders
+oldest-updated first, then ascending Issue ID. Omitted status excludes Closed;
+explicit `closed` selects only Closed Issues. Status values for both queries
+are exactly `open`, `in_progress`, and `closed`.
 
 ### ready
 

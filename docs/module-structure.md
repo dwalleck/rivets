@@ -41,6 +41,7 @@ rivets/
 │   │   │   ├── domain/
 │   │   │   │   ├── mod.rs         # Issue, Note, filters, and shared domain types
 │   │   │   │   ├── label.rs       # Canonical Issue Label parsing and ownership
+│   │   │   │   ├── query.rs       # Validated bounded List/Stale inputs and cutoff
 │   │   │   │   ├── relationship.rs # Role-safe Issue Relationships
 │   │   │   │   └── resource.rs    # Associated Resource domain types
 │   │   │   ├── output/
@@ -56,6 +57,7 @@ rivets/
 │   │   │           ├── trait_impl.rs  # IssueStorage implementation
 │   │   │           ├── graph.rs   # Dependency graph operations
 │   │   │           ├── sorting.rs # Ready-work sort policies
+│   │   │           ├── query.rs   # Shared bounded List/Stale filtering and ordering
 │   │   │           ├── issue_record.rs  # Persisted-record compatibility DTOs
 │   │   │           └── jsonl.rs   # JSONL load/save for the backend
 │   │   └── tests/
@@ -211,6 +213,12 @@ graph TD
 
 Central domain types include `IssueId`, `IssueStatus`, `IssueKind`, `Label`,
 `BlockingDependency`, `IssueFilter`, Notes, and the Issue aggregate.
+`domain/query.rs` defines opaque `ListQuery` and `StaleQuery` inputs. The existing
+`IssueStorage` interface exposes `list_issues` and `stale_issues`; in-memory
+selection filters and sorts borrowed candidates before cloning the bounded
+result. Generic `list` remains unbounded unless its internal filter carries a
+limit, and includes all Workflow States unless filtered.
+
 `Dependency` / `DependencyType` remain compatibility record types only:
 
 ```rust

@@ -185,8 +185,8 @@ ADR-0002 slices.
 
 ```mermaid
 flowchart TD
-    Start[rivets list<br/>--status open<br/>--priority 2] --> ParseFilter[Parse filter args]
-    ParseFilter --> BuildFilter[Build IssueFilter struct]
+    Start[rivets list<br/>--status open<br/>--priority 2<br/>--limit 50] --> ParseFilter[Parse canonical filters<br/>and positive required limit]
+    ParseFilter --> BuildFilter[Construct validated ListQuery]
 
     BuildFilter --> IterateIssues[Iterate all issues<br/>in HashMap]
 
@@ -204,9 +204,7 @@ flowchart TD
     MoreIssues -->|Yes| IterateIssues
     MoreIssues -->|No| Sort
 
-    Sort[Sort: priority asc,<br/>then created_at desc<br/>--sort newest/oldest/updated] --> Limit{Limit<br/>specified?}
-    Limit -->|Default 50| TakeN[Truncate to first N]
-    Limit -->|--limit N| TakeN
+    Sort[Sort: created_at desc,<br/>then Issue ID asc] --> TakeN[Truncate to explicit limit]
 
     TakeN --> Display[Display results<br/>as table or JSON]
 
@@ -216,6 +214,13 @@ flowchart TD
 `--priority` takes a single value 0–4 (not a range); `--status` accepts exactly
 `open`, `in_progress`, or `closed`; `--kind` accepts `bug`, `feature`, `task`,
 `epic`, or `chore`.
+
+List includes all Workflow States when status is omitted. Both CLI and MCP
+delegate to the same bounded storage query; there is no List sort selector.
+Stale uses a checked `updated_at < cutoff`, defaults to 30 days, excludes Closed
+unless explicitly filtered, and orders `updated_at` ascending then Issue ID
+ascending before applying its required positive limit. Both selectors sort
+borrowed candidates and clone only the selected prefix.
 
 ## Ready Work Algorithm Flow
 

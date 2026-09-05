@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- List and Stale now require an explicit positive limit through CLI and MCP. Shared storage query policy orders List newest-created and Stale oldest-updated, with ascending Issue-ID ties; Stale excludes Closed unless explicitly filtered and rejects unrepresentable age cutoffs.
+- Removed CLI List `--sort`, the List/Stale `in-progress` alias, and MCP List's hidden `issue_type` alias. Canonical query filters and published MCP schemas now agree across adapters.
 - Canonicalized Issue ID parsing across CLI and MCP, including Assignment and every relationship endpoint; malformed IDs are rejected before Workspace lookup while canonical persisted IDs remain readable.
 - Added canonical typed Labels across CLI, MCP, filters, storage, and JSONL; invalid persisted Labels retain the partial-load write guard, and owned spellings are validated without an extra copy.
 - Label inputs are validated exactly as supplied: surrounding whitespace is rejected rather than trimmed. Issue IDs retain their existing whitespace trimming and case preservation.

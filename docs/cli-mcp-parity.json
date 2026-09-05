@@ -36,7 +36,12 @@
     },
     {
       "id": "stale-excludes-closed",
-      "contract": "Stale Issues excludes Closed Issues unless the caller explicitly filters for Closed Workflow State."
+      "contract": "Stale Issues excludes Closed Issues unless the caller explicitly filters for Closed Workflow State.",
+      "status": "conformant",
+      "evidence": [
+        "crates/rivets-mcp/tests/query_parity.rs::stale_contract",
+        "crates/rivets/tests/query_contract.rs::stale_selection_contract"
+      ]
     },
     {
       "id": "canonical-issue-id-input",
@@ -206,54 +211,47 @@
       "id": "list_issues",
       "title": "List Issues",
       "requirement": "shared",
-      "current_parity": "drift",
-      "target_status": "gap_both",
+      "current_parity": "conformant",
+      "target_status": "conformant",
       "target": "Filter Issues by Workflow State, Priority, Issue Kind, Assignee, and Label; require an explicit limit; order newest-created first.",
       "cli": {
         "surfaces": [
           "list"
         ],
         "arguments": {
-          "status": "optional Workflow State; canonical values plus a CLI-only in-progress alias",
-          "priority": "optional P0-P4",
+          "status": "optional canonical Workflow State: open, in_progress, closed",
+          "priority": "optional integer P0-P4",
           "kind": "optional Issue Kind",
           "assignee": "optional string",
-          "label": "optional string",
-          "limit": "optional; current default 50; zero accepted",
-          "sort": "optional; current default Priority; Priority/Newest/Oldest/Updated"
+          "label": "optional canonical Label",
+          "limit": "required positive integer; no implicit default"
         },
-        "result": "Issue list."
+        "result": "Issue list, newest-created first with ascending Issue-ID ties; all Workflow States unless filtered."
       },
       "mcp": {
         "surfaces": [
           "list"
         ],
         "arguments": {
-          "status": "optional raw string; canonical Workflow State spellings only",
-          "priority": "optional unconstrained u8",
+          "status": "optional canonical Workflow State: open, in_progress, closed",
+          "priority": "optional integer P0-P4",
           "issue_kind": "optional Issue Kind",
           "assignee": "optional string",
-          "label": "optional string",
-          "limit": "optional; current default 100",
+          "label": "optional canonical Label",
+          "limit": "required positive integer; no implicit default",
           "workspace_root": "optional adapter mechanic"
         },
-        "result": "Issue list."
+        "result": "Issue list, newest-created first with ascending Issue-ID ties; all Workflow States unless filtered."
       },
-      "differences": [
-        "CLI defaults to Priority ordering and limit 50; MCP fixes newest-created ordering and defaults to 100.",
-        "CLI alone accepts the in-progress alias.",
-        "CLI constrains Priority to P0-P4; MCP accepts any u8.",
-        "MCP accepts a hidden migration-only issue_type alias.",
-        "Newest-created ties are not deterministically ordered."
-      ],
-      "risk": "Equivalent omitted inputs return different subsets/order, validation differs, and implicit truncation can hide Issues.",
-      "required_resolution": "Require a positive explicit limit, use deterministic newest-created ordering in both adapters, enforce canonical Priority, and publish the same constrained schemas.",
+      "differences": [],
+      "risk": "Ordering, selection, validation and explicit-limit behavior are defended by cross-adapter query fixtures.",
+      "required_resolution": "Preserve the shared bounded query contract and cross-adapter semantic fences.",
       "evidence": [
-        "crates/rivets/src/cli/args.rs::ListArgs",
-        "crates/rivets/src/cli/execute.rs::execute_list",
-        "crates/rivets/src/storage/in_memory/trait_impl.rs::list",
-        "crates/rivets-mcp/src/models.rs::ListParams",
-        "crates/rivets-mcp/src/tools.rs::list"
+        "crates/rivets/src/domain/query.rs",
+        "crates/rivets/src/storage/in_memory/query.rs",
+        "crates/rivets/tests/query_contract.rs",
+        "crates/rivets-mcp/tests/query_parity.rs",
+        "crates/rivets-mcp/src/server.rs::tests::query_tool_schemas_require_positive_limits_and_publish_canonical_filters"
       ]
     },
     {
@@ -958,45 +956,41 @@
       "id": "stale_issues",
       "title": "Stale Issues",
       "requirement": "shared",
-      "current_parity": "drift",
-      "target_status": "gap_both",
+      "current_parity": "conformant",
+      "target_status": "conformant",
       "target": "Return non-Closed Issues older than the requested age, require limit, and order oldest-updated first; Closed is included only when explicitly filtered.",
       "cli": {
         "surfaces": [
           "stale"
         ],
         "arguments": {
-          "days": "current default 30",
-          "status": "optional canonical Workflow State",
-          "limit": "current default 50"
+          "days": "optional nonnegative age in days, default 30; unrepresentable cutoff rejected",
+          "status": "optional canonical Workflow State: open, in_progress, closed",
+          "limit": "required positive integer; no implicit default"
         },
-        "result": "Issue list; Closed excluded when status omitted; oldest-updated first."
+        "result": "Issue list, oldest-updated first with ascending Issue-ID ties; strict age cutoff; Closed excluded unless explicitly filtered."
       },
       "mcp": {
         "surfaces": [
           "stale"
         ],
         "arguments": {
-          "days": "current default 30",
-          "status": "optional string",
-          "limit": "current default 100",
+          "days": "optional nonnegative age in days, default 30; unrepresentable cutoff rejected",
+          "status": "optional canonical Workflow State: open, in_progress, closed",
+          "limit": "required positive integer; no implicit default",
           "workspace_root": "optional adapter mechanic"
         },
-        "result": "Issue list; Closed included when status omitted; storage newest-created order."
+        "result": "Issue list, oldest-updated first with ascending Issue-ID ties; strict age cutoff; Closed excluded unless explicitly filtered."
       },
-      "differences": [
-        "CLI defaults to limit 50, excludes Closed when status is omitted, and orders oldest-updated; MCP defaults to 100, includes Closed, and inherits newest-created order.",
-        "CLI alone accepts the in-progress alias.",
-        "Ordering ties are not deterministic."
-      ],
-      "risk": "Equivalent omitted inputs return different Issues and MCP can omit the stalest records while including Closed work.",
-      "required_resolution": "Require a positive explicit limit, exclude Closed by default, and use deterministic oldest-updated ordering.",
+      "differences": [],
+      "risk": "Ordering, selection, validation and explicit-limit behavior are defended by cross-adapter query fixtures.",
+      "required_resolution": "Preserve the shared bounded query contract and cross-adapter semantic fences.",
       "evidence": [
-        "crates/rivets/src/cli/args.rs::StaleArgs",
-        "crates/rivets/src/cli/execute.rs::execute_stale",
-        "crates/rivets-mcp/src/models.rs::StaleParams",
-        "crates/rivets-mcp/src/tools.rs::stale",
-        "crates/rivets/src/storage/in_memory/trait_impl.rs::list"
+        "crates/rivets/src/domain/query.rs",
+        "crates/rivets/src/storage/in_memory/query.rs",
+        "crates/rivets/tests/query_contract.rs",
+        "crates/rivets-mcp/tests/query_parity.rs",
+        "crates/rivets-mcp/src/server.rs::tests::query_tool_schemas_require_positive_limits_and_publish_canonical_filters"
       ]
     },
     {
@@ -1446,13 +1440,24 @@
       "target_status": "gap_mcp",
       "target": "Attach a child Issue to one Epic parent without affecting Ready or Blocked.",
       "cli": {
-        "surfaces": ["parent set"],
-        "arguments": {"child": "canonical child Issue ID", "parent": "canonical Epic parent Issue ID"},
+        "surfaces": [
+          "parent set"
+        ],
+        "arguments": {
+          "child": "canonical child Issue ID",
+          "parent": "canonical Epic parent Issue ID"
+        },
         "result": "Attached child_id and parent_id; same-parent retry is idempotent."
       },
       "mcp": {
-        "surfaces": ["parent_set"],
-        "arguments": {"child_id": "child Issue ID string", "parent_id": "Epic parent Issue ID string", "workspace_root": "optional adapter mechanic"},
+        "surfaces": [
+          "parent_set"
+        ],
+        "arguments": {
+          "child_id": "child Issue ID string",
+          "parent_id": "Epic parent Issue ID string",
+          "workspace_root": "optional adapter mechanic"
+        },
         "result": "Attached child_id and parent_id; same-parent retry is idempotent."
       },
       "risk": "MCP accepts ID strings outside the CLI grammar; valid requests share single-Epic, lifecycle, cycle, and persistence checks.",
@@ -1477,13 +1482,22 @@
       "target_status": "gap_mcp",
       "target": "Remove a child's Parentage without changing lifecycle or readiness.",
       "cli": {
-        "surfaces": ["parent clear"],
-        "arguments": {"child": "canonical child Issue ID"},
+        "surfaces": [
+          "parent clear"
+        ],
+        "arguments": {
+          "child": "canonical child Issue ID"
+        },
         "result": "Removed child_id and parent_id; other relationship kinds remain unchanged."
       },
       "mcp": {
-        "surfaces": ["parent_clear"],
-        "arguments": {"child_id": "child Issue ID string", "workspace_root": "optional adapter mechanic"},
+        "surfaces": [
+          "parent_clear"
+        ],
+        "arguments": {
+          "child_id": "child Issue ID string",
+          "workspace_root": "optional adapter mechanic"
+        },
         "result": "Removed child_id and parent_id; other relationship kinds remain unchanged."
       },
       "risk": "MCP accepts ID strings outside the CLI grammar; valid requests share the exact Parentage removal.",
@@ -1508,13 +1522,24 @@
       "target_status": "gap_mcp",
       "target": "Atomically validate a new Epic parent before replacing the old Parentage.",
       "cli": {
-        "surfaces": ["parent move"],
-        "arguments": {"child": "canonical child Issue ID", "parent": "canonical new Epic parent Issue ID"},
+        "surfaces": [
+          "parent move"
+        ],
+        "arguments": {
+          "child": "canonical child Issue ID",
+          "parent": "canonical new Epic parent Issue ID"
+        },
         "result": "New child_id and parent_id plus previous_parent_id from the atomic transition."
       },
       "mcp": {
-        "surfaces": ["parent_move"],
-        "arguments": {"child_id": "child Issue ID string", "parent_id": "new Epic parent Issue ID string", "workspace_root": "optional adapter mechanic"},
+        "surfaces": [
+          "parent_move"
+        ],
+        "arguments": {
+          "child_id": "child Issue ID string",
+          "parent_id": "new Epic parent Issue ID string",
+          "workspace_root": "optional adapter mechanic"
+        },
         "result": "New child_id and parent_id after the same atomic transition."
       },
       "risk": "MCP accepts ID strings outside the CLI grammar; valid requests share atomic validation and replacement.",
@@ -1539,13 +1564,22 @@
       "target_status": "gap_both",
       "target": "Return an Issue's parent and direct children with explicit ownership roles.",
       "cli": {
-        "surfaces": ["parent show"],
-        "arguments": {"child": "canonical child Issue ID"},
+        "surfaces": [
+          "parent show"
+        ],
+        "arguments": {
+          "child": "canonical child Issue ID"
+        },
         "result": "The child's child_id and parent_id, with parent_id null when unparented."
       },
       "mcp": {
-        "surfaces": ["parent_show"],
-        "arguments": {"child_id": "child Issue ID string", "workspace_root": "optional adapter mechanic"},
+        "surfaces": [
+          "parent_show"
+        ],
+        "arguments": {
+          "child_id": "child Issue ID string",
+          "workspace_root": "optional adapter mechanic"
+        },
         "result": "The child's child_id and parent_id, or null when unparented."
       },
       "risk": "MCP accepts ID strings outside the CLI grammar; neither current query lists direct children.",

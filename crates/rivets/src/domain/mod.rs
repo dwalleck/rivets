@@ -10,12 +10,14 @@ use std::str::FromStr;
 use std::sync::OnceLock;
 
 mod label;
+mod query;
 mod relationship;
 mod resource;
 #[cfg(test)]
 mod workspace_path_corpus;
 
 pub use label::{Label, LabelError, MAX_LABEL_LENGTH};
+pub use query::{ListQuery, QueryError, StaleQuery};
 pub use relationship::{
     BlockingDependency, BlockingDependencyError, DiscoveryOrigin, DiscoveryOriginError, Parentage,
     ParentageError, RelatedAssociation, RelatedAssociationError,

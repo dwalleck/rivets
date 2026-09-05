@@ -6,13 +6,14 @@ use super::graph::{
     has_parentage_cycle_impl, has_unresolved_blocking_dependency, parentage_children_impl,
     parentage_of_impl, related_associations_impl,
 };
+use super::query;
 use super::sorting::sort_by_policy;
 use super::{InMemoryStorage, InMemoryStorageInner};
 use crate::domain::{
     AssignmentError, BlockingDependency, Dependency, DependencyType, DiscoveryOrigin, Issue,
-    IssueFilter, IssueId, IssueKind, IssueStatus, IssueUpdate, Label, MAX_PRIORITY, NewIssue,
-    NewResource, Note, Parentage, ParentageError, ReadyFilter, RelatedAssociation, ResourceId,
-    ResourceUpdate, SortPolicy,
+    IssueFilter, IssueId, IssueKind, IssueStatus, IssueUpdate, Label, ListQuery, MAX_PRIORITY,
+    NewIssue, NewResource, Note, Parentage, ParentageError, ReadyFilter, RelatedAssociation,
+    ResourceId, ResourceUpdate, SortPolicy, StaleQuery,
 };
 use crate::error::{Error, Result, StorageError};
 use crate::storage::IssueStorage;
@@ -75,7 +76,7 @@ fn active_parentage_child_ids(
     Ok(active_child_ids)
 }
 /// Check whether an Issue matches every common list or Ready criterion.
-fn matches_common_filter(
+pub(super) fn matches_common_filter(
     issue: &Issue,
     priority: Option<u8>,
     issue_kind: Option<&IssueKind>,
@@ -928,6 +929,16 @@ impl IssueStorage for InMemoryStorage {
         let inner = self.lock().await;
         parentage_of_impl(&inner.graph, &inner.node_map, child_id)
     }
+    async fn list_issues(&self, query: &ListQuery) -> Result<Vec<Issue>> {
+        let inner = self.lock().await;
+        Ok(query::list_issues(&inner, query))
+    }
+
+    async fn stale_issues(&self, query: &StaleQuery) -> Result<Vec<Issue>> {
+        let inner = self.lock().await;
+        Ok(query::stale_issues(&inner, query))
+    }
+
     async fn list(&self, filter: &IssueFilter) -> Result<Vec<Issue>> {
         let inner = self.lock().await;
 

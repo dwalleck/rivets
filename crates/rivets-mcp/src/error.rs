@@ -32,7 +32,9 @@ pub enum Error {
         /// Description of valid values.
         valid_values: &'static str,
     },
-
+    /// Canonical List or Stale query validation failed.
+    #[error(transparent)]
+    Query(#[from] rivets::domain::QueryError),
     /// Issue ID input failed domain parsing.
     #[error(transparent)]
     InvalidIssueId(#[from] rivets::domain::IssueIdError),
@@ -169,6 +171,7 @@ impl Error {
                     "workspace_root": workspace_root,
                 })),
             ),
+            Self::Query(query) => McpError::invalid_params(query_message(query), None),
             Self::NoContext
             | Self::InvalidArgument { .. }
             | Self::InvalidIssueId(_)
@@ -194,6 +197,16 @@ impl Error {
             | Self::Io(_)
             | Self::Json(_) => McpError::internal_error(self.to_string(), None),
         }
+    }
+}
+
+fn query_message(query: &rivets::domain::QueryError) -> String {
+    match query {
+        rivets::domain::QueryError::MissingLimit | rivets::domain::QueryError::InvalidLimit(_) => {
+            format!("Invalid limit: {query}")
+        }
+        rivets::domain::QueryError::InvalidPriority(_) => format!("Invalid priority: {query}"),
+        rivets::domain::QueryError::CutoffOverflow { .. } => format!("Invalid days: {query}"),
     }
 }
 
@@ -233,6 +246,7 @@ impl From<RivetsError> for Error {
                 discovered_issue_id: discovered_issue_id.to_string(),
                 source_issue_id: source_issue_id.to_string(),
             },
+            RivetsError::Query(source) => Self::Query(source),
             RivetsError::Storage(storage_error) => match storage_error.try_into_resource_error() {
                 Ok(source) => Self::InvalidResource(source),
                 Err(storage_error) => match storage_error.try_into_status_transition_error() {
@@ -388,6 +402,33 @@ mod tests {
             Error::Storage(RivetsError::Storage(StorageError::InvalidFormat(message)))
                 if message == "bad record"
         ));
+    }
+
+    #[test]
+    fn query_errors_map_to_field_specific_invalid_params() {
+        use rmcp::model::ErrorCode;
+
+        let cases = [
+            (rivets::domain::QueryError::MissingLimit, "limit"),
+            (rivets::domain::QueryError::InvalidLimit(0), "limit"),
+            (rivets::domain::QueryError::InvalidPriority(5), "priority"),
+            (
+                rivets::domain::QueryError::CutoffOverflow { days: u32::MAX },
+                "days",
+            ),
+        ];
+
+        for (source, field) in cases {
+            let error = Error::from(RivetsError::Query(source));
+            assert!(matches!(error, Error::Query(_)));
+            let protocol = error.to_mcp_error();
+            assert_eq!(protocol.code, ErrorCode::INVALID_PARAMS);
+            assert!(
+                protocol.message.contains(field),
+                "{field} should identify the invalid query field: {}",
+                protocol.message
+            );
+        }
     }
 
     #[test]

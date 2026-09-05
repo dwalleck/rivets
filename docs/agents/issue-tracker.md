@@ -9,7 +9,7 @@ Before adding or changing a CLI command, MCP tool, argument, default, validation
 - **Initialize MCP context**: call `set_context` with the repository root before other Rivets MCP operations.
 - **Create an issue**: use `create`, or `rivets create --title "..." --kind <kind> --priority <0-4>`.
 - **Read an issue**: use `show`, or `rivets show <issue-id>`.
-- **List issues**: use `list`, or `rivets list`, with status, label, kind, priority, or assignee filters as needed.
+- **List issues**: use MCP `list` with an explicit positive `limit`, or `rivets list --limit <n>`, with status, label, kind, priority, or assignee filters as needed. List orders newest-created first; Stale also requires a positive limit and orders oldest-updated first, excluding Closed unless explicitly filtered.
 - **Find Ready work**: use `ready`, or `rivets ready`. Omitted Assignment selectors return only unassigned Open Issues without unresolved direct Blocking Dependencies; use `--assignee` or `--all-assignees` when that visibility is intentional.
 - **Update an issue**: use `update`, or `rivets update <issue-id>`, for ordinary fields and Workflow State. Assignment changes use `claim` / `release`; labels use atomic add/remove operations.
 - **Claim or release responsibility**: use MCP `claim` / `release`, or `rivets claim <issue-id> --assignee <name>` / `rivets release <issue-id> --assignee <name>`. Never emulate either intent with a read followed by a general update.

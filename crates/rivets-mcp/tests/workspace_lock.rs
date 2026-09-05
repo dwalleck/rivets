@@ -46,10 +46,10 @@ fn list_params(workspace_root: Option<&str>) -> ListParams {
     ListParams {
         status: None,
         priority: None,
-        kind: IssueKindInput::canonical(None),
+        issue_kind: None,
         assignee: None,
         label: None,
-        limit: Some(100),
+        limit: std::num::NonZeroUsize::new(100).expect("test limit should be positive"),
         workspace_root: workspace_root.map(str::to_string),
     }
 }

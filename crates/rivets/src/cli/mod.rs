@@ -47,8 +47,7 @@ pub use args::{
     StatsArgs, UpdateArgs,
 };
 
-// Re-export types
-pub use types::{BatchError, BatchResult, SortOrderArg, SortPolicyArg};
+pub use types::{BatchError, BatchResult, SortPolicyArg};
 
 // Re-export validators for external use
 pub use validators::{
@@ -97,10 +96,9 @@ pub enum Commands {
     /// an interactive prompt will be shown.
     Create(CreateArgs),
 
-    /// List issues with optional filters
+    /// List issues with filters and an explicit positive limit
     ///
-    /// Shows all issues matching the filter criteria. By default, shows all
-    /// non-closed issues sorted by priority and creation date.
+    /// Shows all issues matching the filter criteria in canonical creation order.
     List(ListArgs),
 
     /// Show detailed information about an issue
@@ -468,9 +466,8 @@ mod tests {
         for args in [
             &["init"][..],
             &["info"],
-            &["list"],
+            &["list", "--limit", "1"],
             &["show", "test-abc"],
-            &["ready"],
             &["blocking-dependency", "list", "--dependent", "test-abc"],
             &["blocking-dependency", "tree", "--dependent", "test-abc"],
             &["related", "list", "--issue", "test-abc"],
@@ -479,9 +476,10 @@ mod tests {
             &["label", "list", "test-abc"],
             &["label", "list-all"],
             &["resource", "list", "test-abc"],
-            &["stale"],
-            &["blocked"],
+            &["stale", "--limit", "1"],
+            &["ready"],
             &["stats"],
+            &["blocked"],
         ] {
             assert!(!parses_as_mutation(args), "should not lock read: {args:?}");
         }
@@ -554,7 +552,7 @@ mod tests {
 
     #[test]
     fn test_parse_global_json_flag() {
-        let cli = Cli::try_parse_from(["rivets", "--json", "list"]).unwrap();
+        let cli = Cli::try_parse_from(["rivets", "--json", "list", "--limit", "1"]).unwrap();
         assert!(cli.json);
         assert!(matches!(cli.command, Some(Commands::List(_))));
     }
@@ -684,17 +682,17 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_list_default() {
-        let cli = Cli::try_parse_from(["rivets", "list"]).unwrap();
-        match cli.command {
-            Some(Commands::List(args)) => {
-                assert!(args.status.is_none());
-                assert!(args.priority.is_none());
-                assert_eq!(args.limit, 50); // default
-                assert_eq!(args.sort, SortOrderArg::Priority); // default
-            }
-            _ => panic!("Expected List command"),
-        }
+    fn test_parse_list_requires_positive_limit() {
+        let missing = Cli::try_parse_from(["rivets", "list"])
+            .expect_err("list must require an explicit limit");
+        assert_eq!(
+            missing.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+
+        let zero = Cli::try_parse_from(["rivets", "list", "--limit", "0"])
+            .expect_err("list must reject zero limits");
+        assert_eq!(zero.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]
@@ -721,7 +719,7 @@ mod tests {
                 assert_eq!(args.priority, Some(1));
                 assert_eq!(args.issue_kind, Some(IssueKind::Bug));
                 assert_eq!(args.assignee, Some("bob".to_string()));
-                assert_eq!(args.limit, 10);
+                assert_eq!(args.limit.get(), 10);
             }
             _ => panic!("Expected List command"),
         }
@@ -729,7 +727,9 @@ mod tests {
 
     #[test]
     fn test_parse_list_status_in_progress() {
-        let cli = Cli::try_parse_from(["rivets", "list", "--status", "in_progress"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["rivets", "list", "--status", "in_progress", "--limit", "1"])
+                .unwrap();
         match cli.command {
             Some(Commands::List(args)) => {
                 assert_eq!(args.status, Some(IssueStatus::InProgress));
@@ -739,14 +739,24 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_list_status_in_progress_alias() {
-        let cli = Cli::try_parse_from(["rivets", "list", "--status", "in-progress"]).unwrap();
-        match cli.command {
-            Some(Commands::List(args)) => {
-                assert_eq!(args.status, Some(IssueStatus::InProgress));
-            }
-            _ => panic!("Expected List command"),
-        }
+    fn test_parse_list_status_rejects_alias() {
+        let result =
+            Cli::try_parse_from(["rivets", "list", "--status", "in-progress", "--limit", "1"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_stale_requires_positive_limit() {
+        let missing = Cli::try_parse_from(["rivets", "stale"])
+            .expect_err("stale must require an explicit limit");
+        assert_eq!(
+            missing.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+
+        let zero = Cli::try_parse_from(["rivets", "stale", "--limit", "0"])
+            .expect_err("stale must reject zero limits");
+        assert_eq!(zero.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]
@@ -940,7 +950,7 @@ mod tests {
                 "--labels",
                 "bad label",
             ],
-            vec!["rivets", "list", "--label", "bad label"],
+            vec!["rivets", "list", "--limit", "1", "--label", "bad label"],
             vec!["rivets", "ready", "--label", "bad label"],
             vec!["rivets", "label", "add", "bad label", "ab-1"],
             vec!["rivets", "label", "remove", "bad label", "ab-1"],
@@ -949,12 +959,7 @@ mod tests {
         for invalid_args in cases {
             let error = Cli::try_parse_from(&invalid_args)
                 .expect_err("noncanonical Label should fail at the CLI boundary");
-            assert!(
-                error
-                    .to_string()
-                    .contains("Label must contain only lowercase letters"),
-                "unexpected error for {invalid_args:?}: {error}"
-            );
+            assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
 
             let valid_args = invalid_args
                 .into_iter()

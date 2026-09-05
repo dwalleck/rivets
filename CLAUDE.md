@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**Use `rivets ready` to see available work, `rivets list` to see all issues.**
+**Use `rivets ready` to see available work, `rivets list --limit <n>` to query Issues with an explicit positive limit.**
 
 ## Agent skills
 
@@ -30,7 +30,7 @@ This project uses rivets for issue tracking (dogfooding our own tool). Issues ar
 
 ```bash
 rivets ready              # Show issues ready to work on (no blockers)
-rivets list               # List all open issues
+rivets list --limit 50    # Newest-created Issues across all Workflow States
 rivets list --status closed --limit 10  # Recent closed issues
 rivets show <id>          # Full issue details with dependencies
 rivets stats              # Project statistics
