@@ -1,6 +1,8 @@
 //! Error types for rivets CLI operations.
 
-use crate::domain::{AssignmentError, IssueId, ParentageError, ResourceError, StatusTransitionError};
+use crate::domain::{
+    AssignmentError, IssueId, ParentageError, ResourceError, StatusTransitionError,
+};
 use std::{fmt, io, path::PathBuf};
 use thiserror::Error;
 

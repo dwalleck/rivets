@@ -1437,21 +1437,21 @@
       "id": "set_parentage",
       "title": "Set Parentage",
       "requirement": "future_shared",
-      "current_parity": "not_comparable",
-      "target_status": "gap_both",
+      "current_parity": "drift",
+      "target_status": "gap_mcp",
       "target": "Attach a child Issue to one Epic parent without affecting Ready or Blocked.",
       "cli": {
-        "surfaces": [],
-        "arguments": {},
-        "result": "Only legacy parent-child dependency exists."
+        "surfaces": ["parent set"],
+        "arguments": {"child": "canonical child Issue ID", "parent": "canonical Epic parent Issue ID"},
+        "result": "Attached child_id and parent_id; same-parent retry is idempotent."
       },
       "mcp": {
-        "surfaces": [],
-        "arguments": {},
-        "result": "Only legacy generic dep exists."
+        "surfaces": ["parent_set"],
+        "arguments": {"child_id": "child Issue ID string", "parent_id": "Epic parent Issue ID string", "workspace_root": "optional adapter mechanic"},
+        "result": "Attached child_id and parent_id; same-parent retry is idempotent."
       },
-      "risk": "Current adapters cannot enforce one Epic parent and non-blocking semantics canonically.",
-      "required_resolution": "Add equivalent Set Parentage intents.",
+      "risk": "MCP accepts ID strings outside the CLI grammar; valid requests share single-Epic, lifecycle, cycle, and persistence checks.",
+      "required_resolution": "Adopt canonical Issue ID parsing in MCP while retaining the shared Parentage transition.",
       "evidence": [
         "docs/adr/0002-issue-relationships-and-readiness.md",
         "crates/rivets/src/domain/mod.rs::DependencyType",
@@ -1460,29 +1460,29 @@
         ".rivets/issues.jsonl::rivets-qcje"
       ],
       "differences": [
-        "No canonical CLI or MCP surface exists; only legacy ParentChild records are compatibility-loaded.",
-        "Legacy ParentChild currently propagates blockedness and lacks one-Epic-parent/cardinality/lifecycle invariants."
+        "CLI validates canonical Issue ID grammar; MCP accepts unconstrained strings.",
+        "Both adapters now enforce single-Epic Parentage without propagating blockedness."
       ]
     },
     {
       "id": "clear_parentage",
       "title": "Clear Parentage",
       "requirement": "future_shared",
-      "current_parity": "not_comparable",
-      "target_status": "gap_both",
+      "current_parity": "drift",
+      "target_status": "gap_mcp",
       "target": "Remove a child's Parentage without changing lifecycle or readiness.",
       "cli": {
-        "surfaces": [],
-        "arguments": {},
-        "result": "No canonical intent."
+        "surfaces": ["parent clear"],
+        "arguments": {"child": "canonical child Issue ID"},
+        "result": "Removed child_id and parent_id; other relationship kinds remain unchanged."
       },
       "mcp": {
-        "surfaces": [],
-        "arguments": {},
-        "result": "No canonical intent."
+        "surfaces": ["parent_clear"],
+        "arguments": {"child_id": "child Issue ID string", "workspace_root": "optional adapter mechanic"},
+        "result": "Removed child_id and parent_id; other relationship kinds remain unchanged."
       },
-      "risk": "MCP cannot remove even the legacy equivalent and neither adapter exposes ownership semantics.",
-      "required_resolution": "Add equivalent Clear Parentage intents.",
+      "risk": "MCP accepts ID strings outside the CLI grammar; valid requests share the exact Parentage removal.",
+      "required_resolution": "Adopt canonical Issue ID parsing in MCP while retaining the shared Parentage transition.",
       "evidence": [
         "docs/adr/0002-issue-relationships-and-readiness.md",
         "crates/rivets/src/domain/mod.rs::DependencyType",
@@ -1491,29 +1491,29 @@
         ".rivets/issues.jsonl::rivets-qcje"
       ],
       "differences": [
-        "No canonical CLI or MCP surface exists; only legacy ParentChild records are compatibility-loaded.",
-        "Legacy ParentChild currently propagates blockedness and lacks one-Epic-parent/cardinality/lifecycle invariants."
+        "CLI validates canonical Issue ID grammar; MCP accepts unconstrained strings.",
+        "Both adapters remove only the child's Parentage and preserve all other relationship kinds."
       ]
     },
     {
       "id": "move_parentage",
       "title": "Move Parentage",
       "requirement": "future_shared",
-      "current_parity": "not_comparable",
-      "target_status": "gap_both",
+      "current_parity": "drift",
+      "target_status": "gap_mcp",
       "target": "Atomically validate a new Epic parent before replacing the old Parentage.",
       "cli": {
-        "surfaces": [],
-        "arguments": {},
-        "result": "No canonical intent."
+        "surfaces": ["parent move"],
+        "arguments": {"child": "canonical child Issue ID", "parent": "canonical new Epic parent Issue ID"},
+        "result": "New child_id and parent_id plus previous_parent_id from the atomic transition."
       },
       "mcp": {
-        "surfaces": [],
-        "arguments": {},
-        "result": "No canonical intent."
+        "surfaces": ["parent_move"],
+        "arguments": {"child_id": "child Issue ID string", "parent_id": "new Epic parent Issue ID string", "workspace_root": "optional adapter mechanic"},
+        "result": "New child_id and parent_id after the same atomic transition."
       },
-      "risk": "Remove-then-add can leave a gap or invalid ownership state.",
-      "required_resolution": "Add equivalent atomic Move Parentage intents.",
+      "risk": "MCP accepts ID strings outside the CLI grammar; valid requests share atomic validation and replacement.",
+      "required_resolution": "Adopt canonical Issue ID parsing in MCP while retaining the shared Parentage transition.",
       "evidence": [
         "docs/adr/0002-issue-relationships-and-readiness.md",
         "crates/rivets/src/domain/mod.rs::DependencyType",
@@ -1522,29 +1522,29 @@
         ".rivets/issues.jsonl::rivets-qcje"
       ],
       "differences": [
-        "No canonical CLI or MCP surface exists; only legacy ParentChild records are compatibility-loaded.",
-        "Legacy ParentChild currently propagates blockedness and lacks one-Epic-parent/cardinality/lifecycle invariants."
+        "CLI validates canonical Issue ID grammar; MCP accepts unconstrained strings.",
+        "CLI includes previous_parent_id for its move summary; both adapters return the new ownership and reject self-parentage before querying existing ownership."
       ]
     },
     {
       "id": "show_parentage",
       "title": "Show Parentage",
       "requirement": "future_shared",
-      "current_parity": "not_comparable",
+      "current_parity": "drift",
       "target_status": "gap_both",
       "target": "Return an Issue's parent and direct children with explicit ownership roles.",
       "cli": {
-        "surfaces": [],
-        "arguments": {},
-        "result": "No canonical intent."
+        "surfaces": ["parent show"],
+        "arguments": {"child": "canonical child Issue ID"},
+        "result": "The child's child_id and parent_id, with parent_id null when unparented."
       },
       "mcp": {
-        "surfaces": [],
-        "arguments": {},
-        "result": "No canonical intent."
+        "surfaces": ["parent_show"],
+        "arguments": {"child_id": "child Issue ID string", "workspace_root": "optional adapter mechanic"},
+        "result": "The child's child_id and parent_id, or null when unparented."
       },
-      "risk": "Ownership must currently be inferred from generic relationship direction.",
-      "required_resolution": "Add equivalent Parentage query intents.",
+      "risk": "MCP accepts ID strings outside the CLI grammar; neither current query lists direct children.",
+      "required_resolution": "Adopt canonical Issue ID parsing in MCP and complete the registry's parent-and-direct-children query target.",
       "evidence": [
         "docs/adr/0002-issue-relationships-and-readiness.md",
         "crates/rivets/src/domain/mod.rs::DependencyType",
@@ -1553,8 +1553,8 @@
         ".rivets/issues.jsonl::rivets-qcje"
       ],
       "differences": [
-        "No canonical CLI or MCP surface exists; only legacy ParentChild records are compatibility-loaded.",
-        "Legacy ParentChild currently propagates blockedness and lacks one-Epic-parent/cardinality/lifecycle invariants."
+        "CLI validates canonical Issue ID grammar; MCP accepts unconstrained strings.",
+        "Both adapters show one child's parent; the registry's broader direct-children query remains absent."
       ]
     },
     {

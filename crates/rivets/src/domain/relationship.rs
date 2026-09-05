@@ -216,6 +216,8 @@ pub enum DiscoveryOriginError {
     /// An Issue cannot record itself as its own Discovery source.
     #[error("Issue {issue_id} cannot be its own Discovery source")]
     SelfReference { issue_id: IssueId },
+}
+
 /// A directed ownership relationship from a child Issue to one Epic parent.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct Parentage {

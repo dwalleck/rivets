@@ -841,6 +841,88 @@ async fn parentage_jsonl_restart_round_trip() {
 }
 
 #[tokio::test]
+async fn parentage_reverse_blocking_survives_restart() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let child = storage
+        .create(epic("Child"))
+        .await
+        .expect("child should exist");
+    let parent = storage
+        .create(epic("Parent"))
+        .await
+        .expect("parent should exist");
+    let parentage = Parentage::new(child.id.clone(), parent.id.clone())
+        .expect("distinct endpoints should form Parentage");
+    let blocking = BlockingDependency::new(parent.id.clone(), child.id.clone())
+        .expect("the parent may explicitly depend on its child");
+    storage
+        .add_blocking_dependency(blocking.clone())
+        .await
+        .expect("Blocking should be valid");
+    storage
+        .set_parent(parentage.clone())
+        .await
+        .expect("Parentage must ignore the reverse Blocking path");
+
+    let directory = tempdir().expect("temporary directory should exist");
+    let path = directory.path().join("issues.jsonl");
+    save_to_jsonl(storage.as_ref(), &path)
+        .await
+        .expect("both edges should persist");
+    let canonical = std::fs::read_to_string(&path).expect("saved records should be readable");
+    let reversed = canonical.lines().rev().collect::<Vec<_>>().join("\n") + "\n";
+    for records in [&canonical, &reversed] {
+        std::fs::write(&path, records).expect("record order fixture should persist");
+        for _ in 0..2 {
+            let (reloaded, warnings) = load_from_jsonl(&path, "test".to_string())
+                .await
+                .expect("independent relationships should reload");
+            assert!(
+                warnings.is_empty(),
+                "valid mixed relationships produced {warnings:?}"
+            );
+            assert_eq!(
+                reloaded
+                    .parent_of(&child.id)
+                    .await
+                    .expect("parent should load"),
+                Some(parentage.clone())
+            );
+            assert_eq!(
+                reloaded
+                    .blocking_prerequisites(&parent.id)
+                    .await
+                    .expect("Blocking should load"),
+                vec![blocking.clone()]
+            );
+            assert_eq!(
+                reloaded
+                    .ready_to_work(&ReadyFilter::default(), None)
+                    .await
+                    .expect("Ready should load")
+                    .into_iter()
+                    .map(|issue| issue.id)
+                    .collect::<HashSet<_>>(),
+                HashSet::from([child.id.clone()])
+            );
+            assert_eq!(
+                reloaded
+                    .blocked_issues()
+                    .await
+                    .expect("Blocked should load")
+                    .into_iter()
+                    .map(|(issue, _)| issue.id)
+                    .collect::<HashSet<_>>(),
+                HashSet::from([parent.id.clone()])
+            );
+            save_to_jsonl(reloaded.as_ref(), &path)
+                .await
+                .expect("second save must retain both relationships");
+        }
+    }
+}
+
+#[tokio::test]
 async fn epic_close_reports_active_direct_children_without_cascade() {
     let mut storage = new_in_memory_storage("test".to_string());
     let parent = storage.create(epic("Parent")).await.unwrap();

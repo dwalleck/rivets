@@ -164,3 +164,47 @@ Slices 1-4 in dependency order. Mergeable definition: the repository exposes typ
 - [x] Partition arithmetic is 3,000 + 750 = 3,750, below 4,000; every slice names single increment P, whose mergeable definition is recorded.
 - [x] Every deferral phrase is classified; verified `rivets-vio8` owns intended migration work.
 - [x] No slice is marked complete; checkpointed-build exclusively judges completion.
+
+## Review-fix slice 5: Preserve mixed-kind restart behavior (F1)
+
+**Claim IDs:** C3, C9.
+**Expected behavior:** Opposing Parentage and Blocking edges survive reload in either record order, without cycle warnings or changed Ready/Blocked results.
+**Oracle:** Literal child/parent and dependent/prerequisite pairs; child is Ready and parent is explicitly Blocked.
+**Stress fixture:** Reverse two-Issue relationships in both record orders, followed by a second save/reload.
+**Regression fence:** `crates/rivets/tests/in_memory_storage.rs::parentage_reverse_blocking_survives_restart`.
+**Named mutation:** Remove the edge-kind filter from `has_cycle_for_type_impl`; the restart fence must fail with a false cycle warning and pass after restoration.
+**Complexity/production scale:** N/A — retain upstream kind-filtered reload; no production loop changes.
+**Wall budget/phase:** N/A — no new runtime phase; existing Parentage scale fences remain applicable.
+**Files:** `crates/rivets/tests/in_memory_storage.rs`; loader/graph implementation inherited from reconciled upstream.
+**Estimate:** One focused regression slice.
+**Diff estimate:** 90 lines including evidence.
+**PR increment:** P.
+**Commands and expected results:**
+- `cargo test -p rivets --test in_memory_storage parentage_reverse_blocking_survives_restart -- --exact` — both relationships and frontier effects survive both record orders and second reload; named mutation red, restoration green.
+
+## Review-fix slice 6: Return previous ownership from the atomic move (F3)
+
+**Claim IDs:** C4, C10, C11.
+**Expected behavior:** `move_parent` returns previous Parentage under the same guard that replaces it. CLI and MCP construct the typed request before storage validation; self-move rejects as SelfReference even without an existing parent. Success payloads retain the new parent and CLI retains previous_parent_id.
+**Oracle:** Literal old/new parent IDs, typed SelfReference/NoParent errors, and unchanged persisted bytes on rejection.
+**Stress fixture:** Existing and missing unparented child with self-parent candidate; distinct valid move and same-parent retry.
+**Regression fence:** Existing storage atomic-move fence gains prior-parent assertions; CLI handler tests gain typed self-move precedence; existing MCP Parentage scenario gains matching rejection.
+**Named mutation:** Return requested rather than previous Parentage; separately restore CLI parent_of/NoParent preflight before typed construction. Owning fences must fail for the specified behavior, then pass after restoration.
+**Complexity/production scale:** N/A — removes one graph lookup and retains existing validation; no new loop.
+**Wall budget/phase:** N/A — no new runtime phase or algorithm.
+**Files:** `crates/rivets/src/storage/mod.rs`, `crates/rivets/src/storage/in_memory/trait_impl.rs`, `crates/rivets/src/cli/execute.rs`, `crates/rivets-mcp/src/tools.rs`, `crates/rivets/tests/in_memory_storage.rs`, `crates/rivets-mcp/tests/integration.rs`.
+**Estimate:** One cross-adapter transition slice.
+**Diff estimate:** 150 lines including evidence.
+**PR increment:** P.
+**Commands and expected results:**
+- `cargo test -p rivets --test in_memory_storage parent_move_validates_before_atomic_replacement -- --exact` — rejected moves retain ownership and successful moves return prior ownership; return mutation red, restoration green.
+- `cargo test -p rivets parent_move_rejects_self_before_parent_lookup` and `cargo test -p rivets-mcp --test integration parentage_mcp_contract_context_recreation_and_locking -- --exact` — both adapters report typed SelfReference before NoParent and preserve bytes; preflight mutation red, restoration green.
+- `cargo test --workspace` — assembled Parentage, Assignment, Related, Discovery, locking, migration, and adapter contracts remain green.
+
+### Review reconciliation and tracker repair (F2, F4)
+
+Replay only the five Parentage commits onto fetched default-branch revision `cc0b2ad`; preserve the original tip at `backup/qcje-pre-review-20260905`. Keep every upstream tracker record except qcje byte-for-byte unchanged, verified with an exact Issue-ID keyed comparison. No push or merge to the default branch is part of this work.
+
+### Revised review partition
+
+Original projection 3,750 plus 240 review lines = 3,990, including the original 750-line churn margin. Increment P remains one complete Parentage change. Actual diff size is checked before delivery.

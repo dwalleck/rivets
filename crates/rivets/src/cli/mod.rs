@@ -325,6 +325,7 @@ impl Cli {
             Some(Commands::Discovery(args)) => {
                 let mut app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_discovery(&mut app, args, output_mode).await
+            }
             Some(Commands::Parent(args)) => {
                 let mut app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_parent(&mut app, args, output_mode).await
@@ -433,12 +434,7 @@ mod tests {
                 "test-def",
             ],
             &[
-                "parent",
-                "set",
-                "--child",
-                "test-abc",
-                "--parent",
-                "test-def",
+                "parent", "set", "--child", "test-abc", "--parent", "test-def",
             ],
             &["parent", "clear", "--child", "test-abc"],
             &[

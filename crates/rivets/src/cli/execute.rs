@@ -9,9 +9,8 @@ use anyhow::{Context, Result};
 use super::args::{
     AssignmentArgs, BlockedArgs, BlockingDependencyAction, BlockingDependencyArgs, CloseArgs,
     CreateArgs, DeleteArgs, DiscoveryAction, DiscoveryArgs, InfoArgs, InitArgs, LabelAction,
-    LabelArgs, ListArgs, ReadyArgs, RelatedAction, RelatedArgs, ReopenArgs, ResourceAction,
-    ResourceArgs, ShowArgs, StaleArgs, StatsArgs, UpdateArgs,
-    ParentAction, ParentArgs,
+    LabelArgs, ListArgs, ParentAction, ParentArgs, ReadyArgs, RelatedAction, RelatedArgs,
+    ReopenArgs, ResourceAction, ResourceArgs, ShowArgs, StaleArgs, StatsArgs, UpdateArgs,
 };
 use super::types::{SortOrderArg, SortPolicyArg};
 use crate::output::OutputMode;
@@ -1064,6 +1063,12 @@ pub async fn execute_discovery(
                         );
                     }
                 }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Execute one canonical Parentage operation.
 pub async fn execute_parent(
     app: &mut crate::app::App,
