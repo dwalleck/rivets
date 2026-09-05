@@ -40,6 +40,8 @@ rivets/
 │   │   │   │   └── init.rs        # `rivets init` implementation
 │   │   │   ├── domain/
 │   │   │   │   ├── mod.rs         # Issue, Note, filters, and shared domain types
+│   │   │   │   ├── label.rs       # Canonical Issue Label parsing and ownership
+│   │   │   │   ├── relationship.rs # Role-safe Issue Relationships
 │   │   │   │   └── resource.rs    # Associated Resource domain types
 │   │   │   ├── output/
 │   │   │   │   ├── mod.rs         # Output formatting for CLI commands
@@ -197,10 +199,12 @@ metadata ignore entry.
 graph TD
     ModRS[domain/mod.rs<br/>Issue, Note, filters, shared types] --> Relationship[relationship.rs<br/>BlockingDependency, role invariant]
     ModRS --> Resource[resource.rs<br/>AssociatedResource, targets, roles, identifiers]
+    ModRS --> Label[label.rs<br/>Canonical Label grammar and ownership]
 
     style ModRS fill:#ADD8E6
     style Relationship fill:#90EE90
     style Resource fill:#90EE90
+    style Label fill:#90EE90
 ```
 
 #### domain/mod.rs

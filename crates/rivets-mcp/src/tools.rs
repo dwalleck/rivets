@@ -61,7 +61,7 @@ fn parse_label(input: &str) -> Result<Label> {
 fn parse_labels(inputs: Vec<String>) -> Result<Vec<Label>> {
     inputs
         .into_iter()
-        .map(|input| parse_label(&input))
+        .map(|input| Label::try_from(input).map_err(Error::from))
         .collect()
 }
 
@@ -290,7 +290,7 @@ impl Tools {
             (None, true) => ReadyAssignmentFilter::All,
             (None, false) => ReadyAssignmentFilter::Unassigned,
         };
-        let label = params.label.as_deref().map(parse_label).transpose()?;
+        let label = params.label.map(Label::try_from).transpose()?;
 
         // Release context lock before acquiring storage lock to prevent deadlocks
         let storage = self.storage_for(params.workspace_root.as_deref()).await?;
@@ -321,7 +321,7 @@ impl Tools {
         debug!("Listing issues");
         let status = params.status.as_deref().map(validate_status).transpose()?;
         let issue_kind = params.kind.resolve("list");
-        let label = params.label.as_deref().map(parse_label).transpose()?;
+        let label = params.label.map(Label::try_from).transpose()?;
 
         let storage = self.storage_for(params.workspace_root.as_deref()).await?;
         let storage = storage.read().await;

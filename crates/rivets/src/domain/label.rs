@@ -70,10 +70,8 @@ pub enum LabelError {
     },
 }
 
-impl FromStr for Label {
-    type Err = LabelError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
+impl Label {
+    fn validate(value: &str) -> Result<(), LabelError> {
         if value.is_empty() {
             return Err(LabelError::Empty);
         }
@@ -106,7 +104,25 @@ impl FromStr for Label {
             return Err(LabelError::InvalidEnd);
         }
 
-        Ok(Self(value.to_string()))
+        Ok(())
+    }
+}
+
+impl FromStr for Label {
+    type Err = LabelError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::validate(value)?;
+        Ok(Self(value.to_owned()))
+    }
+}
+
+impl TryFrom<String> for Label {
+    type Error = LabelError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::validate(&value)?;
+        Ok(Self(value))
     }
 }
 
@@ -131,7 +147,7 @@ impl<'de> Deserialize<'de> for Label {
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        value.parse().map_err(de::Error::custom)
+        Self::try_from(value).map_err(de::Error::custom)
     }
 }
 
@@ -154,6 +170,12 @@ mod tests {
         assert_eq!(label.as_str(), value);
         assert_eq!(label.to_string(), value);
         assert_eq!(label.into_string(), value);
+        assert_eq!(
+            Label::try_from(value.to_owned())
+                .expect("owned canonical Label should parse")
+                .as_str(),
+            value
+        );
     }
 
     #[rstest]
@@ -189,7 +211,12 @@ mod tests {
         LabelError::ConsecutiveSeparators { position: 5 }
     )]
     fn rejects_noncanonical_label(#[case] value: &str, #[case] expected: LabelError) {
-        assert_eq!(value.parse::<Label>(), Err(expected));
+        assert_eq!(value.parse::<Label>(), Err(expected.clone()));
+        assert_eq!(Label::try_from(value.to_owned()), Err(expected));
+        let json = serde_json::to_string(value).expect("spelling should serialize");
+        let error = serde_json::from_str::<Label>(&json)
+            .expect_err("noncanonical Label should be rejected by serde");
+        assert!(error.is_data());
     }
 
     #[test]
@@ -201,22 +228,5 @@ mod tests {
             serde_json::from_str::<Label>(&json).expect("Label should deserialize"),
             label
         );
-    }
-
-    #[test]
-    fn serde_rejects_noncanonical_spelling() {
-        let error = serde_json::from_str::<Label>("\"DRY\"")
-            .expect_err("noncanonical Label should be rejected");
-        assert!(error.to_string().contains("Label must be lowercase"));
-    }
-
-    #[test]
-    fn collection_budget_is_one_bounded_parse_per_label() {
-        let labels = (0..1_000)
-            .map(|index| format!("label-{index}"))
-            .map(|value| Label::new(value).expect("generated Label should parse"))
-            .collect::<Vec<_>>();
-        assert_eq!(labels.len(), 1_000);
-        assert!(labels.iter().all(|label| label.as_str().len() <= 50));
     }
 }

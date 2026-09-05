@@ -389,7 +389,7 @@ impl IssueRecord {
         };
         let labels = labels
             .into_iter()
-            .map(Label::new)
+            .map(Label::try_from)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| invalid_data_error(&id, migration_conflict, error))?;
 

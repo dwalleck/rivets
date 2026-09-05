@@ -30,18 +30,18 @@ This change is additive with respect to constraints: it strengthens previously r
 - **Owner:** new `rivets::domain::label` module, re-exporting `Label`, `LabelError`, and `MAX_LABEL_LENGTH`. The domain wins because CLI, MCP, JSONL, storage, filtering, and output all consume the invariant.
 - **Competing seam A:** keep CLI `validate_label` and call it from other crates. Rejected: domain/storage would depend on a human adapter and MCP would inherit string errors.
 - **Competing seam B:** validate separately in each storage method. Rejected: Create, Update, filters, output, JSONL, and adapters could still bypass it.
-- **Chosen interface:** private `Label(String)` with `FromStr`, fallible `new`, `as_str`, `into_string`, `Display`, validated serde string representation, equality/order/hash, and typed `LabelError`.
+- **Chosen interface:** private `Label(String)` with borrowed `FromStr`, owned `TryFrom<String>`, fallible `new`, `as_str`, `into_string`, `Display`, validated serde string representation, equality/order/hash, and typed `LabelError`. Owned conversion retains the input buffer; all constructors share private grammar validation.
 - **Forbidden:** no public unchecked constructor, no trimming/case-folding, no grammar duplication outside the domain, and no conflation with `ResourceLabel`.
 
 ### Domain and storage propagation
 
-- **Owner:** existing `Issue`, `NewIssue`, `IssueUpdate`, `IssueFilter`, and `IssueStorage` interfaces carry `Label`; in-memory storage compares typed values and preserves insertion/idempotency semantics.
+- **Owner:** existing `Issue`, `NewIssue`, `IssueUpdate`, `IssueFilter`, `ReadyFilter`, and `IssueStorage` interfaces carry `Label`; in-memory storage compares typed values and preserves insertion/idempotency semantics.
 - **New seam:** none — this deepens the existing domain/storage interface instead of layering another validator.
 - **Forbidden:** storage methods may not accept `&str`; no adapter may hand raw Issue-Label strings to storage; general Update compatibility remains temporary under `rivets-67d7`.
 
 ### Adapter translation
 
-- **Owner:** clap parses `Label` directly; MCP `Tools` uses one parser helper and `Error::InvalidLabel`, with JSON-RPC `invalid_params`. MCP schema-only string constraints mirror the domain grammar and are fenced against drift.
+- **Owner:** clap parses `Label` directly; MCP `Tools` uses the domain's borrowed or owned parser as appropriate and `Error::InvalidLabel`, with JSON-RPC `invalid_params`. MCP schema-only string constraints mirror the domain grammar and are fenced against drift.
 - **New seam:** no production seam; the MCP schema stand-in is documentation-only because `rivets` must not depend on schemars.
 - **Forbidden:** adapter-local arm tables, resource-label validation reuse, internal-error mapping, or mutation/query before parsing.
 
