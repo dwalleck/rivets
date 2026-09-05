@@ -755,15 +755,20 @@ impl Tools {
         query: &BlockingDependencyListQuery,
         workspace_root: Option<&str>,
     ) -> Result<Vec<BlockingDependency>> {
+        let endpoint_id = match query {
+            BlockingDependencyListQuery::PrerequisitesOf { dependent_id } => dependent_id,
+            BlockingDependencyListQuery::DependentsOf { prerequisite_id } => prerequisite_id,
+        };
+        let endpoint_id = parse_issue_id(endpoint_id)?;
         let storage = self.storage_for(workspace_root).await?;
         let storage = storage.read().await;
         match query {
-            BlockingDependencyListQuery::PrerequisitesOf { dependent_id } => Ok(storage
-                .blocking_prerequisites(&parse_issue_id(dependent_id)?)
-                .await?),
-            BlockingDependencyListQuery::DependentsOf { prerequisite_id } => Ok(storage
-                .blocking_dependents(&parse_issue_id(prerequisite_id)?)
-                .await?),
+            BlockingDependencyListQuery::PrerequisitesOf { .. } => {
+                Ok(storage.blocking_prerequisites(&endpoint_id).await?)
+            }
+            BlockingDependencyListQuery::DependentsOf { .. } => {
+                Ok(storage.blocking_dependents(&endpoint_id).await?)
+            }
         }
     }
 

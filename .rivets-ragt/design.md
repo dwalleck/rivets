@@ -14,10 +14,11 @@
 | Issue ID string | empty; surrounding whitespace; no separator; one separator; multiple suffix separators | Covered by C1 |
 | Prefix | 1 byte; 2 bytes; 20 bytes; 21 bytes; ASCII alphanumeric; punctuation; internal whitespace; Unicode | Covered by C1 |
 | Suffix | empty; one ASCII-alphanumeric segment; multiple segments; leading/trailing/consecutive hyphen; punctuation/underscore/internal whitespace/control/Unicode; long segment | Covered by C1 |
-| CLI single-ID operations | Show, Update, Close, Reopen, Label Add/Remove/List, Resource Add/Update/Remove/List, Note append | Covered by C2 |
-| CLI ID collections/pairs | zero/single/multiple Create prerequisites; batch Show/Update/Close/Reopen/Label; both Blocking endpoints; Blocking list/tree roots | Covered by C2 |
-| MCP single-ID operations | Show, Update, Close, Reopen, Label Add/Remove/List, Resource Add/Update/Remove/List, Note append | Covered by C3 |
-| MCP endpoint pairs | add/remove with valid/invalid dependent and prerequisite; list perspectives; tree root | Covered by C3 |
+| CLI single-ID operations | Show, Update, Close, Reopen, Delete, Claim, Release, Label Add/Remove/List, Resource Add/Update/Remove/List, Note append, Parent Clear/Show, Related/Discovery List | Covered by C2 |
+| CLI ID collections/pairs | zero/single/multiple Create prerequisites; batch Show/Update/Close/Reopen/Label; both Blocking, Related, Discovery, and Parent Set/Move endpoint roles; Blocking list/tree roots | Covered by C2 |
+| MCP single-ID operations | Show, Update, Close, Reopen, Claim, Release, Label Add/Remove/List, Resource Add/Update/Remove/List, Note append, Parent Clear/Show, Related/Discovery List | Covered by C3 |
+| MCP endpoint pairs | Blocking, Related, Discovery, and Parent Set/Move roles; Blocking list perspectives and tree root | Covered by C3 |
+| MCP Workspace context | no selected context; initialized Workspace | Covered by C3 and the pre-storage parsing regression fence |
 | Persisted IDs | canonical legacy/current ID | Covered by C4 |
 | Persisted noncanonical IDs | legacy hierarchical/dotted or otherwise noncanonical IDs | N/A — this ticket governs CLI/MCP input and guarantees compatibility only for persisted IDs satisfying the canonical grammar; persistence compatibility decoding remains unchanged |
 | Multiple simultaneously-invalid non-ID fields | invalid ID plus invalid status/resource/note/reason | N/A — error precedence between independently invalid fields is not part of ADR-0006; each focused parity case keeps non-ID fields valid |

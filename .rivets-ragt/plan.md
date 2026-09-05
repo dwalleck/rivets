@@ -78,3 +78,44 @@ Slices 1-3. Mergeable when the domain parser, every caller, cross-adapter fences
 - [x] The review-size partition arithmetic is recorded.
 - [x] No deferred or intended-future work is introduced.
 - [x] No slice is declared complete here; checkpointed-build owns completion.
+
+## Slice 4: Preserve pre-storage parsing after integration — F1
+
+**Claim IDs:** C3.
+**Expected behavior:** Both Blocking list endpoint perspectives reject malformed IDs before resolving a Workspace, including when no context is selected.
+**Oracle:** The domain `IssueIdError::MissingSeparator` and the already-canonical CLI input error, independent of Workspace availability.
+**Stress fixture:** Run the complete MCP malformed-ID operation matrix against both an unselected context and an initialized Workspace.
+**Regression fence:** `every_mcp_issue_id_operation_rejects_malformed_input_before_storage`.
+**Named mutation:** Restore the original storage-before-parser order; the unselected-context Blocking list case must fail with `NoContext`.
+**Complexity/production scale:** N/A — no new production loop; the existing parser moves before Workspace resolution.
+**Wall budget/phase:** N/A — no new runtime phase or parser algorithm.
+**Files:** `crates/rivets-mcp/src/tools.rs`, `crates/rivets-mcp/tests/integration.rs`, and these workflow artifacts.
+**Estimate:** One focused correction.
+**Diff estimate:** 80 lines including evidence; with the original 35% margin, the increment remains below 4,000 lines.
+**PR increment:** canonical-issue-id-input.
+**Commands and expected results:**
+- `cargo test -p rivets-mcp every_mcp_issue_id_operation_rejects_malformed_input_before_storage` — original order is red with `NoContext`; corrected order is green for both context states.
+- Final workspace tests, Clippy with warnings denied, formatting, and parity renderer remain green.
+
+### Integration and Slice 4 checkpoint — 2026-09-05
+
+Requester approved the rebase/review plan with **"Execute the plan you suggested"**. Base: `d873f9b83645fc883983f86d482f90de741ed507`; original tip preserved by `backup/interface-parity-pre-rebase-20260905`.
+
+| Gate | Result |
+|---|---|
+| Affected tests | PASS — final integrated workspace suite: 1,213 passed, 8 ignored; full suite includes every canonical-ID regression fence. |
+| Assigned falsifier | PASS — malformed Blocking list inputs produce `InvalidIssueId` with and without Workspace context. |
+| Stress fixture | PASS — complete current MCP operation matrix in both context states; actual CLI malformed/empty/boundary inputs, including 56 Parentage/Assignment rejections. |
+| Independent oracle | PASS — typed domain errors and CLI validation classification agree; valid trimmed and 20-byte-prefix IDs reach lookup. |
+| Production-scale budget | N/A — unchanged parser and no new production loop/phase; integration only changes placement and coverage. |
+| Regression fence | PASS — existing CLI/MCP matrices expanded to current Assignment and relationship endpoints. |
+| Named mutation | PASS — removing CLI Parent Show parsing and bypassing MCP Parent Show parsing each made its fence red; original Blocking list order made the no-context case red with `NoContext`. |
+| Restored fence | PASS — all parsers restored; focused checks and final full suite green. |
+
+Clippy with `--workspace --all-targets --all-features -- -D warnings`, `cargo fmt --all -- --check`, and the parity renderer check passed. The independently checked ID-only boundary passed 1,201 tests plus Clippy, formatting, renderer, and actual CLI smoke before the focused F1 correction; F1's corrected source and fence passed the final integrated suite. Temporary smoke workspaces were removed.
+
+### Review decisions
+
+| finding-id | finding | reviewer | evidence-state | evidence | decision | fix | note |
+|---|---|---|---|---|---|---|---|
+| F1 | Blocking list resolved storage before parsing; move parsing earlier. | CanonicalIdSpec | Verified | Expanded matrix failed with `NoContext` for malformed input before the correction, then passed. | Accept | Parse the selected endpoint before Workspace resolution; Slice 4 checkpoint passed. | Focused reviewer recheck confirmed resolution and no new defect. |

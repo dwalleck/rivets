@@ -1704,24 +1704,26 @@ async fn every_mcp_issue_id_operation_rejects_malformed_input_before_storage() {
         InvalidIssueIdOperation::LabelList,
     ];
 
-    for operation in operations {
-        let error = operation
-            .invoke(&tools)
-            .await
-            .expect_err("malformed Issue ID should be rejected before storage");
-        assert_eq!(
-            error.to_string(),
-            cli_error,
-            "{operation:?} changed the shared domain error meaning"
-        );
-        assert!(
-            matches!(
-                &error,
-                Error::InvalidIssueId(IssueIdError::MissingSeparator { value })
-                    if value == "invalid"
-            ),
-            "{operation:?} reached the wrong error: {error:?}"
-        );
+    for tools in [create_tools(), tools] {
+        for operation in operations {
+            let error = operation
+                .invoke(&tools)
+                .await
+                .expect_err("malformed Issue ID should be rejected before storage");
+            assert_eq!(
+                error.to_string(),
+                cli_error,
+                "{operation:?} changed the shared domain error meaning"
+            );
+            assert!(
+                matches!(
+                    &error,
+                    Error::InvalidIssueId(IssueIdError::MissingSeparator { value })
+                        if value == "invalid"
+                ),
+                "{operation:?} reached the wrong error: {error:?}"
+            );
+        }
     }
 }
 

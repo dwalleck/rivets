@@ -37,3 +37,5 @@ falsifiable-design → budgeted-plan → checkpointed-build
 ## Terminal criterion
 
 Structural — every downstream artifact satisfies its owning stage's completion criterion, ending with no FAIL in checkpointed-build's recorded gate.
+
+2026-09-05 integration result: **PASS**. The approved contracts remain unchanged; current adapter coverage and the F1 review correction are recorded in `plan.md`'s integration checkpoint.
