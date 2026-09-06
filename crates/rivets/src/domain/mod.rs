@@ -1161,6 +1161,8 @@ impl ReadyAssignmentFilter {
 /// Filter applied after an Issue satisfies the canonical Ready predicate.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReadyFilter {
+    /// Restrict results to direct children of this existing Epic.
+    pub parent_id: Option<IssueId>,
     /// Filter by priority.
     pub priority: Option<u8>,
     /// Filter by Issue Kind.

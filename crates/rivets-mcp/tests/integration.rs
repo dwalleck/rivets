@@ -52,6 +52,7 @@ fn ready_params(
     workspace_root: Option<&str>,
 ) -> ReadyParams {
     ReadyParams {
+        parent_id: None,
         limit,
         priority,
         kind: kind_input(issue_kind),

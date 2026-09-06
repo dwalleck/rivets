@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Added optional Epic scoping to Ready: CLI `ready --parent <epic-id>` and MCP `ready.parent_id` select direct children before ordering and limiting, preserve Assignment visibility, and reject missing or non-Epic parents without mutation.
 - Restricted general Update to title, description, Priority, Kind, design, and acceptance criteria through a validated nonempty domain value. Removed CLI Update `--status`/`--notes` and MCP Update's obsolete fields and compatibility aliases; rejected requests preserve timestamps and persisted bytes.
 - Added CLI/MCP Start and Return to Open and CLI `note append`; lifecycle changes and Note append now use dedicated atomic storage intents. Existing Close/Reopen reason history, Assignment, Parentage, and ordered partial-success batches are preserved.
 - Workspace mutation guards explicitly unlock on drop so unrelated forked children cannot transiently retain released ownership.
