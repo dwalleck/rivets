@@ -48,3 +48,20 @@ falsifiable-design → requester approval → budgeted-plan → checkpointed-bui
 ## Terminal criterion
 
 PASS — 2026-09-06. Every downstream artifact satisfies its owning stage's completion criterion; design approved verbatim, plan implemented as one atomic slice, all eight checkpoint gates PASS. Final integration: 1,227 workspace tests passed; fmt, Clippy -D warnings, cargo check and parity renderer passed; explicit scale fence and real CLI/MCP oracles passed. Evidence and mutations are recorded in plan.md; the atomic slice commit includes these artifacts.
+
+## CI portability repair — Local
+
+The original local result above did not establish platform CI success. Run [34001803630](https://github.com/dwalleck/rivets/actions/runs/34001803630) failed on macOS and Windows in `information_uses_resolved_configuration`: the fixture resolved its backend from the raw temporary root but expected a canonical database path. macOS exposed `/var` versus `/private/var`; Windows exposed short-name versus canonical extended paths.
+
+| Test | Verdict | Evidence |
+|---|---|---|
+| T1 Empirical premise | no | Both native CI logs identify the same assertion; a Linux `TMPDIR` symlink reproduces the identical alias/canonical mismatch. No new platform behavior is assumed. |
+| T2 Structural boundary | no | Only the existing test fixture changes. Constructor contract, production callers, public APIs, schemas, and module placement remain unchanged. |
+| T3 Production-scale risk | no | No production execution or algorithm changes. |
+| T4 Explicit behavior | yes | Given an initialized Workspace under an aliased temporary root, when the fixture resolves its backend from the canonical Workspace root as required by `from_config`, then the report uses canonical root/config identity and the configured database location beneath that root, without canonicalizing the database file itself. |
+
+Unknown tests: none. Selected route: Local.
+
+Required artifact: this route record (change-workflow owner). `spec.md`: N/A — behavior explicit. `evidence.md`, `probe.*`: N/A — native CI logs plus direct local reproduction cover the premise. Additional design/plan artifacts and checkpointed-build: N/A — no behavior-changing slice; fixture correction under the existing contract.
+
+Terminal criterion: PASS for focused local verification. With `TMPDIR` pointing at a symlink, `cargo test -p rivets --lib reporting::tests::information_uses_resolved_configuration -- --exact` failed before the correction with alias versus real path, then passed after canonicalizing the fixture root before backend resolution. Under the same aliased environment, `cargo nextest run -p rivets-mcp --test reporting_parity` passed all four real CLI/MCP and concurrency tests. Native CI verification remains required before reporting the cross-platform repair complete; its result is recorded on the PR.

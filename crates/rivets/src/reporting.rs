@@ -175,13 +175,13 @@ mod tests {
         let mut config = RivetsConfig::load(&config_path).await.unwrap();
         config.storage.data_file = "data/issues.jsonl".to_string();
         config.save(&config_path).await.unwrap();
-        let backend = config.storage.to_backend(temp_dir.path()).unwrap();
+        let expected_root = temp_dir.path().canonicalize().unwrap();
+        let backend = config.storage.to_backend(&expected_root).unwrap();
 
         let information =
-            WorkspaceInformation::from_config(temp_dir.path(), &config, &backend).unwrap();
-        let expected_root = temp_dir.path().canonicalize().unwrap();
+            WorkspaceInformation::from_config(&expected_root, &config, &backend).unwrap();
         let expected_config = expected_root.join(RIVETS_DIR_NAME).join(CONFIG_FILE_NAME);
-        let expected_database = data_path.canonicalize().unwrap();
+        let expected_database = expected_root.join("data").join("issues.jsonl");
 
         assert_eq!(information.workspace_root(), expected_root);
         assert_eq!(information.config_path(), expected_config);
