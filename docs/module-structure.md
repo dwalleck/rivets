@@ -170,6 +170,7 @@ Argument parsing and command dispatch, split by responsibility:
 
 - `args.rs` — clap argument structs for every subcommand
 - `execute.rs` — command execution logic (create, list, show, update, close, dependencies, labels, resources, …)
+- `execute/reporting.rs` — shared Information/Statistics orchestration; text rendering lives in `output/reporting.rs`
 - `types.rs` — CLI value enums and conversions into domain types
 - `validators.rs` — input validation functions
 
@@ -179,6 +180,18 @@ Application context for CLI command execution: locates the Workspace and
 constructs its storage. Read-only construction remains unlocked; mutation
 construction owns `WorkspaceMutationLock` before configuration/storage load and
 retains it for the App lifetime.
+App retains the immutable `WorkspaceInformation` projection of the configuration
+used to initialize storage. MCP Context retains the same projection with its cache.
+
+### reporting/
+
+`reporting.rs` owns private-field, shared serialized `WorkspaceInformation` and
+`WorkspaceStatistics` values. `reporting/statistics.rs` aggregates borrowed Issues
+and owns the intrinsic Open/unblocked Ready predicate shared with Ready queries.
+`IssueStorage::statistics` computes the canonical blocked set once and aggregates
+under one storage lock; no Issue payloads are cloned or sorted. Priority buckets
+are always present; Workspace Statistics Ready explicitly includes all Assignments.
+
 
 ### workspace_lock.rs
 

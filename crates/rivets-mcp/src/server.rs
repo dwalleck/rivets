@@ -11,7 +11,7 @@ use crate::models::{
     LabelRemoveParams, ListParams, ParentChildParams, ParentPairParams, ReadyParams,
     RelatedListParams, RelatedPairParams, ReopenParams, ResourceAddParams, ResourceListParams,
     ResourceRemoveParams, ResourceUpdateParams, SetContextParams, ShowParams, StaleParams,
-    UpdateParams,
+    UpdateParams, WorkspaceRootParams,
 };
 use crate::tools::Tools;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -66,6 +66,34 @@ impl RivetsMcpServer {
     #[tool(description = "Show current workspace context and database path. Useful for debugging.")]
     async fn where_am_i(&self) -> Result<CallToolResult, McpError> {
         match self.tools.where_am_i().await {
+            Ok(response) => Ok(CallToolResult::success(vec![Content::json(response)?])),
+            Err(e) => Err(to_mcp_error(&e)),
+        }
+    }
+
+    /// Return initialized workspace configuration information.
+    #[tool(
+        description = "Show the initialized workspace configuration snapshot. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn info(
+        &self,
+        Parameters(params): Parameters<WorkspaceRootParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self.tools.info(params.workspace_root).await {
+            Ok(response) => Ok(CallToolResult::success(vec![Content::json(response)?])),
+            Err(e) => Err(to_mcp_error(&e)),
+        }
+    }
+
+    /// Return aggregate workspace statistics.
+    #[tool(
+        description = "Show aggregate workspace statistics including status, Assignment-aware Ready, direct blocked dependents, and all Priority buckets. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn stats(
+        &self,
+        Parameters(params): Parameters<WorkspaceRootParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self.tools.stats(params.workspace_root).await {
             Ok(response) => Ok(CallToolResult::success(vec![Content::json(response)?])),
             Err(e) => Err(to_mcp_error(&e)),
         }

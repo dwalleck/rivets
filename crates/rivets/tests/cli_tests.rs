@@ -1672,41 +1672,13 @@ fn test_cli_blocked_with_dependencies(initialized_dir: TempDir) {
 // ============================================================================
 
 #[rstest]
-fn test_cli_stats_empty(initialized_dir: TempDir) {
-    let output = run_rivets_in_dir(initialized_dir.path(), &["stats"]);
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Project Statistics"));
-    assert!(stdout.contains("Total Issues:"));
-}
-
-#[rstest]
-fn test_cli_stats_with_issues(initialized_dir: TempDir) {
-    // Create some issues with different statuses
-    run_rivets_in_dir(
-        initialized_dir.path(),
-        &["create", "--title", "Open issue 1"],
-    );
-    run_rivets_in_dir(
-        initialized_dir.path(),
-        &["create", "--title", "Open issue 2"],
-    );
-
-    let output = run_rivets_in_dir(initialized_dir.path(), &["stats", "--detailed"]);
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Total Issues:"));
-    assert!(stdout.contains("By Priority:"));
-}
-
-#[rstest]
 fn stats_and_frontier_output_separate_lifecycle_from_blocked(initialized_dir: TempDir) {
     let prerequisite = create_issue(initialized_dir.path(), "Prerequisite", &[]);
     let dependent = create_issue(initialized_dir.path(), "Dependent", &[]);
+    let assigned_open = create_issue(initialized_dir.path(), "Assigned open", &[]);
     let in_progress = create_issue(initialized_dir.path(), "In progress", &[]);
     let closed = create_issue(initialized_dir.path(), "Closed", &[]);
+    claim_issue(initialized_dir.path(), &assigned_open, "assigned-owner");
     claim_issue(initialized_dir.path(), &in_progress, "active-owner");
     let active = run_rivets_in_dir(
         initialized_dir.path(),
@@ -1727,12 +1699,6 @@ fn stats_and_frontier_output_separate_lifecycle_from_blocked(initialized_dir: Te
     );
     assert!(add.status.success());
 
-    let text = run_rivets_in_dir(initialized_dir.path(), &["stats"]);
-    assert!(text.status.success());
-    let stdout = String::from_utf8_lossy(&text.stdout);
-    assert!(!stdout.contains("  Blocked:"));
-    assert!(stdout.contains("Blocked by Dependencies: 1"));
-
     let json = run_rivets_in_dir(initialized_dir.path(), &["--json", "stats"]);
     assert!(json.status.success());
     let json: serde_json::Value =
@@ -1740,13 +1706,36 @@ fn stats_and_frontier_output_separate_lifecycle_from_blocked(initialized_dir: Te
     let by_status = json["by_status"]
         .as_object()
         .expect("by_status is an object");
-    let mut keys = by_status.keys().map(String::as_str).collect::<Vec<_>>();
-    keys.sort_unstable();
-    assert_eq!(keys, ["closed", "in_progress", "open"]);
-    assert_eq!(by_status["open"], 2);
+    let mut status_keys = by_status.keys().map(String::as_str).collect::<Vec<_>>();
+    status_keys.sort_unstable();
+    assert_eq!(status_keys, ["closed", "in_progress", "open"]);
+    assert_eq!(by_status["open"], 3);
     assert_eq!(by_status["in_progress"], 1);
     assert_eq!(by_status["closed"], 1);
+    assert_eq!(json["total"], 5);
+    assert_eq!(json["ready"], 2);
     assert_eq!(json["blocked_by_dependencies"], 1);
+
+    let by_priority = json["by_priority"]
+        .as_object()
+        .expect("by_priority is an object");
+    let mut priority_keys = by_priority.keys().map(String::as_str).collect::<Vec<_>>();
+    priority_keys.sort_unstable();
+    assert_eq!(
+        priority_keys,
+        [
+            "p0_critical",
+            "p1_high",
+            "p2_medium",
+            "p3_low",
+            "p4_backlog"
+        ]
+    );
+    assert_eq!(by_priority["p0_critical"], 0);
+    assert_eq!(by_priority["p1_high"], 0);
+    assert_eq!(by_priority["p2_medium"], 5);
+    assert_eq!(by_priority["p3_low"], 0);
+    assert_eq!(by_priority["p4_backlog"], 0);
 
     let blocked = run_rivets_in_dir(initialized_dir.path(), &["--json", "blocked"]);
     assert!(blocked.status.success());
@@ -1759,15 +1748,13 @@ fn stats_and_frontier_output_separate_lifecycle_from_blocked(initialized_dir: Te
     assert!(ready.status.success());
     let ready: serde_json::Value =
         serde_json::from_slice(&ready.stdout).expect("ready output is JSON");
+    assert_eq!(ready.as_array().expect("ready output is an array").len(), 1);
     assert!(
         ready
             .as_array()
             .expect("ready output is an array")
             .iter()
-            .all(|issue| matches!(
-                issue["status"].as_str(),
-                Some("open" | "in_progress" | "closed")
-            ))
+            .all(|issue| issue["status"] == "open")
     );
 }
 
@@ -1799,12 +1786,29 @@ fn test_cli_json_output_stats(initialized_dir: TempDir) {
     let output = run_rivets_in_dir(initialized_dir.path(), &["--json", "stats"]);
 
     assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // Should be valid JSON
     let json: serde_json::Value =
-        serde_json::from_str(&stdout).expect("Output should be valid JSON");
-    assert!(json["total"].is_number());
+        serde_json::from_slice(&output.stdout).expect("stats output should be valid JSON");
+
+    let mut keys = json
+        .as_object()
+        .expect("stats is an object")
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "blocked_by_dependencies",
+            "by_priority",
+            "by_status",
+            "ready",
+            "total"
+        ]
+    );
+    assert_eq!(json["total"], 0);
+    assert_eq!(json["ready"], 0);
+    assert_eq!(json["blocked_by_dependencies"], 0);
 }
 
 // ============================================================================
@@ -1900,104 +1904,44 @@ fn test_cli_reopen_already_open_issue(initialized_dir: TempDir) {
 // ============================================================================
 
 #[rstest]
-fn test_cli_info_command(initialized_dir: TempDir) {
-    let output = run_rivets_in_dir(initialized_dir.path(), &["info"]);
-
-    assert!(
-        output.status.success(),
-        "Info failed: {:?}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Rivets Repository Information"));
-    assert!(stdout.contains("Database:"));
-    assert!(stdout.contains("Issue prefix:"));
-    assert!(stdout.contains("Issues:"));
-}
-
-#[rstest]
-fn test_cli_info_with_issues(initialized_dir: TempDir) {
-    // Create some issues with different statuses
-    create_issue(initialized_dir.path(), "Open issue", &[]);
-    let id2 = create_issue(initialized_dir.path(), "In progress issue", &[]);
-    let id3 = create_issue(initialized_dir.path(), "Closed issue", &[]);
-    claim_issue(initialized_dir.path(), &id2, "active-owner");
-
-    let active = run_rivets_in_dir(
-        initialized_dir.path(),
-        &["update", &id2, "--status", "in_progress"],
-    );
-    assert!(active.status.success());
-    run_rivets_in_dir(initialized_dir.path(), &["close", &id3]);
-
-    let output = run_rivets_in_dir(initialized_dir.path(), &["info"]);
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("3 total"));
-    assert!(stdout.contains("1 open"));
-    assert!(stdout.contains("1 in progress"));
-    assert!(stdout.contains("1 closed"));
-}
-
-#[rstest]
 fn test_cli_info_json_output(initialized_dir: TempDir) {
-    create_issue(initialized_dir.path(), "Test issue", &[]);
-
     let output = run_rivets_in_dir(initialized_dir.path(), &["--json", "info"]);
 
     assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
     let json: serde_json::Value =
-        serde_json::from_str(&stdout).expect("Output should be valid JSON");
-    assert!(json["database_path"].is_string());
-    assert!(json["issue_prefix"].is_string());
-    assert!(json["issues"]["total"].is_number());
-}
+        serde_json::from_slice(&output.stdout).expect("info output should be valid JSON");
+    let workspace_root = initialized_dir
+        .path()
+        .canonicalize()
+        .expect("workspace root should canonicalize");
+    let expected_database = workspace_root.join(".rivets/issues.jsonl");
+    let expected_config = workspace_root.join(".rivets/config.yaml");
 
-#[rstest]
-fn test_cli_info_with_canonical_states(initialized_dir: TempDir) {
-    create_issue(initialized_dir.path(), "Open issue", &[]);
-    let in_progress_id = create_issue(initialized_dir.path(), "In progress issue", &[]);
-    let closed_id = create_issue(initialized_dir.path(), "Closed issue", &[]);
-    claim_issue(initialized_dir.path(), &in_progress_id, "active-owner");
-
-    let active = run_rivets_in_dir(
-        initialized_dir.path(),
-        &["update", &in_progress_id, "--status", "in_progress"],
-    );
-    assert!(active.status.success());
-    run_rivets_in_dir(initialized_dir.path(), &["close", &closed_id]);
-
-    let output = run_rivets_in_dir(initialized_dir.path(), &["info"]);
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("3 total"));
-    assert!(stdout.contains("1 open"));
-    assert!(stdout.contains("1 in progress"));
-    assert!(stdout.contains("1 closed"));
-    assert!(!stdout.contains("blocked"));
-}
-
-#[rstest]
-fn test_cli_info_json_has_only_canonical_state_counts(initialized_dir: TempDir) {
-    create_issue(initialized_dir.path(), "Open issue", &[]);
-    let closed_id = create_issue(initialized_dir.path(), "Closed issue", &[]);
-    run_rivets_in_dir(initialized_dir.path(), &["close", &closed_id]);
-
-    let output = run_rivets_in_dir(initialized_dir.path(), &["--json", "info"]);
-    assert!(output.status.success());
-    let json: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("Output should be valid JSON");
-    let issues = json["issues"].as_object().expect("issues is an object");
-    let mut keys = issues.keys().map(String::as_str).collect::<Vec<_>>();
+    let mut keys = json
+        .as_object()
+        .expect("info is an object")
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
     keys.sort_unstable();
-    assert_eq!(keys, ["closed", "in_progress", "open", "total"]);
-    assert_eq!(issues["total"], 2);
-    assert_eq!(issues["open"], 1);
-    assert_eq!(issues["in_progress"], 0);
-    assert_eq!(issues["closed"], 1);
+    assert_eq!(
+        keys,
+        [
+            "config_path",
+            "database_path",
+            "issue_prefix",
+            "storage_backend",
+            "workspace_root"
+        ]
+    );
+    assert_eq!(json["workspace_root"], workspace_root.display().to_string());
+    assert_eq!(
+        json["database_path"],
+        expected_database.display().to_string()
+    );
+    assert_eq!(json["config_path"], expected_config.display().to_string());
+    assert_eq!(json["storage_backend"], "jsonl");
+    assert_eq!(json["issue_prefix"], "test");
 }
 
 // ============================================================================

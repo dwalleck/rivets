@@ -28,6 +28,7 @@ use rivets::domain::{
     NoteContent, Parentage, ReadyAssignmentFilter, ReadyFilter, RelatedAssociation, ResourceId,
     ResourceLabel, ResourceRole, ResourceTarget, ResourceUpdate, StaleQuery, WebUrl, WorkspacePath,
 };
+use rivets::reporting::{WorkspaceInformation, WorkspaceStatistics};
 use rivets::storage::IssueStorage;
 use rivets::workspace_lock::WorkspaceMutationLock;
 use std::path::Path;
@@ -263,6 +264,51 @@ impl Tools {
                 issue_prefix: None,
             }),
         }
+    }
+
+    /// Return the initialized configuration snapshot for a workspace.
+    ///
+    /// An explicit workspace root is initialized and cached without changing
+    /// the current context. Omitting the root uses the current context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the workspace cannot be resolved or initialized,
+    /// its configuration is invalid, or the cached report is unavailable.
+    #[instrument(skip(self))]
+    pub async fn info(&self, workspace_root: Option<String>) -> Result<WorkspaceInformation> {
+        let workspace_path = workspace_root.as_deref().map(Path::new);
+        {
+            let context = self.context.read().await;
+            match context.information_for_async(workspace_path).await {
+                Ok(information) => return Ok(information),
+                Err(Error::WorkspaceNotInitialized(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+
+        // Initialization and report capture share the same guard: another
+        // explicit-root call cannot evict this entry between the two.
+        let mut context = self.context.write().await;
+        context.storage_for_or_init(workspace_path).await?;
+        context.information_for_async(workspace_path).await
+    }
+
+    /// Return aggregate workspace statistics from the initialized storage.
+    ///
+    /// Statistics include every Assignment when evaluating Ready and count
+    /// each non-Closed dependent once when it has an unresolved direct
+    /// Blocking Dependency.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the workspace cannot be resolved or initialized,
+    /// or if storage aggregation fails.
+    #[instrument(skip(self))]
+    pub async fn stats(&self, workspace_root: Option<String>) -> Result<WorkspaceStatistics> {
+        let storage = self.storage_for(workspace_root.as_deref()).await?;
+        let storage = storage.read().await;
+        Ok(storage.statistics().await?)
     }
 
     /// Get issues ready to work on.

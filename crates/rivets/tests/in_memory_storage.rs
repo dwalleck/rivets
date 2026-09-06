@@ -14,7 +14,7 @@ use rivets::domain::{
 use rivets::error::{Error, StorageError};
 use rivets::storage::IssueStorage;
 use rivets::storage::in_memory::{load_from_jsonl, new_in_memory_storage, save_to_jsonl};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
@@ -3142,4 +3142,210 @@ async fn label_mutations_preserve_order_and_no_op_timestamps() {
         vec!["second"]
     );
     assert!(added_first.labels.contains(&first));
+}
+
+#[tokio::test]
+async fn statistics_canonical_matrix() {
+    let mut storage = new_in_memory_storage("matrix".to_string());
+
+    let prerequisite_open = storage
+        .create(create_test_issue_with_priority("open prerequisite", 0))
+        .await
+        .unwrap();
+    let prerequisite_closed = storage
+        .create(create_test_issue_with_priority("closed prerequisite", 1))
+        .await
+        .unwrap();
+
+    let mut dependent_input = create_test_issue_with_priority("multiple prerequisites", 2);
+    dependent_input.prerequisites =
+        vec![prerequisite_open.id.clone(), prerequisite_closed.id.clone()];
+    let dependent = storage.create(dependent_input).await.unwrap();
+
+    let mut assigned_input = create_test_issue_with_priority("assigned open", 3);
+    assigned_input.assignee = Some("agent".to_string());
+    let assigned = storage.create(assigned_input).await.unwrap();
+
+    let in_progress = storage
+        .create(create_test_issue_with_priority("in progress", 4))
+        .await
+        .unwrap();
+    storage.claim(&in_progress.id, "worker").await.unwrap();
+    storage
+        .update(
+            &in_progress.id,
+            IssueUpdate {
+                status: Some(IssueStatus::InProgress),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let closed = storage
+        .create(create_test_issue_with_priority("closed", 0))
+        .await
+        .unwrap();
+    storage
+        .update(
+            &closed.id,
+            IssueUpdate {
+                status: Some(IssueStatus::Closed),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    storage
+        .update(
+            &prerequisite_closed.id,
+            IssueUpdate {
+                status: Some(IssueStatus::Closed),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let mut epic_input = epic("nonblocking epic");
+    epic_input.priority = 1;
+    let epic = storage.create(epic_input).await.unwrap();
+    let child = storage
+        .create(create_test_issue_with_priority("parented child", 2))
+        .await
+        .unwrap();
+    storage
+        .set_parent(Parentage::new(child.id.clone(), epic.id.clone()).unwrap())
+        .await
+        .unwrap();
+    storage
+        .add_related_association(
+            RelatedAssociation::new(prerequisite_open.id.clone(), assigned.id.clone()).unwrap(),
+        )
+        .await
+        .unwrap();
+    storage
+        .add_discovery_origin(DiscoveryOrigin::new(child.id.clone(), assigned.id.clone()).unwrap())
+        .await
+        .unwrap();
+
+    storage
+        .update(
+            &dependent.id,
+            IssueUpdate {
+                status: Some(IssueStatus::Closed),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let closed_dependent = storage.statistics().await.unwrap();
+    assert_eq!(closed_dependent.blocked_by_dependencies(), 0);
+    storage
+        .update(
+            &dependent.id,
+            IssueUpdate {
+                status: Some(IssueStatus::Open),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let before_resolution = storage.statistics().await.unwrap();
+    assert_eq!(before_resolution.total(), 8);
+    assert_eq!(before_resolution.open(), 5);
+    assert_eq!(before_resolution.in_progress(), 1);
+    assert_eq!(before_resolution.closed(), 2);
+    assert_eq!(before_resolution.ready(), 4);
+    assert_eq!(before_resolution.blocked_by_dependencies(), 1);
+    assert_eq!(before_resolution.by_priority(), &[2, 2, 2, 1, 1]);
+
+    storage
+        .update(
+            &prerequisite_open.id,
+            IssueUpdate {
+                status: Some(IssueStatus::Closed),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let after_close = storage.statistics().await.unwrap();
+    assert_eq!(after_close.ready(), 4);
+    assert_eq!(after_close.blocked_by_dependencies(), 0);
+
+    storage
+        .update(
+            &prerequisite_closed.id,
+            IssueUpdate {
+                status: Some(IssueStatus::Open),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let after_reopen = storage.statistics().await.unwrap();
+    assert_eq!(after_reopen.ready(), 4);
+    assert_eq!(after_reopen.blocked_by_dependencies(), 1);
+}
+
+#[tokio::test]
+#[ignore = "release-only scale fence; run explicitly after integration"]
+async fn statistics_scale_budget() {
+    const ISSUE_COUNT: usize = 10_000;
+    const EDGE_COUNT: usize = 50_000;
+    const DEPENDENT_START: usize = 5_000;
+    const EDGES_PER_DEPENDENT: usize = EDGE_COUNT / (ISSUE_COUNT - DEPENDENT_START);
+
+    let mut seed = new_in_memory_storage("scale".to_string());
+    let payload = "large issue description ".repeat(256);
+    let mut ids = Vec::with_capacity(ISSUE_COUNT);
+    for index in 0..ISSUE_COUNT {
+        let mut issue =
+            create_test_issue_with_priority(&format!("scale issue {index}"), (index % 5) as u8);
+        issue.description = payload.clone();
+        ids.push(seed.create(issue).await.unwrap().id);
+    }
+
+    let mut imported = seed.export_all().await.unwrap();
+    let indexes: HashMap<IssueId, usize> = ids
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(index, id)| (id, index))
+        .collect();
+    for issue in &mut imported {
+        let index = indexes[&issue.id];
+        if index >= DEPENDENT_START {
+            issue.dependencies = (0..EDGES_PER_DEPENDENT)
+                .map(|offset| Dependency {
+                    depends_on_id: ids[(index + offset) % DEPENDENT_START].clone(),
+                    dep_type: DependencyType::Blocks,
+                })
+                .collect();
+        }
+    }
+
+    let mut storage = new_in_memory_storage("scale".to_string());
+    storage.import_issues(imported).await.unwrap();
+    let started = Instant::now();
+    let statistics = storage.statistics().await.unwrap();
+    let elapsed = started.elapsed();
+    eprintln!("statistics: {ISSUE_COUNT} Issues, {EDGE_COUNT} edges, {elapsed:?}");
+
+    assert_eq!(statistics.total(), ISSUE_COUNT);
+    assert_eq!(statistics.open(), ISSUE_COUNT);
+    assert_eq!(statistics.in_progress(), 0);
+    assert_eq!(statistics.closed(), 0);
+    assert_eq!(statistics.ready(), DEPENDENT_START);
+    assert_eq!(
+        statistics.blocked_by_dependencies(),
+        ISSUE_COUNT - DEPENDENT_START
+    );
+    assert_eq!(statistics.by_priority(), &[2_000; 5]);
+    assert!(
+        elapsed <= Duration::from_secs(2),
+        "statistics aggregation took {elapsed:?}"
+    );
 }

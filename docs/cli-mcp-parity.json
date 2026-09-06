@@ -120,32 +120,30 @@
       "id": "workspace_information",
       "title": "Workspace Information",
       "requirement": "shared",
-      "current_parity": "not_comparable",
-      "target_status": "gap_both",
-      "target": "Return Workspace root, storage location/backend, Issue ID prefix, and configuration identity without issue statistics.",
+      "current_parity": "conformant",
+      "target_status": "conformant",
+      "target": "Return workspace_root, configured database_path and storage_backend, issue_prefix, and canonical config_path from the initialized configuration snapshot, without Issue counts.",
       "cli": {
         "surfaces": [
           "info"
         ],
         "arguments": {},
-        "result": "Database path, Issue ID prefix, and total/open/in_progress/closed counts."
+        "result": "Shared WorkspaceInformation: workspace_root, database_path, storage_backend, issue_prefix, config_path; no Issue statistics."
       },
       "mcp": {
-        "surfaces": [],
-        "arguments": {},
-        "result": "No shared Workspace Information tool; where_am_i is context inspection."
+        "surfaces": ["info"],
+        "arguments": {"workspace_root": "optional override; otherwise selected MCP context"},
+        "result": "The same WorkspaceInformation result, inside the MCP protocol envelope."
       },
-      "risk": "Neither adapter currently returns the required shared Workspace root, configured storage/backend, Issue ID prefix, and configuration identity contract.",
-      "required_resolution": "Separate information from statistics, source fields from actual Workspace configuration, and add the shared Workspace Information intent to MCP.",
+      "risk": "None; configuration identity is the loaded config file path, and cached information describes the same configuration as cached storage.",
+      "required_resolution": "Implemented with shared core reporting and exact real CLI/registered MCP payload comparisons.",
       "evidence": [
-        "crates/rivets/src/cli/execute.rs::execute_info",
-        "crates/rivets-mcp/src/tools.rs::where_am_i",
-        "crates/rivets-mcp/src/server.rs::where_am_i"
+        "crates/rivets/src/reporting.rs::WorkspaceInformation",
+        "crates/rivets/src/cli/execute/reporting.rs::execute_info",
+        "crates/rivets-mcp/src/tools.rs::info",
+        "crates/rivets-mcp/tests/reporting_parity.rs"
       ],
-      "differences": [
-        "CLI info hardcodes the default issues.jsonl path and mixes configuration identity with Issue statistics.",
-        "No shared MCP Workspace Information tool exists; where_am_i is MCP-only context inspection."
-      ]
+      "differences": []
     },
     {
       "id": "create_issue",
@@ -1038,37 +1036,33 @@
       "id": "workspace_statistics",
       "title": "Workspace Statistics",
       "requirement": "shared",
-      "current_parity": "not_comparable",
-      "target_status": "gap_both",
-      "target": "Return total Issues, counts by canonical Workflow State and Priority, derived Ready count, and derived Blocked count.",
+      "current_parity": "conformant",
+      "target_status": "conformant",
+      "target": "Return total, canonical by_status counts, all-Assignment Ready count, direct non-Closed blocked_by_dependencies count, and all five by_priority buckets including zeros.",
       "cli": {
         "surfaces": [
           "stats"
         ],
-        "arguments": {
-          "detailed": "optional boolean; current default false"
-        },
-        "result": "Statistics with canonical Workflow State counts plus separate derived Ready and blocked-by-dependency counts."
+        "arguments": {},
+        "result": "Shared WorkspaceStatistics; Priority counts are unconditional in JSON and text, and --detailed is removed."
       },
       "mcp": {
-        "surfaces": [],
-        "arguments": {},
-        "result": "No registered tool; unused StatsResponse exists."
+        "surfaces": ["stats"],
+        "arguments": {"workspace_root": "optional override; otherwise selected MCP context"},
+        "result": "The same WorkspaceStatistics result, inside the MCP protocol envelope."
       },
-      "risk": "MCP has no equivalent Workspace health view, and CLI Priority counts are conditional on --detailed.",
-      "required_resolution": "Add shared Workspace Statistics to MCP with deterministic Priority counts and matching Ready and Blocked definitions.",
+      "risk": "Statistics Ready includes all Assignments; the default Ready query still selects only unassigned Issues.",
+      "required_resolution": "Implemented through one shared storage aggregation and exact real CLI/registered MCP payload comparisons.",
       "evidence": [
-        "crates/rivets/src/cli/args.rs::StatsArgs",
-        "crates/rivets/src/cli/execute.rs::execute_stats",
-        "crates/rivets/src/storage/in_memory/trait_impl.rs::ready_to_work",
-        "crates/rivets/src/storage/in_memory/trait_impl.rs::blocked_issues",
-        "crates/rivets-mcp/src/models.rs::StatsResponse",
-        "crates/rivets-mcp/src/server.rs::RivetsMcpServer"
+        "crates/rivets/src/reporting.rs::WorkspaceStatistics",
+        "crates/rivets/src/reporting/statistics.rs::aggregate",
+        "crates/rivets/src/cli/execute/reporting.rs::execute_stats",
+        "crates/rivets-mcp/src/tools.rs::stats",
+        "crates/rivets-mcp/tests/reporting_parity.rs",
+        "crates/rivets/tests/in_memory_storage.rs::statistics_canonical_matrix",
+        "crates/rivets/tests/in_memory_storage.rs::statistics_scale_budget"
       ],
-      "differences": [
-        "CLI statistics make Priority counts conditional on --detailed.",
-        "No MCP statistics tool is registered; StatsResponse is unused."
-      ]
+      "differences": []
     },
     {
       "id": "append_note",

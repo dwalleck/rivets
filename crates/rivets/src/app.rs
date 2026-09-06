@@ -19,6 +19,7 @@
 
 use crate::commands::init::{CONFIG_FILE_NAME, RivetsConfig, find_rivets_root};
 use crate::error::{ConfigError, Result};
+use crate::reporting::WorkspaceInformation;
 use crate::storage::{IssueStorage, create_storage};
 use crate::workspace_lock::{RIVETS_DIR_NAME, WorkspaceMutationLock};
 use std::path::{Path, PathBuf};
@@ -32,11 +33,11 @@ pub struct App {
     /// The storage backend (trait object for polymorphism)
     storage: Box<dyn IssueStorage>,
 
+    /// Immutable configuration snapshot used to initialize `storage`.
+    information: WorkspaceInformation,
+
     /// Path to the rivets directory (.rivets)
     rivets_dir: PathBuf,
-
-    /// Issue ID prefix from configuration
-    prefix: String,
 
     /// Durable mutation ownership retained through save and error recovery.
     _mutation_lock: Option<WorkspaceMutationLock>,
@@ -45,8 +46,8 @@ pub struct App {
 impl std::fmt::Debug for App {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("App")
+            .field("information", &self.information)
             .field("rivets_dir", &self.rivets_dir)
-            .field("prefix", &self.prefix)
             .field("storage", &"<dyn IssueStorage>")
             .field("mutation_locked", &self._mutation_lock.is_some())
             .finish()
@@ -59,16 +60,10 @@ impl App {
     /// Searches up the directory tree to find a `.rivets/` directory,
     /// loads configuration, and initializes storage.
     ///
-    /// # Arguments
-    ///
-    /// * `working_dir` - The directory to start searching from
-    ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// - No rivets repository is found in the directory tree
-    /// - Configuration cannot be loaded
-    /// - Storage initialization fails
+    /// Returns an error if no Workspace is found, configuration cannot be loaded
+    /// or resolved, or storage initialization fails.
     pub async fn from_directory(working_dir: &Path) -> Result<Self> {
         let root_dir = find_rivets_root(working_dir).ok_or(ConfigError::NotInitialized)?;
         Self::from_root(root_dir, None).await
@@ -82,8 +77,7 @@ impl App {
     /// # Errors
     ///
     /// Returns [`crate::error::Error::WorkspaceBusy`] on contention, or the
-    /// same discovery, configuration, and storage errors as
-    /// [`from_directory`](Self::from_directory).
+    /// configuration and storage errors described by [`Self::from_directory`].
     pub async fn from_directory_for_mutation(working_dir: &Path) -> Result<Self> {
         let root_dir = find_rivets_root(working_dir).ok_or(ConfigError::NotInitialized)?;
         let mutation_lock = WorkspaceMutationLock::try_acquire(&root_dir)?;
@@ -95,16 +89,18 @@ impl App {
         root_dir: PathBuf,
         mutation_lock: Option<WorkspaceMutationLock>,
     ) -> Result<Self> {
+        let root_dir = root_dir.canonicalize()?;
         let rivets_dir = root_dir.join(RIVETS_DIR_NAME);
         let config_path = rivets_dir.join(CONFIG_FILE_NAME);
         let config = RivetsConfig::load(&config_path).await?;
         let backend = config.storage.to_backend(&root_dir)?;
+        let information = WorkspaceInformation::from_config(&root_dir, &config, &backend)?;
         let storage = create_storage(backend, config.issue_prefix.clone()).await?;
 
         Ok(Self {
             storage,
+            information,
             rivets_dir,
-            prefix: config.issue_prefix,
             _mutation_lock: mutation_lock,
         })
     }
@@ -119,9 +115,14 @@ impl App {
         self.storage.as_ref()
     }
 
+    /// Get the immutable Workspace configuration snapshot used by this App.
+    pub fn information(&self) -> &WorkspaceInformation {
+        &self.information
+    }
+
     /// Get the issue ID prefix.
     pub fn prefix(&self) -> &str {
-        &self.prefix
+        self.information.issue_prefix()
     }
 
     /// Get the path to the rivets directory.
@@ -146,29 +147,24 @@ mod tests {
     #[tokio::test]
     async fn test_app_from_initialized_directory() {
         let temp_dir = TempDir::new().unwrap();
-
-        // Initialize rivets first
         init::init(temp_dir.path(), Some("test")).await.unwrap();
 
-        // Create app from that directory
         let app = App::from_directory(temp_dir.path()).await.unwrap();
 
         assert_eq!(app.prefix(), "test");
         assert!(app.rivets_dir().ends_with(".rivets"));
+        assert_eq!(app.information().issue_prefix(), "test");
+        assert_eq!(app.information().storage_backend(), "jsonl");
     }
 
     #[tokio::test]
     async fn test_app_from_subdirectory() {
         let temp_dir = TempDir::new().unwrap();
-
-        // Initialize rivets in root
         init::init(temp_dir.path(), Some("proj")).await.unwrap();
 
-        // Create a subdirectory
         let sub_dir = temp_dir.path().join("src").join("lib");
         std::fs::create_dir_all(&sub_dir).unwrap();
 
-        // App should find rivets from subdirectory
         let app = App::from_directory(&sub_dir).await.unwrap();
         assert_eq!(app.prefix(), "proj");
     }
@@ -201,5 +197,30 @@ mod tests {
         let reacquired = WorkspaceMutationLock::try_acquire(temp_dir.path())
             .expect("dropping App should release");
         drop(reacquired);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn app_canonicalizes_symlink_root() {
+        let temp_dir = TempDir::new().unwrap();
+        init::init(temp_dir.path(), Some("symlink")).await.unwrap();
+        let alias_parent = TempDir::new().unwrap();
+        let alias = alias_parent.path().join("workspace-link");
+        std::os::unix::fs::symlink(temp_dir.path(), &alias).unwrap();
+
+        let app = App::from_directory(&alias).await.unwrap();
+        assert_eq!(
+            app.information().workspace_root(),
+            temp_dir.path().canonicalize().unwrap()
+        );
+        assert_eq!(
+            app.information().database_path(),
+            temp_dir
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join(".rivets/issues.jsonl")
+        );
+        std::fs::remove_file(alias).unwrap();
     }
 }

@@ -44,7 +44,7 @@ pub use args::{
     BlockingDependencyListArgs, CloseArgs, CreateArgs, DeleteArgs, DiscoveryAction, DiscoveryArgs,
     InfoArgs, InitArgs, LabelAction, LabelArgs, ListArgs, ParentAction, ParentArgs, ReadyArgs,
     RelatedAction, RelatedArgs, ReopenArgs, ResourceAction, ResourceArgs, ShowArgs, StaleArgs,
-    StatsArgs, UpdateArgs,
+    UpdateArgs,
 };
 
 pub use types::{BatchError, BatchResult, SortPolicyArg};
@@ -87,7 +87,7 @@ pub enum Commands {
 
     /// Show repository information
     ///
-    /// Displays database path, issue prefix, and summary statistics.
+    /// Displays the initialized workspace configuration.
     Info(InfoArgs),
 
     /// Create a new issue
@@ -175,7 +175,7 @@ pub enum Commands {
     /// Show project statistics
     ///
     /// Displays summary statistics about issues, completion rates, and trends.
-    Stats(StatsArgs),
+    Stats,
 }
 
 impl Commands {
@@ -204,7 +204,7 @@ impl Commands {
             | Self::Ready(_)
             | Self::Stale(_)
             | Self::Blocked(_)
-            | Self::Stats(_) => false,
+            | Self::Stats => false,
         }
     }
 }
@@ -344,9 +344,9 @@ impl Cli {
                 let app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_blocked(&app, args, output_mode).await
             }
-            Some(Commands::Stats(args)) => {
+            Some(Commands::Stats) => {
                 let app = load_app_from_cwd(mutates_workspace).await?;
-                execute::execute_stats(&app, args, output_mode).await
+                execute::execute_stats(&app, output_mode).await
             }
             None => {
                 println!("Rivets issue tracking system");
@@ -1220,13 +1220,9 @@ mod tests {
 
     #[test]
     fn test_parse_stats() {
-        let cli = Cli::try_parse_from(["rivets", "stats", "--detailed"]).unwrap();
-        match cli.command {
-            Some(Commands::Stats(args)) => {
-                assert!(args.detailed);
-            }
-            _ => panic!("Expected Stats command"),
-        }
+        let cli = Cli::try_parse_from(["rivets", "stats"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Stats)));
+        assert!(Cli::try_parse_from(["rivets", "stats", "--detailed"]).is_err());
     }
 
     #[test]

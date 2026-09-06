@@ -16,6 +16,9 @@ use crate::domain::{
     ResourceId, ResourceUpdate, SortPolicy, StaleQuery,
 };
 use crate::error::{Error, Result, StorageError};
+use crate::reporting::WorkspaceStatistics;
+use crate::reporting::statistics::{aggregate, is_intrinsically_ready};
+
 use crate::storage::IssueStorage;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -972,9 +975,7 @@ impl IssueStorage for InMemoryStorage {
             .issues
             .values()
             .filter(|issue| {
-                issue.status == IssueStatus::Open
-                    && !blocked.contains(&issue.id)
-                    && matches_ready_filter(issue, filter)
+                is_intrinsically_ready(issue, &blocked) && matches_ready_filter(issue, filter)
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -1017,6 +1018,12 @@ impl IssueStorage for InMemoryStorage {
         }
 
         Ok(blocked_list)
+    }
+
+    async fn statistics(&self) -> Result<WorkspaceStatistics> {
+        let inner = self.lock().await;
+        let blocked = find_blocked_issues(&inner.graph, &inner.node_map, &inner.issues);
+        aggregate(&inner.issues, &blocked)
     }
 
     async fn add_label(&mut self, id: &IssueId, label: &Label) -> Result<Issue> {

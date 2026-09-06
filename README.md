@@ -50,7 +50,7 @@ rivets close "$ID"
 | Command | Purpose |
 |---------|---------|
 | `init` | Initialize a repository (`.rivets/` and `config.yaml`); `--prefix <name>` sets the ID prefix |
-| `info` | Repository info: database path, prefix, and summary counts |
+| `info` | Workspace root, configured storage/backend, Issue ID prefix, and configuration path; no Issue counts |
 | `create` | Create an issue (`--title`, `--kind`, `--priority`, `--assignee`, `--labels`, repeatable `--prerequisite`, `--design`, `--acceptance`, `--notes`) |
 | `list` | Newest-created Issues, with ascending Issue-ID ties; required positive `--limit`; filters: `--status`, `--priority`, `--kind`, `--assignee`, `--label` |
 | `show` | Show one or more issues with their Blocking prerequisites/dependents and resources |
@@ -69,9 +69,14 @@ rivets close "$ID"
 | `label` | Labels: `add <label> [<issue-id>]`, `remove`, `list <issue-id>`, `list-all`; use `--ids` for batches |
 | `resource` | Associated Resources: `add`, `list`, `update`, `remove` (see below) |
 | `stale` | Oldest-updated Issues not updated in N days (`--days`, default 30); required positive `--limit`; excludes Closed unless `--status closed` |
-| `stats` | Project statistics (`--detailed` for a breakdown) |
+| `stats` | Workspace totals, canonical Workflow State counts, all-Assignment Ready and direct Blocked counts, and all five Priority buckets |
 
 Global flags include `--json` for data-command output and `-y`/`--yes` to skip confirmation prompts.
+
+`info` and `stats` return the same semantic JSON as their MCP counterparts.
+Statistics always include Priority counts; the former `--detailed` flag is removed.
+Statistics Ready includes assigned Open, unblocked Issues; `ready` still defaults
+to unassigned work. Configuration identity is the loaded `config.yaml` path.
 
 ## Usage
 
