@@ -251,6 +251,11 @@ impl McpProcess {
     }
 
     fn request(&mut self, method: &str, params: Value) -> Value {
+        self.request_result(method, params)
+            .unwrap_or_else(|error| panic!("MCP {method} returned protocol error: {error}"))
+    }
+
+    fn request_result(&mut self, method: &str, params: Value) -> Result<Value, Value> {
         self.next_id += 1;
         let id = self.next_id;
         let mut request = json!({"jsonrpc": "2.0", "id": id, "method": method});
@@ -270,25 +275,35 @@ impl McpProcess {
                 continue;
             }
             if let Some(error) = response.get("error") {
-                panic!("MCP {method} returned protocol error: {error}");
+                return Err(error.clone());
             }
-            return response
+            return Ok(response
                 .get("result")
                 .cloned()
-                .expect("MCP result envelope");
+                .expect("MCP result envelope"));
         }
     }
 
     fn call(&mut self, name: &str, arguments: Value) -> Value {
-        let mut params = json!({"name": name});
-        params["arguments"] = arguments;
-        let result = self.request("tools/call", params);
+        self.call_result(name, arguments)
+            .unwrap_or_else(|error| panic!("MCP {name} failed: {error}"))
+    }
+
+    fn call_result(&mut self, name: &str, arguments: Value) -> Result<Value, Value> {
+        let params = serde_json::Map::from_iter([
+            ("name".to_string(), Value::String(name.to_string())),
+            ("arguments".to_string(), arguments),
+        ]);
+        let result = self.request_result("tools/call", Value::Object(params))?;
+        if result["isError"] == true {
+            return Err(result);
+        }
         let text = result["content"]
             .as_array()
             .and_then(|content| content.first())
             .and_then(|content| content["text"].as_str())
             .unwrap_or_else(|| panic!("MCP {name} did not return text JSON: {result}"));
-        serde_json::from_str(text).expect("MCP tool JSON payload")
+        Ok(serde_json::from_str(text).expect("MCP tool JSON payload"))
     }
 }
 
@@ -482,4 +497,26 @@ async fn information_survives_concurrent_cache_eviction() {
     while let Some(result) = tasks.join_next().await {
         result.expect("report task");
     }
+}
+
+#[test]
+fn registered_mcp_empty_update_is_invalid_params() {
+    let mut original = issue_record("rep-update", "open", 2, None, &[]);
+    original["labels"] = json!(["preserve"]);
+    let fixture = Fixture::new(vec![original]);
+    let mut mcp = McpProcess::new(fixture.root());
+    mcp.call("set_context", json!({"workspace_root": fixture.root()}));
+
+    let empty = mcp
+        .call_result("update", json!({"issue_id": "rep-update"}))
+        .unwrap_err();
+    assert_eq!(empty["code"], -32602);
+    fixture.assert_source_unchanged();
+
+    let updated = mcp.call(
+        "update",
+        json!({"issue_id": "rep-update", "title": "Registered change"}),
+    );
+    assert_eq!(updated["title"], "Registered change");
+    assert_ne!(std::fs::read(&fixture.data_path).unwrap(), fixture.original);
 }
