@@ -6,10 +6,10 @@
 
 use rivets::domain::{
     AssignmentError, BlockingDependency, Dependency, DependencyType, DiscoveryOrigin, Issue,
-    IssueId, IssueKind, IssueStatus, IssueUpdate, Label, MAX_PRIORITY, NewIssue, NewResource,
-    NoteContent, Parentage, ParentageError, ReadyAssignmentFilter, ReadyFilter, RelatedAssociation,
-    ResourceId, ResourceLabel, ResourceRole, ResourceTarget, ResourceUpdate, SortPolicy, WebUrl,
-    WorkspacePath,
+    IssueId, IssueKind, IssueStatus, IssueUpdate, Label, LifecycleAction, MAX_PRIORITY, NewIssue,
+    NewResource, NoteContent, Parentage, ParentageError, ReadyAssignmentFilter, ReadyFilter,
+    RelatedAssociation, ResourceId, ResourceLabel, ResourceRole, ResourceTarget, ResourceUpdate,
+    SortPolicy, UpdateError, WebUrl, WorkspacePath,
 };
 use rivets::error::{Error, StorageError};
 use rivets::storage::IssueStorage;
@@ -211,14 +211,17 @@ async fn test_update_issue() {
         .await
         .expect("Issue should be claimed before entering In Progress");
 
-    let updates = IssueUpdate {
-        title: Some("Updated Title".to_string()),
-        status: Some(IssueStatus::InProgress),
-        priority: Some(1),
-        ..Default::default()
-    };
+    let updates = IssueUpdate::builder()
+        .title(Some("Updated Title".to_string()))
+        .priority(Some(1))
+        .build()
+        .expect("valid update");
 
-    let updated = storage.update(&created.id, updates).await.unwrap();
+    storage.update(&created.id, updates).await.unwrap();
+    let updated = storage
+        .transition(&created.id, LifecycleAction::Start)
+        .await
+        .unwrap();
     assert_eq!(updated.title, "Updated Title");
     assert_eq!(updated.status, IssueStatus::InProgress);
     assert_eq!(updated.priority, 1);
@@ -226,48 +229,91 @@ async fn test_update_issue() {
 
 #[tokio::test]
 async fn test_update_rejects_invalid_priority() {
-    let mut storage = new_in_memory_storage("test".to_string());
+    let result = IssueUpdate::builder()
+        .priority(Some(MAX_PRIORITY + 1))
+        .build();
 
-    let new_issue = create_test_issue("Test Issue");
-    let created = storage.create(new_issue).await.unwrap();
-
-    let result = storage
-        .update(
-            &created.id,
-            IssueUpdate {
-                priority: Some(MAX_PRIORITY + 1),
-                ..Default::default()
-            },
-        )
-        .await;
-
-    assert!(matches!(result, Err(Error::InvalidPriority(_))));
+    assert!(matches!(result, Err(UpdateError::InvalidPriority(_))));
 }
 
 #[tokio::test]
-async fn rejected_update_does_not_append_note_or_mutate_issue() {
+async fn rejected_update_does_not_mutate_issue() {
     let mut storage = new_in_memory_storage("test".to_string());
     let created = storage
         .create(create_test_issue("Original Title"))
         .await
         .unwrap();
 
-    let result = storage
-        .update(
-            &created.id,
-            IssueUpdate {
-                title: Some(" ".to_string()),
-                note: Some(NoteContent::new("Must not persist").unwrap()),
-                ..Default::default()
-            },
-        )
-        .await;
-    assert!(result.is_err());
+    let result = IssueUpdate::builder().title(Some(" ".to_string())).build();
+    assert!(matches!(result, Err(UpdateError::InvalidTitle(_))));
 
     let unchanged = storage.get(&created.id).await.unwrap().unwrap();
     assert_eq!(unchanged.title, "Original Title");
     assert!(unchanged.notes().is_empty());
     assert_eq!(unchanged.updated_at, created.updated_at);
+}
+#[tokio::test]
+async fn append_note_uses_dedicated_storage_intent() {
+    let mut storage = new_in_memory_storage("test".to_string());
+    let created = storage
+        .create(create_test_issue("Note target"))
+        .await
+        .unwrap();
+
+    let updated = storage
+        .append_note(
+            &created.id,
+            NoteContent::new("First note").expect("valid note"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.notes().len(), 1);
+    assert_eq!(updated.notes()[0].content(), "First note");
+    assert!(updated.updated_at >= created.updated_at);
+}
+
+#[tokio::test]
+async fn lifecycle_intents_preserve_state_and_reason_history() {
+    let mut input = create_test_issue("Lifecycle target");
+    input.assignee = Some("owner".to_string());
+    let mut storage = new_in_memory_storage("test".to_string());
+    let created = storage.create(input).await.unwrap();
+
+    storage
+        .transition(&created.id, LifecycleAction::Start)
+        .await
+        .unwrap();
+    let returned = storage
+        .transition(&created.id, LifecycleAction::ReturnToOpen)
+        .await
+        .unwrap();
+    assert_eq!(returned.status, IssueStatus::Open);
+    assert_eq!(returned.assignee.as_deref(), Some("owner"));
+
+    let closed = storage
+        .transition(
+            &created.id,
+            LifecycleAction::Close {
+                reason: Some(NoteContent::closing_reason("finished").expect("valid reason")),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(closed.status, IssueStatus::Closed);
+    assert_eq!(closed.notes()[0].content(), "Closed: finished");
+
+    let reopened = storage
+        .transition(
+            &created.id,
+            LifecycleAction::Reopen {
+                reason: Some(NoteContent::reopening_reason("follow-up").expect("valid reason")),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(reopened.status, IssueStatus::Open);
+    assert_eq!(reopened.assignee, None);
+    assert_eq!(reopened.notes()[1].content(), "Reopened: follow-up");
 }
 
 #[tokio::test]
@@ -598,13 +644,7 @@ async fn closed_prerequisite_stays_recorded_without_blocking() {
     );
 
     storage
-        .update(
-            &prerequisite.id,
-            IssueUpdate {
-                status: Some(IssueStatus::Closed),
-                ..Default::default()
-            },
-        )
+        .transition(&prerequisite.id, LifecycleAction::Close { reason: None })
         .await
         .unwrap();
 
@@ -673,10 +713,10 @@ async fn parentage_cardinality_and_epic_parent_are_enforced() {
     let result = storage
         .update(
             &first_parent.id,
-            IssueUpdate {
-                issue_kind: Some(IssueKind::Task),
-                ..Default::default()
-            },
+            IssueUpdate::builder()
+                .issue_kind(Some(IssueKind::Task))
+                .build()
+                .expect("valid update"),
         )
         .await;
     assert!(matches!(
@@ -937,23 +977,11 @@ async fn epic_close_reports_active_direct_children_without_cascade() {
     let in_progress_child = storage.create(in_progress_input).await.unwrap();
     let closed_child = storage.create(create_test_issue("Closed")).await.unwrap();
     storage
-        .update(
-            &in_progress_child.id,
-            IssueUpdate {
-                status: Some(IssueStatus::InProgress),
-                ..Default::default()
-            },
-        )
+        .transition(&in_progress_child.id, LifecycleAction::Start)
         .await
         .unwrap();
     storage
-        .update(
-            &closed_child.id,
-            IssueUpdate {
-                status: Some(IssueStatus::Closed),
-                ..Default::default()
-            },
-        )
+        .transition(&closed_child.id, LifecycleAction::Close { reason: None })
         .await
         .unwrap();
     for child_id in [&open_child.id, &in_progress_child.id, &closed_child.id] {
@@ -966,13 +994,7 @@ async fn epic_close_reports_active_direct_children_without_cascade() {
     let mut expected = vec![open_child.id.clone(), in_progress_child.id.clone()];
     expected.sort();
     let error = storage
-        .update(
-            &parent.id,
-            IssueUpdate {
-                status: Some(IssueStatus::Closed),
-                ..Default::default()
-            },
-        )
+        .transition(&parent.id, LifecycleAction::Close { reason: None })
         .await
         .unwrap_err();
     assert!(matches!(
@@ -1002,25 +1024,13 @@ async fn epic_close_reports_active_direct_children_without_cascade() {
 
     for child_id in [&open_child.id, &in_progress_child.id] {
         storage
-            .update(
-                child_id,
-                IssueUpdate {
-                    status: Some(IssueStatus::Closed),
-                    ..Default::default()
-                },
-            )
+            .transition(child_id, LifecycleAction::Close { reason: None })
             .await
             .unwrap();
     }
     assert_eq!(
         storage
-            .update(
-                &parent.id,
-                IssueUpdate {
-                    status: Some(IssueStatus::Closed),
-                    ..Default::default()
-                },
-            )
+            .transition(&parent.id, LifecycleAction::Close { reason: None })
             .await
             .unwrap()
             .status,
@@ -1034,13 +1044,7 @@ async fn closed_parent_attachment_and_reopen_truth_table() {
     let closed_parent = storage.create(epic("Closed parent")).await.unwrap();
     let open_parent = storage.create(epic("Open parent")).await.unwrap();
     storage
-        .update(
-            &closed_parent.id,
-            IssueUpdate {
-                status: Some(IssueStatus::Closed),
-                ..Default::default()
-            },
-        )
+        .transition(&closed_parent.id, LifecycleAction::Close { reason: None })
         .await
         .unwrap();
 
@@ -1052,13 +1056,7 @@ async fn closed_parent_attachment_and_reopen_truth_table() {
     in_progress_input.assignee = Some("active-owner".to_string());
     let in_progress_child = storage.create(in_progress_input).await.unwrap();
     storage
-        .update(
-            &in_progress_child.id,
-            IssueUpdate {
-                status: Some(IssueStatus::InProgress),
-                ..Default::default()
-            },
-        )
+        .transition(&in_progress_child.id, LifecycleAction::Start)
         .await
         .unwrap();
     let closed_child = storage
@@ -1066,13 +1064,7 @@ async fn closed_parent_attachment_and_reopen_truth_table() {
         .await
         .unwrap();
     storage
-        .update(
-            &closed_child.id,
-            IssueUpdate {
-                status: Some(IssueStatus::Closed),
-                ..Default::default()
-            },
-        )
+        .transition(&closed_child.id, LifecycleAction::Close { reason: None })
         .await
         .unwrap();
 
@@ -1097,13 +1089,7 @@ async fn closed_parent_attachment_and_reopen_truth_table() {
         closed_parentage
     );
     let error = storage
-        .update(
-            &closed_child.id,
-            IssueUpdate {
-                status: Some(IssueStatus::Open),
-                ..Default::default()
-            },
-        )
+        .transition(&closed_child.id, LifecycleAction::Reopen { reason: None })
         .await
         .unwrap_err();
     assert!(matches!(
@@ -1156,26 +1142,14 @@ async fn epic_close_10k_direct_children_budget() {
             0 => active_child_ids.push(child.id),
             1 => {
                 storage
-                    .update(
-                        &child.id,
-                        IssueUpdate {
-                            status: Some(IssueStatus::InProgress),
-                            ..Default::default()
-                        },
-                    )
+                    .transition(&child.id, LifecycleAction::Start)
                     .await
                     .unwrap();
                 active_child_ids.push(child.id);
             }
             2 => {
                 storage
-                    .update(
-                        &child.id,
-                        IssueUpdate {
-                            status: Some(IssueStatus::Closed),
-                            ..Default::default()
-                        },
-                    )
+                    .transition(&child.id, LifecycleAction::Close { reason: None })
                     .await
                     .unwrap();
             }
@@ -1186,13 +1160,7 @@ async fn epic_close_10k_direct_children_budget() {
 
     let started = Instant::now();
     let error = storage
-        .update(
-            &parent.id,
-            IssueUpdate {
-                status: Some(IssueStatus::Closed),
-                ..Default::default()
-            },
-        )
+        .transition(&parent.id, LifecycleAction::Close { reason: None })
         .await
         .unwrap_err();
     let elapsed = started.elapsed();
@@ -1210,25 +1178,13 @@ async fn epic_close_10k_direct_children_budget() {
 
     for child_id in active_child_ids {
         storage
-            .update(
-                &child_id,
-                IssueUpdate {
-                    status: Some(IssueStatus::Closed),
-                    ..Default::default()
-                },
-            )
+            .transition(&child_id, LifecycleAction::Close { reason: None })
             .await
             .unwrap();
     }
     assert_eq!(
         storage
-            .update(
-                &parent.id,
-                IssueUpdate {
-                    status: Some(IssueStatus::Closed),
-                    ..Default::default()
-                },
-            )
+            .transition(&parent.id, LifecycleAction::Close { reason: None })
             .await
             .unwrap()
             .status,
@@ -1317,13 +1273,7 @@ async fn ready_truth_table_covers_state_blocking_and_assignment() {
         .await
         .expect("in-progress issue should be created");
     storage
-        .update(
-            &in_progress.id,
-            IssueUpdate {
-                status: Some(IssueStatus::InProgress),
-                ..Default::default()
-            },
-        )
+        .transition(&in_progress.id, LifecycleAction::Start)
         .await
         .expect("in-progress status update should succeed");
 
@@ -1332,13 +1282,7 @@ async fn ready_truth_table_covers_state_blocking_and_assignment() {
         .await
         .expect("closed issue should be created");
     storage
-        .update(
-            &closed.id,
-            IssueUpdate {
-                status: Some(IssueStatus::Closed),
-                ..Default::default()
-            },
-        )
+        .transition(&closed.id, LifecycleAction::Close { reason: None })
         .await
         .expect("closed status update should succeed");
 
@@ -1616,13 +1560,7 @@ async fn test_ready_to_work_closed_blocker_unblocks() {
 
     // Close the blocker
     storage
-        .update(
-            &blocker.id,
-            IssueUpdate {
-                status: Some(IssueStatus::Closed),
-                ..Default::default()
-            },
-        )
+        .transition(&blocker.id, LifecycleAction::Close { reason: None })
         .await
         .unwrap();
 
@@ -1898,23 +1836,11 @@ async fn test_ready_to_work_all_closed() {
 
     // Close all issues
     storage
-        .update(
-            &issue1.id,
-            IssueUpdate {
-                status: Some(IssueStatus::Closed),
-                ..Default::default()
-            },
-        )
+        .transition(&issue1.id, LifecycleAction::Close { reason: None })
         .await
         .unwrap();
     storage
-        .update(
-            &issue2.id,
-            IssueUpdate {
-                status: Some(IssueStatus::Closed),
-                ..Default::default()
-            },
-        )
+        .transition(&issue2.id, LifecycleAction::Close { reason: None })
         .await
         .unwrap();
 
@@ -2286,13 +2212,7 @@ async fn claim_compare_and_set_matrix_changes_only_assignment() {
         .await
         .expect("active target should be created");
     let active = storage
-        .update(
-            &active.id,
-            IssueUpdate {
-                status: Some(IssueStatus::InProgress),
-                ..Default::default()
-            },
-        )
+        .transition(&active.id, LifecycleAction::Start)
         .await
         .expect("assigned Issue should enter In Progress");
     assert!(matches!(
@@ -2432,13 +2352,7 @@ async fn release_compare_and_set_matrix_changes_only_assignment() {
         .await
         .expect("active target should be created");
     let active = storage
-        .update(
-            &active.id,
-            IssueUpdate {
-                status: Some(IssueStatus::InProgress),
-                ..Default::default()
-            },
-        )
+        .transition(&active.id, LifecycleAction::Start)
         .await
         .expect("assigned target should become active");
     assert!(matches!(
@@ -2460,14 +2374,7 @@ async fn workflow_transition_assignment_matrix() {
         .await
         .expect("unassigned target should be created");
     let rejected = storage
-        .update(
-            &unassigned.id,
-            IssueUpdate {
-                title: Some("Must not persist".to_string()),
-                status: Some(IssueStatus::InProgress),
-                ..Default::default()
-            },
-        )
+        .transition(&unassigned.id, LifecycleAction::Start)
         .await;
     assert!(matches!(
         rejected,
@@ -2493,49 +2400,25 @@ async fn workflow_transition_assignment_matrix() {
         .await
         .expect("assigned target should be created");
     let active = storage
-        .update(
-            &assigned.id,
-            IssueUpdate {
-                status: Some(IssueStatus::InProgress),
-                ..Default::default()
-            },
-        )
+        .transition(&assigned.id, LifecycleAction::Start)
         .await
         .expect("assigned target should become active");
     assert_eq!(active.assignee.as_deref(), Some("alice"));
 
     let open_again = storage
-        .update(
-            &assigned.id,
-            IssueUpdate {
-                status: Some(IssueStatus::Open),
-                ..Default::default()
-            },
-        )
+        .transition(&assigned.id, LifecycleAction::ReturnToOpen)
         .await
         .expect("active target should return to Open");
     assert_eq!(open_again.assignee.as_deref(), Some("alice"));
 
     let closed = storage
-        .update(
-            &assigned.id,
-            IssueUpdate {
-                status: Some(IssueStatus::Closed),
-                ..Default::default()
-            },
-        )
+        .transition(&assigned.id, LifecycleAction::Close { reason: None })
         .await
         .expect("target should close");
     assert_eq!(closed.assignee, None);
 
     let reopened = storage
-        .update(
-            &assigned.id,
-            IssueUpdate {
-                status: Some(IssueStatus::Open),
-                ..Default::default()
-            },
-        )
+        .transition(&assigned.id, LifecycleAction::Reopen { reason: None })
         .await
         .expect("closed target should reopen");
     assert_eq!(reopened.status, IssueStatus::Open);
@@ -2543,13 +2426,7 @@ async fn workflow_transition_assignment_matrix() {
 
     assert!(matches!(
         storage
-            .update(
-                &assigned.id,
-                IssueUpdate {
-                    status: Some(IssueStatus::Open),
-                    ..Default::default()
-                },
-            )
+            .transition(&assigned.id, LifecycleAction::Reopen { reason: None })
             .await,
         Err(Error::Storage(StorageError::InvalidStatusTransition(
             rivets::domain::StatusTransitionError::NotClosed {
@@ -2571,13 +2448,7 @@ async fn create_assignment_follows_claim_readiness_after_relationship_validation
         .await
         .expect("closed prerequisite should be created");
     storage
-        .update(
-            &closed.id,
-            IssueUpdate {
-                status: Some(IssueStatus::Closed),
-                ..Default::default()
-            },
-        )
+        .transition(&closed.id, LifecycleAction::Close { reason: None })
         .await
         .expect("prerequisite should close");
 
@@ -3172,13 +3043,7 @@ async fn statistics_canonical_matrix() {
         .unwrap();
     storage.claim(&in_progress.id, "worker").await.unwrap();
     storage
-        .update(
-            &in_progress.id,
-            IssueUpdate {
-                status: Some(IssueStatus::InProgress),
-                ..Default::default()
-            },
-        )
+        .transition(&in_progress.id, LifecycleAction::Start)
         .await
         .unwrap();
 
@@ -3187,22 +3052,13 @@ async fn statistics_canonical_matrix() {
         .await
         .unwrap();
     storage
-        .update(
-            &closed.id,
-            IssueUpdate {
-                status: Some(IssueStatus::Closed),
-                ..Default::default()
-            },
-        )
+        .transition(&closed.id, LifecycleAction::Close { reason: None })
         .await
         .unwrap();
     storage
-        .update(
+        .transition(
             &prerequisite_closed.id,
-            IssueUpdate {
-                status: Some(IssueStatus::Closed),
-                ..Default::default()
-            },
+            LifecycleAction::Close { reason: None },
         )
         .await
         .unwrap();
@@ -3230,25 +3086,13 @@ async fn statistics_canonical_matrix() {
         .unwrap();
 
     storage
-        .update(
-            &dependent.id,
-            IssueUpdate {
-                status: Some(IssueStatus::Closed),
-                ..Default::default()
-            },
-        )
+        .transition(&dependent.id, LifecycleAction::Close { reason: None })
         .await
         .unwrap();
     let closed_dependent = storage.statistics().await.unwrap();
     assert_eq!(closed_dependent.blocked_by_dependencies(), 0);
     storage
-        .update(
-            &dependent.id,
-            IssueUpdate {
-                status: Some(IssueStatus::Open),
-                ..Default::default()
-            },
-        )
+        .transition(&dependent.id, LifecycleAction::Reopen { reason: None })
         .await
         .unwrap();
 
@@ -3262,12 +3106,9 @@ async fn statistics_canonical_matrix() {
     assert_eq!(before_resolution.by_priority(), &[2, 2, 2, 1, 1]);
 
     storage
-        .update(
+        .transition(
             &prerequisite_open.id,
-            IssueUpdate {
-                status: Some(IssueStatus::Closed),
-                ..Default::default()
-            },
+            LifecycleAction::Close { reason: None },
         )
         .await
         .unwrap();
@@ -3276,12 +3117,9 @@ async fn statistics_canonical_matrix() {
     assert_eq!(after_close.blocked_by_dependencies(), 0);
 
     storage
-        .update(
+        .transition(
             &prerequisite_closed.id,
-            IssueUpdate {
-                status: Some(IssueStatus::Open),
-                ..Default::default()
-            },
+            LifecycleAction::Reopen { reason: None },
         )
         .await
         .unwrap();

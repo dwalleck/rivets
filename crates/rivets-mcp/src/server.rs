@@ -8,10 +8,10 @@ use crate::models::{
     AddNoteParams, AssignmentParams, BlockedParams, BlockingDependencyListParams,
     BlockingDependencyPairParams, BlockingDependencyTreeParams, CloseParams, CreateParams,
     DiscoveryListParams, DiscoveryPairParams, LabelAddParams, LabelListAllParams, LabelListParams,
-    LabelRemoveParams, ListParams, ParentChildParams, ParentPairParams, ReadyParams,
-    RelatedListParams, RelatedPairParams, ReopenParams, ResourceAddParams, ResourceListParams,
-    ResourceRemoveParams, ResourceUpdateParams, SetContextParams, ShowParams, StaleParams,
-    UpdateParams, WorkspaceRootParams,
+    LabelRemoveParams, LifecycleParams, ListParams, ParentChildParams, ParentPairParams,
+    ReadyParams, RelatedListParams, RelatedPairParams, ReopenParams, ResourceAddParams,
+    ResourceListParams, ResourceRemoveParams, ResourceUpdateParams, SetContextParams, ShowParams,
+    StaleParams, UpdateParams, WorkspaceRootParams,
 };
 use crate::tools::Tools;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -175,7 +175,7 @@ impl RivetsMcpServer {
 
     /// Update an existing issue.
     #[tool(
-        description = "Update an existing issue's status, priority, kind, labels, description, design notes, or acceptance criteria. Assignment changes use claim or release. Labels replace existing labels when provided. Uses workspace_root if provided, otherwise uses current context."
+        description = "Update an existing issue's title, description, priority, kind, design notes, or acceptance criteria. Omitted or null optional fields remain unchanged; at least one canonical field is required. Workflow state, Assignment, Labels, Notes, and relationships use dedicated tools. Uses workspace_root if provided, otherwise uses current context."
     )]
     async fn update(
         &self,
@@ -184,6 +184,34 @@ impl RivetsMcpServer {
         match self.tools.update(params).await {
             Ok(issue) => Ok(CallToolResult::success(vec![Content::json(issue)?])),
             Err(e) => Err(to_mcp_error(&e)),
+        }
+    }
+
+    /// Start an Issue, moving it to In Progress.
+    #[tool(
+        description = "Start an issue by moving it from Open to In Progress. The domain enforces Assignment and other lifecycle invariants. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn start(
+        &self,
+        Parameters(params): Parameters<LifecycleParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self.tools.start(params).await {
+            Ok(issue) => Ok(CallToolResult::success(vec![Content::json(issue)?])),
+            Err(error) => Err(to_mcp_error(&error)),
+        }
+    }
+
+    /// Return an In Progress Issue to Open.
+    #[tool(
+        description = "Return an In Progress issue to Open without changing its Assignment. Closed issues must use reopen. Uses workspace_root if provided, otherwise uses current context."
+    )]
+    async fn return_to_open(
+        &self,
+        Parameters(params): Parameters<LifecycleParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self.tools.return_to_open(params).await {
+            Ok(issue) => Ok(CallToolResult::success(vec![Content::json(issue)?])),
+            Err(error) => Err(to_mcp_error(&error)),
         }
     }
 
@@ -1353,8 +1381,40 @@ mod tests {
                 .expect("tool input schema should expose properties")
         };
         assert!(input_properties("create").contains_key("initial_note"));
-        assert!(!input_properties("update").contains_key("notes"));
-        assert!(!input_properties("update").contains_key("assignee"));
+        let update_properties = input_properties("update");
+        let update_tool = tools
+            .iter()
+            .find(|tool| tool.name == "update")
+            .expect("Update tool should be registered");
+        assert_eq!(
+            update_tool.input_schema["additionalProperties"],
+            serde_json::json!(false),
+            "Update schema must reject unknown fields"
+        );
+        let mut field_names = update_properties
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        field_names.sort_unstable();
+        assert_eq!(
+            field_names,
+            [
+                "acceptance_criteria",
+                "description",
+                "design",
+                "issue_id",
+                "issue_kind",
+                "priority",
+                "title",
+                "workspace_root"
+            ],
+            "Update schema must expose exactly the canonical fields"
+        );
+        for tool_name in ["start", "return_to_open"] {
+            let properties = input_properties(tool_name);
+            assert!(properties.contains_key("issue_id"));
+            assert!(properties.contains_key("workspace_root"));
+        }
         for tool_name in ["claim", "release"] {
             let properties = input_properties(tool_name);
             assert!(properties.contains_key("issue_id"));
@@ -1517,14 +1577,7 @@ mod tests {
         let server = RivetsMcpServer::new();
         let tools = server.tool_router.list_all();
 
-        for tool_name in [
-            "ready",
-            "list",
-            "create",
-            "update",
-            "label_add",
-            "label_remove",
-        ] {
+        for tool_name in ["ready", "list", "create", "label_add", "label_remove"] {
             let tool = tools
                 .iter()
                 .find(|tool| tool.name == tool_name)

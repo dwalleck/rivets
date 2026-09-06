@@ -11,6 +11,8 @@ classDiagram
         +create(NewIssue) Future~Issue~
         +get(IssueId) Future~Option~Issue~~
         +update(IssueId, IssueUpdate) Future~Issue~
+        +transition(IssueId, LifecycleAction) Future~Issue~
+        +append_note(IssueId, NoteContent) Future~Issue~
         +claim(IssueId, str) Future~Issue~
         +release(IssueId, str) Future~Issue~
         +delete(IssueId) Future~void~

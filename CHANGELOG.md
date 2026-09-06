@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Restricted general Update to title, description, Priority, Kind, design, and acceptance criteria through a validated nonempty domain value. Removed CLI Update `--status`/`--notes` and MCP Update's obsolete fields and compatibility aliases; rejected requests preserve timestamps and persisted bytes.
+- Added CLI/MCP Start and Return to Open and CLI `note append`; lifecycle changes and Note append now use dedicated atomic storage intents. Existing Close/Reopen reason history, Assignment, Parentage, and ordered partial-success batches are preserved.
 - Workspace mutation guards explicitly unlock on drop, releasing the lock even when unrelated forked children retain an inherited file descriptor.
 - Added shared CLI/MCP `info` and `stats` reports. Information now reports the initialized Workspace configuration without Issue counts; Statistics always includes all five Priority buckets, three Workflow States, all-Assignment Ready, and direct Blocked counts. Removed CLI `stats --detailed`; MCP `where_am_i` remains separate context inspection.
 - List and Stale now require an explicit positive limit through CLI and MCP. Shared storage query policy orders List newest-created and Stale oldest-updated, with ascending Issue-ID ties; Stale excludes Closed unless explicitly filtered and rejects unrepresentable age cutoffs.

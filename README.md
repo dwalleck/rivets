@@ -39,7 +39,7 @@ rivets ready
 
 # Atomically claim it, then start active work
 rivets claim "$ID" --assignee "$USER"
-rivets update "$ID" --status in_progress
+rivets start "$ID"
 
 # Mark it done
 rivets close "$ID"
@@ -54,9 +54,12 @@ rivets close "$ID"
 | `create` | Create an issue (`--title`, `--kind`, `--priority`, `--assignee`, `--labels`, repeatable `--prerequisite`, `--design`, `--acceptance`, `--notes`) |
 | `list` | Newest-created Issues, with ascending Issue-ID ties; required positive `--limit`; filters: `--status`, `--priority`, `--kind`, `--assignee`, `--label` |
 | `show` | Show one or more issues with their Blocking prerequisites/dependents and resources |
-| `update` | Update status, Kind, design, acceptance criteria, or append a Note; Assignment uses `claim`/`release`, labels use `label` |
+| `update` | Update title, description, Priority, Kind, design, or acceptance criteria; requires at least one field |
 | `claim` | Atomically assign one Open, unblocked Issue (`<issue-id> --assignee <name>`) |
 | `release` | Atomically unassign one Open Issue from its exact owner (`<issue-id> --assignee <name>`) |
+| `start` | Enter In Progress after claiming one or more Issues |
+| `return-to-open` | Return In Progress Issues to Open, retaining Assignment |
+| `note append` | Append an immutable Note (`<issue-ids>... --content "text"`) |
 | `close` | Close one or more issues, optionally `--reason` |
 | `reopen` | Reopen a closed issue, optionally `--reason` |
 | `delete` | Delete an issue permanently (`--force` skips the confirmation prompt) |
@@ -95,7 +98,7 @@ rivets update demo-a3f8 --priority 2     # Update fields
 rivets claim demo-a3f8 --assignee alice  # Atomically claim Ready work
 rivets release demo-a3f8 --assignee alice
 rivets claim demo-a3f8 --assignee alice
-rivets update demo-a3f8 --status in_progress
+rivets start demo-a3f8
 rivets close demo-a3f8 --reason "Fixed in commit abc123" # Closing clears Assignment
 ```
 

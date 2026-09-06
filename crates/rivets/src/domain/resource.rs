@@ -419,8 +419,8 @@ pub struct NewResource {
 ///
 /// Every `None` field leaves that property unchanged, so an update never
 /// shifts the resource's position or reissues its identifier. The label uses
-/// the double-Option pattern (same as `IssueUpdate::assignee`): `None` keeps
-/// the current label, `Some(None)` clears it, and `Some(Some(label))` sets it.
+/// the double-Option pattern: `None` keeps the current label,
+/// `Some(None)` clears it, and `Some(Some(label))` sets it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResourceUpdate {
     /// New target (if updating).

@@ -9,10 +9,10 @@ use std::io::Write;
 use anyhow::{Context, Result};
 
 use super::args::{
-    AssignmentArgs, BlockedArgs, BlockingDependencyAction, BlockingDependencyArgs, CloseArgs,
-    CreateArgs, DeleteArgs, DiscoveryAction, DiscoveryArgs, InitArgs, LabelAction, LabelArgs,
-    ListArgs, ParentAction, ParentArgs, ReadyArgs, RelatedAction, RelatedArgs, ReopenArgs,
-    ResourceAction, ResourceArgs, ShowArgs, StaleArgs, UpdateArgs,
+    AssignmentArgs, BlockedArgs, BlockingDependencyAction, BlockingDependencyArgs, CreateArgs,
+    DeleteArgs, DiscoveryAction, DiscoveryArgs, InitArgs, LabelAction, LabelArgs, ListArgs,
+    ParentAction, ParentArgs, ReadyArgs, RelatedAction, RelatedArgs, ResourceAction, ResourceArgs,
+    ShowArgs, StaleArgs, UpdateArgs,
 };
 use super::types::SortPolicyArg;
 use crate::output::OutputMode;
@@ -254,36 +254,21 @@ pub async fn execute_update(
     output_mode: OutputMode,
 ) -> Result<()> {
     use super::types::BatchResult;
-    use crate::domain::{IssueId, IssueUpdate, NoteContent};
+    use crate::domain::{IssueId, IssueUpdate};
 
-    if !args.has_updates() {
-        anyhow::bail!(
-            "No fields specified to update. Use one or more of:\n  {}\n\n\
-             Example: rivets update ISSUE-ID --title 'New title' --priority 1",
-            UpdateArgs::available_flags_help()
-        );
-    }
+    let update = IssueUpdate::builder()
+        .title(args.title.clone())
+        .description(args.description.clone())
+        .priority(args.priority)
+        .issue_kind(args.issue_kind)
+        .design(args.design.clone())
+        .acceptance_criteria(args.acceptance.clone())
+        .build()?;
 
     let mut result = BatchResult::new();
-    let note = args.notes.clone().map(NoteContent::new).transpose()?;
-
     for id_str in &args.issue_ids {
         let issue_id = IssueId::new(id_str);
-
-        // Build the update (same for all issues)
-        let update = IssueUpdate {
-            title: args.title.clone(),
-            description: args.description.clone(),
-            status: args.status,
-            priority: args.priority,
-            issue_kind: args.issue_kind,
-            design: args.design.clone(),
-            acceptance_criteria: args.acceptance.clone(),
-            note: note.clone(),
-            ..Default::default()
-        };
-
-        let storage_result = app.storage_mut().update(&issue_id, update).await;
+        let storage_result = app.storage_mut().update(&issue_id, update.clone()).await;
         save_or_record_failure(app, &mut result, id_str, storage_result).await;
     }
 
@@ -359,7 +344,7 @@ pub async fn execute_release(
 /// * `result` - Batch result to record success/failure
 /// * `issue_id` - Issue identifier for error reporting
 /// * `storage_result` - Result from the storage operation
-async fn save_or_record_failure(
+pub(super) async fn save_or_record_failure(
     app: &mut crate::app::App,
     result: &mut super::types::BatchResult,
     issue_id: &str,
@@ -402,9 +387,8 @@ async fn save_or_record_failure(
         }
     }
 }
-
-/// Output batch operation results in the appropriate format
-fn output_batch_result(
+/// Output batch operation results in the appropriate format.
+pub(super) fn output_batch_result(
     result: &super::types::BatchResult,
     action: &str,
     output_mode: OutputMode,
@@ -416,7 +400,6 @@ fn output_batch_result(
             output::print_json(result)?;
         }
         output::OutputMode::Text => {
-            // Print successes
             if !result.succeeded.is_empty() {
                 let ids: Vec<_> = result.succeeded.iter().map(|i| i.id.to_string()).collect();
                 println!(
@@ -427,7 +410,6 @@ fn output_batch_result(
                 );
             }
 
-            // Print failures
             if !result.failed.is_empty() {
                 eprintln!("Failed {} issue(s):", result.failed.len());
                 for err in &result.failed {
@@ -441,7 +423,10 @@ fn output_batch_result(
 }
 
 /// Return an error if a batch operation had any failures.
-fn bail_on_batch_failures(result: &super::types::BatchResult, action: &str) -> Result<()> {
+pub(super) fn bail_on_batch_failures(
+    result: &super::types::BatchResult,
+    action: &str,
+) -> Result<()> {
     if result.has_failures() {
         anyhow::bail!(
             "{} of {} {}(s) failed",
@@ -466,7 +451,6 @@ fn confirm_action(prompt: &str) -> Result<bool> {
     let bytes_read = std::io::stdin()
         .read_line(&mut input)
         .context("Failed to read confirmation from stdin")?;
-    // EOF (e.g. Ctrl+D or piped input) is treated as "no"
     if bytes_read == 0 {
         eprintln!();
         return Ok(false);
@@ -514,99 +498,6 @@ pub(super) async fn confirm_delete(
         return Ok(false);
     }
     Ok(true)
-}
-
-/// Execute the close command
-///
-/// # Batch Processing
-///
-/// Each issue is processed independently with save-after-each-success semantics:
-/// - Each successful close is immediately saved to disk
-/// - Processing continues even if some closes fail
-/// - Returns a structured result showing both succeeded and failed operations
-/// - Exit code is non-zero if any failures occurred
-pub async fn execute_close(
-    app: &mut crate::app::App,
-    args: &CloseArgs,
-    output_mode: OutputMode,
-) -> Result<()> {
-    use super::types::BatchResult;
-    use crate::domain::{IssueId, IssueStatus, IssueUpdate, NoteContent};
-
-    let note = args
-        .reason
-        .as_deref()
-        .map(NoteContent::closing_reason)
-        .transpose()?;
-
-    let mut result = BatchResult::new();
-
-    for id_str in &args.issue_ids {
-        let issue_id = IssueId::new(id_str);
-        let update = IssueUpdate {
-            status: Some(IssueStatus::Closed),
-            note: note.clone(),
-            ..Default::default()
-        };
-
-        // Missing issues and invalid transitions are rejected by the
-        // storage/domain seam (ADR-0005); no adapter-local checks here.
-        let storage_result = app.storage_mut().update(&issue_id, update).await;
-        save_or_record_failure(app, &mut result, id_str, storage_result).await;
-    }
-
-    output_batch_result(&result, "Closed", output_mode)?;
-    bail_on_batch_failures(&result, "close")
-}
-
-/// Execute the reopen command
-///
-/// # Batch Processing
-///
-/// Each issue is processed independently with save-after-each-success semantics:
-/// - Each successful reopen is immediately saved to disk
-/// - Processing continues even if some reopens fail
-/// - Returns a structured result showing both succeeded and failed operations
-/// - Exit code is non-zero if any failures occurred
-pub async fn execute_reopen(
-    app: &mut crate::app::App,
-    args: &ReopenArgs,
-    output_mode: OutputMode,
-) -> Result<()> {
-    use super::types::BatchResult;
-    use crate::domain::{IssueId, IssueStatus, IssueUpdate, NoteContent};
-
-    let note = args
-        .reason
-        .as_deref()
-        .map(NoteContent::reopening_reason)
-        .transpose()?;
-
-    let mut result = BatchResult::new();
-
-    for id_str in &args.issue_ids {
-        let issue_id = IssueId::new(id_str);
-        let update = IssueUpdate {
-            status: Some(IssueStatus::Open),
-            note: note.clone(),
-            ..Default::default()
-        };
-
-        let storage_result = match app.storage().get(&issue_id).await {
-            Ok(Some(issue)) => match issue.status.validate_reopen() {
-                Ok(()) => app.storage_mut().update(&issue_id, update).await,
-                Err(source) => Err(crate::error::Error::Storage(
-                    crate::error::StorageError::InvalidStatusTransition(source),
-                )),
-            },
-            Ok(None) => Err(crate::error::Error::IssueNotFound(issue_id.clone())),
-            Err(error) => Err(error),
-        };
-        save_or_record_failure(app, &mut result, id_str, storage_result).await;
-    }
-
-    output_batch_result(&result, "Reopened", output_mode)?;
-    bail_on_batch_failures(&result, "reopen")
 }
 
 /// Execute the delete command
@@ -1825,34 +1716,22 @@ mod tests {
                 issue_ids: vec!["test-abc".to_string()],
                 title: None,
                 description: None,
-                status: None,
                 priority: None,
                 issue_kind: None,
                 design: None,
                 acceptance: None,
-                notes: None,
             };
 
             let result = execute_update(&mut app, &args, OutputMode::Text).await;
 
             assert!(result.is_err());
-            let error_msg = result.unwrap_err().to_string();
-            assert!(
-                error_msg.contains("No fields specified"),
-                "Error should mention no fields specified, got: {}",
-                error_msg
-            );
-            assert!(
-                error_msg.contains("--title"),
-                "Error should list available options, got: {}",
-                error_msg
-            );
         }
     }
 
     mod execute_close_tests {
-        use super::super::{CloseArgs, execute_close};
-        use crate::domain::{IssueStatus, IssueUpdate, NewIssue};
+        use crate::cli::CloseArgs;
+        use crate::cli::lifecycle::execute_close;
+        use crate::domain::{LifecycleAction, NewIssue};
         use crate::output::OutputMode;
         use tempfile::TempDir;
 
@@ -1875,12 +1754,11 @@ mod tests {
             let issue = app.storage_mut().create(new_issue).await.unwrap();
             app.save().await.unwrap();
 
-            // Close it first
-            let update = IssueUpdate {
-                status: Some(IssueStatus::Closed),
-                ..Default::default()
-            };
-            app.storage_mut().update(&issue.id, update).await.unwrap();
+            // Close it first through the dedicated lifecycle intent.
+            app.storage_mut()
+                .transition(&issue.id, LifecycleAction::Close { reason: None })
+                .await
+                .unwrap();
             app.save().await.unwrap();
 
             // Try to close it again
@@ -1902,7 +1780,8 @@ mod tests {
     }
 
     mod execute_reopen_tests {
-        use super::super::{ReopenArgs, execute_reopen};
+        use crate::cli::ReopenArgs;
+        use crate::cli::lifecycle::execute_reopen;
         use crate::domain::NewIssue;
         use crate::output::OutputMode;
         use tempfile::TempDir;
@@ -1945,7 +1824,7 @@ mod tests {
 
         #[tokio::test]
         async fn test_reopen_in_progress_issue_is_rejected_without_mutation() {
-            use crate::domain::{IssueStatus, IssueUpdate};
+            use crate::domain::{IssueStatus, LifecycleAction, NewIssue};
 
             let temp_dir = TempDir::new().unwrap();
             crate::commands::init::init(temp_dir.path(), Some("test"))
@@ -1963,13 +1842,7 @@ mod tests {
             };
             let issue = app.storage_mut().create(new_issue).await.unwrap();
             app.storage_mut()
-                .update(
-                    &issue.id,
-                    IssueUpdate {
-                        status: Some(IssueStatus::InProgress),
-                        ..Default::default()
-                    },
-                )
+                .transition(&issue.id, LifecycleAction::Start)
                 .await
                 .expect("assigned Issue should enter In Progress");
             app.save().await.unwrap();

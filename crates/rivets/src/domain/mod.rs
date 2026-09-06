@@ -10,13 +10,16 @@ use std::str::FromStr;
 use std::sync::OnceLock;
 
 mod label;
+mod lifecycle;
 mod query;
 mod relationship;
 mod resource;
+mod update;
 #[cfg(test)]
 mod workspace_path_corpus;
 
 pub use label::{Label, LabelError, MAX_LABEL_LENGTH};
+pub use lifecycle::LifecycleAction;
 pub use query::{ListQuery, QueryError, StaleQuery};
 pub use relationship::{
     BlockingDependency, BlockingDependencyError, DiscoveryOrigin, DiscoveryOriginError, Parentage,
@@ -26,6 +29,7 @@ pub use resource::{
     AssociatedResource, NewResource, ResourceError, ResourceId, ResourceLabel, ResourceRole,
     ResourceTarget, ResourceUpdate, WebUrl, WorkspacePath,
 };
+pub use update::{IssueUpdate, IssueUpdateBuilder, UpdateError};
 
 /// Minimum number of ASCII-alphanumeric bytes in an Issue ID prefix.
 const MIN_ISSUE_ID_PREFIX_LENGTH: usize = 2;
@@ -664,6 +668,12 @@ pub enum StatusTransitionError {
         /// The Issue's status when the reopen was rejected.
         current: IssueStatus,
     },
+    /// Returning to Open is valid only from In Progress.
+    #[error("Issue is not in progress (status: {current})")]
+    NotInProgress {
+        /// The Issue's status when return-to-open was rejected.
+        current: IssueStatus,
+    },
     /// A Closed Issue must reopen to Open before becoming active.
     #[error("Closed Issue must reopen to open before entering {target}")]
     MustReopenToOpen {
@@ -1121,37 +1131,6 @@ impl Default for NewIssue {
             prerequisites: vec![],
         }
     }
-}
-
-/// Data for updating an existing issue
-#[derive(Debug, Clone, Default)]
-pub struct IssueUpdate {
-    /// New title (if updating)
-    pub title: Option<String>,
-
-    /// New description (if updating)
-    pub description: Option<String>,
-
-    /// New status (if updating)
-    pub status: Option<IssueStatus>,
-
-    /// New priority (if updating)
-    pub priority: Option<u8>,
-
-    /// New issue kind (if reclassifying)
-    pub issue_kind: Option<IssueKind>,
-
-    /// New design notes (if updating)
-    pub design: Option<String>,
-
-    /// New acceptance criteria (if updating)
-    pub acceptance_criteria: Option<String>,
-
-    /// Note to append with this mutation's timestamp
-    pub note: Option<NoteContent>,
-
-    /// New labels (if updating) - replaces existing labels
-    pub labels: Option<Vec<Label>>,
 }
 
 /// Assignment visibility for a Ready query.

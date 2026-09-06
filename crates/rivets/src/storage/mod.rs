@@ -71,8 +71,8 @@
 
 use crate::domain::{
     BlockingDependency, DiscoveryOrigin, Issue, IssueFilter, IssueId, IssueUpdate, Label,
-    ListQuery, NewIssue, NewResource, Parentage, ReadyFilter, RelatedAssociation, ResourceId,
-    ResourceUpdate, SortPolicy, StaleQuery,
+    LifecycleAction, ListQuery, NewIssue, NewResource, NoteContent, Parentage, ReadyFilter,
+    RelatedAssociation, ResourceId, ResourceUpdate, SortPolicy, StaleQuery,
 };
 use crate::error::{PartialLoadError, Result, SkippedIssueRecordCause, StorageError};
 use crate::reporting::WorkspaceStatistics;
@@ -146,6 +146,11 @@ pub trait IssueStorage: Send + Sync {
     ///
     /// Returns `Error::IssueNotFound` if the issue doesn't exist.
     async fn update(&mut self, id: &IssueId, updates: IssueUpdate) -> Result<Issue>;
+    /// Atomically apply one dedicated workflow lifecycle intent.
+    async fn transition(&mut self, id: &IssueId, action: LifecycleAction) -> Result<Issue>;
+
+    /// Atomically append one validated Note to an Issue's history.
+    async fn append_note(&mut self, id: &IssueId, content: NoteContent) -> Result<Issue>;
 
     /// Atomically Claim an Open, unblocked Issue for one Assignee.
     ///
@@ -611,6 +616,15 @@ impl IssueStorage for JsonlBackedStorage {
         self.prepare_mutation().await?;
         self.inner.update(id, updates).await
     }
+    async fn transition(&mut self, id: &IssueId, action: LifecycleAction) -> Result<Issue> {
+        self.prepare_mutation().await?;
+        self.inner.transition(id, action).await
+    }
+
+    async fn append_note(&mut self, id: &IssueId, content: NoteContent) -> Result<Issue> {
+        self.prepare_mutation().await?;
+        self.inner.append_note(id, content).await
+    }
 
     async fn claim(&mut self, id: &IssueId, claimant: &str) -> Result<Issue> {
         self.prepare_mutation().await?;
@@ -1024,6 +1038,13 @@ impl IssueStorage for MockStorage {
     async fn update(&mut self, _id: &IssueId, _updates: IssueUpdate) -> Result<Issue> {
         Self::unsupported("MockStorage::update")
     }
+    async fn transition(&mut self, _id: &IssueId, _action: LifecycleAction) -> Result<Issue> {
+        Self::unsupported("MockStorage::transition")
+    }
+
+    async fn append_note(&mut self, _id: &IssueId, _content: NoteContent) -> Result<Issue> {
+        Self::unsupported("MockStorage::append_note")
+    }
 
     async fn claim(&mut self, _id: &IssueId, _claimant: &str) -> Result<Issue> {
         Self::unsupported("MockStorage::claim")
@@ -1346,10 +1367,10 @@ mod tests {
         storage.save().await.unwrap();
 
         // Modify in memory without saving
-        let update = IssueUpdate {
-            title: Some("Modified Title".to_string()),
-            ..Default::default()
-        };
+        let update = IssueUpdate::builder()
+            .title(Some("Modified Title".to_string()))
+            .build()
+            .expect("valid update");
         let modified = storage.update(&issue_id, update).await.unwrap();
         assert_eq!(modified.title, "Modified Title");
 
@@ -1541,10 +1562,10 @@ mod tests {
         cached
             .update(
                 &cached_issue.id,
-                IssueUpdate {
-                    title: Some("Cached issue updated".to_string()),
-                    ..Default::default()
-                },
+                IssueUpdate::builder()
+                    .title(Some("Cached issue updated".to_string()))
+                    .build()
+                    .expect("valid update"),
             )
             .await
             .expect("mutation should refresh the external revision");
@@ -1694,10 +1715,10 @@ mod tests {
         cached
             .update(
                 &cached_issue.id,
-                IssueUpdate {
-                    title: Some("Unsaved title".to_string()),
-                    ..Default::default()
-                },
+                IssueUpdate::builder()
+                    .title(Some("Unsaved title".to_string()))
+                    .build()
+                    .expect("valid update"),
             )
             .await
             .expect("in-memory mutation should succeed");
@@ -1775,10 +1796,10 @@ mod tests {
         storage
             .update(
                 &issue.id,
-                IssueUpdate {
-                    title: Some("Second title".to_string()),
-                    ..Default::default()
-                },
+                IssueUpdate::builder()
+                    .title(Some("Second title".to_string()))
+                    .build()
+                    .expect("valid update"),
             )
             .await
             .expect("own save must not look external");
@@ -1836,10 +1857,10 @@ mod tests {
         let error = cached
             .update(
                 &cached_issue.id,
-                IssueUpdate {
-                    title: Some("Must not reappear".to_string()),
-                    ..Default::default()
-                },
+                IssueUpdate::builder()
+                    .title(Some("Must not reappear".to_string()))
+                    .build()
+                    .expect("valid update"),
             )
             .await
             .expect_err("present-to-missing transition should discard stale cache");
@@ -1907,10 +1928,10 @@ mod tests {
         external
             .update(
                 &last_id,
-                IssueUpdate {
-                    title: Some("External λ".to_string()),
-                    ..Default::default()
-                },
+                IssueUpdate::builder()
+                    .title(Some("External λ".to_string()))
+                    .build()
+                    .expect("valid update"),
             )
             .await
             .expect("external scale mutation should succeed");
@@ -1923,10 +1944,10 @@ mod tests {
         cached
             .update(
                 &first_id,
-                IssueUpdate {
-                    title: Some("Cached λ".to_string()),
-                    ..Default::default()
-                },
+                IssueUpdate::builder()
+                    .title(Some("Cached λ".to_string()))
+                    .build()
+                    .expect("valid update"),
             )
             .await
             .expect("cached scale mutation should refresh");
@@ -2013,10 +2034,10 @@ mod tests {
         let error = storage
             .update(
                 &issue.id,
-                IssueUpdate {
-                    title: Some("Must not reappear".to_string()),
-                    ..Default::default()
-                },
+                IssueUpdate::builder()
+                    .title(Some("Must not reappear".to_string()))
+                    .build()
+                    .expect("valid update"),
             )
             .await
             .expect_err("own save revision must detect later deletion");

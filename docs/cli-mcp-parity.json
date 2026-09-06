@@ -298,9 +298,9 @@
       "id": "update_issue",
       "title": "Update Issue",
       "requirement": "shared",
-      "current_parity": "drift",
-      "target_status": "gap_both",
-      "target": "Update mutable descriptive fields and Issue Kind; reject empty updates; Assignment, Labels, Notes, relationships, and lifecycle transitions use intent-named operations.",
+      "current_parity": "conformant",
+      "target_status": "conformant",
+      "target": "Update title, description, Priority P0-P4, Kind, design, or acceptance criteria; reject empty requests and obsolete fields without mutation; preserve omitted fields and existing explicit-empty text semantics.",
       "cli": {
         "surfaces": [
           "update"
@@ -309,12 +309,10 @@
           "issue_ids": "one or more Issue IDs",
           "title": "optional string",
           "description": "optional string",
-          "status": "optional canonical Workflow State",
           "priority": "optional P0-P4",
           "kind": "optional Issue Kind",
           "design": "optional string",
-          "acceptance": "optional string",
-          "notes": "optional Note append"
+          "acceptance": "optional string"
         },
         "result": "Partial-success batch result."
       },
@@ -326,40 +324,106 @@
           "issue_id": "one Issue ID",
           "title": "optional string",
           "description": "optional string",
-          "status": "optional string",
-          "priority": "optional integer",
+          "priority": "optional P0-P4",
           "issue_kind": "optional Issue Kind",
           "design": "optional string",
           "acceptance_criteria": "optional string",
-          "labels": "optional full replacement",
           "workspace_root": "optional adapter mechanic"
         },
         "result": "Issue."
       },
       "differences": [
-        "CLI rejects empty updates; MCP accepts them and advances updated_at.",
-        "MCP replaces Labels while CLI requires dedicated add/remove for label mutation.",
-        "CLI appends Notes through update; MCP uses add_note.",
-        "General Update cannot mutate Assignment; dedicated Claim/Release own that intent.",
-        "CLI validates Issue ID and Priority grammar before mutation; MCP uses unconstrained strings and weaker numeric schema.",
-        "MCP accepts a hidden migration-only issue_type alias."
+        "CLI ordered partial-success batching and MCP single-target envelopes are intentional adapter mechanics."
       ],
-      "risk": "Adapter choice changes accepted fields, no-op mutation history, validation, and ownership/lifecycle semantics.",
-      "required_resolution": "Restrict general Update to canonical descriptive fields and Issue Kind, reject empty requests, adopt canonical Issue ID parsing, and route Assignment, Labels, Notes, relationships, and lifecycle through dedicated intents.",
+      "risk": "Shared mutation invariants are defended by storage and cross-adapter behavioral fences.",
+      "required_resolution": "Preserve shared validation, dedicated mutation ownership, and loop-equivalent batch effects.",
       "evidence": [
-        "crates/rivets/src/cli/args.rs::UpdateArgs",
-        "crates/rivets/src/cli/execute.rs::execute_update",
-        "crates/rivets-mcp/src/models.rs::UpdateParams",
-        "crates/rivets-mcp/src/tools.rs::update",
-        "crates/rivets/src/storage/in_memory/trait_impl.rs::update"
+        "crates/rivets-mcp/tests/update_contract.rs",
+        "crates/rivets/src/storage/in_memory/trait_impl.rs",
+        "crates/rivets/src/domain/update.rs",
+        "crates/rivets-mcp/tests/stale_cache.rs"
+      ]
+    },
+    {
+      "id": "start_issue",
+      "title": "Start Issue",
+      "requirement": "shared",
+      "current_parity": "conformant",
+      "target_status": "conformant",
+      "target": "Enter In Progress under the canonical transition matrix; Assignment is required and retained.",
+      "cli": {
+        "surfaces": [
+          "start"
+        ],
+        "arguments": {
+          "issue_ids": "one or more canonical Issue IDs"
+        },
+        "result": "Partial-success batch result."
+      },
+      "mcp": {
+        "surfaces": [
+          "start"
+        ],
+        "arguments": {
+          "issue_id": "one canonical Issue ID",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Issue."
+      },
+      "differences": [
+        "CLI ordered partial-success batching is loop-equivalent to repeated single-target MCP calls."
+      ],
+      "risk": "Lifecycle and Assignment effects must remain storage-owned.",
+      "required_resolution": "Preserve canonical state preconditions and Assignment side effects.",
+      "evidence": [
+        "crates/rivets-mcp/tests/update_contract.rs",
+        "crates/rivets/src/domain/lifecycle.rs",
+        "crates/rivets/src/storage/in_memory/trait_impl.rs"
+      ]
+    },
+    {
+      "id": "return_issue_to_open",
+      "title": "Return Issue to Open",
+      "requirement": "shared",
+      "current_parity": "conformant",
+      "target_status": "conformant",
+      "target": "Return only an In Progress Issue to Open, retaining Assignment; Closed Issues must use Reopen.",
+      "cli": {
+        "surfaces": [
+          "return-to-open"
+        ],
+        "arguments": {
+          "issue_ids": "one or more canonical Issue IDs"
+        },
+        "result": "Partial-success batch result."
+      },
+      "mcp": {
+        "surfaces": [
+          "return_to_open"
+        ],
+        "arguments": {
+          "issue_id": "one canonical Issue ID",
+          "workspace_root": "optional adapter mechanic"
+        },
+        "result": "Issue."
+      },
+      "differences": [
+        "CLI ordered partial-success batching is loop-equivalent to repeated single-target MCP calls."
+      ],
+      "risk": "Lifecycle and Assignment effects must remain storage-owned.",
+      "required_resolution": "Preserve canonical state preconditions and Assignment side effects.",
+      "evidence": [
+        "crates/rivets-mcp/tests/update_contract.rs",
+        "crates/rivets/src/domain/lifecycle.rs",
+        "crates/rivets/src/storage/in_memory/trait_impl.rs"
       ]
     },
     {
       "id": "close_issue",
       "title": "Close Issue",
       "requirement": "shared",
-      "current_parity": "drift",
-      "target_status": "gap_both",
+      "current_parity": "conformant",
+      "target_status": "conformant",
       "target": "Close an Issue, append an optional reason Note, clear Assignment, and preserve canonical relationship invariants.",
       "cli": {
         "surfaces": [
@@ -383,24 +447,21 @@
         "result": "Issue."
       },
       "differences": [
-        "CLI batch/confirmation behavior is an intentional adapter mechanic.",
-        "CLI validates Issue ID grammar before mutation; MCP uses an unconstrained string."
+        "CLI ordered partial-success batching and MCP single-target envelopes are intentional adapter mechanics."
       ],
-      "risk": "Invalid Issue IDs fail differently across adapters.",
-      "required_resolution": "Adopt canonical Issue ID parsing in MCP Close while retaining the shared Assignment-clearing transition.",
+      "risk": "Shared mutation invariants are defended by storage and cross-adapter behavioral fences.",
+      "required_resolution": "Preserve shared validation, dedicated mutation ownership, and loop-equivalent batch effects.",
       "evidence": [
-        "crates/rivets/src/cli/execute.rs::execute_close",
-        "crates/rivets-mcp/src/tools.rs::close",
-        "crates/rivets/src/storage/in_memory/trait_impl.rs::update",
-        "docs/adr/0002-issue-relationships-and-readiness.md"
+        "crates/rivets-mcp/tests/update_contract.rs",
+        "crates/rivets/src/storage/in_memory/trait_impl.rs"
       ]
     },
     {
       "id": "reopen_issue",
       "title": "Reopen Issue",
       "requirement": "shared",
-      "current_parity": "drift",
-      "target_status": "gap_both",
+      "current_parity": "conformant",
+      "target_status": "conformant",
       "target": "Reopen a Closed Issue as unassigned Open and append an optional reason Note.",
       "cli": {
         "surfaces": [
@@ -424,16 +485,13 @@
         "result": "Issue."
       },
       "differences": [
-        "CLI batch/confirmation behavior is an intentional adapter mechanic.",
-        "CLI validates Issue ID grammar before mutation; MCP uses an unconstrained string."
+        "CLI ordered partial-success batching and MCP single-target envelopes are intentional adapter mechanics."
       ],
-      "risk": "Invalid Issue IDs fail differently across adapters.",
-      "required_resolution": "Adopt canonical Issue ID parsing in MCP Reopen while retaining the shared unassigned-Open transition.",
+      "risk": "Shared mutation invariants are defended by storage and cross-adapter behavioral fences.",
+      "required_resolution": "Preserve shared validation, dedicated mutation ownership, and loop-equivalent batch effects.",
       "evidence": [
-        "crates/rivets/src/cli/execute.rs::execute_reopen",
-        "crates/rivets-mcp/src/tools.rs::reopen",
-        "crates/rivets/src/storage/in_memory/trait_impl.rs::update",
-        "docs/adr/0002-issue-relationships-and-readiness.md"
+        "crates/rivets-mcp/tests/update_contract.rs",
+        "crates/rivets/src/storage/in_memory/trait_impl.rs"
       ]
     },
     {
@@ -1068,19 +1126,15 @@
       "id": "append_note",
       "title": "Append Note",
       "requirement": "shared",
-      "current_parity": "drift",
-      "target_status": "gap_mcp",
+      "current_parity": "conformant",
+      "target_status": "conformant",
       "target": "Append one immutable, system-timestamped Note.",
       "cli": {
-        "surfaces": [],
-        "forms": [
-          {
-            "surface": "update",
-            "argument": "notes"
-          }
+        "surfaces": [
+          "note append"
         ],
         "arguments": {
-          "issue_id": "one or more through update",
+          "issue_id": "one or more Issue IDs",
           "content": "Note content"
         },
         "result": "Updated Issue in batch result."
@@ -1097,16 +1151,13 @@
         "result": "Updated Issue."
       },
       "differences": [
-        "CLI validates Issue ID grammar; MCP uses an unconstrained string.",
-        "CLI update --notes batching and MCP add_note spelling/envelope are intentional adapter mechanics."
+        "CLI ordered partial-success batching and MCP single-target envelopes are intentional adapter mechanics."
       ],
-      "risk": "MCP accepts Issue IDs rejected by CLI; Note append semantics otherwise match.",
-      "required_resolution": "Adopt canonical Issue ID parsing in MCP while preserving append-only Note semantics and loop-equivalent adapter mechanics.",
+      "risk": "Shared mutation invariants are defended by storage and cross-adapter behavioral fences.",
+      "required_resolution": "Preserve shared validation, dedicated mutation ownership, and loop-equivalent batch effects.",
       "evidence": [
-        "crates/rivets/src/cli/args.rs::UpdateArgs",
-        "crates/rivets/src/cli/execute.rs::execute_update",
-        "crates/rivets-mcp/src/tools.rs::add_note",
-        "crates/rivets/src/domain/mod.rs::NoteContent"
+        "crates/rivets-mcp/tests/update_contract.rs",
+        "crates/rivets/src/storage/in_memory/trait_impl.rs"
       ]
     },
     {
@@ -2047,7 +2098,12 @@
       "title": "Canonical general Update contract",
       "tracking_issue": "rivets-67d7",
       "intents": [
-        "update_issue"
+        "update_issue",
+        "start_issue",
+        "return_issue_to_open",
+        "close_issue",
+        "reopen_issue",
+        "append_note"
       ],
       "blocked_by": [
         "rivets-8rj9",
