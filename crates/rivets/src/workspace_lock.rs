@@ -108,14 +108,14 @@ pub const WORKSPACE_LOCK_FILE_NAME: &str = "workspace.lock";
 pub struct WorkspaceMutationLock {
     workspace_root: PathBuf,
     lock_path: PathBuf,
-    _file: File,
+    file: File,
 }
 
 impl Drop for WorkspaceMutationLock {
     fn drop(&mut self) {
         // Release ownership before closing: another thread may have forked a
         // child that retains this open-file description until exec.
-        if let Err(error) = self._file.unlock() {
+        if let Err(error) = self.file.unlock() {
             tracing::warn!(path = %self.lock_path.display(), %error, "Failed to release Workspace lock");
         }
     }
@@ -166,7 +166,7 @@ impl WorkspaceMutationLock {
                 Ok(Self {
                     workspace_root,
                     lock_path,
-                    _file: file,
+                    file,
                 })
             }
             Err(TryLockError::WouldBlock) => Err(Error::WorkspaceBusy { workspace_root }),
@@ -235,7 +235,7 @@ mod tests {
         // dup and fork share an open-file description; closing only the parent's
         // descriptor cannot release flock while an unrelated child retains it.
         let inherited = guard
-            ._file
+            .file
             .try_clone()
             .expect("duplicate inherited descriptor");
         assert!(matches!(
