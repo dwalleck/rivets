@@ -16,6 +16,12 @@ Open, blocked Issue. Entering In Progress requires an assignee, returning to
 Open retains it, closing clears it, and reopening creates an unassigned Open
 Issue.
 
+`IssueStorage::transition` accepts a `LifecycleAction`: Start, ReturnToOpen,
+Close, or Reopen. ReturnToOpen requires In Progress; Reopen requires Closed.
+Storage checks Parentage and commits the state change and optional reason Note
+under one lock. General Update accepts a validated, nonempty `IssueUpdate`
+containing only title, description, Priority, Kind, design, and acceptance criteria.
+
 ## Consequences
 
 Adapters must not read an Issue and then implement Assignment with a generic

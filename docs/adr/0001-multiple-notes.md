@@ -10,8 +10,8 @@ Key decisions:
 - **Append-only**: Notes cannot be edited or deleted through the CLI. The JSONL file is the audit trail; `git` provides recovery if needed.
 - **Minimal metadata**: No `author` field. Git already tracks who changed what. Duplicating author would drift from reality.
 - **Migration**: Existing single notes become the first entry in the new `Vec<Note>`, timestamped at the issue's `updated_at`.
-- **CLI semantics**: `rivets update <id> --notes "text"` appends rather than replaces.
-- **MCP tooling**: Dedicated `add_note` tool for AI assistants, separate from `update_issue`.
+- **CLI semantics**: `rivets note append <id> --content "text"` appends rather than replaces. General Update does not accept Notes.
+- **MCP tooling**: Dedicated `add_note` tool, separate from `update`. Both adapters call `IssueStorage::append_note`; Close/Reopen commit an optional reason Note atomically with the lifecycle transition.
 
 ## Rejected Alternatives
 

@@ -19,14 +19,15 @@ use crate::context::Context;
 use crate::error::{Error, Result};
 use crate::models::{
     BlockedIssueResponse, BlockingDependencyListQuery, BlockingDependencyTreeEntry,
-    BlockingDependencyTreeResponse, CreateParams, ListParams, ReadyParams, ResourceUpdateParams,
-    SetContextResponse, UpdateParams, WhereAmIResponse,
+    BlockingDependencyTreeResponse, CreateParams, LifecycleParams, ListParams, ReadyParams,
+    ResourceUpdateParams, SetContextResponse, UpdateParams, WhereAmIResponse,
 };
 use rivets::domain::{
     AssignmentError, AssociatedResource, BlockingDependency, DiscoveryOrigin, Issue, IssueFilter,
-    IssueId, IssueKind, IssueStatus, IssueUpdate, Label, ListQuery, NewIssue, NewResource,
-    NoteContent, Parentage, ReadyAssignmentFilter, ReadyFilter, RelatedAssociation, ResourceId,
-    ResourceLabel, ResourceRole, ResourceTarget, ResourceUpdate, StaleQuery, WebUrl, WorkspacePath,
+    IssueId, IssueKind, IssueStatus, IssueUpdate, Label, LifecycleAction, ListQuery, NewIssue,
+    NewResource, NoteContent, Parentage, ReadyAssignmentFilter, ReadyFilter, RelatedAssociation,
+    ResourceId, ResourceLabel, ResourceRole, ResourceTarget, ResourceUpdate, StaleQuery, WebUrl,
+    WorkspacePath,
 };
 use rivets::reporting::{WorkspaceInformation, WorkspaceStatistics};
 use rivets::storage::IssueStorage;
@@ -458,48 +459,37 @@ impl Tools {
     }
 
     /// Update an existing issue.
+    ///
+    /// Only descriptive fields, Priority, and Issue Kind are accepted. Empty
+    /// updates and invalid values are rejected by the shared domain builder.
+    ///
     /// # Errors
     ///
-    /// Returns an error if no context is set, status is invalid, the issue is missing, or storage fails.
+    /// Returns an error if the update is empty or invalid, the issue is
+    /// missing, no context is set, or storage fails.
     #[instrument(skip(self, params), fields(issue_id = %params.issue_id))]
     pub async fn update(&self, params: UpdateParams) -> Result<Issue> {
         debug!("Updating issue");
-        if params.contains_legacy_assignee() {
-            return Err(Error::InvalidArgument {
-                field: "assignee",
-                value: "legacy assignee field".to_string(),
-                valid_values: "use claim or release",
-            });
-        }
-        if !params.has_updates() {
-            return Err(Error::InvalidArgument {
-                field: "updates",
-                value: "no update fields provided".to_string(),
-                valid_values: "at least one update field",
-            });
-        }
-
-        let status = params.status.as_deref().map(validate_status).transpose()?;
-        let issue_kind = params.kind.resolve("update");
-
-        let labels = params.labels.map(parse_labels).transpose()?;
-        let id = parse_issue_id(&params.issue_id)?;
-        let mut storage = self
-            .mutation_storage_for(params.workspace_root.as_deref())
-            .await?;
-
-        let updates = IssueUpdate {
-            title: params.title,
-            description: params.description,
-            status,
-            priority: params.priority,
+        let UpdateParams {
+            issue_id,
+            title,
+            description,
+            priority,
             issue_kind,
-
-            design: params.design,
-            acceptance_criteria: params.acceptance_criteria,
-            note: None,
-            labels,
-        };
+            design,
+            acceptance_criteria,
+            workspace_root,
+        } = params;
+        let updates = IssueUpdate::builder()
+            .title(title)
+            .description(description)
+            .priority(priority)
+            .issue_kind(issue_kind)
+            .design(design)
+            .acceptance_criteria(acceptance_criteria)
+            .build()?;
+        let id = parse_issue_id(&issue_id)?;
+        let mut storage = self.mutation_storage_for(workspace_root.as_deref()).await?;
 
         let issue = storage.update(&id, updates).await?;
         save_or_reload(storage.as_mut()).await?;
@@ -592,15 +582,7 @@ impl Tools {
         let note = NoteContent::new(content)?;
         let mut storage = self.mutation_storage_for(workspace_root).await?;
 
-        let issue = storage
-            .update(
-                &issue_id,
-                IssueUpdate {
-                    note: Some(note),
-                    ..Default::default()
-                },
-            )
-            .await?;
+        let issue = storage.append_note(&issue_id, note).await?;
         save_or_reload(storage.as_mut()).await?;
         Ok(issue)
     }
@@ -732,6 +714,42 @@ impl Tools {
         Ok(issue.resources().to_vec())
     }
 
+    async fn transition(&self, params: LifecycleParams, action: LifecycleAction) -> Result<Issue> {
+        let id = parse_issue_id(&params.issue_id)?;
+        let mut storage = self
+            .mutation_storage_for(params.workspace_root.as_deref())
+            .await?;
+        let issue = storage.transition(&id, action).await?;
+        save_or_reload(storage.as_mut()).await?;
+        Ok(issue)
+    }
+
+    /// Start an Issue, moving it to In Progress.
+    ///
+    /// The domain and storage layers enforce Assignment and state invariants.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Issue ID, context, or lifecycle transition is
+    /// invalid, or when storage persistence fails.
+    #[instrument(skip(self, params), fields(issue_id = %params.issue_id))]
+    pub async fn start(&self, params: LifecycleParams) -> Result<Issue> {
+        debug!("Starting issue");
+        self.transition(params, LifecycleAction::Start).await
+    }
+
+    /// Return an In Progress Issue to Open.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Issue ID, context, or lifecycle transition is
+    /// invalid, or when storage persistence fails.
+    #[instrument(skip(self, params), fields(issue_id = %params.issue_id))]
+    pub async fn return_to_open(&self, params: LifecycleParams) -> Result<Issue> {
+        debug!("Returning issue to open");
+        self.transition(params, LifecycleAction::ReturnToOpen).await
+    }
+
     /// Close an issue.
     ///
     /// # Errors
@@ -750,13 +768,9 @@ impl Tools {
         let note = reason.map(NoteContent::closing_reason).transpose()?;
         let mut storage = self.mutation_storage_for(workspace_root).await?;
 
-        let updates = IssueUpdate {
-            status: Some(rivets::domain::IssueStatus::Closed),
-            note,
-            ..Default::default()
-        };
-
-        let issue = storage.update(&id, updates).await?;
+        let issue = storage
+            .transition(&id, LifecycleAction::Close { reason: note })
+            .await?;
         save_or_reload(storage.as_mut()).await?;
         debug!("Closed issue");
         Ok(issue)
@@ -1084,18 +1098,9 @@ impl Tools {
         let note = reason.map(NoteContent::reopening_reason).transpose()?;
         let mut storage = self.mutation_storage_for(workspace_root).await?;
 
-        let current = storage
-            .get(&id)
-            .await?
-            .ok_or_else(|| Error::IssueNotFound(issue_id.to_string()))?;
-        current.status.validate_reopen()?;
-        let updates = IssueUpdate {
-            status: Some(IssueStatus::Open),
-            note,
-            ..Default::default()
-        };
-
-        let issue = storage.update(&id, updates).await?;
+        let issue = storage
+            .transition(&id, LifecycleAction::Reopen { reason: note })
+            .await?;
         save_or_reload(storage.as_mut()).await?;
         debug!("Reopened issue");
         Ok(issue)
@@ -1342,25 +1347,20 @@ mod tests {
         issue_id: &str,
         title: Option<String>,
         description: Option<String>,
-        status: Option<&str>,
         priority: Option<u8>,
         issue_kind: Option<&str>,
         design: Option<String>,
         acceptance_criteria: Option<String>,
-        labels: Option<Vec<String>>,
         workspace_root: Option<&str>,
     ) -> UpdateParams {
         UpdateParams {
             issue_id: issue_id.to_string(),
-            status: status.map(str::to_string),
-            priority,
-            kind: kind_input(issue_kind),
-            legacy_assignee: crate::models::LegacyAssigneePresence::default(),
             title,
             description,
+            priority,
+            issue_kind: issue_kind.map(|value| value.parse().expect("valid test Issue Kind")),
             design,
             acceptance_criteria,
-            labels,
             workspace_root: workspace_root.map(str::to_string),
         }
     }
@@ -1491,9 +1491,7 @@ mod tests {
                 issue.id.as_str(),
                 Some("Updated Title".to_string()),
                 None,
-                Some("in_progress"),
                 Some(0),
-                None,
                 None,
                 None,
                 None,
@@ -1503,8 +1501,9 @@ mod tests {
             .expect("update should succeed");
 
         assert_eq!(updated.title, "Updated Title");
-        assert_eq!(updated.status, IssueStatus::InProgress);
+        assert_eq!(updated.status, IssueStatus::Open);
         assert_eq!(updated.priority, 0);
+        assert_eq!(updated.assignee.as_deref(), Some("active-owner"));
     }
 
     #[rstest]
@@ -1520,6 +1519,61 @@ mod tests {
             .expect("close should succeed");
 
         assert_eq!(closed.status, IssueStatus::Closed);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_add_note_appends_note_history(#[future] tools: Tools) {
+        let tools = tools.await;
+        let issue = create_issue(&tools, "Noted Issue").await;
+
+        let updated = tools
+            .add_note(issue.id.as_str(), "First note".to_string(), None)
+            .await
+            .expect("note append should succeed");
+
+        assert_eq!(updated.notes().len(), 1);
+        assert_eq!(updated.notes()[0].content(), "First note");
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_start_and_return_to_open_preserve_assignment(#[future] tools: Tools) {
+        let tools = tools.await;
+        let issue = tools
+            .create(create_params(
+                "Assigned Issue".to_string(),
+                None,
+                None,
+                None,
+                Some("alice".to_string()),
+                None,
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("assigned issue should be created");
+
+        let started = tools
+            .start(LifecycleParams {
+                issue_id: issue.id.to_string(),
+                workspace_root: None,
+            })
+            .await
+            .expect("start should succeed");
+        assert_eq!(started.status, IssueStatus::InProgress);
+        assert_eq!(started.assignee.as_deref(), Some("alice"));
+
+        let returned = tools
+            .return_to_open(LifecycleParams {
+                issue_id: issue.id.to_string(),
+                workspace_root: None,
+            })
+            .await
+            .expect("return_to_open should succeed");
+        assert_eq!(returned.status, IssueStatus::Open);
+        assert_eq!(returned.assignee.as_deref(), Some("alice"));
     }
 
     #[rstest]
@@ -1826,18 +1880,10 @@ mod tests {
             .await
             .expect("assigned issue should be created");
         let in_progress = tools
-            .update(update_params(
-                in_progress.id.as_str(),
-                None,
-                None,
-                Some("in_progress"),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            ))
+            .start(LifecycleParams {
+                issue_id: in_progress.id.to_string(),
+                workspace_root: None,
+            })
             .await
             .expect("assigned issue should enter progress");
         let in_progress_updated_at = in_progress.updated_at;

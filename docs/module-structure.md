@@ -284,19 +284,11 @@ pub struct NewIssue {
     pub prerequisites: Vec<IssueId>,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct IssueUpdate {
-    pub title: Option<String>,
-    pub description: Option<String>,
-    pub status: Option<IssueStatus>,
-    pub priority: Option<u8>,
-    pub issue_kind: Option<IssueKind>,
-    pub assignee: Option<Option<String>>,
-    pub design: Option<String>,
-    pub acceptance_criteria: Option<String>,
-    pub note: Option<NoteContent>,
-    pub labels: Option<Vec<Label>>,
-}
+// Validated, nonempty value with private fields; no Default.
+let update = IssueUpdate::builder()
+    .title(Some("Refined title".to_owned()))
+    .priority(Some(1))
+    .build()?;
 ```
 
 `Issue` and `Note` intentionally do not implement `Deserialize`. JSONL loading

@@ -6,7 +6,7 @@ use rivets::workspace_lock::WorkspaceMutationLock;
 use rivets_mcp::context::Context;
 use rivets_mcp::error::Error;
 use rivets_mcp::models::{
-    CreateParams, IssueKindInput, ListParams, ResourceUpdateParams, UpdateParams,
+    CreateParams, IssueKindInput, LifecycleParams, ListParams, ResourceUpdateParams, UpdateParams,
 };
 use rivets_mcp::tools::Tools;
 use std::path::{Path, PathBuf};
@@ -34,12 +34,16 @@ fn create_params(title: &str, workspace_root: Option<&str>) -> CreateParams {
 }
 
 fn update_params(issue_id: &str, workspace_root: Option<&str>) -> UpdateParams {
-    serde_json::from_value(serde_json::json!({
-        "issue_id": issue_id,
-        "title": "Updated title",
-        "workspace_root": workspace_root,
-    }))
-    .expect("update parameters should deserialize")
+    UpdateParams {
+        issue_id: issue_id.to_string(),
+        title: Some("Updated title".to_string()),
+        description: None,
+        priority: None,
+        issue_kind: None,
+        design: None,
+        acceptance_criteria: None,
+        workspace_root: workspace_root.map(str::to_string),
+    }
 }
 
 fn list_params(workspace_root: Option<&str>) -> ListParams {
@@ -269,7 +273,7 @@ async fn assert_resource_mutators_busy(fixture: &MutationFixture) {
     );
 }
 
-async fn assert_lifecycle_relationship_and_label_mutators_busy(fixture: &MutationFixture) {
+async fn assert_lifecycle_mutators_busy(fixture: &MutationFixture) {
     assert_busy(
         fixture
             .tools
@@ -288,6 +292,30 @@ async fn assert_lifecycle_relationship_and_label_mutators_busy(fixture: &Mutatio
             .await,
         &fixture.root,
     );
+    assert_busy(
+        fixture
+            .tools
+            .start(LifecycleParams {
+                issue_id: fixture.lifecycle_target.id.to_string(),
+                workspace_root: Some(fixture.root_string.clone()),
+            })
+            .await,
+        &fixture.root,
+    );
+    assert_busy(
+        fixture
+            .tools
+            .return_to_open(LifecycleParams {
+                issue_id: fixture.lifecycle_target.id.to_string(),
+                workspace_root: Some(fixture.root_string.clone()),
+            })
+            .await,
+        &fixture.root,
+    );
+}
+
+async fn assert_lifecycle_relationship_and_label_mutators_busy(fixture: &MutationFixture) {
+    assert_lifecycle_mutators_busy(fixture).await;
     assert_busy(
         fixture
             .tools

@@ -2,6 +2,7 @@
 
 use crate::domain::{
     AssignmentError, IssueId, ParentageError, QueryError, ResourceError, StatusTransitionError,
+    UpdateError,
 };
 use std::{fmt, io, path::PathBuf};
 use thiserror::Error;
@@ -362,6 +363,9 @@ pub enum Error {
     /// Storage error.
     #[error("{0}")]
     Storage(#[from] StorageError),
+    /// A general Issue update failed its shared domain validation.
+    #[error(transparent)]
+    InvalidUpdate(UpdateError),
 
     /// A Parentage invariant or transition was rejected.
     #[error(transparent)]
@@ -477,6 +481,14 @@ pub enum Error {
     /// storage code.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+}
+impl From<UpdateError> for Error {
+    fn from(error: UpdateError) -> Self {
+        match error {
+            UpdateError::InvalidPriority(priority) => Self::InvalidPriority(priority),
+            error => Self::InvalidUpdate(error),
+        }
+    }
 }
 
 /// A specialized Result type for rivets operations.

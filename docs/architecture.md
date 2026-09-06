@@ -99,6 +99,8 @@ pub trait IssueStorage: Send + Sync {
     async fn create(&mut self, issue: NewIssue) -> Result<Issue>;
     async fn get(&self, id: &IssueId) -> Result<Option<Issue>>;
     async fn update(&mut self, id: &IssueId, updates: IssueUpdate) -> Result<Issue>;
+    async fn transition(&mut self, id: &IssueId, action: LifecycleAction) -> Result<Issue>;
+    async fn append_note(&mut self, id: &IssueId, content: NoteContent) -> Result<Issue>;
     async fn delete(&mut self, id: &IssueId) -> Result<()>;
 
     // Blocking Dependencies

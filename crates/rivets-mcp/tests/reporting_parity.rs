@@ -500,6 +500,105 @@ async fn information_survives_concurrent_cache_eviction() {
 }
 
 #[test]
+fn registered_mcp_requests_enforce_update_and_dedicated_intent_contract() {
+    let mut original = issue_record("rep-update", "open", 2, None, &[]);
+    original["labels"] = json!(["preserve"]);
+    let fixture = Fixture::new(vec![original.clone()]);
+    let mut mcp = McpProcess::new(fixture.root());
+    mcp.call("set_context", json!({"workspace_root": fixture.root()}));
+    let obsolete = mcp
+        .call_result(
+            "update",
+            json!({
+                "issue_id": "rep-update", "title": "Must not apply", "status": null
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(obsolete["isError"], true); // rmcp's parameter decoding envelope
+    fixture.assert_source_unchanged();
+
+    let updated = mcp.call(
+        "update",
+        json!({
+            "issue_id": "rep-update", "title": "Registered change", "description": "",
+            "priority": 0, "issue_kind": "bug", "design": "", "acceptance_criteria": "Verified"
+        }),
+    );
+    for (field, expected) in [
+        ("title", json!("Registered change")),
+        ("description", json!("")),
+        ("priority", json!(0)),
+        ("issue_kind", json!("bug")),
+        ("design", json!("")),
+        ("acceptance_criteria", json!("Verified")),
+    ] {
+        assert_eq!(updated[field], expected, "registered Update {field}");
+    }
+    for field in [
+        "id",
+        "created_at",
+        "status",
+        "assignee",
+        "labels",
+        "notes",
+        "resources",
+        "closed_at",
+    ] {
+        assert_eq!(
+            updated[field], original[field],
+            "Update must preserve {field}"
+        );
+    }
+    assert_ne!(std::fs::read(&fixture.data_path).unwrap(), fixture.original);
+    mcp.call(
+        "claim",
+        json!({"issue_id": "rep-update", "assignee": "alice"}),
+    );
+    let started = mcp.call("start", json!({"issue_id": "rep-update"}));
+    assert_eq!(started["status"], "in_progress");
+    assert_eq!(started["assignee"], "alice");
+    let returned = mcp.call("return_to_open", json!({"issue_id": "rep-update"}));
+    assert_eq!(returned["status"], "open");
+    assert_eq!(returned["assignee"], "alice");
+    mcp.call(
+        "add_note",
+        json!({"issue_id": "rep-update", "content": "Evidence"}),
+    );
+    let closed = mcp.call(
+        "close",
+        json!({"issue_id": "rep-update", "reason": "Complete"}),
+    );
+    assert_eq!(closed["status"], "closed");
+    assert!(closed["assignee"].is_null());
+    let reopened = mcp.call(
+        "reopen",
+        json!({"issue_id": "rep-update", "reason": "Inspect"}),
+    );
+    assert_eq!(reopened["status"], "open");
+    assert!(reopened["assignee"].is_null());
+    let contents: Vec<_> = reopened["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|note| note["content"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        contents,
+        ["Evidence", "Closed: Complete", "Reopened: Inspect"]
+    );
+    drop(mcp);
+    let persisted: Value =
+        serde_json::from_slice(&std::fs::read(&fixture.data_path).unwrap()).unwrap();
+    let mut expected = reopened;
+    // Relationship compatibility records are persisted but omitted from Issue responses.
+    expected["dependencies"] = original["dependencies"].clone();
+    assert_eq!(
+        persisted, expected,
+        "registered mutations must survive server restart"
+    );
+}
+
+#[test]
 fn registered_mcp_empty_update_is_invalid_params() {
     let mut original = issue_record("rep-update", "open", 2, None, &[]);
     original["labels"] = json!(["preserve"]);

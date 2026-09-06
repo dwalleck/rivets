@@ -427,7 +427,7 @@ reviewable diffs) to a `.tmp` file, flushed, then renamed over `issues.jsonl`.
 ## State Transitions
 
 Workflow State changes and Assignment changes are separate operations. `claim`
-and `release` mutate only Assignment; `update --status`, `close`, and `reopen`
+and `release` mutate only Assignment; `start`, `return-to-open`, `close`, and `reopen`
 mutate Workflow State and apply the domain-owned Assignment side effects.
 Dependency operations never change Workflow State. Open, In Progress, and Closed
 are the only states; Blocked and Ready are derived and never serialized on Issue

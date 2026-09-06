@@ -22,9 +22,9 @@ use crate::domain::Issue;
 
 /// Result of a batch operation on multiple issues.
 ///
-/// Batch operations (update, close, reopen, label add/remove) process each
-/// issue independently and save after each success. This allows partial
-/// progress to be preserved even when some operations fail.
+/// Batch operations (update, lifecycle transitions, Note append, and label
+/// add/remove) process each issue independently and save after each success.
+/// This allows partial progress to be preserved even when some operations fail.
 #[derive(Debug, Clone, Serialize)]
 pub struct BatchResult {
     /// Issues that were successfully processed and saved

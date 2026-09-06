@@ -8,9 +8,12 @@
 //! - `init`: Initialize a new rivets repository
 //! - `create`: Create a new issue
 //! - `list`: List issues with optional filters
-//! - `show`: Show issue details
 //! - `update`: Update an existing issue
+//! - `start`: Start an assigned issue
+//! - `return-to-open`: Return an in-progress issue to open
 //! - `close`: Close an issue
+//! - `reopen`: Reopen a closed issue
+//! - `note append`: Append a note to one or more issues
 //! - `delete`: Delete an issue
 //! - `ready`: Show ready-to-work issues
 //!
@@ -24,12 +27,14 @@
 //! ```bash
 //! rivets create --title "Fix bug" --priority 1 --kind bug
 //! rivets list --status open --priority 1
-//! rivets update proj-abc --status in_progress
+//! rivets update proj-abc --title "Clarify scope"
 //! rivets close proj-abc --reason "Fixed in PR #123"
 //! ```
 
 mod args;
 mod execute;
+mod lifecycle;
+mod notes;
 mod types;
 mod validators;
 
@@ -42,9 +47,9 @@ use crate::app::App;
 pub use args::{
     AssignmentArgs, BlockedArgs, BlockingDependencyAction, BlockingDependencyArgs,
     BlockingDependencyListArgs, CloseArgs, CreateArgs, DeleteArgs, DiscoveryAction, DiscoveryArgs,
-    InfoArgs, InitArgs, LabelAction, LabelArgs, ListArgs, ParentAction, ParentArgs, ReadyArgs,
-    RelatedAction, RelatedArgs, ReopenArgs, ResourceAction, ResourceArgs, ShowArgs, StaleArgs,
-    UpdateArgs,
+    InfoArgs, InitArgs, LabelAction, LabelArgs, ListArgs, NoteAction, NoteArgs, ParentAction,
+    ParentArgs, ReadyArgs, RelatedAction, RelatedArgs, ReopenArgs, ResourceAction, ResourceArgs,
+    ReturnToOpenArgs, ShowArgs, StaleArgs, StartArgs, UpdateArgs,
 };
 
 pub use types::{BatchError, BatchResult, SortPolicyArg};
@@ -112,6 +117,14 @@ pub enum Commands {
     /// Modifies one or more fields of an existing issue. Only provided fields
     /// are updated; other fields remain unchanged.
     Update(UpdateArgs),
+    /// Start an assigned Open issue.
+    Start(StartArgs),
+
+    /// Return an In Progress issue to Open.
+    ReturnToOpen(ReturnToOpenArgs),
+
+    /// Manage Issue Notes.
+    Note(NoteArgs),
     /// Claim an Open, unblocked Issue for one Assignee.
     Claim(AssignmentArgs),
 
@@ -183,10 +196,13 @@ impl Commands {
         match self {
             Self::Create(_)
             | Self::Update(_)
+            | Self::Start(_)
+            | Self::ReturnToOpen(_)
             | Self::Claim(_)
             | Self::Release(_)
             | Self::Close(_)
             | Self::Reopen(_)
+            | Self::Note(_)
             | Self::Delete(_) => true,
             Self::BlockingDependency(args) => args.action.mutates_workspace(),
             Self::Related(args) => args.action.mutates_workspace(),
@@ -276,6 +292,18 @@ impl Cli {
                 let mut app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_update(&mut app, args, output_mode).await
             }
+            Some(Commands::Start(args)) => {
+                let mut app = load_app_from_cwd(mutates_workspace).await?;
+                lifecycle::execute_start(&mut app, args, output_mode).await
+            }
+            Some(Commands::ReturnToOpen(args)) => {
+                let mut app = load_app_from_cwd(mutates_workspace).await?;
+                lifecycle::execute_return_to_open(&mut app, args, output_mode).await
+            }
+            Some(Commands::Note(args)) => {
+                let mut app = load_app_from_cwd(mutates_workspace).await?;
+                notes::execute_note(&mut app, args, output_mode).await
+            }
             Some(Commands::Claim(args)) => {
                 let mut app = load_app_from_cwd(mutates_workspace).await?;
                 execute::execute_claim(&mut app, args, output_mode).await
@@ -289,14 +317,14 @@ impl Cli {
                     return Ok(());
                 }
                 let mut app = load_app_from_cwd(mutates_workspace).await?;
-                execute::execute_close(&mut app, args, output_mode).await
+                lifecycle::execute_close(&mut app, args, output_mode).await
             }
             Some(Commands::Reopen(args)) => {
                 if !execute::confirm_batch("Reopen", args.issue_ids.len(), self.yes)? {
                     return Ok(());
                 }
                 let mut app = load_app_from_cwd(mutates_workspace).await?;
-                execute::execute_reopen(&mut app, args, output_mode).await
+                lifecycle::execute_reopen(&mut app, args, output_mode).await
             }
             Some(Commands::Delete(args)) => {
                 if !args.force && !self.yes {
@@ -378,6 +406,9 @@ mod tests {
         for args in [
             &["create", "--title", "Issue"][..],
             &["update", "test-abc", "--title", "Updated"],
+            &["start", "test-abc"],
+            &["return-to-open", "test-abc"],
+            &["note", "append", "test-abc", "--content", "A note"],
             &["close", "test-abc"],
             &["reopen", "test-abc"],
             &["delete", "test-abc", "--force"],
@@ -801,6 +832,9 @@ mod tests {
             ],
             vec!["rivets", "show", "invalid"],
             vec!["rivets", "update", "invalid", "--title", "Title"],
+            vec!["rivets", "start", "invalid"],
+            vec!["rivets", "return-to-open", "invalid"],
+            vec!["rivets", "note", "append", "invalid", "--content", "text"],
             vec!["rivets", "close", "invalid"],
             vec!["rivets", "reopen", "invalid"],
             vec!["rivets", "delete", "invalid"],
@@ -984,10 +1018,16 @@ mod tests {
             "proj-abc",
             "--title",
             "New title",
-            "--status",
-            "in_progress",
             "--priority",
             "0",
+            "--kind",
+            "bug",
+            "--description",
+            "Details",
+            "--design",
+            "Plan",
+            "--acceptance",
+            "Done when shipped",
         ])
         .unwrap();
 
@@ -995,8 +1035,11 @@ mod tests {
             Some(Commands::Update(args)) => {
                 assert_eq!(args.issue_ids, vec!["proj-abc"]);
                 assert_eq!(args.title, Some("New title".to_string()));
-                assert_eq!(args.status, Some(IssueStatus::InProgress));
                 assert_eq!(args.priority, Some(0));
+                assert_eq!(args.issue_kind, Some(IssueKind::Bug));
+                assert_eq!(args.description, Some("Details".to_string()));
+                assert_eq!(args.design, Some("Plan".to_string()));
+                assert_eq!(args.acceptance, Some("Done when shipped".to_string()));
             }
             _ => panic!("Expected Update command"),
         }
@@ -1009,18 +1052,67 @@ mod tests {
             "update",
             "proj-abc",
             "proj-def",
-            "--status",
-            "in_progress",
+            "--priority",
+            "1",
         ])
         .unwrap();
 
         match cli.command {
             Some(Commands::Update(args)) => {
                 assert_eq!(args.issue_ids, vec!["proj-abc", "proj-def"]);
-                assert_eq!(args.status, Some(IssueStatus::InProgress));
+                assert_eq!(args.priority, Some(1));
             }
             _ => panic!("Expected Update command"),
         }
+    }
+
+    #[test]
+    fn test_parse_update_rejects_legacy_fields() {
+        for field in ["--status", "--notes", "--labels", "--assignee"] {
+            assert!(
+                Cli::try_parse_from(["rivets", "update", "proj-abc", field, "value"]).is_err(),
+                "legacy update field should be rejected: {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_start_and_return_to_open() {
+        assert!(matches!(
+            Cli::try_parse_from(["rivets", "start", "proj-abc", "proj-def"])
+                .unwrap()
+                .command,
+            Some(Commands::Start(StartArgs { issue_ids }))
+                if issue_ids == vec!["proj-abc".to_string(), "proj-def".to_string()]
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["rivets", "return-to-open", "proj-abc"])
+                .unwrap()
+                .command,
+            Some(Commands::ReturnToOpen(ReturnToOpenArgs { issue_ids }))
+                if issue_ids == vec!["proj-abc".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_parse_note_append() {
+        let cli = Cli::try_parse_from([
+            "rivets",
+            "note",
+            "append",
+            "proj-abc",
+            "proj-def",
+            "--content",
+            "A note",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Note(NoteArgs {
+                action: NoteAction::Append { issue_ids, content }
+            })) if issue_ids == vec!["proj-abc".to_string(), "proj-def".to_string()]
+                && content == "A note"
+        ));
     }
 
     #[test]
