@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Workspace mutation guards explicitly unlock on drop so unrelated forked children cannot transiently retain released ownership.
+- Workspace mutation guards explicitly unlock on drop, releasing the lock even when unrelated forked children retain an inherited file descriptor.
 - Added shared CLI/MCP `info` and `stats` reports. Information now reports the initialized Workspace configuration without Issue counts; Statistics always includes all five Priority buckets, three Workflow States, all-Assignment Ready, and direct Blocked counts. Removed CLI `stats --detailed`; MCP `where_am_i` remains separate context inspection.
 - List and Stale now require an explicit positive limit through CLI and MCP. Shared storage query policy orders List newest-created and Stale oldest-updated, with ascending Issue-ID ties; Stale excludes Closed unless explicitly filtered and rejects unrepresentable age cutoffs.
 - Removed CLI List `--sort`, the List/Stale `in-progress` alias, and MCP List's hidden `issue_type` alias. Canonical query filters and published MCP schemas now agree across adapters.
