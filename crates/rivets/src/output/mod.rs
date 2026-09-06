@@ -6,12 +6,14 @@
 //! Submodules:
 //! - [`color`]: Color and styling helpers (semantic colors, icons)
 //! - [`json`]: JSON serialization for programmatic output
-
+//! - [`reporting`]: Workspace information and statistics rendering
 pub mod color;
 mod json;
+mod reporting;
 
 use crate::domain::{BlockingDependency, Issue, Note};
 use colored::Colorize;
+pub use reporting::{print_information, print_statistics};
 use serde::Serialize;
 use std::env;
 use std::io::{self, Write};

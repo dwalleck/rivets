@@ -15,6 +15,7 @@
 
 use crate::error::{Error, Result};
 use rivets::commands::init::RivetsConfig;
+use rivets::reporting::WorkspaceInformation;
 use rivets::storage::{IssueStorage, create_storage};
 use rivets::workspace_lock::RIVETS_DIR_NAME;
 #[cfg(test)]
@@ -43,6 +44,9 @@ pub struct Context {
     /// Per-workspace database paths (discovered dynamically).
     database_paths: HashMap<PathBuf, PathBuf>,
 
+    /// Configuration snapshots used to initialize cached storage.
+    information_cache: HashMap<PathBuf, WorkspaceInformation>,
+
     /// Insertion order for FIFO cache eviction.
     cache_order: VecDeque<PathBuf>,
 
@@ -59,6 +63,7 @@ impl Context {
             current_workspace: None,
             storage_cache: HashMap::new(),
             database_paths: HashMap::new(),
+            information_cache: HashMap::new(),
             cache_order: VecDeque::new(),
             #[cfg(test)]
             test_workspaces: HashSet::new(),
@@ -96,6 +101,19 @@ impl Context {
         protected_workspace: Option<&Path>,
     ) -> Result<WorkspaceInfo> {
         let canonical = canonicalize_workspace_async(workspace_root).await?;
+
+        // A cached storage and its information report are one initialized
+        // snapshot. Do not reload a changed config for a cache hit: doing so
+        // would make the report disagree with the storage's configured data.
+        if self.storage_cache.contains_key(&canonical)
+            && let Some(information) = self.information_cache.get(&canonical)
+        {
+            return Ok(WorkspaceInfo {
+                workspace_root: information.workspace_root().to_path_buf(),
+                database_path: information.database_path().to_path_buf(),
+            });
+        }
+
         let rivets_dir = canonical.join(RIVETS_DIR_NAME);
 
         // Load config to get storage settings
@@ -110,15 +128,9 @@ impl Context {
 
         // Create backend configuration (this resolves the data path)
         let backend = config.storage.to_backend(&canonical)?;
-        let db_path = backend.data_path().map_or_else(
-            || canonical.join(&config.storage.data_file),
-            Path::to_path_buf,
-        );
+        let information = WorkspaceInformation::from_config(&canonical, &config, &backend)?;
+        let db_path = information.database_path().to_path_buf();
         debug!(db_path = %db_path.display(), "Database path from backend");
-
-        // Store database path
-        self.database_paths
-            .insert(canonical.clone(), db_path.clone());
 
         // Create storage if not cached
         if self.storage_cache.contains_key(&canonical) {
@@ -137,11 +149,18 @@ impl Context {
                 }
             }
 
-            let storage = create_storage(backend.clone(), config.issue_prefix).await?;
+            let storage = create_storage(backend, config.issue_prefix).await?;
             self.storage_cache
                 .insert(canonical.clone(), Arc::new(RwLock::new(storage)));
             self.cache_order.push_back(canonical.clone());
         }
+
+        // Keep the configuration and database identities paired with the
+        // storage snapshot that was initialized above.
+        self.database_paths
+            .insert(canonical.clone(), db_path.clone());
+        self.information_cache
+            .insert(canonical.clone(), information);
 
         Ok(WorkspaceInfo {
             workspace_root: canonical,
@@ -167,6 +186,7 @@ impl Context {
 
         self.storage_cache.remove(&oldest);
         self.database_paths.remove(&oldest);
+        self.information_cache.remove(&oldest);
         #[cfg(test)]
         self.test_workspaces.remove(&oldest);
         tracing::debug!(workspace = %oldest.display(), "Evicted workspace from cache");
@@ -230,6 +250,19 @@ impl Context {
         let workspace = self.resolve_workspace_root_async(workspace_root).await?;
 
         self.storage_cache
+            .get(&workspace)
+            .cloned()
+            .ok_or_else(|| Error::WorkspaceNotInitialized(workspace.display().to_string()))
+    }
+
+    /// Resolve the initialized configuration snapshot for a workspace.
+    pub(crate) async fn information_for_async(
+        &self,
+        workspace_root: Option<&Path>,
+    ) -> Result<WorkspaceInformation> {
+        let workspace = self.resolve_workspace_root_async(workspace_root).await?;
+
+        self.information_cache
             .get(&workspace)
             .cloned()
             .ok_or_else(|| Error::WorkspaceNotInitialized(workspace.display().to_string()))

@@ -75,6 +75,8 @@ use crate::domain::{
     ResourceUpdate, SortPolicy, StaleQuery,
 };
 use crate::error::{PartialLoadError, Result, SkippedIssueRecordCause, StorageError};
+use crate::reporting::WorkspaceStatistics;
+
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use std::io::ErrorKind;
@@ -293,6 +295,9 @@ pub trait IssueStorage: Send + Sync {
     ///
     /// Returns tuples of (blocked issue, blocking issues).
     async fn blocked_issues(&self) -> Result<Vec<(Issue, Vec<Issue>)>>;
+
+    /// Aggregate a Workspace-wide report from one storage snapshot.
+    async fn statistics(&self) -> Result<WorkspaceStatistics>;
 
     // ========== Atomic Label Operations ==========
 
@@ -727,6 +732,10 @@ impl IssueStorage for JsonlBackedStorage {
         self.inner.blocked_issues().await
     }
 
+    async fn statistics(&self) -> Result<WorkspaceStatistics> {
+        self.inner.statistics().await
+    }
+
     async fn add_label(&mut self, id: &IssueId, label: &Label) -> Result<Issue> {
         self.prepare_mutation().await?;
         self.inner.add_label(id, label).await
@@ -1129,6 +1138,10 @@ impl IssueStorage for MockStorage {
 
     async fn blocked_issues(&self) -> Result<Vec<(Issue, Vec<Issue>)>> {
         Ok(vec![])
+    }
+
+    async fn statistics(&self) -> Result<WorkspaceStatistics> {
+        Ok(WorkspaceStatistics::default())
     }
 
     async fn add_label(&mut self, _id: &IssueId, _label: &Label) -> Result<Issue> {

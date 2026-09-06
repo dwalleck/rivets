@@ -2,15 +2,17 @@
 //!
 //! This module contains the implementation of all CLI commands.
 
+mod reporting;
+pub(super) use reporting::{execute_info, execute_stats};
 use std::io::Write;
 
 use anyhow::{Context, Result};
 
 use super::args::{
     AssignmentArgs, BlockedArgs, BlockingDependencyAction, BlockingDependencyArgs, CloseArgs,
-    CreateArgs, DeleteArgs, DiscoveryAction, DiscoveryArgs, InfoArgs, InitArgs, LabelAction,
-    LabelArgs, ListArgs, ParentAction, ParentArgs, ReadyArgs, RelatedAction, RelatedArgs,
-    ReopenArgs, ResourceAction, ResourceArgs, ShowArgs, StaleArgs, StatsArgs, UpdateArgs,
+    CreateArgs, DeleteArgs, DiscoveryAction, DiscoveryArgs, InitArgs, LabelAction, LabelArgs,
+    ListArgs, ParentAction, ParentArgs, ReadyArgs, RelatedAction, RelatedArgs, ReopenArgs,
+    ResourceAction, ResourceArgs, ShowArgs, StaleArgs, UpdateArgs,
 };
 use super::types::SortPolicyArg;
 use crate::output::OutputMode;
@@ -67,53 +69,6 @@ pub async fn execute_init(args: &InitArgs) -> Result<()> {
         println!("  Config: {}", result.config_file.display());
         println!("  Issues: {}", result.issues_file.display());
         println!("  Issue prefix: {}", result.prefix);
-    }
-
-    Ok(())
-}
-
-/// Execute the info command
-pub async fn execute_info(
-    app: &crate::app::App,
-    _args: &InfoArgs,
-    output_mode: OutputMode,
-) -> Result<()> {
-    use crate::domain::IssueFilter;
-    use crate::output;
-
-    let rivets_dir = app.rivets_dir();
-    let database_path = rivets_dir.join("issues.jsonl");
-    let issue_prefix = app.prefix();
-
-    // Get issue counts in a single pass
-    let all_issues = app.storage().list(&IssueFilter::default()).await?;
-    let counts = count_by_status(&all_issues);
-
-    match output_mode {
-        output::OutputMode::Json => {
-            output::print_json(&serde_json::json!({
-                "database_path": database_path.display().to_string(),
-                "issue_prefix": issue_prefix,
-                "issues": {
-                    "total": counts.total,
-                    "open": counts.open,
-                    "in_progress": counts.in_progress,
-                    "closed": counts.closed
-                }
-            }))?;
-        }
-        output::OutputMode::Text => {
-            println!("Rivets Repository Information");
-            println!("==============================");
-            println!();
-            println!("Database:     {}", database_path.display());
-            println!("Issue prefix: {}", issue_prefix);
-            println!();
-            println!(
-                "Issues: {} total ({} open, {} in progress, {} closed)",
-                counts.total, counts.open, counts.in_progress, counts.closed
-            );
-        }
     }
 
     Ok(())
@@ -496,32 +451,6 @@ fn bail_on_batch_failures(result: &super::types::BatchResult, action: &str) -> R
         );
     }
     Ok(())
-}
-
-/// Issue counts grouped by status.
-#[derive(Default)]
-struct StatusCounts {
-    total: usize,
-    open: usize,
-    in_progress: usize,
-    closed: usize,
-}
-
-/// Count issues by status in a single pass.
-fn count_by_status(issues: &[crate::domain::Issue]) -> StatusCounts {
-    use crate::domain::IssueStatus;
-
-    issues
-        .iter()
-        .fold(StatusCounts::default(), |mut counts, issue| {
-            counts.total += 1;
-            match issue.status {
-                IssueStatus::Open => counts.open += 1,
-                IssueStatus::InProgress => counts.in_progress += 1,
-                IssueStatus::Closed => counts.closed += 1,
-            }
-            counts
-        })
 }
 
 /// Prompt the user for confirmation and return whether they accepted.
@@ -1552,95 +1481,6 @@ pub async fn execute_blocked(
     Ok(())
 }
 
-/// Execute the stats command
-pub async fn execute_stats(
-    app: &crate::app::App,
-    args: &StatsArgs,
-    output_mode: OutputMode,
-) -> Result<()> {
-    use crate::domain::{IssueFilter, ReadyFilter};
-    use crate::output;
-
-    // Get all issues and count by status
-    let all_issues = app.storage().list(&IssueFilter::default()).await?;
-    let counts = count_by_status(&all_issues);
-
-    // Ready defaults to unassigned Issues.
-    let ready = app
-        .storage()
-        .ready_to_work(&ReadyFilter::default(), None)
-        .await?
-        .len();
-
-    // Blocked issues (by dependencies)
-    let blocked_by_deps = app.storage().blocked_issues().await?.len();
-
-    match output_mode {
-        output::OutputMode::Json => {
-            let mut stats = serde_json::json!({
-                "total": counts.total,
-                "by_status": {
-                    "open": counts.open,
-                    "in_progress": counts.in_progress,
-                    "closed": counts.closed
-                },
-                "ready": ready,
-                "blocked_by_dependencies": blocked_by_deps
-            });
-
-            if args.detailed {
-                // Add priority breakdown
-                let by_priority: Vec<usize> = (0..=4)
-                    .map(|p| all_issues.iter().filter(|i| i.priority == p).count())
-                    .collect();
-
-                stats["by_priority"] = serde_json::json!({
-                    "p0_critical": by_priority[0],
-                    "p1_high": by_priority[1],
-                    "p2_medium": by_priority[2],
-                    "p3_low": by_priority[3],
-                    "p4_backlog": by_priority[4]
-                });
-            }
-
-            output::print_json(&stats)?;
-        }
-        output::OutputMode::Text => {
-            println!("Project Statistics");
-            println!("==================");
-            println!();
-            println!("Total Issues:  {}", counts.total);
-            println!();
-            println!("By Status:");
-            println!("  Open:        {}", counts.open);
-            println!("  In Progress: {}", counts.in_progress);
-            println!("  Closed:      {}", counts.closed);
-            println!();
-            println!("Ready to Work: {}", ready);
-            println!("Blocked by Dependencies: {}", blocked_by_deps);
-
-            if args.detailed {
-                println!();
-                println!("By Priority:");
-                for p in 0..=4 {
-                    let count = all_issues.iter().filter(|i| i.priority == p).count();
-                    let label = match p {
-                        0 => "P0 (Critical)",
-                        1 => "P1 (High)",
-                        2 => "P2 (Medium)",
-                        3 => "P3 (Low)",
-                        4 => "P4 (Backlog)",
-                        _ => unreachable!(),
-                    };
-                    println!("  {}: {}", label, count);
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1884,73 +1724,6 @@ mod tests {
             let result = resolve_label_issue_ids(&None, &[]);
             assert!(result.is_err());
             assert!(result.unwrap_err().to_string().contains("Must provide"));
-        }
-    }
-
-    mod count_by_status_tests {
-        use super::super::count_by_status;
-        use super::create_test_issue;
-        use crate::domain::IssueStatus;
-
-        #[test]
-        fn test_empty_list() {
-            let counts = count_by_status(&[]);
-            assert_eq!(counts.total, 0);
-            assert_eq!(counts.open, 0);
-            assert_eq!(counts.in_progress, 0);
-            assert_eq!(counts.closed, 0);
-        }
-
-        #[test]
-        fn test_single_status() {
-            let mut issue = create_test_issue("test-1");
-            issue.status = IssueStatus::InProgress;
-            let counts = count_by_status(&[issue]);
-            assert_eq!(counts.total, 1);
-            assert_eq!(counts.open, 0);
-            assert_eq!(counts.in_progress, 1);
-            assert_eq!(counts.closed, 0);
-        }
-
-        #[test]
-        fn test_mixed_statuses() {
-            let mut issues = vec![
-                create_test_issue("test-1"),
-                create_test_issue("test-2"),
-                create_test_issue("test-3"),
-                create_test_issue("test-4"),
-                create_test_issue("test-5"),
-                create_test_issue("test-6"),
-            ];
-            issues[0].status = IssueStatus::Open;
-            issues[1].status = IssueStatus::Open;
-            issues[2].status = IssueStatus::InProgress;
-            issues[3].status = IssueStatus::InProgress;
-            issues[4].status = IssueStatus::Closed;
-            issues[5].status = IssueStatus::Closed;
-
-            let counts = count_by_status(&issues);
-            assert_eq!(counts.total, 6);
-            assert_eq!(counts.open, 2);
-            assert_eq!(counts.in_progress, 2);
-            assert_eq!(counts.closed, 2);
-        }
-
-        #[test]
-        fn test_all_same_status() {
-            let issues: Vec<_> = (1..=5)
-                .map(|i| {
-                    let mut issue = create_test_issue(&format!("test-{}", i));
-                    issue.status = IssueStatus::InProgress;
-                    issue
-                })
-                .collect();
-
-            let counts = count_by_status(&issues);
-            assert_eq!(counts.total, 5);
-            assert_eq!(counts.open, 0);
-            assert_eq!(counts.in_progress, 5);
-            assert_eq!(counts.closed, 0);
         }
     }
 

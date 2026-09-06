@@ -123,6 +123,13 @@ pub struct SetContextParams {
     pub workspace_root: String,
 }
 
+/// Optional workspace override shared by read-only workspace report tools.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct WorkspaceRootParams {
+    /// Workspace root to inspect; omitted uses the current context.
+    pub workspace_root: Option<String>,
+}
+
 /// Parameters for the `ready` tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct ReadyParams {
@@ -670,28 +677,6 @@ pub struct BlockedIssueResponse {
 
     /// Issues blocking this one.
     pub blockers: Vec<Issue>,
-}
-
-/// Statistics response.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct StatsResponse {
-    /// Total number of issues.
-    pub total: usize,
-
-    /// Number of open issues.
-    pub open: usize,
-
-    /// Number of in-progress issues.
-    pub in_progress: usize,
-
-    /// Number of blocked issues.
-    pub blocked: usize,
-
-    /// Number of closed issues.
-    pub closed: usize,
-
-    /// Number of ready-to-work issues.
-    pub ready: usize,
 }
 
 #[cfg(test)]

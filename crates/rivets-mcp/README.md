@@ -4,7 +4,7 @@ MCP (Model Context Protocol) server for the Rivets issue tracking system. Enable
 
 ## Features
 
-- **32 MCP tools** for complete issue management
+- **38 MCP tools** for Issue management and Workspace reporting
 - **Multi-workspace support** - work with multiple projects in one session
 - **Stdio transport** - works with any MCP-compatible client
 - **Structured tracing** - debug with `RUST_LOG=debug`
@@ -78,6 +78,8 @@ RUST_LOG=debug rivets-mcp
 
 | Tool | Description |
 |------|-------------|
+| `info` | Workspace root, configured storage/backend, Issue ID prefix, and config path from the initialized snapshot; no counts |
+| `stats` | Workspace totals, three Workflow State counts, all-Assignment Ready, direct Blocked, and all five Priority buckets |
 | `ready` | Find Open Issues without unresolved direct Blocking Dependencies; defaults to unassigned |
 | `list` | Newest-created Issues with optional filters and a required positive limit |
 | `show` | Show detailed information about a specific Issue |
@@ -125,6 +127,12 @@ the JSON-RPC server returns an internal error with
 `{"retryable": true, "workspace_root": "..."}` and writes no Issue bytes.
 Queries and context inspection remain unlocked; different Workspaces remain
 independently writable.
+
+`info` and `stats` accept the same optional `workspace_root` override and serialize
+the same shared reports as CLI `info --json` and `stats --json`. Information is
+retained with the storage configuration snapshot; editing config while a Workspace
+is cached does not retarget that cached storage or its report. `where_am_i` remains
+separate MCP context inspection, including the unset-context case.
 
 ### claim / release
 

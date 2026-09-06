@@ -11,7 +11,9 @@ pub mod domain;
 pub mod error;
 pub mod id_generation;
 pub mod output;
+pub mod reporting;
 pub mod storage;
+
 pub mod workspace_lock;
 
 // Public CLI module (needed by binary)

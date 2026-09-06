@@ -498,14 +498,6 @@ pub struct BlockedArgs {
     pub assignee: Option<String>,
 }
 
-/// Arguments for the `stats` command
-#[derive(Parser, Debug, Clone, Default)]
-pub struct StatsArgs {
-    /// Show detailed breakdown
-    #[arg(short, long)]
-    pub detailed: bool,
-}
-
 /// Arguments for the `info` command
 #[derive(Parser, Debug, Clone, Default)]
 pub struct InfoArgs {
