@@ -68,7 +68,7 @@ def render(registry: dict[str, Any]) -> str:
         "",
         f"The current inventory contains **{len(cli_leaves)} CLI leaf operations** and "
         f"**{len(mcp_tools)} MCP tools**. **{shared} domain intents** currently have a surface in both adapters; "
-        "this count includes alternate forms such as CLI `update --notes` for MCP `add_note`.",
+        "adapter spellings may differ, such as CLI `note append` and MCP `add_note`.",
         "",
         "Interface Parity follows canonical domain language. `status` remains a current code-and-wire field name; "
         "the domain concept is **Workflow State**. Generic dependency operations are legacy; canonical target intents "

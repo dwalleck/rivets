@@ -43,8 +43,10 @@
 //!
 //! ## Issue Modification
 //! - `create` - Create a new Issue
-//! - `update` - Update Issue fields
-//! - `close` - Mark an Issue as complete
+//! - `update` - Update canonical descriptive Issue fields
+//! - `start` / `return_to_open` - Move an Issue through active workflow states
+//! - `close` / `reopen` - Complete or resume an Issue
+//! - `add_note` - Append an immutable Note
 //! - `blocking_dependency_add` / `blocking_dependency_remove` - Manage Blocking Dependencies
 //! - `related_add` / `related_remove` - Manage symmetric Related Associations
 //! - `discovery_add` / `discovery_remove` - Manage directed Discovery Origins

@@ -32,7 +32,10 @@ pub enum Error {
         /// Description of valid values.
         valid_values: &'static str,
     },
-    /// Canonical List or Stale query validation failed.
+    /// Canonical general Update validation failed.
+    #[error(transparent)]
+    InvalidUpdate(#[from] rivets::domain::UpdateError),
+    /// Canonical query validation failed.
     #[error(transparent)]
     Query(#[from] rivets::domain::QueryError),
     /// Issue ID input failed domain parsing.
@@ -174,6 +177,7 @@ impl Error {
             Self::Query(query) => McpError::invalid_params(query_message(query), None),
             Self::NoContext
             | Self::InvalidArgument { .. }
+            | Self::InvalidUpdate(_)
             | Self::InvalidIssueId(_)
             | Self::InvalidLabel(_)
             | Self::InvalidResource(_)
@@ -246,6 +250,10 @@ impl From<RivetsError> for Error {
                 discovered_issue_id: discovered_issue_id.to_string(),
                 source_issue_id: source_issue_id.to_string(),
             },
+            RivetsError::InvalidUpdate(source) => Self::InvalidUpdate(source),
+            RivetsError::InvalidPriority(priority) => {
+                Self::InvalidUpdate(rivets::domain::UpdateError::InvalidPriority(priority))
+            }
             RivetsError::Query(source) => Self::Query(source),
             RivetsError::Storage(storage_error) => match storage_error.try_into_resource_error() {
                 Ok(source) => Self::InvalidResource(source),
@@ -265,7 +273,6 @@ impl From<RivetsError> for Error {
             | RivetsError::HasDependents { .. }
             | RivetsError::CircularDependency { .. }
             | RivetsError::InvalidIssueId(_)
-            | RivetsError::InvalidPriority(_)
             | RivetsError::DependencyNotFound { .. }
             | RivetsError::IssueAlreadyExists(_)
             | RivetsError::Json(_)) => Self::Storage(error),
@@ -278,7 +285,7 @@ mod tests {
     use super::*;
     use rivets::domain::{
         AssignmentError, IssueId, IssueKind, IssueStatus, ParentageError, ResourceError,
-        StatusTransitionError,
+        StatusTransitionError, UpdateError,
     };
     use rivets::error::StorageError;
 
@@ -402,6 +409,26 @@ mod tests {
             Error::Storage(RivetsError::Storage(StorageError::InvalidFormat(message)))
                 if message == "bad record"
         ));
+    }
+
+    #[test]
+    fn update_errors_remain_typed_invalid_params() {
+        use rmcp::model::ErrorCode;
+
+        let error = Error::from(UpdateError::EmptyUpdate);
+        assert!(matches!(
+            error,
+            Error::InvalidUpdate(UpdateError::EmptyUpdate)
+        ));
+        let protocol = error.to_mcp_error();
+        assert_eq!(protocol.code, ErrorCode::INVALID_PARAMS);
+
+        let error = Error::from(RivetsError::InvalidPriority(5));
+        assert!(matches!(
+            error,
+            Error::InvalidUpdate(UpdateError::InvalidPriority(5))
+        ));
+        assert_eq!(error.to_mcp_error().code, ErrorCode::INVALID_PARAMS);
     }
 
     #[test]

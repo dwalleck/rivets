@@ -11,9 +11,9 @@ use super::sorting::sort_by_policy;
 use super::{InMemoryStorage, InMemoryStorageInner};
 use crate::domain::{
     AssignmentError, BlockingDependency, Dependency, DependencyType, DiscoveryOrigin, Issue,
-    IssueFilter, IssueId, IssueKind, IssueStatus, IssueUpdate, Label, ListQuery, MAX_PRIORITY,
-    NewIssue, NewResource, Note, Parentage, ParentageError, ReadyFilter, RelatedAssociation,
-    ResourceId, ResourceUpdate, SortPolicy, StaleQuery,
+    IssueFilter, IssueId, IssueKind, IssueStatus, IssueUpdate, Label, LifecycleAction, ListQuery,
+    NewIssue, NewResource, Note, NoteContent, Parentage, ParentageError, ReadyFilter,
+    RelatedAssociation, ResourceId, ResourceUpdate, SortPolicy, StaleQuery,
 };
 use crate::error::{Error, Result, StorageError};
 use crate::reporting::WorkspaceStatistics;
@@ -238,81 +238,101 @@ impl IssueStorage for InMemoryStorage {
             .ok_or_else(|| Error::IssueNotFound(id.clone()))?;
         let now = Utc::now();
 
-        if let Some(title) = updates.title {
-            candidate.title = title;
+        updates.apply(&mut candidate);
+        if candidate.issue_kind != inner.issues[id].issue_kind {
+            let child_ids = parentage_children_impl(&inner.graph, &inner.node_map, id)?
+                .into_iter()
+                .map(|parentage| parentage.child_id().clone())
+                .collect::<Vec<_>>();
+            if !child_ids.is_empty() && candidate.issue_kind != IssueKind::Epic {
+                return Err(ParentageError::ParentHasChildren {
+                    parent_id: id.clone(),
+                    child_ids,
+                }
+                .into());
+            }
         }
-        if let Some(description) = updates.description {
-            candidate.description = description;
-        }
-        let status = updates.status;
-        if let Some(status) = status {
-            if status == IssueStatus::Closed && candidate.issue_kind == IssueKind::Epic {
-                let child_ids = active_parentage_child_ids(&inner, id)?;
-                if !child_ids.is_empty() {
-                    return Err(ParentageError::ActiveChildren {
-                        epic_id: id.clone(),
-                        child_ids,
-                    }
+        candidate.validate().map_err(StorageError::Validation)?;
+        candidate
+            .validate_assignment_state()
+            .map_err(StorageError::Assignment)?;
+        candidate.updated_at = now;
+
+        inner.issues.insert(id.clone(), candidate.clone());
+        Ok(candidate)
+    }
+
+    async fn transition(&mut self, id: &IssueId, action: LifecycleAction) -> Result<Issue> {
+        let mut inner = self.lock().await;
+        let mut candidate = inner
+            .issues
+            .get(id)
+            .cloned()
+            .ok_or_else(|| Error::IssueNotFound(id.clone()))?;
+        let now = Utc::now();
+
+        match action {
+            LifecycleAction::Start => {
+                candidate
+                    .apply_status_transition(IssueStatus::InProgress, now)
+                    .map_err(StorageError::InvalidStatusTransition)?;
+            }
+            LifecycleAction::ReturnToOpen => {
+                if candidate.status != IssueStatus::InProgress {
+                    return Err(StorageError::InvalidStatusTransition(
+                        crate::domain::StatusTransitionError::NotInProgress {
+                            current: candidate.status,
+                        },
+                    )
                     .into());
                 }
+                candidate
+                    .apply_status_transition(IssueStatus::Open, now)
+                    .map_err(StorageError::InvalidStatusTransition)?;
             }
-            if candidate.status == IssueStatus::Closed
-                && status != IssueStatus::Closed
-                && let Some(parentage) = parentage_of_impl(&inner.graph, &inner.node_map, id)?
-            {
-                let parent = inner
-                    .issues
-                    .get(parentage.parent_id())
-                    .ok_or_else(|| Error::IssueNotFound(parentage.parent_id().clone()))?;
-                if parent.status == IssueStatus::Closed {
-                    return Err(ParentageError::ClosedParent {
-                        child_id: id.clone(),
-                        parent_id: parent.id.clone(),
+            LifecycleAction::Close { reason } => {
+                if candidate.issue_kind == IssueKind::Epic {
+                    let child_ids = active_parentage_child_ids(&inner, id)?;
+                    if !child_ids.is_empty() {
+                        return Err(ParentageError::ActiveChildren {
+                            epic_id: id.clone(),
+                            child_ids,
+                        }
+                        .into());
                     }
-                    .into());
+                }
+                candidate
+                    .apply_status_transition(IssueStatus::Closed, now)
+                    .map_err(StorageError::InvalidStatusTransition)?;
+                if let Some(reason) = reason {
+                    candidate.append_note(reason, now);
                 }
             }
-        }
-        if let Some(priority) = updates.priority {
-            if priority > MAX_PRIORITY {
-                return Err(Error::InvalidPriority(priority));
-            }
-            candidate.priority = priority;
-        }
-        if let Some(issue_kind) = updates.issue_kind {
-            if issue_kind != IssueKind::Epic {
-                let child_ids = parentage_children_impl(&inner.graph, &inner.node_map, id)?
-                    .into_iter()
-                    .map(|parentage| parentage.child_id().clone())
-                    .collect::<Vec<_>>();
-                if !child_ids.is_empty() {
-                    return Err(ParentageError::ParentHasChildren {
-                        parent_id: id.clone(),
-                        child_ids,
+            LifecycleAction::Reopen { reason } => {
+                candidate
+                    .status
+                    .validate_reopen()
+                    .map_err(StorageError::InvalidStatusTransition)?;
+                if let Some(parentage) = parentage_of_impl(&inner.graph, &inner.node_map, id)? {
+                    let parent = inner
+                        .issues
+                        .get(parentage.parent_id())
+                        .ok_or_else(|| Error::IssueNotFound(parentage.parent_id().clone()))?;
+                    if parent.status == IssueStatus::Closed {
+                        return Err(ParentageError::ClosedParent {
+                            child_id: id.clone(),
+                            parent_id: parent.id.clone(),
+                        }
+                        .into());
                     }
-                    .into());
+                }
+                candidate
+                    .apply_status_transition(IssueStatus::Open, now)
+                    .map_err(StorageError::InvalidStatusTransition)?;
+                if let Some(reason) = reason {
+                    candidate.append_note(reason, now);
                 }
             }
-            candidate.issue_kind = issue_kind;
-        }
-        if let Some(status) = status {
-            // The domain owns transition and Assignment coupling (ADRs 0002
-            // and 0005); this is the single application site.
-            candidate
-                .apply_status_transition(status, now)
-                .map_err(StorageError::InvalidStatusTransition)?;
-        }
-        if let Some(design) = updates.design {
-            candidate.design = Some(design);
-        }
-        if let Some(acceptance_criteria) = updates.acceptance_criteria {
-            candidate.acceptance_criteria = Some(acceptance_criteria);
-        }
-        if let Some(note) = updates.note {
-            candidate.append_note(note, now);
-        }
-        if let Some(labels) = updates.labels {
-            candidate.labels = labels;
         }
 
         candidate.validate().map_err(StorageError::Validation)?;
@@ -320,7 +340,24 @@ impl IssueStorage for InMemoryStorage {
             .validate_assignment_state()
             .map_err(StorageError::Assignment)?;
         candidate.updated_at = now;
+        inner.issues.insert(id.clone(), candidate.clone());
+        Ok(candidate)
+    }
 
+    async fn append_note(&mut self, id: &IssueId, content: NoteContent) -> Result<Issue> {
+        let mut inner = self.lock().await;
+        let mut candidate = inner
+            .issues
+            .get(id)
+            .cloned()
+            .ok_or_else(|| Error::IssueNotFound(id.clone()))?;
+        let now = Utc::now();
+        candidate.append_note(content, now);
+        candidate.validate().map_err(StorageError::Validation)?;
+        candidate
+            .validate_assignment_state()
+            .map_err(StorageError::Assignment)?;
+        candidate.updated_at = now;
         inner.issues.insert(id.clone(), candidate.clone());
         Ok(candidate)
     }

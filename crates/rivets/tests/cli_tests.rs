@@ -110,6 +110,12 @@ fn test_cli_help_shows_all_commands() {
         stdout.contains("update"),
         "Help should show 'update' command"
     );
+    assert!(stdout.contains("start"), "Help should show 'start' command");
+    assert!(
+        stdout.contains("return-to-open"),
+        "Help should show 'return-to-open' command"
+    );
+    assert!(stdout.contains("note"), "Help should show 'note' command");
     assert!(stdout.contains("claim"), "Help should show 'claim' command");
     assert!(
         stdout.contains("release"),
@@ -507,12 +513,9 @@ fn test_cli_list_status_filters_match_issues(initialized_dir: TempDir) {
     let in_progress_id = create_issue(initialized_dir.path(), "In progress issue", &[]);
     claim_issue(initialized_dir.path(), &in_progress_id, "active-owner");
 
-    // Update one to in_progress
-    let update = run_rivets_in_dir(
-        initialized_dir.path(),
-        &["update", &in_progress_id, "--status", "in_progress"],
-    );
-    assert!(update.status.success());
+    // Start one after assigning it.
+    let start = run_rivets_in_dir(initialized_dir.path(), &["start", &in_progress_id]);
+    assert!(start.status.success());
 
     // List open - should only show open issue
     let output = run_rivets_in_dir(
@@ -624,10 +627,6 @@ fn test_cli_show_nonexistent_issue(initialized_dir: TempDir) {
     assert!(stderr.to_lowercase().contains("not found"));
 }
 
-// ============================================================================
-// Update Command Tests
-// ============================================================================
-
 #[rstest]
 fn test_cli_update_issue(initialized_dir: TempDir) {
     let issue_id = create_issue(initialized_dir.path(), "Original title", &[]);
@@ -635,14 +634,7 @@ fn test_cli_update_issue(initialized_dir: TempDir) {
 
     let output = run_rivets_in_dir(
         initialized_dir.path(),
-        &[
-            "update",
-            &issue_id,
-            "--title",
-            "Updated title",
-            "--status",
-            "in_progress",
-        ],
+        &["update", &issue_id, "--title", "Updated title"],
     );
 
     assert!(
@@ -653,13 +645,27 @@ fn test_cli_update_issue(initialized_dir: TempDir) {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Updated 1 issue(s):"));
 
-    // Verify the update
+    let start = run_rivets_in_dir(initialized_dir.path(), &["start", &issue_id]);
+    assert!(
+        start.status.success(),
+        "Start failed: {:?}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+
     let show_output = run_rivets_in_dir(initialized_dir.path(), &["show", &issue_id]);
     let show_stdout = String::from_utf8_lossy(&show_output.stdout);
     assert!(show_stdout.contains("Updated title"));
     assert!(show_stdout.contains("in_progress"));
-}
 
+    let returned = run_rivets_in_dir(initialized_dir.path(), &["return-to-open", &issue_id]);
+    assert!(
+        returned.status.success(),
+        "Return to Open failed: {:?}",
+        String::from_utf8_lossy(&returned.stderr)
+    );
+    let returned_show = run_rivets_in_dir(initialized_dir.path(), &["show", &issue_id]);
+    assert!(String::from_utf8_lossy(&returned_show.stdout).contains("open"));
+}
 #[rstest]
 fn test_cli_notes_append_and_survive_restart(initialized_dir: TempDir) {
     let issue_id = create_issue(
@@ -683,14 +689,14 @@ fn test_cli_notes_append_and_survive_restart(initialized_dir: TempDir) {
         initial_issue["updated_at"]
     );
 
-    let update = run_rivets_in_dir(
+    let append = run_rivets_in_dir(
         initialized_dir.path(),
-        &["update", &issue_id, "--notes", "Second finding"],
+        &["note", "append", &issue_id, "--content", "Second finding"],
     );
     assert!(
-        update.status.success(),
+        append.status.success(),
         "Note append failed: {}",
-        String::from_utf8_lossy(&update.stderr)
+        String::from_utf8_lossy(&append.stderr)
     );
 
     let restarted = run_rivets_in_dir(initialized_dir.path(), &["--json", "show", &issue_id]);
@@ -745,7 +751,7 @@ fn test_cli_notes_append_and_survive_restart(initialized_dir: TempDir) {
 }
 
 #[rstest]
-fn test_cli_rejects_empty_notes_on_create_and_update(initialized_dir: TempDir) {
+fn test_cli_rejects_empty_notes_on_create_and_append(initialized_dir: TempDir) {
     let create = run_rivets_in_dir(
         initialized_dir.path(),
         &["create", "--title", "Invalid Note", "--notes", " \n "],
@@ -759,12 +765,12 @@ fn test_cli_rejects_empty_notes_on_create_and_update(initialized_dir: TempDir) {
     assert_eq!(after_failed_create, serde_json::json!([]));
 
     let issue_id = create_issue(initialized_dir.path(), "Valid Issue", &[]);
-    let update = run_rivets_in_dir(
+    let append = run_rivets_in_dir(
         initialized_dir.path(),
-        &["update", &issue_id, "--notes", ""],
+        &["note", "append", &issue_id, "--content", ""],
     );
-    assert!(!update.status.success());
-    assert!(String::from_utf8_lossy(&update.stderr).contains("Note content cannot be empty"));
+    assert!(!append.status.success());
+    assert!(String::from_utf8_lossy(&append.stderr).contains("Note content cannot be empty"));
 
     let shown = run_rivets_in_dir(initialized_dir.path(), &["--json", "show", &issue_id]);
     let shown: serde_json::Value =
@@ -1075,14 +1081,11 @@ fn ready_assignment_visibility(initialized_dir: TempDir) {
     );
     let in_progress = create_issue(initialized_dir.path(), "In Progress", &[]);
     claim_issue(initialized_dir.path(), &in_progress, "active-owner");
-    let update = run_rivets_in_dir(
-        initialized_dir.path(),
-        &["update", &in_progress, "--status", "in_progress"],
-    );
+    let start = run_rivets_in_dir(initialized_dir.path(), &["start", &in_progress]);
     assert!(
-        update.status.success(),
-        "status update failed: {}",
-        String::from_utf8_lossy(&update.stderr)
+        start.status.success(),
+        "start failed: {}",
+        String::from_utf8_lossy(&start.stderr)
     );
     let closed = create_issue(initialized_dir.path(), "Closed", &[]);
     let close = run_rivets_in_dir(initialized_dir.path(), &["close", &closed]);
@@ -1680,10 +1683,7 @@ fn stats_and_frontier_output_separate_lifecycle_from_blocked(initialized_dir: Te
     let closed = create_issue(initialized_dir.path(), "Closed", &[]);
     claim_issue(initialized_dir.path(), &assigned_open, "assigned-owner");
     claim_issue(initialized_dir.path(), &in_progress, "active-owner");
-    let active = run_rivets_in_dir(
-        initialized_dir.path(),
-        &["update", &in_progress, "--status", "in_progress"],
-    );
+    let active = run_rivets_in_dir(initialized_dir.path(), &["start", &in_progress]);
     assert!(active.status.success());
     run_rivets_in_dir(initialized_dir.path(), &["close", &closed]);
     let add = run_rivets_in_dir(
@@ -2118,10 +2118,7 @@ fn test_cli_stale_with_status_filter(initialized_dir: TempDir) {
     let id2 = create_issue(initialized_dir.path(), "In progress issue", &[]);
     claim_issue(initialized_dir.path(), &id2, "active-owner");
 
-    let active = run_rivets_in_dir(
-        initialized_dir.path(),
-        &["update", &id2, "--status", "in_progress"],
-    );
+    let active = run_rivets_in_dir(initialized_dir.path(), &["start", &id2]);
     assert!(active.status.success());
 
     // Look for stale open issues only
@@ -2304,10 +2301,7 @@ fn claim_release_cli_contract_survives_restart(initialized_dir: TempDir) {
         "Active target",
         &["--assignee", "active-owner"],
     );
-    let enter_active = run_rivets_in_dir(
-        initialized_dir.path(),
-        &["update", &active, "--status", "in_progress"],
-    );
+    let enter_active = run_rivets_in_dir(initialized_dir.path(), &["start", &active]);
     assert!(enter_active.status.success());
     let active_claim = run_rivets_in_dir(
         initialized_dir.path(),

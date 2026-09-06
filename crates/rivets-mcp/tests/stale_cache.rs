@@ -3,7 +3,7 @@
 use rivets::domain::Issue;
 use rivets_mcp::context::Context;
 use rivets_mcp::error::Error;
-use rivets_mcp::models::{CreateParams, IssueKindInput, UpdateParams};
+use rivets_mcp::models::{CreateParams, IssueKindInput, LifecycleParams, UpdateParams};
 use rivets_mcp::tools::Tools;
 use serde_json::Value;
 use std::path::Path;
@@ -40,35 +40,6 @@ fn create_params(
         initial_note: None,
         workspace_root: workspace_root.map(str::to_string),
     }
-}
-
-#[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
-fn update_params(
-    issue_id: &str,
-    title: Option<String>,
-    description: Option<String>,
-    status: Option<&str>,
-    priority: Option<u8>,
-    issue_kind: Option<&str>,
-
-    design: Option<String>,
-    acceptance_criteria: Option<String>,
-    labels: Option<Vec<String>>,
-    workspace_root: Option<&str>,
-) -> UpdateParams {
-    serde_json::from_value(serde_json::json!({
-        "issue_id": issue_id,
-        "status": status,
-        "priority": priority,
-        "issue_kind": issue_kind,
-        "title": title,
-        "description": description,
-        "design": design,
-        "acceptance_criteria": acceptance_criteria,
-        "labels": labels,
-        "workspace_root": workspace_root,
-    }))
-    .expect("update parameters should deserialize")
 }
 
 fn create_temp_workspace() -> TempDir {
@@ -250,18 +221,12 @@ async fn exercise_issue_mutations(fixture: &MutationFixture) {
     fixture.external_edit("external-update");
     fixture
         .tools
-        .update(update_params(
-            fixture.update_target.id.as_str(),
-            Some("Updated after external edit".to_string()),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(&fixture.workspace_root),
-        ))
+        .update(UpdateParams {
+            issue_id: fixture.update_target.id.to_string(),
+            title: Some("Updated after external edit".to_string()),
+            workspace_root: Some(fixture.workspace_root.clone()),
+            ..Default::default()
+        })
         .await
         .expect("update should refresh stale JSONL");
     fixture.assert_external_edit("external-update");
@@ -326,6 +291,40 @@ async fn exercise_resource_mutations(fixture: &MutationFixture) {
 }
 
 async fn exercise_workflow_mutations(fixture: &MutationFixture) {
+    fixture.external_edit("external-claim");
+    fixture
+        .tools
+        .claim(
+            fixture.lifecycle_target.id.as_str(),
+            "stale-owner",
+            Some(&fixture.workspace_root),
+        )
+        .await
+        .expect("claim should refresh stale JSONL");
+    fixture.assert_external_edit("external-claim");
+
+    fixture.external_edit("external-start");
+    fixture
+        .tools
+        .start(LifecycleParams {
+            issue_id: fixture.lifecycle_target.id.to_string(),
+            workspace_root: Some(fixture.workspace_root.clone()),
+        })
+        .await
+        .expect("start should refresh stale JSONL");
+    fixture.assert_external_edit("external-start");
+
+    fixture.external_edit("external-return-to-open");
+    fixture
+        .tools
+        .return_to_open(LifecycleParams {
+            issue_id: fixture.lifecycle_target.id.to_string(),
+            workspace_root: Some(fixture.workspace_root.clone()),
+        })
+        .await
+        .expect("return_to_open should refresh stale JSONL");
+    fixture.assert_external_edit("external-return-to-open");
+
     fixture.external_edit("external-close");
     fixture
         .tools
@@ -451,7 +450,7 @@ async fn empty_update_rejects_without_mutating_jsonl_or_timestamp() {
         serde_json::from_value(serde_json::json!({ "issue_id": issue.id.as_str() }))
             .expect("empty update parameters should deserialize");
     match tools.update(params).await {
-        Err(Error::InvalidArgument { field, .. }) => assert_eq!(field, "updates"),
+        Err(Error::InvalidUpdate(rivets::domain::UpdateError::EmptyUpdate)) => {}
         Err(error) => panic!("expected empty update rejection, got {error:?}"),
         Ok(_) => panic!("empty update must not succeed"),
     }
@@ -477,31 +476,16 @@ async fn historical_assignee_update_is_rejected_even_when_null() {
     set_context(&tools, workspace.path()).await;
     let issue = create_issue(&tools, "Historical assignee target").await;
     let before = std::fs::read(&issues_path).expect("source should be readable");
-    let before_modified = std::fs::metadata(&issues_path)
-        .expect("source metadata should be readable")
-        .modified()
-        .expect("source modification time should be available");
-
-    let params: UpdateParams = serde_json::from_value(serde_json::json!({
+    let params = serde_json::from_value::<UpdateParams>(serde_json::json!({
         "issue_id": issue.id.as_str(),
         "assignee": null,
-    }))
-    .expect("historical assignee parameters should deserialize");
-    match tools.update(params).await {
-        Err(Error::InvalidArgument { field, .. }) => assert_eq!(field, "assignee"),
-        Err(error) => panic!("expected historical assignee rejection, got {error:?}"),
-        Ok(_) => panic!("historical assignee must not succeed"),
-    }
-
+    }));
+    assert!(
+        params.is_err(),
+        "legacy assignee key must be rejected by strict decoding"
+    );
     assert_eq!(
         std::fs::read(&issues_path).expect("source should remain readable"),
         before
-    );
-    assert_eq!(
-        std::fs::metadata(&issues_path)
-            .expect("source metadata should remain readable")
-            .modified()
-            .expect("source modification time should remain available"),
-        before_modified
     );
 }

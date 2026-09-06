@@ -13,8 +13,8 @@
 
 use chrono::Utc;
 use rivets::domain::{
-    BlockingDependency, DiscoveryOrigin, IssueId, IssueKind, IssueStatus, Label, NewIssue,
-    RelatedAssociation, ResourceError, ResourceRole,
+    BlockingDependency, DiscoveryOrigin, IssueId, IssueKind, IssueStatus, Label, LifecycleAction,
+    NewIssue, RelatedAssociation, ResourceError, ResourceRole,
 };
 use rivets::storage::in_memory::{
     LoadWarning, MigrationField, load_from_jsonl, new_in_memory_storage, save_to_jsonl,
@@ -1250,14 +1250,16 @@ mod storage_after_load_tests {
             .expect("legacy Issue should be claimable after loading");
 
         // Update the issue
-        let update = rivets::domain::IssueUpdate {
-            title: Some("Updated Title".to_string()),
-            status: Some(IssueStatus::InProgress),
-            ..Default::default()
-        };
-
+        let update = rivets::domain::IssueUpdate::builder()
+            .title(Some("Updated Title".to_string()))
+            .build()
+            .expect("valid update");
         storage
             .update(&IssueId::new("test-1"), update)
+            .await
+            .unwrap();
+        storage
+            .transition(&IssueId::new("test-1"), LifecycleAction::Start)
             .await
             .unwrap();
 

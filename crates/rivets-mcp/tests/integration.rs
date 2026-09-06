@@ -17,7 +17,7 @@ use rivets_mcp::context::Context;
 use rivets_mcp::error::Error;
 use rivets_mcp::models::{
     BlockingDependencyListQuery, BlockingDependencyTreeResponse, CreateParams, IssueKindInput,
-    ListParams, ReadyParams, ResourceUpdateParams, UpdateParams,
+    LifecycleParams, ListParams, ReadyParams, ResourceUpdateParams, UpdateParams,
 };
 use rivets_mcp::tools::Tools;
 use rmcp::model::Content;
@@ -106,34 +106,6 @@ fn create_params(
         initial_note: None,
         workspace_root: workspace_root.map(str::to_string),
     }
-}
-
-#[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
-fn update_params(
-    issue_id: &str,
-    title: Option<String>,
-    description: Option<String>,
-    status: Option<&str>,
-    priority: Option<u8>,
-    issue_kind: Option<&str>,
-    design: Option<String>,
-    acceptance_criteria: Option<String>,
-    labels: Option<Vec<String>>,
-    workspace_root: Option<&str>,
-) -> UpdateParams {
-    serde_json::from_value(serde_json::json!({
-        "issue_id": issue_id,
-        "status": status,
-        "priority": priority,
-        "issue_kind": issue_kind,
-        "title": title,
-        "description": description,
-        "design": design,
-        "acceptance_criteria": acceptance_criteria,
-        "labels": labels,
-        "workspace_root": workspace_root,
-    }))
-    .expect("update parameters should deserialize")
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -226,18 +198,11 @@ impl InvalidIssueIdOperation {
             Self::Claim => tools.claim(INVALID, "agent", None).await.map(drop),
             Self::Release => tools.release(INVALID, "agent", None).await.map(drop),
             Self::Update => tools
-                .update(update_params(
-                    INVALID,
-                    Some("Changed".to_string()),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                ))
+                .update(UpdateParams {
+                    issue_id: (INVALID).to_string(),
+                    title: Some("Changed".to_string()),
+                    ..Default::default()
+                })
                 .await
                 .map(drop),
             Self::AddNote => tools
@@ -319,7 +284,6 @@ impl InvalidIssueIdOperation {
 #[derive(Debug, Clone, Copy)]
 enum InvalidLabelOperation {
     Create,
-    Update,
     ReadyFilter,
     ListFilter,
     Add,
@@ -339,21 +303,6 @@ impl InvalidLabelOperation {
                     Some(vec![label.to_string()]),
                     None,
                     None,
-                    None,
-                ))
-                .await
-                .map(drop),
-            Self::Update => tools
-                .update(update_params(
-                    "ab-1",
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    Some(vec![label.to_string()]),
                     None,
                 ))
                 .await
@@ -976,9 +925,9 @@ async fn reopen_rejects_open_issue_without_mutation() {
     );
 }
 
-/// Dedicated Reopen is Closed-only; generic Update retains the active-to-Open path.
+/// Dedicated Reopen is Closed-only; Return to Open retains active Assignment.
 #[tokio::test]
-async fn reopen_rejects_in_progress_while_generic_update_returns_to_open() {
+async fn reopen_rejects_in_progress_while_return_to_open_retains_assignment() {
     let workspace = create_temp_workspace();
     let tools = create_tools();
     set_context(&tools, workspace.path()).await;
@@ -997,18 +946,10 @@ async fn reopen_rejects_in_progress_while_generic_update_returns_to_open() {
         .await
         .expect("create should succeed");
     let active = tools
-        .update(update_params(
-            issue.id.as_str(),
-            None,
-            None,
-            Some("in_progress"),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        ))
+        .start(LifecycleParams {
+            issue_id: issue.id.to_string(),
+            workspace_root: None,
+        })
         .await
         .expect("status setup should succeed");
 
@@ -1031,20 +972,12 @@ async fn reopen_rejects_in_progress_while_generic_update_returns_to_open() {
     assert!(unchanged.notes().is_empty());
 
     let returned = tools
-        .update(update_params(
-            issue.id.as_str(),
-            None,
-            None,
-            Some("open"),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        ))
+        .return_to_open(LifecycleParams {
+            issue_id: issue.id.to_string(),
+            workspace_root: None,
+        })
         .await
-        .expect("generic Update should retain active-to-Open transition");
+        .expect("dedicated Return to Open should retain active-to-Open transition");
     assert_eq!(returned.status, IssueStatus::Open);
     assert_eq!(returned.assignee, active.assignee);
 }
@@ -1226,18 +1159,10 @@ async fn claim_release_mcp_state_matrix() {
         .await
         .expect("assigned active target should be created");
     tools
-        .update(update_params(
-            active.id.as_str(),
-            None,
-            None,
-            Some("in_progress"),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        ))
+        .start(LifecycleParams {
+            issue_id: active.id.to_string(),
+            workspace_root: None,
+        })
         .await
         .expect("assigned target should enter In Progress");
     for result in [
@@ -1282,21 +1207,21 @@ async fn test_issue_lifecycle_create_update_close() {
     assert_eq!(created.status, IssueStatus::Open);
 
     // Update to in_progress
-    let updated = tools
-        .update(update_params(
-            created.id.as_str(),
-            None,
-            None,
-            Some("in_progress"),
-            Some(1),
-            None, // issue_kind
-            None,
-            None,
-            None, // labels
-            None, // workspace_root
-        ))
+    tools
+        .update(UpdateParams {
+            issue_id: (created.id.as_str()).to_string(),
+            priority: Some(1),
+            ..Default::default()
+        })
         .await
-        .expect("update should succeed");
+        .expect("priority update should succeed");
+    let updated = tools
+        .start(LifecycleParams {
+            issue_id: created.id.to_string(),
+            workspace_root: None,
+        })
+        .await
+        .expect("start should succeed");
 
     assert_eq!(updated.status, IssueStatus::InProgress);
     assert_eq!(updated.priority, 1);
@@ -1519,18 +1444,11 @@ async fn test_update_reclassifies_only_kind_and_persists_across_context_restart(
     .await;
 
     let updated = tools
-        .update(update_params(
-            created.id.as_str(),
-            None,
-            None,
-            None,
-            None,
-            Some("bug"),
-            None,
-            None,
-            None,
-            None,
-        ))
+        .update(UpdateParams {
+            issue_id: created.id.to_string(),
+            issue_kind: Some(IssueKind::Bug),
+            ..Default::default()
+        })
         .await
         .expect("kind update should succeed");
 
@@ -1858,7 +1776,6 @@ async fn every_mcp_label_operation_rejects_noncanonical_input_before_behavior() 
         .to_string();
     let operations = [
         InvalidLabelOperation::Create,
-        InvalidLabelOperation::Update,
         InvalidLabelOperation::ReadyFilter,
         InvalidLabelOperation::ListFilter,
         InvalidLabelOperation::Add,
@@ -3393,18 +3310,18 @@ async fn test_update_persistence() {
         issue_id = issue.id.as_str().to_string();
 
         tools
-            .update(update_params(
-                &issue_id,
-                Some("Updated Title".to_string()),
-                None,
-                Some("in_progress"),
-                None,
-                None, // issue_kind
-                None,
-                None,
-                None, // labels
-                None, // workspace_root
-            ))
+            .update(UpdateParams {
+                issue_id: issue_id.clone(),
+                title: Some("Updated Title".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        tools
+            .start(LifecycleParams {
+                issue_id: issue_id.clone(),
+                workspace_root: None,
+            })
             .await
             .unwrap();
     }
@@ -4247,47 +4164,6 @@ fn test_invalid_issue_kind_values(#[case] invalid_value: &str) {
     }
 }
 
-/// Test invalid status in update returns appropriate error.
-#[rstest]
-#[case::invalid_update_status("invalid")]
-#[case::pending_update_status("pending")]
-#[case::done_update_status("done")]
-#[tokio::test]
-async fn test_invalid_status_in_update(#[case] invalid_value: &str) {
-    let workspace = create_temp_workspace();
-    let tools = create_tools();
-    set_context(&tools, workspace.path()).await;
-
-    let issue = create_issue(&tools, "Test Issue").await;
-
-    let result = tools
-        .update(update_params(
-            issue.id.as_str(),
-            None,
-            None,
-            Some(invalid_value),
-            None,
-            None, // issue_kind
-            None,
-            None,
-            None, // labels
-            None, // workspace_root
-        ))
-        .await;
-
-    assert!(
-        result.is_err(),
-        "Expected error for invalid status in update: {invalid_value}"
-    );
-    match result.unwrap_err() {
-        Error::InvalidArgument { field, value, .. } => {
-            assert_eq!(field, "status");
-            assert_eq!(value, invalid_value);
-        }
-        e => panic!("Expected InvalidArgument error, got: {e:?}"),
-    }
-}
-
 /// Test error message formatting includes all relevant information.
 #[tokio::test]
 async fn test_error_message_format() {
@@ -4330,14 +4206,13 @@ async fn test_error_message_format() {
 // Additional Lifecycle and Integration Tests (rivets-d06)
 // ============================================================================
 
-/// Test complete issue lifecycle through multiple state transitions.
+/// Test complete issue lifecycle through dedicated transition intents.
 #[tokio::test]
 async fn canonical_workflow_state_inputs() {
     let workspace = create_temp_workspace();
     let tools = create_tools();
     set_context(&tools, workspace.path()).await;
 
-    // Create issue (starts as open)
     let created = tools
         .create(create_params(
             "Lifecycle Issue".to_string(),
@@ -4354,63 +4229,27 @@ async fn canonical_workflow_state_inputs() {
         .expect("create should succeed");
 
     assert_eq!(created.status, IssueStatus::Open);
-    assert!(created.closed_at.is_none());
-    let rejected = tools
-        .update(update_params(
-            created.id.as_str(),
-            None,
-            None,
-            Some("blocked"),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        ))
-        .await
-        .expect_err("Blocked is derived and must not be accepted as Workflow State");
-    match rejected {
-        Error::InvalidArgument {
-            field,
-            value,
-            valid_values,
-        } => {
-            assert_eq!(field, "status");
-            assert_eq!(value, "blocked");
-            assert_eq!(valid_values, "open, in_progress, closed");
-        }
-        other => panic!("expected InvalidArgument, got {other:?}"),
-    }
-    assert_eq!(
-        tools
-            .show(created.id.as_str(), None)
-            .await
-            .expect("rejected update preserves Issue")
-            .status,
-        IssueStatus::Open
-    );
-
-    // Transition to in_progress
+    assert_eq!(created.assignee.as_deref(), Some("developer"));
     let in_progress = tools
-        .update(update_params(
-            created.id.as_str(),
-            None,
-            None,
-            Some("in_progress"),
-            None,
-            None, // issue_kind
-            None,
-            None,
-            None, // labels
-            None, // workspace_root
-        ))
+        .start(LifecycleParams {
+            issue_id: created.id.to_string(),
+            workspace_root: None,
+        })
         .await
-        .expect("update to in_progress should succeed");
-
+        .expect("start should succeed");
     assert_eq!(in_progress.status, IssueStatus::InProgress);
+    assert_eq!(in_progress.assignee.as_deref(), Some("developer"));
 
-    // Close the issue
+    let returned = tools
+        .return_to_open(LifecycleParams {
+            issue_id: created.id.to_string(),
+            workspace_root: None,
+        })
+        .await
+        .expect("return_to_open should succeed");
+    assert_eq!(returned.status, IssueStatus::Open);
+    assert_eq!(returned.assignee.as_deref(), Some("developer"));
+
     let closed = tools
         .close(
             created.id.as_str(),
@@ -4419,20 +4258,13 @@ async fn canonical_workflow_state_inputs() {
         )
         .await
         .expect("close should succeed");
-
     assert_eq!(closed.status, IssueStatus::Closed);
+    assert!(closed.assignee.is_none());
     assert!(closed.closed_at.is_some());
-
-    // Verify final state via show
-    let final_state = tools
-        .show(created.id.as_str(), None)
-        .await
-        .expect("show should succeed");
-
-    assert_eq!(final_state.status, IssueStatus::Closed);
-    assert_eq!(final_state.title, "Lifecycle Issue");
-    assert_eq!(final_state.description, "Testing full lifecycle");
-    assert!(final_state.closed_at.is_some());
+    assert_eq!(
+        closed.notes().last().expect("close Note").content(),
+        "Closed: Completed successfully"
+    );
 }
 
 /// Test issue updates preserve unmodified fields.
@@ -4460,18 +4292,11 @@ async fn test_update_preserves_unmodified_fields() {
 
     // Update only the title
     let updated = tools
-        .update(update_params(
-            created.id.as_str(),
-            Some("New Title".to_string()),
-            None, // Don't update description
-            None, // Don't update status
-            None, // Don't update priority
-            None, // issue_kind
-            None, // Don't update design
-            None, // Don't update acceptance
-            None, // labels
-            None, // workspace_root
-        ))
+        .update(UpdateParams {
+            issue_id: created.id.to_string(),
+            title: Some("New Title".to_string()),
+            ..Default::default()
+        })
         .await
         .expect("update should succeed");
 
@@ -4640,21 +4465,21 @@ async fn test_all_tools_with_storage_backend() {
     assert_eq!(ready[0].id, created.id);
 
     // 7. update
-    let updated = tools
-        .update(update_params(
-            created.id.as_str(),
-            Some("Updated Title".to_string()),
-            None,
-            Some("in_progress"),
-            None,
-            None, // issue_kind
-            None,
-            None,
-            None, // labels
-            None, // workspace_root
-        ))
+    tools
+        .update(UpdateParams {
+            issue_id: (created.id.as_str()).to_string(),
+            title: Some("Updated Title".to_string()),
+            ..Default::default()
+        })
         .await
         .expect("update should succeed");
+    let updated = tools
+        .start(LifecycleParams {
+            issue_id: created.id.to_string(),
+            workspace_root: None,
+        })
+        .await
+        .expect("start should succeed");
     assert_eq!(updated.title, "Updated Title");
     assert_eq!(updated.status, IssueStatus::InProgress);
 
@@ -4867,18 +4692,10 @@ async fn test_issue_counts_accurate() {
     let issue3 = create_issue(&tools, "To Close").await;
 
     tools
-        .update(update_params(
-            issue2.id.as_str(),
-            None,
-            None,
-            Some("in_progress"),
-            None,
-            None, // issue_kind
-            None,
-            None,
-            None, // labels
-            None, // workspace_root
-        ))
+        .start(LifecycleParams {
+            issue_id: issue2.id.to_string(),
+            workspace_root: None,
+        })
         .await
         .unwrap();
 
@@ -5633,18 +5450,11 @@ async fn mixed_legacy_fixture_migrates_through_mcp_and_context_recreation() {
     let expected_long_note = assert_migrated_mcp_content(&tools, &fixture).await;
 
     let updated = tools
-        .update(update_params(
-            CONFLICT_ID,
-            Some("Canonical migration update".to_string()),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        ))
+        .update(UpdateParams {
+            issue_id: (CONFLICT_ID).to_string(),
+            title: Some("Canonical migration update".to_string()),
+            ..Default::default()
+        })
         .await
         .expect("one deterministic MCP update should rewrite the mixed file");
     assert_eq!(updated.title, "Canonical migration update");

@@ -120,14 +120,10 @@ pub struct ShowArgs {
     pub issue_ids: Vec<String>,
 }
 
-/// Arguments for the `update` command
+/// Arguments for the `update` command.
 ///
-/// # Labels
-///
-/// Labels are intentionally not modifiable via `update`. Use the dedicated
-/// `label add` and `label remove` commands instead. This avoids ambiguity
-/// about replace-vs-add semantics - the dedicated commands make the intent
-/// explicit.
+/// General Update only changes descriptive Issue fields. Workflow state,
+/// Assignment, labels, and Notes each have dedicated commands.
 #[derive(Parser, Debug, Clone)]
 pub struct UpdateArgs {
     /// Issue ID(s) to update, space-separated (e.g., rivets-abc rivets-def)
@@ -142,10 +138,6 @@ pub struct UpdateArgs {
     /// New description
     #[arg(short = 'D', long, allow_hyphen_values = true, value_parser = validate_description)]
     pub description: Option<String>,
-
-    /// New status
-    #[arg(short, long, value_enum)]
-    pub status: Option<IssueStatus>,
 
     /// New priority
     #[arg(short, long, value_parser = clap::value_parser!(u8).range(MIN_PRIORITY as i64..=MAX_PRIORITY as i64))]
@@ -162,10 +154,21 @@ pub struct UpdateArgs {
     /// New acceptance criteria
     #[arg(long, allow_hyphen_values = true)]
     pub acceptance: Option<String>,
+}
+/// Arguments for the `start` command.
+#[derive(Parser, Debug, Clone)]
+pub struct StartArgs {
+    /// Issue ID(s) to start, space-separated (e.g., rivets-abc rivets-def)
+    #[arg(required = true, value_parser = validate_issue_id)]
+    pub issue_ids: Vec<String>,
+}
 
-    /// Note to append
-    #[arg(long, allow_hyphen_values = true)]
-    pub notes: Option<String>,
+/// Arguments for the `return-to-open` command.
+#[derive(Parser, Debug, Clone)]
+pub struct ReturnToOpenArgs {
+    /// Issue ID(s) to return to Open, space-separated (e.g., rivets-abc rivets-def)
+    #[arg(required = true, value_parser = validate_issue_id)]
+    pub issue_ids: Vec<String>,
 }
 
 /// Arguments for an Assignment Claim or Release.
@@ -180,45 +183,26 @@ pub struct AssignmentArgs {
     pub assignee: String,
 }
 
-impl UpdateArgs {
-    /// Returns a formatted string of available flags for error messages.
-    ///
-    /// This dynamically generates the list from clap's argument definitions,
-    /// ensuring it stays in sync with the actual struct fields.
-    #[must_use]
-    pub fn available_flags_help() -> String {
-        use clap::CommandFactory;
+/// Arguments for the `note` command.
+#[derive(Parser, Debug, Clone)]
+pub struct NoteArgs {
+    #[command(subcommand)]
+    pub action: NoteAction,
+}
 
-        let cmd = Self::command();
-        cmd.get_arguments()
-            .filter(|arg| {
-                // Filter out positional arguments (issue_ids) and help/version
-                let id = arg.get_id().as_str();
-                arg.get_long().is_some() && id != "help" && id != "version"
-            })
-            .map(|arg| {
-                let long = format!("--{}", arg.get_long().unwrap());
-                match arg.get_short() {
-                    Some(short) => format!("{} (-{})", long, short),
-                    None => long,
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
+/// Note management actions.
+#[derive(Subcommand, Debug, Clone)]
+pub enum NoteAction {
+    /// Append a Note to one or more Issues.
+    Append {
+        /// Issue ID(s) to receive the Note, space-separated.
+        #[arg(required = true, value_parser = validate_issue_id)]
+        issue_ids: Vec<String>,
 
-    /// Returns true if any update field is specified.
-    #[must_use]
-    pub fn has_updates(&self) -> bool {
-        self.title.is_some()
-            || self.description.is_some()
-            || self.status.is_some()
-            || self.priority.is_some()
-            || self.issue_kind.is_some()
-            || self.design.is_some()
-            || self.acceptance.is_some()
-            || self.notes.is_some()
-    }
+        /// Note content. Multi-line text is allowed.
+        #[arg(long, allow_hyphen_values = true)]
+        content: String,
+    },
 }
 
 /// Arguments for the `close` command
@@ -677,197 +661,6 @@ impl ResourceAction {
         match self {
             Self::Add { .. } | Self::Update { .. } | Self::Remove { .. } => true,
             Self::List { .. } => false,
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    mod update_args_has_updates_tests {
-        use super::*;
-
-        fn create_empty_update_args() -> UpdateArgs {
-            UpdateArgs {
-                issue_ids: vec!["test-abc".to_string()],
-                title: None,
-                description: None,
-                status: None,
-                priority: None,
-                issue_kind: None,
-                design: None,
-                acceptance: None,
-                notes: None,
-            }
-        }
-
-        #[test]
-        fn test_has_updates_returns_false_when_all_fields_none() {
-            let args = create_empty_update_args();
-            assert!(!args.has_updates());
-        }
-
-        #[test]
-        fn test_has_updates_title() {
-            let mut args = create_empty_update_args();
-            args.title = Some("New title".to_string());
-            assert!(args.has_updates());
-        }
-
-        #[test]
-        fn test_has_updates_description() {
-            let mut args = create_empty_update_args();
-            args.description = Some("New description".to_string());
-            assert!(args.has_updates());
-        }
-
-        #[test]
-        fn test_has_updates_status() {
-            let mut args = create_empty_update_args();
-            args.status = Some(IssueStatus::InProgress);
-            assert!(args.has_updates());
-        }
-
-        #[test]
-        fn test_has_updates_priority() {
-            let mut args = create_empty_update_args();
-            args.priority = Some(1);
-            assert!(args.has_updates());
-        }
-
-        #[test]
-        fn test_has_updates_issue_kind() {
-            let mut args = create_empty_update_args();
-            args.issue_kind = Some(IssueKind::Bug);
-            assert!(args.has_updates());
-        }
-
-        #[test]
-        fn test_has_updates_design() {
-            let mut args = create_empty_update_args();
-            args.design = Some("Design notes".to_string());
-            assert!(args.has_updates());
-        }
-
-        #[test]
-        fn test_has_updates_acceptance() {
-            let mut args = create_empty_update_args();
-            args.acceptance = Some("Acceptance criteria".to_string());
-            assert!(args.has_updates());
-        }
-
-        #[test]
-        fn test_has_updates_notes() {
-            let mut args = create_empty_update_args();
-            args.notes = Some("Notes".to_string());
-            assert!(args.has_updates());
-        }
-
-        #[test]
-        fn test_has_updates_multiple_fields() {
-            let mut args = create_empty_update_args();
-            args.title = Some("New title".to_string());
-            args.priority = Some(1);
-            args.notes = Some("Notes".to_string());
-            assert!(args.has_updates());
-        }
-    }
-
-    mod available_flags_help_tests {
-        use super::*;
-
-        #[test]
-        fn test_contains_expected_flags() {
-            let help = UpdateArgs::available_flags_help();
-
-            // Verify all expected flags are present
-            let expected_flags = [
-                "--title",
-                "--description",
-                "--status",
-                "--priority",
-                "--kind",
-                "--design",
-                "--acceptance",
-                "--notes",
-            ];
-
-            for flag in expected_flags {
-                assert!(
-                    help.contains(flag),
-                    "Expected flag '{}' not found in help: {}",
-                    flag,
-                    help
-                );
-            }
-            assert!(!help.contains("assignee"));
-        }
-
-        #[test]
-        fn test_contains_short_flags_where_defined() {
-            let help = UpdateArgs::available_flags_help();
-
-            // These flags have short versions defined in the struct
-            assert!(
-                help.contains("(-D)"),
-                "Expected short flag -D for description, got: {}",
-                help
-            );
-            assert!(
-                help.contains("(-s)"),
-                "Expected short flag -s for status, got: {}",
-                help
-            );
-            assert!(
-                help.contains("(-p)"),
-                "Expected short flag -p for priority, got: {}",
-                help
-            );
-        }
-
-        #[test]
-        fn test_excludes_positional_and_meta_args() {
-            let help = UpdateArgs::available_flags_help();
-
-            // Should not contain help/version or positional args
-            assert!(
-                !help.contains("--help"),
-                "Should not contain --help: {}",
-                help
-            );
-            assert!(
-                !help.contains("--version"),
-                "Should not contain --version: {}",
-                help
-            );
-            // issue_ids is positional, should not appear
-            assert!(
-                !help.contains("issue_ids"),
-                "Should not contain positional arg: {}",
-                help
-            );
-        }
-
-        #[test]
-        fn test_format_is_comma_separated() {
-            let help = UpdateArgs::available_flags_help();
-
-            // Should be comma-separated
-            assert!(
-                help.contains(", "),
-                "Expected comma-separated format: {}",
-                help
-            );
-
-            // Count commas to verify multiple flags
-            let comma_count = help.matches(", ").count();
-            assert!(
-                comma_count >= 5,
-                "Expected at least 5 commas (6+ flags), got {}: {}",
-                comma_count,
-                help
-            );
         }
     }
 }
