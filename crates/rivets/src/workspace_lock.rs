@@ -111,9 +111,18 @@ pub struct WorkspaceMutationLock {
     _file: File,
 }
 
-#[allow(clippy::io_other_error)]
+impl Drop for WorkspaceMutationLock {
+    fn drop(&mut self) {
+        // Release ownership before closing: another thread may have forked a
+        // child that retains this open-file description until exec.
+        if let Err(error) = self._file.unlock() {
+            tracing::warn!(path = %self.lock_path.display(), %error, "Failed to release Workspace lock");
+        }
+    }
+}
+
 fn join_error_to_io(source: tokio::task::JoinError) -> io::Error {
-    io::Error::new(ErrorKind::Other, source)
+    io::Error::other(source)
 }
 
 impl WorkspaceMutationLock {
@@ -216,6 +225,33 @@ mod tests {
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
     use tokio::sync::oneshot;
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_guard_releases_lock_with_inherited_descriptor() {
+        let workspace = TempDir::new().expect("Workspace fixture");
+        fs::create_dir(workspace.path().join(RIVETS_DIR_NAME)).expect("metadata directory");
+        let guard = WorkspaceMutationLock::try_acquire(workspace.path()).expect("first owner");
+        // dup and fork share an open-file description; closing only the parent's
+        // descriptor cannot release flock while an unrelated child retains it.
+        let inherited = guard
+            ._file
+            .try_clone()
+            .expect("duplicate inherited descriptor");
+        assert!(matches!(
+            WorkspaceMutationLock::try_acquire(workspace.path()),
+            Err(Error::WorkspaceBusy { .. })
+        ));
+        drop(guard);
+        let next = WorkspaceMutationLock::try_acquire(workspace.path())
+            .expect("guard drop must release ownership even before child exec");
+        drop(inherited);
+        assert!(matches!(
+            WorkspaceMutationLock::try_acquire(workspace.path()),
+            Err(Error::WorkspaceBusy { .. })
+        ));
+        drop(next);
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn blocking_acquisition_leaves_current_thread_runtime_responsive() {
