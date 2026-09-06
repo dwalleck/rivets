@@ -61,7 +61,7 @@ impl WorkspaceInformation {
         &self.workspace_root
     }
 
-    /// Absolute configured storage path.
+    /// Absolute configured storage path; unlike the root/config paths, symlinks are not canonicalized.
     pub fn database_path(&self) -> &Path {
         &self.database_path
     }
