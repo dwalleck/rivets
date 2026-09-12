@@ -1006,13 +1006,40 @@ impl IssueStorage for InMemoryStorage {
         sort_policy: Option<SortPolicy>,
     ) -> Result<Vec<Issue>> {
         let inner = self.lock().await;
+        let parent_node = if let Some(parent_id) = &filter.parent_id {
+            let parent = inner
+                .issues
+                .get(parent_id)
+                .ok_or_else(|| Error::IssueNotFound(parent_id.clone()))?;
+            if parent.issue_kind != IssueKind::Epic {
+                return Err(ParentageError::ParentNotEpic {
+                    parent_id: parent_id.clone(),
+                    actual_kind: parent.issue_kind,
+                }
+                .into());
+            }
+            Some(
+                *inner
+                    .node_map
+                    .get(parent_id)
+                    .ok_or_else(|| Error::IssueNotFound(parent_id.clone()))?,
+            )
+        } else {
+            None
+        };
         let blocked = find_blocked_issues(&inner.graph, &inner.node_map, &inner.issues);
 
         let mut ready = inner
             .issues
             .values()
             .filter(|issue| {
-                is_intrinsically_ready(issue, &blocked) && matches_ready_filter(issue, filter)
+                is_intrinsically_ready(issue, &blocked)
+                    && matches_ready_filter(issue, filter)
+                    && parent_node.is_none_or(|parent_node| {
+                        inner.node_map.get(&issue.id).is_some_and(|child_node| {
+                            find_parentage_edge(&inner.graph, *child_node, parent_node).is_some()
+                        })
+                    })
             })
             .cloned()
             .collect::<Vec<_>>();

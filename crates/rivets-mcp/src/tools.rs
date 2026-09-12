@@ -320,7 +320,7 @@ impl Tools {
     /// # Errors
     ///
     /// Returns an error if no context is set, both Assignment selectors are
-    /// provided, or storage operations fail.
+    /// provided, the parent ID is malformed, missing or not an Epic, or storage operations fail.
     #[instrument(skip(self, params), fields(limit = params.limit, priority = params.priority))]
     pub async fn ready(&self, params: ReadyParams) -> Result<Vec<Issue>> {
         debug!("Finding ready issues");
@@ -338,11 +338,17 @@ impl Tools {
             (None, false) => ReadyAssignmentFilter::Unassigned,
         };
         let label = params.label.map(Label::try_from).transpose()?;
+        let parent_id = params
+            .parent_id
+            .as_deref()
+            .map(str::parse::<IssueId>)
+            .transpose()?;
 
         // Release context lock before acquiring storage lock to prevent deadlocks
         let storage = self.storage_for(params.workspace_root.as_deref()).await?;
         let storage = storage.read().await;
         let filter = ReadyFilter {
+            parent_id,
             priority: params.priority,
             issue_kind,
             assignment,
@@ -1286,6 +1292,7 @@ mod tests {
         workspace_root: Option<&str>,
     ) -> ReadyParams {
         ReadyParams {
+            parent_id: None,
             limit,
             priority,
             kind: kind_input(issue_kind),

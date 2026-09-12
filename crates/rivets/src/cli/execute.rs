@@ -546,6 +546,7 @@ pub async fn execute_ready(
         ReadyAssignmentFilter::Unassigned
     };
     let filter = ReadyFilter {
+        parent_id: args.parent.as_deref().map(str::parse).transpose()?,
         priority: args.priority,
         issue_kind: args.issue_kind,
         assignment,

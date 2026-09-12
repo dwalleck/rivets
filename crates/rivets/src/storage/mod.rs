@@ -276,8 +276,8 @@ pub trait IssueStorage: Send + Sync {
     /// - No explicit Blocking Dependency points to an unresolved prerequisite
     /// - Assignment matches the query's [`ReadyFilter`]
     ///
-    /// Priority, Issue Kind, label, ordering, and limit are applied only after
-    /// eligibility is established.
+    /// Direct parent scope, priority, Issue Kind and label are applied before
+    /// ordering and limit. Parent scope includes only direct children of an Epic.
     ///
     /// # Sort Policies
     ///
@@ -288,8 +288,14 @@ pub trait IssueStorage: Send + Sync {
     ///
     /// # Arguments
     ///
-    /// * `filter` - Ready-specific Assignment, priority, Kind, label, and limit criteria
+    /// * `filter` - Ready-specific parent, Assignment, priority, Kind, label, and limit criteria
     /// * `sort_policy` - Sort order for results (defaults to Hybrid if None)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::IssueNotFound`](crate::error::Error::IssueNotFound) for a
+    /// missing parent, or [`ParentageError::ParentNotEpic`](crate::domain::ParentageError::ParentNotEpic)
+    /// when the selected parent is not an Epic, even if no candidates match.
     async fn ready_to_work(
         &self,
         filter: &ReadyFilter,

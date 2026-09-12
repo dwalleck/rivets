@@ -80,7 +80,7 @@ RUST_LOG=debug rivets-mcp
 |------|-------------|
 | `info` | Workspace root, configured storage/backend, Issue ID prefix, and config path from the initialized snapshot; no counts |
 | `stats` | Workspace totals, three Workflow State counts, all-Assignment Ready, direct Blocked, and all five Priority buckets |
-| `ready` | Find Open Issues without unresolved direct Blocking Dependencies; defaults to unassigned |
+| `ready` | Find Open Issues without unresolved direct Blocking Dependencies, optionally scoped to direct children of an existing Epic; defaults to unassigned |
 | `list` | Newest-created Issues with optional filters and a required positive limit |
 | `show` | Show detailed information about a specific Issue |
 | `blocked` | Get Issues with direct unresolved Blocking Dependencies and their prerequisites |
@@ -188,6 +188,7 @@ are exactly `open`, `in_progress`, and `closed`.
 
 ```json
 {
+  "parent_id": "proj-epic",   // optional: direct children of an existing Epic
   "assignee": "alice",        // optional exact selector
   "all_assignees": false,     // optional; conflicts with assignee
   "priority": 1,              // optional: 0-4
@@ -199,7 +200,11 @@ are exactly `open`, `in_progress`, and `closed`.
 ```
 
 Omit both Assignment selectors for unassigned Ready Issues. Set
-`all_assignees` to `true` only when every Assignment should be visible.
+`all_assignees` to `true` only when every Assignment should be visible. An
+optional `parent_id` narrows the result to direct children of one existing
+Epic, applied before ordering and `limit`; it never includes grandchildren. A
+missing Issue or a non-Epic parent is an error, and an empty result means no
+child matches the query rather than that the Epic is complete.
 
 ### create
 

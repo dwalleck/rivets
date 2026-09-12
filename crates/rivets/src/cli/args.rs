@@ -244,6 +244,13 @@ pub struct DeleteArgs {
 /// Arguments for the `ready` command
 #[derive(Parser, Debug, Clone)]
 pub struct ReadyArgs {
+    /// Restrict results to direct children of this Epic
+    ///
+    /// The parent must exist and be an Epic. Grandchildren are never included.
+    /// Scope is applied before ordering and before `--limit`.
+    #[arg(long, value_name = "epic-id", value_parser = validate_issue_id)]
+    pub parent: Option<String>,
+
     /// Include only Issues assigned to this exact assignee
     #[arg(short, long, conflicts_with = "all_assignees")]
     pub assignee: Option<String>,

@@ -117,6 +117,9 @@ pub struct WorkspaceRootParams {
 /// Parameters for the `ready` tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct ReadyParams {
+    /// Restrict results to direct children of this existing Epic.
+    pub parent_id: Option<String>,
+
     /// Maximum number of issues to return.
     pub limit: Option<usize>,
 

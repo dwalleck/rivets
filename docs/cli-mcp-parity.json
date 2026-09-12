@@ -529,7 +529,7 @@
       "requirement": "shared",
       "current_parity": "drift",
       "target_status": "gap_both",
-      "target": "Return Open, unblocked Issues using assignee-aware canonical readiness, require limit, and use Hybrid ordering.",
+      "target": "Return Open, unblocked Issues using assignee-aware canonical readiness, optionally scope to direct children of an existing Epic before ordering and limit, require limit, and use Hybrid ordering.",
       "cli": {
         "surfaces": [
           "ready"
@@ -537,6 +537,7 @@
         "arguments": {
           "assignee": "optional string",
           "all_assignees": "optional boolean",
+          "parent": "optional canonical Issue ID of an existing Epic; direct children only",
           "priority": "optional P0-P4",
           "kind": "optional Issue Kind",
           "label": "optional Label",
@@ -552,6 +553,7 @@
         "arguments": {
           "assignee": "optional string",
           "all_assignees": "optional boolean",
+          "parent_id": "optional canonical Issue ID of an existing Epic; direct children only",
           "priority": "optional integer",
           "issue_kind": "optional Issue Kind",
           "label": "optional Label",
@@ -563,7 +565,8 @@
       "differences": [
         "CLI defaults to limit 10 and exposes Hybrid/Priority/Oldest; MCP defaults to 100 and fixes Hybrid.",
         "CLI constrains Priority to P0-P4; MCP accepts any u8 and a hidden issue_type alias.",
-        "Canonical Open, direct-unblocked, Assignment-aware readiness is implemented in shared storage."
+        "Canonical Open, direct-unblocked, Assignment-aware readiness is implemented in shared storage.",
+        "Both adapters optionally scope to direct children of an existing Epic before sorting and limiting; missing or non-Epic parents fail explicitly without mutation."
       ],
       "risk": "Adapters truncate the frontier differently through defaults and validation.",
       "required_resolution": "Require a positive explicit limit, use shared deterministic Hybrid ordering, adopt canonical Priority/Issue Kind schemas, and align Assignment selectors.",
@@ -573,7 +576,13 @@
         "crates/rivets/src/storage/in_memory/trait_impl.rs::ready_to_work",
         "crates/rivets/src/storage/in_memory/graph.rs::find_blocked_issues",
         "crates/rivets-mcp/src/models.rs::ReadyParams",
-        "crates/rivets-mcp/src/tools.rs::ready"
+        "crates/rivets-mcp/src/tools.rs::ready",
+        "crates/rivets/tests/ready_parent.rs::ready_parent_scope_contract",
+        "crates/rivets/tests/ready_parent.rs::ready_parent_scope_errors",
+        "crates/rivets/tests/ready_parent.rs::ready_parent_ignores_rejected_parentage_records",
+        "crates/rivets-mcp/tests/ready_parent.rs::ready_parent_scope_contract",
+        "crates/rivets-mcp/tests/ready_parent.rs::ready_parent_scope_errors",
+        "crates/rivets-mcp/tests/ready_parent.rs::ready_parent_tracks_parentage_changes"
       ]
     },
     {

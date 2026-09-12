@@ -347,7 +347,7 @@ graph TD
     Direct -->|Yes| Exclude
     Direct -->|No| Assignment{Ready Assignment selector matches?}
     Assignment -->|No| Exclude
-    Assignment -->|Yes| Filters[Priority, Issue Kind, label]
+    Assignment -->|Yes| Filters[Priority, Issue Kind, label,<br/>and optional direct-Epic-parent scope]
     Filters --> Sort[Hybrid, Priority, or Oldest]
     Sort --> Limit[Apply limit]
     Limit --> Result[Ready Issues]
@@ -359,13 +359,18 @@ graph TD
 Blocked is derived only from direct unresolved Blocking Dependencies. The
 prerequisite resolves when its Workflow State becomes Closed; the relationship
 remains recorded. Parentage, Related Associations, and Discovery Origins never
-participate.
+participate in Blocked, and Parentage never participates in Ready eligibility;
+an optional `parent_id` scope narrows the post-eligibility result to direct
+children of one existing Epic without changing which Issues are eligible.
 
 Ready eligibility requires Workflow State Open, not Blocked, and one explicit
 Assignment mode encoded by `ReadyAssignmentFilter`: `Unassigned` (the default),
 an exact `Assignee`, or `All`. `ReadyFilter` then applies priority, Issue Kind,
-and label criteria. Storage sorts the eligible filtered set and applies the
-limit last. Neither Blocked nor Ready is serialized on Issue records.
+label, and optional direct-parent scope criteria; a scope naming a missing
+Issue fails with `IssueNotFound`, and one naming a non-Epic fails with
+`ParentNotEpic`, even when no candidate would match. Storage sorts the eligible
+filtered set and applies the limit last. Neither Blocked nor Ready is serialized
+on Issue records.
 
 ## Delete Operation with Referential Integrity
 

@@ -101,7 +101,7 @@ impl RivetsMcpServer {
 
     /// Find Ready Issues.
     #[tool(
-        description = "Find Open Issues without unresolved direct Blocking Dependencies. Omitting assignee and all_assignees returns unassigned Issues; assignee selects one exact assignee, and all_assignees includes every Assignment. Returns up to 100 results by default if no limit is specified. Uses workspace_root if provided, otherwise uses current context."
+        description = "Find Open Issues without unresolved direct Blocking Dependencies. Optional parent_id restricts results to direct children of an existing Epic before ordering and limit; missing or non-Epic parents are errors. Omitting assignee and all_assignees returns unassigned Issues; assignee selects one exact assignee, and all_assignees includes every Assignment. Returns up to 100 results by default if no limit is specified. Uses workspace_root if provided, otherwise uses current context."
     )]
     async fn ready(
         &self,
