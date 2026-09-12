@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  release:
+    name: Release - ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: rivets-linux-x86_64.tar.gz
+          - os: macos-latest
+            artifact_name: rivets-macos-aarch64.tar.gz
+          - os: windows-latest
+            artifact_name: rivets-windows-x86_64.zip
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      # Both binaries, not just `rivets`. The CI artifact this replaces
+      # shipped only one of the two the workspace produces.
+      - name: Build release binaries
+        run: cargo build --release --all-features --bin rivets --bin rivets-mcp
+
+      - name: Stage binaries (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          mkdir -p dist/package
+          cp target/release/rivets dist/package/rivets
+          cp target/release/rivets-mcp dist/package/rivets-mcp
+          tar -czf "dist/${{ matrix.artifact_name }}" -C dist/package .
+
+      - name: Stage binaries (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/package
+          Copy-Item target/release/rivets.exe dist/package/rivets.exe
+          Copy-Item target/release/rivets-mcp.exe dist/package/rivets-mcp.exe
+          Compress-Archive -Path dist/package/* -DestinationPath "dist/${{ matrix.artifact_name }}"
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ matrix.artifact_name }}
+          draft: true
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
