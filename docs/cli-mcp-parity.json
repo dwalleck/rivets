@@ -579,8 +579,10 @@
         "crates/rivets-mcp/src/tools.rs::ready",
         "crates/rivets/tests/ready_parent.rs::ready_parent_scope_contract",
         "crates/rivets/tests/ready_parent.rs::ready_parent_scope_errors",
+        "crates/rivets/tests/ready_parent.rs::ready_parent_ignores_rejected_parentage_records",
         "crates/rivets-mcp/tests/ready_parent.rs::ready_parent_scope_contract",
-        "crates/rivets-mcp/tests/ready_parent.rs::ready_parent_scope_errors"
+        "crates/rivets-mcp/tests/ready_parent.rs::ready_parent_scope_errors",
+        "crates/rivets-mcp/tests/ready_parent.rs::ready_parent_tracks_parentage_changes"
       ]
     },
     {

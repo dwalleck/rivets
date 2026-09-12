@@ -241,7 +241,7 @@ flowchart TD
     Unassigned -->|No| Skip
     Alice -->|Yes| Include
     Alice -->|No| Skip
-    Include --> Filters[Apply priority, Kind, and label filters]
+    Include --> Filters[Apply priority, Kind, label,<br/>and optional --parent scope]
     Filters --> Sort[Sort: hybrid / priority / oldest]
     Sort --> Limit[Apply --limit]
     Limit --> Display[Display Ready Issues]
@@ -252,8 +252,10 @@ flowchart TD
 
 Edges point from **dependent → prerequisite**. Only a direct `blocks` edge to a
 non-Closed prerequisite derives Blocked. Parentage, Related Associations, and
-Discovery Origins never affect Blocked or Ready. Filters, sorting, and limits
-operate only after Open/Blocked/Assignment eligibility.
+Discovery Origins never affect Blocked, and Parentage never affects Ready
+eligibility; an optional `--parent` (MCP `parent_id`) scope only narrows the
+post-eligibility result to direct children of one existing Epic. Filters,
+sorting, and limits operate only after Open/Blocked/Assignment eligibility.
 
 ## Blocked Query Flow
 

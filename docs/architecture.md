@@ -215,7 +215,7 @@ graph TD
     Blocked -->|Yes| Exclude
     Blocked -->|No| Assignment{Assignment selector matches?<br/>Unassigned / Assignee / All}
     Assignment -->|No| Exclude
-    Assignment -->|Yes| Filter[Priority, Kind, and label filters]
+    Assignment -->|Yes| Filter[Priority, Kind, label,<br/>and optional direct-Epic-parent filters]
     Filter --> Sort[Sort by policy<br/>hybrid/priority/oldest]
     Sort --> Limit[Apply limit]
     Limit --> Result[Ready Issues]
@@ -224,9 +224,9 @@ graph TD
 `ready_to_work` semantics:
 
 1. **Blocked**: an Issue with a direct `blocks` edge to a prerequisite whose Workflow State is not Closed
-2. Parentage, Related Associations, and Discovery Origins never affect Blocked or Ready
+2. Parentage, Related Associations, and Discovery Origins never affect Blocked, and Parentage never affects Ready eligibility; an optional `parent_id` scope only narrows the post-eligibility result to direct children of one existing Epic
 3. **Ready eligibility**: Workflow State Open, not Blocked, and selected by `Unassigned` (default), exact `Assignee`, or `All`
-4. Apply optional priority, Issue Kind, and label filters only after eligibility
+4. Apply optional priority, Issue Kind, label, and direct-parent-scope filters only after eligibility
 5. Sort by **hybrid** (default), **priority**, or **oldest**, then apply the result limit
 
 ## Data Flow

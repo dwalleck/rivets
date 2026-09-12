@@ -269,6 +269,19 @@ async fn ready_parent_tracks_parentage_changes() {
     assert_eq!(std::fs::read(&path).unwrap(), cleared);
 }
 
+/// Run one failing CLI invocation and return `(exit code, stdout, stderr)`.
+///
+/// Readiness errors must reach the caller as one explicit domain cause on
+/// stderr with stdout left empty, so the JSON output mode stays parseable.
+fn cli_failure(root: &Path, args: &[&str]) -> (i32, String, String) {
+    let output = cli(root, args);
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
 #[tokio::test]
 async fn ready_parent_scope_errors() {
     let root = fixture();
@@ -284,10 +297,18 @@ async fn ready_parent_scope_errors() {
             tools.ready(params(json!({"parent_id":invalid}))).await,
             Err(Error::InvalidIssueId(_))
         ));
+        // Malformed IDs are rejected by the CLI argument parser, so the CLI
+        // must fail the parse stage (exit 2) rather than reach domain lookup.
+        let (code, stdout, stderr) =
+            cli_failure(root.path(), &["ready", "--parent", invalid, "--json"]);
+        assert_eq!(
+            code, 2,
+            "malformed parent {invalid:?} should be a parse failure; stderr={stderr}"
+        );
+        assert!(stdout.is_empty(), "stdout must stay empty for {invalid:?}");
         assert!(
-            !cli(root.path(), &["ready", "--parent", invalid, "--json"])
-                .status
-                .success()
+            stderr.contains("invalid value"),
+            "malformed parent {invalid:?} should name the rejected value; stderr={stderr}"
         );
     }
     assert!(
@@ -301,15 +322,46 @@ async fn ready_parent_scope_errors() {
             ParentageError::ParentNotEpic { .. }
         ))
     ));
-    for rejected in ["test-missing", "test-child"] {
-        assert!(
-            !cli(
-                root.path(),
-                &["ready", "--parent", rejected, "--limit", "0", "--json"]
-            )
-            .status
-            .success()
-        );
-    }
+    // Missing and non-Epic parents are well-formed IDs, so the CLI must reach
+    // the domain and surface the same cause the MCP arm asserts above.
+    let (code, stdout, stderr) = cli_failure(
+        root.path(),
+        &[
+            "ready",
+            "--parent",
+            "test-missing",
+            "--limit",
+            "0",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        code, 1,
+        "missing parent should be a domain failure; stderr={stderr}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "stdout must stay empty for a missing parent"
+    );
+    assert!(
+        stderr.contains("Issue not found: test-missing"),
+        "missing parent should name the issue; stderr={stderr}"
+    );
+    let (code, stdout, stderr) = cli_failure(
+        root.path(),
+        &["ready", "--parent", "test-child", "--limit", "0", "--json"],
+    );
+    assert_eq!(
+        code, 1,
+        "non-Epic parent should be a domain failure; stderr={stderr}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "stdout must stay empty for a non-Epic parent"
+    );
+    assert!(
+        stderr.contains("test-child cannot be a parent"),
+        "non-Epic parent should name the issue; stderr={stderr}"
+    );
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }

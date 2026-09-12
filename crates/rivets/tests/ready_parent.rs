@@ -163,12 +163,32 @@ async fn ready_parent_scope_errors() {
     let mut storage = new_in_memory_storage("test".into());
     let empty = create(storage.as_mut(), "Empty", IssueKind::Epic, 2, None).await;
     let task = create(storage.as_mut(), "Task", IssueKind::Task, 2, None).await;
+    // The unscoped Workspace still has Ready Issues, so an empty scoped
+    // result is attributable to the parent scope rather than to nothing being
+    // Ready at all.
+    assert!(
+        ids(storage.as_ref(), &ReadyFilter::default())
+            .await
+            .contains(&task.id),
+        "fixture must keep at least one Ready Issue outside the empty Epic"
+    );
+    assert_eq!(
+        ids(
+            storage.as_ref(),
+            &ReadyFilter {
+                parent_id: Some(empty.id.clone()),
+                ..Default::default()
+            }
+        )
+        .await,
+        Vec::<IssueId>::new()
+    );
+    // Scope validation fires even when the limit admits no candidates.
     let filter = ReadyFilter {
         parent_id: Some(empty.id),
         limit: Some(0),
         ..Default::default()
     };
-    assert_eq!(ids(storage.as_ref(), &filter).await, Vec::<IssueId>::new());
     let missing = IssueId::new("test-missing");
     assert!(
         matches!(storage.ready_to_work(&ReadyFilter { parent_id: Some(missing.clone()), ..filter.clone() }, None).await, Err(Error::IssueNotFound(id)) if id == missing)
