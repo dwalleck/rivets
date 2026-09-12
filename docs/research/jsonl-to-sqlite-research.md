@@ -4,6 +4,24 @@
 **Date**: 2026-08-09
 **Related**: [Storage Architecture](../storage-architecture.md), [Architecture Overview](../architecture.md), [Event Sourcing Design](../design/event-sourcing.md), [Automerge Research](automerge-research.md)
 
+> **Point-in-time snapshot — 2026-08-09.** This note was written before several
+> subsequent changes. It is retained as an archival record, not maintained
+> documentation. Two caveats:
+>
+> - **Code line citations have drifted.** The cited files resolve, but many line
+>   ranges no longer point at the cited symbol — e.g. `storage/mod.rs:391-401`
+>   for `StorageBackend` is now 442, and `storage/mod.rs:648-682` for
+>   `create_storage` is now 859. Treat line numbers as approximate.
+> - **The concurrency premise has been superseded.** The note leans on
+>   "Assignment claims are explicitly documented as non-atomic until
+>   `rivets-8rj9` lands" (§2.1, Risk 14, Risk 8). `rivets-8rj9` is now **closed**,
+>   `AGENTS.md` documents the storage compare-and-set making one concurrent
+>   claimant the durable owner, and a cross-process workspace lock
+>   (`.rivets/workspace.lock`) landed via PR #102. Re-read the coordination
+>   argument against that.
+>
+> The options analysis (A/B/C) and the recommendation are unaffected in shape.
+
 This note assesses the level of effort and the strategic/technical implications of migrating Rivets' issue-tracking persistence from JSONL (`.rivets/issues.jsonl`) to SQLite. It is research only: no code, manifests, or existing documentation were changed.
 
 Every material claim is cited inline. Repository citations use repo-relative paths with line ranges or exact symbol/test names; web citations link official primary sources (sqlite.org, docs.rs). Observation (what the code/docs say), recommendation (what I propose), and uncertainty (what cannot be resolved from primary sources alone) are distinguished in the text.
