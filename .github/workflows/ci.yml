@@ -104,7 +104,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # macOS is produced by `release.yml` on a tag, not here. This job
+        # is a compile check: what `cargo build --release` proves over
+        # `cargo nextest run` is release-profile compilation and compiling
+        # without dev-dependencies in the graph, and neither is
+        # platform-specific -- feature unification resolves identically
+        # everywhere. `test` still runs on macOS, so a Darwin-only `cfg`
+        # block is still compiled there.
+        #
+        # The pool cost is the same one described above `concurrency:`.
+        os: [ubuntu-latest, windows-latest]
         rust: [stable]
 
     steps:
@@ -122,26 +131,26 @@ jobs:
       - name: Build
         run: cargo build --release --all-features --workspace
 
-      - name: Upload binary (Ubuntu)
+      # Both binaries. The workspace produces `rivets` and `rivets-mcp`, and
+      # these artifacts shipped only the first, so anyone pulling a CI build
+      # got a `rivets` with no MCP server beside it.
+      - name: Upload binaries (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@v4
         with:
           name: rivets-linux
-          path: target/release/rivets
+          path: |
+            target/release/rivets
+            target/release/rivets-mcp
 
-      - name: Upload binary (macOS)
-        if: matrix.os == 'macos-latest'
-        uses: actions/upload-artifact@v4
-        with:
-          name: rivets-macos
-          path: target/release/rivets
-
-      - name: Upload binary (Windows)
+      - name: Upload binaries (Windows)
         if: matrix.os == 'windows-latest'
         uses: actions/upload-artifact@v4
         with:
           name: rivets-windows
-          path: target/release/rivets.exe
+          path: |
+            target/release/rivets.exe
+            target/release/rivets-mcp.exe
 
   # Check that Cargo.lock is up to date
   cargo-deny:
