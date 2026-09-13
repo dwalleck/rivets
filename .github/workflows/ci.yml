@@ -112,8 +112,7 @@ jobs:
         # everywhere. `test` still runs on macOS, so a Darwin-only `cfg`
         # block is still compiled there.
         #
-        # macOS concurrency is an account-wide pool of five shared across
-        # every repository, and the macOS leg is the slowest in the matrix.
+        # The pool cost is the same one described above `concurrency:`.
         os: [ubuntu-latest, windows-latest]
         rust: [stable]
 

@@ -1,5 +1,8 @@
 name: Release
 
+# Tagged releases only. `ci.yml` no longer builds macOS on every push, so this
+# is the workflow that produces Darwin binaries -- once per version, not once
+# per commit, against an account-wide macOS pool of five runners.
 on:
   push:
     tags:
@@ -9,10 +12,47 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+# This repository's default GITHUB_TOKEN is read-only
+# (`default_workflow_permissions: read`), so a job that does not ask for
+# `contents: write` gets a 403 from action-gh-release the first time a tag is
+# pushed -- and nothing else exercises this path, so it would surface during a
+# release rather than before one. The workflow default stays least-privilege;
+# only the two jobs that publish ask for more.
+permissions:
+  contents: read
+
 jobs:
-  release:
+  # The release is created once, here, before any binary is built.
+  #
+  # The three build legs used to each call action-gh-release for the same tag,
+  # and that action is find-or-create: run concurrently, two legs can miss the
+  # lookup and both try to create the same release, which fails one of them.
+  # Creating it up front makes every later call a pure asset upload against a
+  # release that already exists.
+  #
+  # `generate_release_notes` also belongs here rather than in the matrix, where
+  # it regenerated the same notes three times per release.
+  create-release:
+    name: Create draft release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create the draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+
+  build:
     name: Release - ${{ matrix.os }}
+    needs: create-release
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -20,6 +60,8 @@ jobs:
           - os: ubuntu-latest
             artifact_name: rivets-linux-x86_64.tar.gz
           - os: macos-latest
+            # macos-latest is Apple Silicon. An Intel build would need its own
+            # leg on an explicit x86_64 runner and its own artifact name.
             artifact_name: rivets-macos-aarch64.tar.gz
           - os: windows-latest
             artifact_name: rivets-windows-x86_64.zip
@@ -27,6 +69,12 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      # Matches every job in ci.yml. `rust-toolchain.toml` pins the version
+      # either way, but installing it explicitly keeps the release build on the
+      # same setup path as the builds that gate it.
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
@@ -53,11 +101,10 @@ jobs:
           Copy-Item target/release/rivets-mcp.exe dist/package/rivets-mcp.exe
           Compress-Archive -Path dist/package/* -DestinationPath "dist/${{ matrix.artifact_name }}"
 
-      - name: Upload to GitHub Release
+      # Upload only. The release already exists, so no leg races another to
+      # create it and none of them regenerate the notes.
+      - name: Attach the archive to the release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/${{ matrix.artifact_name }}
           draft: true
-          generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
