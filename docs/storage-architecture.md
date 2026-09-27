@@ -253,6 +253,18 @@ Each line is a canonical record written by `CanonicalIssueRecord` (the persisted
 - `notes` and `resources` are ordered collections. `next_resource_id` is omitted while its value is the default `1`; after any resource ID is allocated it remains serialized even if all resources are later removed.
 - On read, two legacy fields are accepted and never written back: `issue_type` (migration alias for `issue_kind`) and `external_ref` (migrated to a Reference resource or a migration Note).
 - Issue IDs are `{prefix}-{adaptive base36 hash}`; the hash inputs include content plus timestamp/nonce material, so IDs are not purely content-addressed.
+- New Issues start with Created equal to Updated and no Closed timestamp.
+  Identity-preserving loads retain Created and Updated. Recorded legacy closure
+  remains an accepted approximation; absent closure remains unknown, including
+  on Closed Issues. Reading stale `closed_at` on Open/In Progress does not rewrite
+  the record. Future transitions clear closure when leaving Closed and assign a
+  fresh instant when entering Closed.
+- Lifecycle transitions commit state, Assignment effects, Updated, current
+  closure and an optional reason Note atomically with one event timestamp.
+  Rejection preserves the record; content edits while Closed preserve closure.
+  Invalid required Created/Updated values continue to produce load warnings,
+  record exclusion and incomplete-load write refusal; no historical backfill or
+  cross-field chronology repair is performed.
 
 ### Error Recovery Strategies
 

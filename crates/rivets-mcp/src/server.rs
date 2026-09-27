@@ -362,7 +362,7 @@ impl RivetsMcpServer {
 
     /// Close an issue.
     #[tool(
-        description = "Close (complete) an issue. Mark work as done when you've finished implementing/fixing it. Uses workspace_root if provided, otherwise uses current context."
+        description = "Close an issue and clear Assignment. Records the current Closed period: closed_at, updated_at, and an optional reason Note share one event timestamp; created_at is preserved. Reclosing after reopen records a fresh closure. Uses workspace_root if provided, otherwise uses current context."
     )]
     async fn close(
         &self,
@@ -675,7 +675,7 @@ impl RivetsMcpServer {
 
     /// Reopen a closed issue.
     #[tool(
-        description = "Reopen a previously closed issue. Use when work needs to continue or was not actually complete. Uses workspace_root if provided, otherwise uses current context."
+        description = "Reopen a Closed issue as unassigned Open and clear closed_at. updated_at and an optional reason Note share one event timestamp; created_at is preserved. Uses workspace_root if provided, otherwise uses current context."
     )]
     async fn reopen(
         &self,

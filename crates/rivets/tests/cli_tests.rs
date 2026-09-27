@@ -891,39 +891,144 @@ fn test_cli_close_already_closed_issue(initialized_dir: TempDir) {
 }
 
 #[rstest]
-fn test_cli_close_and_reopen_reasons_append_notes(initialized_dir: TempDir) {
-    let issue_id = create_issue(initialized_dir.path(), "Lifecycle history", &[]);
+fn test_cli_closed_period_reopens_recloses_and_preserves_closed_edits(initialized_dir: TempDir) {
+    let issue_id = create_issue(initialized_dir.path(), "Current closed period", &[]);
+    let show = || -> serde_json::Value {
+        let output = run_rivets_in_dir(initialized_dir.path(), &["--json", "show", &issue_id]);
+        assert!(
+            output.status.success(),
+            "show failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let records: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("show output should be JSON");
+        records[0].clone()
+    };
 
-    let close = run_rivets_in_dir(
+    let created = show();
+    assert_eq!(created["created_at"], created["updated_at"]);
+    assert_eq!(created["closed_at"], serde_json::Value::Null);
+
+    let first_close = run_rivets_in_dir(
         initialized_dir.path(),
-        &["close", &issue_id, "--reason", "Fixed once"],
+        &["close", &issue_id, "--reason", "First completion"],
     );
     assert!(
-        close.status.success(),
-        "Close failed: {}",
-        String::from_utf8_lossy(&close.stderr)
+        first_close.status.success(),
+        "first close failed: {}",
+        String::from_utf8_lossy(&first_close.stderr)
+    );
+    let closed_once = show();
+    let first_closed_at = closed_once["closed_at"].clone();
+    let created_at = created["created_at"].clone();
+    assert_eq!(closed_once["status"], "closed");
+    assert_eq!(closed_once["created_at"], created_at);
+    assert_eq!(closed_once["updated_at"], first_closed_at);
+    assert_eq!(closed_once["notes"][0]["created_at"], first_closed_at);
+
+    let edit = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["update", &issue_id, "--title", "Edited while closed"],
+    );
+    assert!(
+        edit.status.success(),
+        "Closed Issue edit failed: {}",
+        String::from_utf8_lossy(&edit.stderr)
+    );
+    let edited = show();
+    assert_eq!(edited["title"], "Edited while closed");
+    assert_ne!(edited["updated_at"], closed_once["updated_at"]);
+    assert_eq!(edited["created_at"], created_at);
+    assert_eq!(
+        edited["closed_at"], first_closed_at,
+        "ordinary Closed content edits preserve the current closure",
     );
 
     let reopen = run_rivets_in_dir(
         initialized_dir.path(),
-        &["reopen", &issue_id, "--reason", "Regression found"],
+        &["reopen", &issue_id, "--reason", "More work found"],
     );
     assert!(
         reopen.status.success(),
-        "Reopen failed: {}",
+        "reopen failed: {}",
         String::from_utf8_lossy(&reopen.stderr)
     );
+    let reopened = show();
+    assert_eq!(reopened["status"], "open");
+    assert_eq!(reopened["closed_at"], serde_json::Value::Null);
+    assert_eq!(reopened["created_at"], created_at);
+    assert_eq!(reopened["notes"][1]["created_at"], reopened["updated_at"]);
+    let bytes_before_rejected_reopen =
+        std::fs::read(initialized_dir.path().join(".rivets/issues.jsonl")).unwrap();
+    let rejected_reopen = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["reopen", &issue_id, "--reason", "Must not append"],
+    );
+    assert!(!rejected_reopen.status.success());
+    assert_eq!(
+        std::fs::read(initialized_dir.path().join(".rivets/issues.jsonl")).unwrap(),
+        bytes_before_rejected_reopen,
+    );
 
-    let restarted = run_rivets_in_dir(initialized_dir.path(), &["--json", "show", &issue_id]);
-    let restarted: serde_json::Value =
-        serde_json::from_slice(&restarted.stdout).expect("show output should be JSON");
-    let issue = &restarted[0];
-    assert_eq!(issue["notes"].as_array().map(Vec::len), Some(2));
-    assert_eq!(issue["notes"][0]["content"], "Closed: Fixed once");
-    assert_eq!(issue["notes"][0]["created_at"], issue["closed_at"]);
-    assert_eq!(issue["notes"][1]["content"], "Reopened: Regression found");
-    assert_eq!(issue["notes"][1]["created_at"], issue["updated_at"]);
-    assert_eq!(issue["status"], "open");
+    let second_close = run_rivets_in_dir(
+        initialized_dir.path(),
+        &["close", &issue_id, "--reason", "Second completion"],
+    );
+    assert!(
+        second_close.status.success(),
+        "second close failed: {}",
+        String::from_utf8_lossy(&second_close.stderr)
+    );
+    let closed_twice = show();
+    assert_eq!(closed_twice["status"], "closed");
+    assert_eq!(closed_twice["created_at"], created_at);
+    assert_ne!(
+        closed_twice["closed_at"], first_closed_at,
+        "a new close must record the new current-period timestamp",
+    );
+    let contents: Vec<_> = closed_twice["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|note| note["content"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        contents,
+        [
+            "Closed: First completion",
+            "Reopened: More work found",
+            "Closed: Second completion",
+        ],
+    );
+    assert_eq!(
+        closed_twice["notes"][0]["created_at"], first_closed_at,
+        "earlier closure history remains immutable",
+    );
+    assert_eq!(
+        closed_twice["notes"][2]["created_at"],
+        closed_twice["updated_at"],
+    );
+    assert_eq!(
+        closed_twice["notes"][2]["created_at"],
+        closed_twice["closed_at"],
+    );
+
+    let bytes_before_rejected_close =
+        std::fs::read(initialized_dir.path().join(".rivets/issues.jsonl"))
+            .expect("persisted lifecycle bytes should be readable");
+    let rejected_close = run_rivets_in_dir(initialized_dir.path(), &["close", &issue_id]);
+    assert!(
+        !rejected_close.status.success(),
+        "closing an already Closed Issue should be rejected",
+    );
+    assert_eq!(
+        std::fs::read(initialized_dir.path().join(".rivets/issues.jsonl"))
+            .expect("persisted lifecycle bytes should remain readable"),
+        bytes_before_rejected_close,
+        "rejected transition must preserve persisted bytes",
+    );
+    let after_rejected_close = show();
+    assert_eq!(after_rejected_close, closed_twice);
 }
 
 #[rstest]

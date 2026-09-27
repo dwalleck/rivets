@@ -22,6 +22,19 @@ Storage checks Parentage and commits the state change and optional reason Note
 under one lock. General Update accepts a validated, nonempty `IssueUpdate`
 containing only title, description, Priority, Kind, design, and acceptance criteria.
 
+Lifecycle transitions preserve Created and use one event timestamp for Updated,
+entry into the current Closed period, and an optional reason Note. Closing sets
+`closed_at` to the new event instant even after an earlier closure; reopening
+clears it. Ordinary edits while Closed preserve the closure instant. Rejected
+transitions leave state, timestamps and history unchanged. Timestamp semantics
+are governed by the approved resolution on `rivets-c6ql`; the lifecycle slice is
+implemented by `rivets-1nhb`, independently of the remaining date-filter work.
+
+Existing recorded closures remain accepted legacy approximations and missing
+closures remain unknown. Read-time compatibility loading does not backfill
+history or rewrite stale closure values on non-Closed records; future lifecycle
+transitions establish current-period semantics.
+
 ## Consequences
 
 Adapters must not read an Issue and then implement Assignment with a generic

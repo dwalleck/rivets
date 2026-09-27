@@ -212,7 +212,7 @@ pub struct CloseArgs {
     #[arg(required = true, value_parser = validate_issue_id)]
     pub issue_ids: Vec<String>,
 
-    /// Reason for closing (only added to notes if provided)
+    /// Optional reason Note, committed with the same event timestamp as Closed and Updated
     #[arg(short, long)]
     pub reason: Option<String>,
 }
@@ -224,7 +224,7 @@ pub struct ReopenArgs {
     #[arg(required = true, value_parser = validate_issue_id)]
     pub issue_ids: Vec<String>,
 
-    /// Reason for reopening
+    /// Optional reason Note, committed with the same event timestamp as Updated
     #[arg(short, long)]
     pub reason: Option<String>,
 }

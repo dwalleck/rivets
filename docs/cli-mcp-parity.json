@@ -70,6 +70,17 @@
       "contract": "Open, In Progress, and Closed are the only Workflow States; Blocked and Ready are derived conditions."
     },
     {
+      "id": "current-closed-period",
+      "contract": "Lifecycle transitions preserve Created. Close records the current Closed period, Reopen clears it, and Reclose records a fresh instant. Updated and an optional reason Note share the event timestamp atomically; ordinary Closed edits preserve closure and rejected transitions preserve the record. Existing recorded closure remains a legacy approximation, absent closure remains unknown, and reads do not rewrite stale closure data. This covers rivets-1nhb only; date predicates, same-value content/resource suppression and relationship endpoint timestamps remain separate rivets-ffqs slices.",
+      "status": "conformant",
+      "evidence": [
+        "crates/rivets/tests/cli_tests.rs::test_cli_closed_period_reopens_recloses_and_preserves_closed_edits",
+        "crates/rivets-mcp/tests/reporting_parity.rs::registered_mcp_lifecycle_records_current_closed_period",
+        "crates/rivets/src/storage/in_memory/trait_impl.rs::tests::lifecycle_transition_at_records_current_closed_period_and_shared_event_time",
+        "crates/rivets/tests/in_memory_resilient_loading.rs::legacy_closed_and_stale_closure_timestamps_are_read_only_until_transition"
+      ]
+    },
+    {
       "id": "canonical-assignment",
       "contract": "Assignment changes through Claim and Release intents, not blind general update. Closing clears Assignment and reopening produces an unassigned Open Issue."
     },
@@ -424,7 +435,7 @@
       "requirement": "shared",
       "current_parity": "conformant",
       "target_status": "conformant",
-      "target": "Close an Issue, append an optional reason Note, clear Assignment, and preserve canonical relationship invariants.",
+      "target": "Close an Issue, clear Assignment, and record entry into the current Closed period. closed_at, updated_at, and an optional reason Note share one atomic event timestamp; created_at is preserved. Reclosing records a fresh closure. Preserve canonical relationship invariants and leave rejected transitions unchanged.",
       "cli": {
         "surfaces": [
           "close"
@@ -453,6 +464,8 @@
       "required_resolution": "Preserve shared validation, dedicated mutation ownership, and loop-equivalent batch effects.",
       "evidence": [
         "crates/rivets-mcp/tests/update_contract.rs",
+        "crates/rivets/tests/cli_tests.rs::test_cli_closed_period_reopens_recloses_and_preserves_closed_edits",
+        "crates/rivets-mcp/tests/reporting_parity.rs::registered_mcp_lifecycle_records_current_closed_period",
         "crates/rivets/src/storage/in_memory/trait_impl.rs"
       ]
     },
@@ -462,7 +475,7 @@
       "requirement": "shared",
       "current_parity": "conformant",
       "target_status": "conformant",
-      "target": "Reopen a Closed Issue as unassigned Open and append an optional reason Note.",
+      "target": "Reopen a Closed Issue as unassigned Open, clear closed_at, and commit updated_at and an optional reason Note at one event timestamp while preserving created_at. Rejected transitions leave timestamps and history unchanged.",
       "cli": {
         "surfaces": [
           "reopen"
@@ -491,6 +504,8 @@
       "required_resolution": "Preserve shared validation, dedicated mutation ownership, and loop-equivalent batch effects.",
       "evidence": [
         "crates/rivets-mcp/tests/update_contract.rs",
+        "crates/rivets/tests/cli_tests.rs::test_cli_closed_period_reopens_recloses_and_preserves_closed_edits",
+        "crates/rivets-mcp/tests/reporting_parity.rs::registered_mcp_lifecycle_records_current_closed_period",
         "crates/rivets/src/storage/in_memory/trait_impl.rs"
       ]
     },

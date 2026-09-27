@@ -560,6 +560,32 @@ fn registered_mcp_requests_enforce_update_and_dedicated_intent_contract() {
     let returned = mcp.call("return_to_open", json!({"issue_id": "rep-update"}));
     assert_eq!(returned["status"], "open");
     assert_eq!(returned["assignee"], "alice");
+    let noted = mcp.call(
+        "add_note",
+        json!({"issue_id": "rep-update", "content": "Evidence"}),
+    );
+    assert_eq!(noted["notes"][0]["content"], "Evidence");
+    assert_eq!(noted["notes"][0]["created_at"], noted["updated_at"]);
+}
+
+fn assert_rejected_lifecycle_unchanged(mcp: &mut McpProcess, fixture: &Fixture, action: &str) {
+    let before = std::fs::read(&fixture.data_path).unwrap();
+    let rejected = mcp
+        .call_result(
+            action,
+            json!({"issue_id": "rep-update", "reason": "Must not append"}),
+        )
+        .unwrap_err();
+    assert_eq!(rejected["code"], -32602);
+    assert_eq!(std::fs::read(&fixture.data_path).unwrap(), before);
+}
+
+#[test]
+fn registered_mcp_lifecycle_records_current_closed_period() {
+    let original = issue_record("rep-update", "open", 2, Some("alice"), &[]);
+    let fixture = Fixture::new(vec![original.clone()]);
+    let mut mcp = McpProcess::new(fixture.root());
+    mcp.call("set_context", json!({"workspace_root": fixture.root()}));
     mcp.call(
         "add_note",
         json!({"issue_id": "rep-update", "content": "Evidence"}),
@@ -570,13 +596,58 @@ fn registered_mcp_requests_enforce_update_and_dedicated_intent_contract() {
     );
     assert_eq!(closed["status"], "closed");
     assert!(closed["assignee"].is_null());
+    assert_eq!(closed["created_at"], original["created_at"]);
+    assert_eq!(closed["updated_at"], closed["closed_at"]);
+    assert_eq!(
+        closed["notes"].as_array().unwrap().last().unwrap()["created_at"],
+        closed["closed_at"],
+    );
+    let first_closed_at = closed["closed_at"].clone();
+
+    let edited_closed = mcp.call(
+        "update",
+        json!({"issue_id": "rep-update", "title": "Edited while closed"}),
+    );
+    assert_eq!(edited_closed["status"], "closed");
+    assert_eq!(edited_closed["title"], "Edited while closed");
+    assert_eq!(edited_closed["created_at"], original["created_at"]);
+    assert_ne!(edited_closed["updated_at"], closed["updated_at"]);
+    assert_eq!(
+        edited_closed["closed_at"], first_closed_at,
+        "Closed content edits preserve the current closure",
+    );
+
     let reopened = mcp.call(
         "reopen",
         json!({"issue_id": "rep-update", "reason": "Inspect"}),
     );
     assert_eq!(reopened["status"], "open");
     assert!(reopened["assignee"].is_null());
-    let contents: Vec<_> = reopened["notes"]
+    assert!(reopened["closed_at"].is_null());
+    assert_eq!(reopened["created_at"], original["created_at"]);
+    assert_eq!(
+        reopened["notes"].as_array().unwrap().last().unwrap()["created_at"],
+        reopened["updated_at"],
+    );
+    assert_rejected_lifecycle_unchanged(&mut mcp, &fixture, "reopen");
+
+    let closed_again = mcp.call(
+        "close",
+        json!({"issue_id": "rep-update", "reason": "Complete again"}),
+    );
+    assert_eq!(closed_again["status"], "closed");
+    assert!(closed_again["assignee"].is_null());
+    assert_eq!(closed_again["created_at"], original["created_at"]);
+    assert_ne!(
+        closed_again["closed_at"], first_closed_at,
+        "a new close records a fresh current-period timestamp",
+    );
+    assert_eq!(closed_again["updated_at"], closed_again["closed_at"]);
+    assert_eq!(
+        closed_again["notes"].as_array().unwrap().last().unwrap()["created_at"],
+        closed_again["closed_at"],
+    );
+    let contents: Vec<_> = closed_again["notes"]
         .as_array()
         .unwrap()
         .iter()
@@ -584,18 +655,38 @@ fn registered_mcp_requests_enforce_update_and_dedicated_intent_contract() {
         .collect();
     assert_eq!(
         contents,
-        ["Evidence", "Closed: Complete", "Reopened: Inspect"]
+        [
+            "Evidence",
+            "Closed: Complete",
+            "Reopened: Inspect",
+            "Closed: Complete again"
+        ]
     );
+
+    assert_rejected_lifecycle_unchanged(&mut mcp, &fixture, "close");
     drop(mcp);
     let persisted: Value =
         serde_json::from_slice(&std::fs::read(&fixture.data_path).unwrap()).unwrap();
-    let mut expected = reopened;
+    let mut expected = closed_again;
     // Relationship compatibility records are persisted but omitted from Issue responses.
     expected["dependencies"] = original["dependencies"].clone();
     assert_eq!(
         persisted, expected,
         "registered mutations must survive server restart"
     );
+    let mut restarted = McpProcess::new(fixture.root());
+    restarted.call("set_context", json!({"workspace_root": fixture.root()}));
+    let reloaded = restarted.call("show", json!({"issue_id": "rep-update"}));
+    for field in [
+        "status",
+        "created_at",
+        "updated_at",
+        "closed_at",
+        "assignee",
+        "notes",
+    ] {
+        assert_eq!(reloaded[field], expected[field], "reloaded {field}");
+    }
 }
 
 #[test]
@@ -618,4 +709,51 @@ fn registered_mcp_empty_update_is_invalid_params() {
     );
     assert_eq!(updated["title"], "Registered change");
     assert_ne!(std::fs::read(&fixture.data_path).unwrap(), fixture.original);
+}
+
+#[test]
+fn reason_bearing_parentage_rejections_preserve_records_through_cli_and_registered_mcp() {
+    for (state, assignee, action, target) in [
+        ("open", Some("alice"), "close", "rep-parent"),
+        ("closed", None, "reopen", "rep-child"),
+    ] {
+        let mut parent = issue_record("rep-parent", state, 2, assignee, &[]);
+        parent["issue_kind"] = json!("epic");
+        let child = issue_record(
+            "rep-child",
+            state,
+            2,
+            assignee,
+            &[("rep-parent", "parent-child")],
+        );
+        let fixture = Fixture::new(vec![parent, child]);
+        let mut mcp = McpProcess::new(fixture.root());
+        mcp.call("set_context", json!({"workspace_root": fixture.root()}));
+        let before = mcp.call("show", json!({"issue_id": target}));
+
+        let cli = run_cli(
+            fixture.root(),
+            &[action, target, "--reason", "Must not append"],
+        );
+        assert_eq!(cli.status.code(), Some(1));
+        fixture.assert_source_unchanged();
+        let rejected = mcp
+            .call_result(
+                action,
+                json!({"issue_id": target, "reason": "Must not append"}),
+            )
+            .unwrap_err();
+        assert_eq!(rejected["code"], -32602);
+        fixture.assert_source_unchanged();
+        assert_eq!(
+            mcp.call("show", json!({"issue_id": target})),
+            before,
+            "{action} rejected by Parentage must preserve the complete Issue",
+        );
+        drop(mcp);
+        let mut reloaded = McpProcess::new(fixture.root());
+        reloaded.call("set_context", json!({"workspace_root": fixture.root()}));
+        assert_eq!(reloaded.call("show", json!({"issue_id": target})), before);
+        fixture.assert_source_unchanged();
+    }
 }

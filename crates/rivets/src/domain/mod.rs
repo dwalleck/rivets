@@ -356,14 +356,15 @@ impl Issue {
         match target {
             IssueStatus::Closed => {
                 self.assignee = None;
-                if self.closed_at.is_none() {
-                    self.closed_at = Some(changed_at);
-                }
+                self.closed_at = Some(changed_at);
             }
             IssueStatus::Open if current == IssueStatus::Closed => {
                 self.assignee = None;
+                self.closed_at = None;
             }
-            IssueStatus::Open | IssueStatus::InProgress => {}
+            IssueStatus::Open | IssueStatus::InProgress => {
+                self.closed_at = None;
+            }
         }
         Ok(())
     }
