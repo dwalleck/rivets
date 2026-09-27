@@ -937,7 +937,17 @@ fn test_cli_closed_period_reopens_recloses_and_preserves_closed_edits(initialize
     );
     let edited = show();
     assert_eq!(edited["title"], "Edited while closed");
-    assert_ne!(edited["updated_at"], closed_once["updated_at"]);
+    let instant = |value: &serde_json::Value| {
+        value
+            .as_str()
+            .expect("timestamp should be a string")
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .expect("timestamp should be RFC 3339")
+    };
+    assert!(
+        instant(&edited["updated_at"]) > instant(&closed_once["updated_at"]),
+        "a Closed content edit must advance Updated",
+    );
     assert_eq!(edited["created_at"], created_at);
     assert_eq!(
         edited["closed_at"], first_closed_at,
@@ -959,15 +969,18 @@ fn test_cli_closed_period_reopens_recloses_and_preserves_closed_edits(initialize
     assert_eq!(reopened["created_at"], created_at);
     assert_eq!(reopened["notes"][1]["created_at"], reopened["updated_at"]);
     let bytes_before_rejected_reopen =
-        std::fs::read(initialized_dir.path().join(".rivets/issues.jsonl")).unwrap();
+        std::fs::read(initialized_dir.path().join(".rivets/issues.jsonl"))
+            .expect("persisted lifecycle bytes should be readable");
     let rejected_reopen = run_rivets_in_dir(
         initialized_dir.path(),
         &["reopen", &issue_id, "--reason", "Must not append"],
     );
     assert!(!rejected_reopen.status.success());
     assert_eq!(
-        std::fs::read(initialized_dir.path().join(".rivets/issues.jsonl")).unwrap(),
+        std::fs::read(initialized_dir.path().join(".rivets/issues.jsonl"))
+            .expect("persisted lifecycle bytes should remain readable"),
         bytes_before_rejected_reopen,
+        "rejected reopen must preserve persisted bytes",
     );
 
     let second_close = run_rivets_in_dir(
@@ -988,9 +1001,13 @@ fn test_cli_closed_period_reopens_recloses_and_preserves_closed_edits(initialize
     );
     let contents: Vec<_> = closed_twice["notes"]
         .as_array()
-        .unwrap()
+        .expect("notes should be an array")
         .iter()
-        .map(|note| note["content"].as_str().unwrap())
+        .map(|note| {
+            note["content"]
+                .as_str()
+                .expect("note content should be text")
+        })
         .collect();
     assert_eq!(
         contents,

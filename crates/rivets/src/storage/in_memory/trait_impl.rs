@@ -1340,25 +1340,29 @@ mod tests {
         let created = storage
             .create(NewIssue {
                 title: "Lifecycle timeline".to_string(),
-                description: "Timestamp behavior".to_string(),
-                priority: 2,
-                issue_kind: IssueKind::Task,
-                assignee: None,
-                labels: Vec::new(),
-                design: None,
-                acceptance_criteria: None,
-                initial_note: None,
-                prerequisites: Vec::new(),
+                ..Default::default()
             })
             .await
             .expect("test Issue should be created");
         assert_eq!(created.created_at, created.updated_at);
         assert_eq!(created.closed_at, None);
 
-        let monday = timestamp("2026-09-21T09:00:00Z");
-        let tuesday = timestamp("2026-09-22T10:00:00Z");
-        let thursday = timestamp("2026-09-24T11:00:00Z");
+        // Pin creation before the literal event instants so the timeline is
+        // chronologically possible regardless of the host clock.
+        let sunday = timestamp("2025-09-21T08:00:00Z");
+        let monday = timestamp("2025-09-22T09:00:00Z");
+        let tuesday = timestamp("2025-09-23T10:00:00Z");
+        let thursday = timestamp("2025-09-25T11:00:00Z");
         let mut inner = storage.lock().await;
+        let created = {
+            let issue = inner
+                .issues
+                .get_mut(&created.id)
+                .expect("created Issue should be stored");
+            issue.created_at = sunday;
+            issue.updated_at = sunday;
+            issue.clone()
+        };
 
         let closed_monday = transition_at(
             &mut inner,
