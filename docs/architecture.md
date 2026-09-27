@@ -144,6 +144,18 @@ pub trait IssueStorage: Send + Sync {
 - **Hash-based IDs**: `{prefix}-{hash}` (e.g., `proj-a3f8`). The hash is SHA256 over `title|description|creator|timestamp|nonce`, base36-encoded with adaptive length (4 chars up to 500 issues, 5 up to 1,500, 6 beyond). IDs are **not** content-addressed: the timestamp and nonce inputs mean identical content produces different IDs. Collisions retry with increasing nonces, then by growing the hash length.
   The public `IdGenerator` can produce dot-suffixed child IDs when given a parent, but `IssueStorage::create` currently passes no parent and creates only top-level hash IDs.
 
+Lifecycle timestamps use the existing domain fields, with no additional wire
+schema or history store. `Issue::apply_status_transition` owns current-period
+closure semantics: close replaces `closed_at` with the event instant, and a
+transition to Open/In Progress clears it. The storage lifecycle mutation captures
+one event instant for Updated, closure, and the optional reason Note, validates
+the candidate, then commits it atomically. Created remains unchanged. Ordinary
+content edits while Closed preserve the closure instant; rejected transitions
+preserve the entire record.
+
+Compatibility loading preserves recorded timestamps, including unknown closure
+and stale legacy closure on non-Closed records, without backfill.
+
 ### 5. Storage Backends
 
 #### JSONL (default) — `JsonlBackedStorage`

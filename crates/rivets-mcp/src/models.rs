@@ -394,7 +394,7 @@ pub struct CloseParams {
     /// The issue ID to close.
     pub issue_id: String,
 
-    /// Reason for closing.
+    /// Optional reason Note, committed atomically with the same timestamp as `closed_at` and `updated_at`.
     pub reason: Option<String>,
 
     /// Optional workspace root (uses current context if not specified).
@@ -514,7 +514,7 @@ pub struct ReopenParams {
     /// The issue ID to reopen.
     pub issue_id: String,
 
-    /// Reason for reopening.
+    /// Optional reason Note, committed atomically with `updated_at` while `closed_at` is cleared.
     pub reason: Option<String>,
     /// Optional workspace root (uses current context if not specified).
     pub workspace_root: Option<String>,

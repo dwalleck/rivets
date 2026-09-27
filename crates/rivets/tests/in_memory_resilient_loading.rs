@@ -16,10 +16,12 @@ use rivets::domain::{
     BlockingDependency, DiscoveryOrigin, IssueId, IssueKind, IssueStatus, Label, LifecycleAction,
     NewIssue, RelatedAssociation, ResourceError, ResourceRole,
 };
+use rivets::error::{Error, StorageError};
 use rivets::storage::in_memory::{
     LoadWarning, MigrationField, load_from_jsonl, new_in_memory_storage, save_to_jsonl,
 };
 use rivets::storage::{StorageBackend, create_storage};
+use rstest::rstest;
 use std::io::Write;
 use tempfile::NamedTempFile;
 
@@ -34,6 +36,43 @@ use mixed_legacy::{
 // =============================================================================
 // Test Helpers
 // =============================================================================
+
+const LEGACY_CREATED_AT: &str = "2026-09-18T08:00:00Z";
+const LEGACY_UPDATED_AT: &str = "2026-09-19T08:00:00Z";
+
+/// A complete canonical JSONL Issue record with fixed Created/Updated values.
+fn canonical_issue_record(
+    id: &str,
+    status: &str,
+    assignee: Option<&str>,
+    closed_at: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "title": id,
+        "description": "Lifecycle timestamp fixture",
+        "status": status,
+        "priority": 2,
+        "issue_kind": "task",
+        "assignee": assignee,
+        "labels": [],
+        "design": null,
+        "acceptance_criteria": null,
+        "notes": [],
+        "resources": [],
+        "dependencies": [],
+        "created_at": LEGACY_CREATED_AT,
+        "updated_at": LEGACY_UPDATED_AT,
+        "closed_at": closed_at,
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TimestampDefect {
+    Missing,
+    Null,
+    Malformed,
+}
 
 fn create_temp_jsonl_file(content: &str) -> NamedTempFile {
     let mut file = NamedTempFile::new().expect("Failed to create temp file");
@@ -325,6 +364,220 @@ mod load_from_jsonl_tests {
         // Should have loaded 2 valid issues
         let all_issues = storage.export_all().await.unwrap();
         assert_eq!(all_issues.len(), 2);
+    }
+
+    fn at(value: &str) -> chrono::DateTime<Utc> {
+        value.parse().expect("fixture timestamp should be RFC 3339")
+    }
+
+    #[tokio::test]
+    async fn legacy_closed_and_stale_closure_timestamps_are_read_only_until_transition() {
+        let known_closed = canonical_issue_record(
+            "legacy-closed-known",
+            "closed",
+            None,
+            Some("2026-09-20T09:00:00Z"),
+        );
+        let mut missing_closed =
+            canonical_issue_record("legacy-closed-missing", "closed", None, None);
+        missing_closed
+            .as_object_mut()
+            .expect("fixture should be an object")
+            .remove("closed_at");
+        let stale_open = canonical_issue_record(
+            "legacy-open-stale",
+            "open",
+            Some("alice"),
+            Some("2026-09-17T07:00:00Z"),
+        );
+        let stale_in_progress = canonical_issue_record(
+            "legacy-progress-stale",
+            "in_progress",
+            Some("alice"),
+            Some("2026-09-17T07:00:00Z"),
+        );
+        let content = [known_closed, missing_closed, stale_open, stale_in_progress]
+            .into_iter()
+            .map(|record| record.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let file = create_temp_jsonl_file(&format!("{content}\n"));
+        let source_bytes = std::fs::read(file.path()).expect("fixture bytes should be readable");
+
+        let (mut storage, warnings) = load_from_jsonl(file.path(), "test".to_string())
+            .await
+            .expect("legacy lifecycle records should load");
+        assert!(warnings.is_empty(), "legacy timestamps should not warn");
+
+        let mut loaded = Vec::new();
+        for id in [
+            "legacy-closed-known",
+            "legacy-closed-missing",
+            "legacy-open-stale",
+            "legacy-progress-stale",
+        ] {
+            loaded.push(
+                storage
+                    .get(&IssueId::new(id))
+                    .await
+                    .expect("legacy record should be readable")
+                    .unwrap_or_else(|| panic!("legacy record {id} should be loaded")),
+            );
+        }
+        let [known, missing, stale, progress] = <[_; 4]>::try_from(loaded)
+            .unwrap_or_else(|_| panic!("four legacy records should be loaded"));
+        assert_eq!(known.closed_at, Some(at("2026-09-20T09:00:00Z")));
+        assert_eq!(missing.closed_at, None);
+        assert_eq!(stale.closed_at, Some(at("2026-09-17T07:00:00Z")));
+        assert_eq!(progress.closed_at, stale.closed_at);
+        for issue in [&known, &missing, &stale, &progress] {
+            assert_eq!(issue.created_at, at(LEGACY_CREATED_AT));
+            assert_eq!(issue.updated_at, at(LEGACY_UPDATED_AT));
+        }
+        assert_eq!(
+            std::fs::read(file.path()).expect("fixture bytes should remain readable"),
+            source_bytes,
+            "read-only loads must not rewrite legacy closure timestamps",
+        );
+        save_to_jsonl(storage.as_ref(), file.path())
+            .await
+            .expect("loaded legacy records should save");
+        let (reloaded, warnings) = load_from_jsonl(file.path(), "test".to_string())
+            .await
+            .expect("saved legacy records should reload");
+        assert!(warnings.is_empty(), "saved legacy records should not warn");
+        for expected in [&known, &missing, &stale, &progress] {
+            let actual = reloaded
+                .get(&expected.id)
+                .await
+                .expect("reloaded record should be readable")
+                .expect("reloaded record should be present");
+            assert_eq!(actual.created_at, expected.created_at);
+            assert_eq!(actual.updated_at, expected.updated_at);
+            assert_eq!(actual.closed_at, expected.closed_at);
+        }
+
+        let reopened_known = storage
+            .transition(&known.id, LifecycleAction::Reopen { reason: None })
+            .await
+            .expect("known Closed Issue should reopen");
+        assert_eq!(reopened_known.closed_at, None);
+        let reopened_missing = storage
+            .transition(&missing.id, LifecycleAction::Reopen { reason: None })
+            .await
+            .expect("Closed Issue without a closure timestamp should reopen");
+        assert_eq!(reopened_missing.closed_at, None);
+        let started_stale = storage
+            .transition(&stale.id, LifecycleAction::Start)
+            .await
+            .expect("stale Open Issue should start");
+        assert_eq!(started_stale.status, IssueStatus::InProgress);
+        assert_eq!(started_stale.closed_at, None);
+        let returned = storage
+            .transition(&progress.id, LifecycleAction::ReturnToOpen)
+            .await
+            .expect("stale In Progress Issue should return to Open");
+        assert_eq!(returned.status, IssueStatus::Open);
+        assert_eq!(returned.assignee.as_deref(), Some("alice"));
+        assert_eq!(returned.closed_at, None);
+        save_to_jsonl(storage.as_ref(), file.path())
+            .await
+            .expect("transitioned records should save");
+        let (reloaded, warnings) = load_from_jsonl(file.path(), "test".to_string())
+            .await
+            .expect("transitioned records should reload");
+        assert!(warnings.is_empty(), "transitioned records should not warn");
+        for expected in [reopened_known, reopened_missing, started_stale, returned] {
+            let actual = reloaded
+                .get(&expected.id)
+                .await
+                .expect("reloaded record should be readable")
+                .expect("reloaded record should be present");
+            assert_eq!(actual.created_at, at(LEGACY_CREATED_AT));
+            assert_eq!(actual.updated_at, expected.updated_at);
+            assert_eq!(actual.closed_at, None);
+        }
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn required_timestamps_reject_missing_null_and_malformed_records(
+        #[values("created_at", "updated_at")] field: &str,
+        #[values(
+            TimestampDefect::Missing,
+            TimestampDefect::Null,
+            TimestampDefect::Malformed
+        )]
+        defect: TimestampDefect,
+    ) {
+        let mut record = canonical_issue_record(&format!("bad-{field}"), "open", None, None);
+        let object = record
+            .as_object_mut()
+            .expect("timestamp fixture should be an object");
+        match defect {
+            TimestampDefect::Missing => {
+                object.remove(field);
+            }
+            TimestampDefect::Null => {
+                object.insert(field.to_string(), serde_json::Value::Null);
+            }
+            TimestampDefect::Malformed => {
+                object.insert(field.to_string(), serde_json::json!("not-a-timestamp"));
+            }
+        }
+        let file = create_temp_jsonl_file(&format!("{record}\n"));
+        let source_bytes =
+            std::fs::read(file.path()).expect("invalid fixture bytes should be readable");
+
+        let (storage, warnings) = load_from_jsonl(file.path(), "test".to_string())
+            .await
+            .expect("invalid timestamps should be reported by resilient loading");
+        assert_eq!(
+            warnings.len(),
+            1,
+            "{field}={defect:?} should emit one warning"
+        );
+        assert!(
+            matches!(
+                &warnings[0],
+                LoadWarning::MalformedJson { line_number: 1, .. }
+            ),
+            "{field}={defect:?} should be a malformed-record warning: {:?}",
+            warnings[0],
+        );
+        assert!(
+            storage
+                .export_all()
+                .await
+                .expect("excluded records should be enumerable")
+                .is_empty(),
+            "{field}={defect:?} record must be excluded",
+        );
+
+        let mut guarded = create_storage(
+            StorageBackend::Jsonl(file.path().to_path_buf()),
+            "test".into(),
+        )
+        .await
+        .expect("JSONL storage should load invalid-record warnings");
+        let result = guarded
+            .create(NewIssue {
+                title: "Must not write through partial load".to_string(),
+                ..Default::default()
+            })
+            .await;
+        assert!(
+            matches!(
+                &result,
+                Err(Error::Storage(StorageError::UnsafePartialLoad(_)))
+            ),
+            "{field}={defect:?} mutation should be guarded: {result:?}",
+        );
+        assert_eq!(
+            std::fs::read(file.path()).expect("guarded source should remain readable"),
+            source_bytes,
+            "{field}={defect:?} guard must preserve source bytes",
+        );
     }
 
     #[tokio::test]

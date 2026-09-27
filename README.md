@@ -102,6 +102,18 @@ rivets start demo-a3f8
 rivets close demo-a3f8 --reason "Fixed in commit abc123" # Closing clears Assignment
 ```
 
+Closing records entry into the **current Closed period**. Reopening clears
+`closed_at`; reclosing records a fresh closure. Each transition sets `updated_at`
+and its optional reason Note to the same event timestamp, preserving `created_at`.
+Ordinary edits while Closed leave the closure instant unchanged. Rejected
+transitions change neither the record nor its Note history.
+
+New Issues start with `created_at == updated_at` and no closure. Existing recorded
+closure values remain accepted legacy approximations; missing closure stays
+unknown. Loading never invents history or rewrites a legacy Open/In Progress
+record merely because it retains `closed_at`; future lifecycle transitions
+establish current-period semantics.
+
 ### Blocking Dependencies
 
 ```bash

@@ -21,7 +21,7 @@ use crate::reporting::statistics::{aggregate, is_intrinsically_ready};
 
 use crate::storage::IssueStorage;
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use petgraph::Direction;
 use petgraph::visit::EdgeRef;
 use std::collections::HashSet;
@@ -117,6 +117,91 @@ fn matches_ready_filter(issue: &Issue, filter: &ReadyFilter) -> bool {
             filter.issue_kind.as_ref(),
             filter.label.as_ref(),
         )
+}
+
+fn transition_at(
+    inner: &mut InMemoryStorageInner,
+    id: &IssueId,
+    action: LifecycleAction,
+    now: DateTime<Utc>,
+) -> Result<Issue> {
+    let mut candidate = inner
+        .issues
+        .get(id)
+        .cloned()
+        .ok_or_else(|| Error::IssueNotFound(id.clone()))?;
+
+    match action {
+        LifecycleAction::Start => {
+            candidate
+                .apply_status_transition(IssueStatus::InProgress, now)
+                .map_err(StorageError::InvalidStatusTransition)?;
+        }
+        LifecycleAction::ReturnToOpen => {
+            if candidate.status != IssueStatus::InProgress {
+                return Err(StorageError::InvalidStatusTransition(
+                    crate::domain::StatusTransitionError::NotInProgress {
+                        current: candidate.status,
+                    },
+                )
+                .into());
+            }
+            candidate
+                .apply_status_transition(IssueStatus::Open, now)
+                .map_err(StorageError::InvalidStatusTransition)?;
+        }
+        LifecycleAction::Close { reason } => {
+            if candidate.issue_kind == IssueKind::Epic {
+                let child_ids = active_parentage_child_ids(inner, id)?;
+                if !child_ids.is_empty() {
+                    return Err(ParentageError::ActiveChildren {
+                        epic_id: id.clone(),
+                        child_ids,
+                    }
+                    .into());
+                }
+            }
+            candidate
+                .apply_status_transition(IssueStatus::Closed, now)
+                .map_err(StorageError::InvalidStatusTransition)?;
+            if let Some(reason) = reason {
+                candidate.append_note(reason, now);
+            }
+        }
+        LifecycleAction::Reopen { reason } => {
+            candidate
+                .status
+                .validate_reopen()
+                .map_err(StorageError::InvalidStatusTransition)?;
+            if let Some(parentage) = parentage_of_impl(&inner.graph, &inner.node_map, id)? {
+                let parent = inner
+                    .issues
+                    .get(parentage.parent_id())
+                    .ok_or_else(|| Error::IssueNotFound(parentage.parent_id().clone()))?;
+                if parent.status == IssueStatus::Closed {
+                    return Err(ParentageError::ClosedParent {
+                        child_id: id.clone(),
+                        parent_id: parent.id.clone(),
+                    }
+                    .into());
+                }
+            }
+            candidate
+                .apply_status_transition(IssueStatus::Open, now)
+                .map_err(StorageError::InvalidStatusTransition)?;
+            if let Some(reason) = reason {
+                candidate.append_note(reason, now);
+            }
+        }
+    }
+
+    candidate.validate().map_err(StorageError::Validation)?;
+    candidate
+        .validate_assignment_state()
+        .map_err(StorageError::Assignment)?;
+    candidate.updated_at = now;
+    inner.issues.insert(id.clone(), candidate.clone());
+    Ok(candidate)
 }
 
 #[async_trait]
@@ -264,84 +349,7 @@ impl IssueStorage for InMemoryStorage {
 
     async fn transition(&mut self, id: &IssueId, action: LifecycleAction) -> Result<Issue> {
         let mut inner = self.lock().await;
-        let mut candidate = inner
-            .issues
-            .get(id)
-            .cloned()
-            .ok_or_else(|| Error::IssueNotFound(id.clone()))?;
-        let now = Utc::now();
-
-        match action {
-            LifecycleAction::Start => {
-                candidate
-                    .apply_status_transition(IssueStatus::InProgress, now)
-                    .map_err(StorageError::InvalidStatusTransition)?;
-            }
-            LifecycleAction::ReturnToOpen => {
-                if candidate.status != IssueStatus::InProgress {
-                    return Err(StorageError::InvalidStatusTransition(
-                        crate::domain::StatusTransitionError::NotInProgress {
-                            current: candidate.status,
-                        },
-                    )
-                    .into());
-                }
-                candidate
-                    .apply_status_transition(IssueStatus::Open, now)
-                    .map_err(StorageError::InvalidStatusTransition)?;
-            }
-            LifecycleAction::Close { reason } => {
-                if candidate.issue_kind == IssueKind::Epic {
-                    let child_ids = active_parentage_child_ids(&inner, id)?;
-                    if !child_ids.is_empty() {
-                        return Err(ParentageError::ActiveChildren {
-                            epic_id: id.clone(),
-                            child_ids,
-                        }
-                        .into());
-                    }
-                }
-                candidate
-                    .apply_status_transition(IssueStatus::Closed, now)
-                    .map_err(StorageError::InvalidStatusTransition)?;
-                if let Some(reason) = reason {
-                    candidate.append_note(reason, now);
-                }
-            }
-            LifecycleAction::Reopen { reason } => {
-                candidate
-                    .status
-                    .validate_reopen()
-                    .map_err(StorageError::InvalidStatusTransition)?;
-                if let Some(parentage) = parentage_of_impl(&inner.graph, &inner.node_map, id)? {
-                    let parent = inner
-                        .issues
-                        .get(parentage.parent_id())
-                        .ok_or_else(|| Error::IssueNotFound(parentage.parent_id().clone()))?;
-                    if parent.status == IssueStatus::Closed {
-                        return Err(ParentageError::ClosedParent {
-                            child_id: id.clone(),
-                            parent_id: parent.id.clone(),
-                        }
-                        .into());
-                    }
-                }
-                candidate
-                    .apply_status_transition(IssueStatus::Open, now)
-                    .map_err(StorageError::InvalidStatusTransition)?;
-                if let Some(reason) = reason {
-                    candidate.append_note(reason, now);
-                }
-            }
-        }
-
-        candidate.validate().map_err(StorageError::Validation)?;
-        candidate
-            .validate_assignment_state()
-            .map_err(StorageError::Assignment)?;
-        candidate.updated_at = now;
-        inner.issues.insert(id.clone(), candidate.clone());
-        Ok(candidate)
+        transition_at(&mut inner, id, action, Utc::now())
     }
 
     async fn append_note(&mut self, id: &IssueId, content: NoteContent) -> Result<Issue> {
@@ -1193,6 +1201,7 @@ mod tests {
     use super::*;
     use crate::domain::{IssueFilter, IssueKind, IssueStatus, Label, ReadyAssignmentFilter};
     use crate::storage::in_memory::inner::InMemoryStorageInner;
+    use chrono::{DateTime, Utc};
     use rstest::rstest;
     use std::collections::BTreeSet;
     use std::sync::Arc;
@@ -1316,6 +1325,117 @@ mod tests {
             ..Default::default()
         };
         assert!(!matches_filter(&issue, &filter));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_transition_at_records_current_closed_period_and_shared_event_time() {
+        fn timestamp(value: &str) -> DateTime<Utc> {
+            DateTime::parse_from_rfc3339(value)
+                .expect("test timestamp should be valid RFC 3339")
+                .with_timezone(&Utc)
+        }
+
+        let mut storage: InMemoryStorage =
+            Arc::new(Mutex::new(InMemoryStorageInner::new("test".to_string())));
+        let created = storage
+            .create(NewIssue {
+                title: "Lifecycle timeline".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("test Issue should be created");
+        assert_eq!(created.created_at, created.updated_at);
+        assert_eq!(created.closed_at, None);
+
+        // Pin creation before the literal event instants so the timeline is
+        // chronologically possible regardless of the host clock.
+        let sunday = timestamp("2025-09-21T08:00:00Z");
+        let monday = timestamp("2025-09-22T09:00:00Z");
+        let tuesday = timestamp("2025-09-23T10:00:00Z");
+        let thursday = timestamp("2025-09-25T11:00:00Z");
+        let mut inner = storage.lock().await;
+        let created = {
+            let issue = inner
+                .issues
+                .get_mut(&created.id)
+                .expect("created Issue should be stored");
+            issue.created_at = sunday;
+            issue.updated_at = sunday;
+            issue.clone()
+        };
+
+        let closed_monday = transition_at(
+            &mut inner,
+            &created.id,
+            LifecycleAction::Close {
+                reason: Some(
+                    NoteContent::closing_reason("Monday completion")
+                        .expect("closing reason should be valid"),
+                ),
+            },
+            monday,
+        )
+        .expect("Monday close should succeed");
+        assert_eq!(closed_monday.status, IssueStatus::Closed);
+        assert_eq!(closed_monday.created_at, created.created_at);
+        assert_eq!(closed_monday.updated_at, monday);
+        assert_eq!(closed_monday.closed_at, Some(monday));
+        assert_eq!(closed_monday.notes().len(), 1);
+        assert_eq!(closed_monday.notes()[0].created_at(), &monday);
+
+        let reopened_tuesday = transition_at(
+            &mut inner,
+            &created.id,
+            LifecycleAction::Reopen {
+                reason: Some(
+                    NoteContent::reopening_reason("Tuesday follow-up")
+                        .expect("reopening reason should be valid"),
+                ),
+            },
+            tuesday,
+        )
+        .expect("Tuesday reopen should succeed");
+        assert_eq!(reopened_tuesday.status, IssueStatus::Open);
+        assert_eq!(reopened_tuesday.created_at, created.created_at);
+        assert_eq!(reopened_tuesday.updated_at, tuesday);
+        assert_eq!(reopened_tuesday.closed_at, None);
+        assert_eq!(reopened_tuesday.notes().len(), 2);
+        assert_eq!(reopened_tuesday.notes()[1].created_at(), &tuesday);
+
+        let closed_thursday = transition_at(
+            &mut inner,
+            &created.id,
+            LifecycleAction::Close {
+                reason: Some(
+                    NoteContent::closing_reason("Thursday completion")
+                        .expect("closing reason should be valid"),
+                ),
+            },
+            thursday,
+        )
+        .expect("Thursday close should succeed");
+        assert_eq!(closed_thursday.status, IssueStatus::Closed);
+        assert_eq!(closed_thursday.created_at, created.created_at);
+        assert_eq!(closed_thursday.updated_at, thursday);
+        assert_eq!(closed_thursday.closed_at, Some(thursday));
+        assert_eq!(closed_thursday.notes().len(), 3);
+        assert_eq!(closed_thursday.notes()[2].created_at(), &thursday);
+        drop(inner);
+
+        let edited_closed = storage
+            .update(
+                &created.id,
+                IssueUpdate::builder()
+                    .title(Some("Edited after Thursday close".to_string()))
+                    .build()
+                    .expect("content edit should be valid"),
+            )
+            .await
+            .expect("Closed Issue content edit should succeed");
+        assert_eq!(edited_closed.status, IssueStatus::Closed);
+        assert_eq!(edited_closed.created_at, created.created_at);
+        assert!(edited_closed.updated_at > thursday);
+        assert_eq!(edited_closed.closed_at, Some(thursday));
     }
 
     #[tokio::test]

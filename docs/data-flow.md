@@ -445,6 +445,19 @@ The transition rules are owned by the domain (`Issue::apply_status_transition`,
 - Closed → In Progress is rejected; reopen to Open first;
 - closing Closed and updating Open to Open are rejected.
 
+The storage transition captures one event instant before applying the domain
+transition to a candidate. Closing sets `closed_at` to that instant; reopening
+clears it; reclosing records the new instant rather than retaining the first
+closure. Updated and an optional reason Note use that same instant. Created
+never changes. Parentage, state and Assignment validation must pass before the
+candidate is committed; rejection leaves timestamps and history unchanged.
+Ordinary edits to a Closed Issue update Updated without moving its closure.
+
+Loading retains historical values: a recorded closure is an accepted legacy
+approximation, missing closure remains unknown, and a stale closure on a
+non-Closed record does not trigger a read-time rewrite. Future transitions
+establish the current Closed period.
+
 Claim is a compare-and-set mutation. It requires an Open, unblocked Issue; an
 unassigned Issue becomes owned by the claimant, the current owner may repeat the
 same claim without changing timestamps, and another claimant receives a typed

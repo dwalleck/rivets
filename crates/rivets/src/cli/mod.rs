@@ -133,12 +133,16 @@ pub enum Commands {
 
     /// Close an issue
     ///
-    /// Marks an issue as completed. Optionally provide a reason for closing.
+    /// Records entry into the current Closed period and clears Assignment.
+    /// Closed and Updated share one event timestamp with the optional reason
+    /// Note; Created is preserved. Reclosing after reopen records a fresh time.
     Close(CloseArgs),
 
     /// Reopen a closed issue
     ///
-    /// Changes a closed issue's status back to open. Optionally provide a reason.
+    /// Returns a Closed issue to unassigned Open and clears its Closed timestamp.
+    /// Updated and the optional reason Note share one event timestamp;
+    /// Created is preserved.
     Reopen(ReopenArgs),
 
     /// Delete an issue permanently
