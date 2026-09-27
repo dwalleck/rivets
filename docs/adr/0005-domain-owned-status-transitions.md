@@ -17,9 +17,10 @@ Open retains it, closing clears it, and reopening creates an unassigned Open
 Issue.
 
 `IssueStorage::transition` accepts a `LifecycleAction`: Start, ReturnToOpen,
-Close, or Reopen. ReturnToOpen requires In Progress; Reopen requires Closed.
-Storage checks Parentage and commits the state change and optional reason Note
-under one lock. General Update accepts a validated, nonempty `IssueUpdate`
+Close, or Reopen. Start requires Open; ReturnToOpen requires In Progress; Reopen
+requires Closed. Storage checks Parentage and commits the state change and
+optional reason Note under one lock.
+General Update accepts a validated, nonempty `IssueUpdate`
 containing only title, description, Priority, Kind, design, and acceptance criteria.
 
 Lifecycle transitions preserve Created and use one event timestamp for Updated,

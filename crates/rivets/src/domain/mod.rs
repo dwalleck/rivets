@@ -353,18 +353,11 @@ impl Issue {
         }
 
         self.status = target;
-        match target {
-            IssueStatus::Closed => {
-                self.assignee = None;
-                self.closed_at = Some(changed_at);
-            }
-            IssueStatus::Open if current == IssueStatus::Closed => {
-                self.assignee = None;
-                self.closed_at = None;
-            }
-            IssueStatus::Open | IssueStatus::InProgress => {
-                self.closed_at = None;
-            }
+        // Closure marks the current Closed period only, so any non-Closed
+        // target clears it, including stale legacy values on active records.
+        self.closed_at = (target == IssueStatus::Closed).then_some(changed_at);
+        if target == IssueStatus::Closed || current == IssueStatus::Closed {
+            self.assignee = None;
         }
         Ok(())
     }
@@ -611,6 +604,7 @@ impl IssueStatus {
     ///
     /// - `Closed` → `Closed`: an Issue cannot be closed twice.
     /// - `Closed` → `In Progress`: a Closed Issue reopens through `Open`.
+    /// - `In Progress` → `In Progress`: only an Open Issue can be started.
     /// - `Open` → `Open`: only Closed and In Progress Issues can target Open.
     ///
     /// `In Progress` → `Open` is valid and retains Assignment at the Issue
@@ -626,6 +620,9 @@ impl IssueStatus {
             }
             (Self::Closed, Self::InProgress) => {
                 Err(StatusTransitionError::MustReopenToOpen { target })
+            }
+            (Self::InProgress, Self::InProgress) => {
+                Err(StatusTransitionError::AlreadyInProgress { current: self })
             }
             (Self::Closed | Self::InProgress, Self::Open) => Ok(()),
             (current, Self::Open) => Err(StatusTransitionError::NotClosed { current }),
@@ -667,6 +664,12 @@ pub enum StatusTransitionError {
     #[error("Issue is not closed (status: {current})")]
     NotClosed {
         /// The Issue's status when the reopen was rejected.
+        current: IssueStatus,
+    },
+    /// Starting an Issue that is already In Progress.
+    #[error("Issue is already in progress (status: {current})")]
+    AlreadyInProgress {
+        /// The Issue's status when the start was rejected.
         current: IssueStatus,
     },
     /// Returning to Open is valid only from In Progress.
@@ -2414,6 +2417,7 @@ mod tests {
         #[case::open_to_open(IssueStatus::Open, IssueStatus::Open, false)]
         #[case::in_progress_to_open(IssueStatus::InProgress, IssueStatus::Open, true)]
         #[case::open_to_in_progress(IssueStatus::Open, IssueStatus::InProgress, true)]
+        #[case::in_progress_to_in_progress(IssueStatus::InProgress, IssueStatus::InProgress, false)]
         fn transition_matrix(
             #[case] current: IssueStatus,
             #[case] target: IssueStatus,
@@ -2454,6 +2458,154 @@ mod tests {
             assert_eq!(
                 error.to_string(),
                 format!("Issue is not closed (status: {current})")
+            );
+        }
+
+        fn at(value: &str) -> DateTime<Utc> {
+            DateTime::parse_from_rfc3339(value)
+                .expect("test timestamp should be valid RFC 3339")
+                .with_timezone(&Utc)
+        }
+
+        /// An Issue whose `closed_at` may be a stale legacy value on a
+        /// non-Closed record.
+        fn issue_in(
+            status: IssueStatus,
+            assignee: Option<&str>,
+            closed_at: Option<DateTime<Utc>>,
+        ) -> Issue {
+            Issue {
+                id: IssueId::new("test-1"),
+                title: "Test".to_string(),
+                description: String::new(),
+                status,
+                priority: 2,
+                issue_kind: IssueKind::Task,
+                assignee: assignee.map(str::to_string),
+                labels: vec![],
+                design: None,
+                acceptance_criteria: None,
+                notes: vec![],
+                resources: vec![],
+                next_resource_id: 1,
+                dependencies: vec![],
+                created_at: at("2026-09-18T08:00:00Z"),
+                updated_at: at("2026-09-19T08:00:00Z"),
+                closed_at,
+            }
+        }
+
+        const STALE: &str = "2026-09-17T07:00:00Z";
+        const EARLIER_CLOSE: &str = "2026-09-20T09:00:00Z";
+        const EVENT: &str = "2026-09-24T11:00:00Z";
+
+        #[rstest]
+        #[case::open_closes(
+            IssueStatus::Open,
+            Some("alice"),
+            None,
+            IssueStatus::Closed,
+            Some(EVENT),
+            None
+        )]
+        #[case::stale_open_closes_fresh(
+            IssueStatus::Open,
+            Some("alice"),
+            Some(STALE),
+            IssueStatus::Closed,
+            Some(EVENT),
+            None
+        )]
+        #[case::stale_in_progress_closes_fresh(
+            IssueStatus::InProgress,
+            Some("alice"),
+            Some(STALE),
+            IssueStatus::Closed,
+            Some(EVENT),
+            None
+        )]
+        #[case::closed_reopens_unassigned(
+            IssueStatus::Closed,
+            None,
+            Some(EARLIER_CLOSE),
+            IssueStatus::Open,
+            None,
+            None
+        )]
+        #[case::stale_open_starts(
+            IssueStatus::Open,
+            Some("alice"),
+            Some(STALE),
+            IssueStatus::InProgress,
+            None,
+            Some("alice")
+        )]
+        #[case::stale_in_progress_returns_to_open(
+            IssueStatus::InProgress,
+            Some("alice"),
+            Some(STALE),
+            IssueStatus::Open,
+            None,
+            Some("alice")
+        )]
+        fn apply_status_transition_sets_current_closed_period(
+            #[case] current: IssueStatus,
+            #[case] assignee: Option<&str>,
+            #[case] closed_at: Option<&str>,
+            #[case] target: IssueStatus,
+            #[case] expected_closed_at: Option<&str>,
+            #[case] expected_assignee: Option<&str>,
+        ) {
+            let mut issue = issue_in(current, assignee, closed_at.map(at));
+            let before = issue.clone();
+
+            issue
+                .apply_status_transition(target, at(EVENT))
+                .expect("transition should be valid");
+
+            assert_eq!(issue.status, target);
+            assert_eq!(issue.closed_at, expected_closed_at.map(at));
+            assert_eq!(issue.assignee.as_deref(), expected_assignee);
+            assert_eq!(issue.created_at, before.created_at);
+            assert_eq!(
+                issue.updated_at, before.updated_at,
+                "storage, not the domain transition, owns Updated"
+            );
+        }
+
+        #[rstest]
+        #[case::closed_to_closed(IssueStatus::Closed, None, IssueStatus::Closed)]
+        #[case::in_progress_to_in_progress(
+            IssueStatus::InProgress,
+            Some("alice"),
+            IssueStatus::InProgress
+        )]
+        #[case::unassigned_start(IssueStatus::Open, None, IssueStatus::InProgress)]
+        fn rejected_status_transition_leaves_issue_unchanged(
+            #[case] current: IssueStatus,
+            #[case] assignee: Option<&str>,
+            #[case] target: IssueStatus,
+        ) {
+            let mut issue = issue_in(current, assignee, Some(at(STALE)));
+            let before = issue.clone();
+
+            issue
+                .apply_status_transition(target, at(EVENT))
+                .expect_err("transition should be rejected");
+
+            assert_eq!(
+                (
+                    issue.status,
+                    &issue.assignee,
+                    issue.closed_at,
+                    issue.updated_at
+                ),
+                (
+                    before.status,
+                    &before.assignee,
+                    before.closed_at,
+                    before.updated_at
+                ),
             );
         }
 

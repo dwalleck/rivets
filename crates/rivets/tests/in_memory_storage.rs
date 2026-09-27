@@ -2404,6 +2404,27 @@ async fn workflow_transition_assignment_matrix() {
         .await
         .expect("assigned target should become active");
     assert_eq!(active.assignee.as_deref(), Some("alice"));
+    assert!(matches!(
+        storage
+            .transition(&assigned.id, LifecycleAction::Start)
+            .await,
+        Err(Error::Storage(StorageError::InvalidStatusTransition(
+            rivets::domain::StatusTransitionError::AlreadyInProgress {
+                current: IssueStatus::InProgress,
+            }
+        )))
+    ));
+    assert_eq!(
+        issue_snapshot(
+            &storage
+                .get(&assigned.id)
+                .await
+                .expect("get should succeed")
+                .expect("target should remain")
+        ),
+        issue_snapshot(&active),
+        "a repeated Start must not touch the record"
+    );
 
     let open_again = storage
         .transition(&assigned.id, LifecycleAction::ReturnToOpen)

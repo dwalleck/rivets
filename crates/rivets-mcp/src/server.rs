@@ -189,7 +189,7 @@ impl RivetsMcpServer {
 
     /// Start an Issue, moving it to In Progress.
     #[tool(
-        description = "Start an issue by moving it from Open to In Progress. The domain enforces Assignment and other lifecycle invariants. Uses workspace_root if provided, otherwise uses current context."
+        description = "Start an issue by moving it from Open to In Progress; an issue already In Progress is rejected. The domain enforces Assignment and other lifecycle invariants. Uses workspace_root if provided, otherwise uses current context."
     )]
     async fn start(
         &self,
@@ -362,7 +362,7 @@ impl RivetsMcpServer {
 
     /// Close an issue.
     #[tool(
-        description = "Close an issue and clear Assignment. Records the current Closed period: closed_at, updated_at, and an optional reason Note share one event timestamp; created_at is preserved. Reclosing after reopen records a fresh closure. Uses workspace_root if provided, otherwise uses current context."
+        description = "Close (complete) an issue: mark work as done when you've finished implementing/fixing it. Clears Assignment and records the current Closed period: closed_at, updated_at, and an optional reason Note share one event timestamp; created_at is preserved. Reclosing after reopen records a fresh closure. Uses workspace_root if provided, otherwise uses current context."
     )]
     async fn close(
         &self,
@@ -675,7 +675,7 @@ impl RivetsMcpServer {
 
     /// Reopen a closed issue.
     #[tool(
-        description = "Reopen a Closed issue as unassigned Open and clear closed_at. updated_at and an optional reason Note share one event timestamp; created_at is preserved. Uses workspace_root if provided, otherwise uses current context."
+        description = "Reopen a Closed issue when work needs to continue or was not actually complete. It becomes unassigned Open and closed_at is cleared; updated_at and an optional reason Note share one event timestamp; created_at is preserved. Uses workspace_root if provided, otherwise uses current context."
     )]
     async fn reopen(
         &self,
