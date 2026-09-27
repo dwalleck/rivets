@@ -257,8 +257,9 @@ Each line is a canonical record written by `CanonicalIssueRecord` (the persisted
   Identity-preserving loads retain Created and Updated. Recorded legacy closure
   remains an accepted approximation; absent closure remains unknown, including
   on Closed Issues. Reading stale `closed_at` on Open/In Progress does not rewrite
-  the record. Future transitions clear closure when leaving Closed and assign a
-  fresh instant when entering Closed.
+  the record. Future transitions assign a fresh instant when entering Closed and
+  clear closure on every transition to Open or In Progress, including Start and
+  Return to Open on a legacy record that still carries one.
 - Lifecycle transitions commit state, Assignment effects, Updated, current
   closure and an optional reason Note atomically with one event timestamp.
   Rejection preserves the record; content edits while Closed preserve closure.

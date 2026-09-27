@@ -114,10 +114,6 @@ unknown. Loading never invents history or rewrites a legacy Open/In Progress
 record merely because it retains `closed_at`; future lifecycle transitions
 establish current-period semantics.
 
-This implements the lifecycle slice (`rivets-1nhb`) only. Date filters,
-same-value content/resource update suppression, and direct relationship-endpoint
-timestamp changes remain separate tasks under `rivets-ffqs`.
-
 ### Blocking Dependencies
 
 ```bash

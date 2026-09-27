@@ -71,7 +71,7 @@
     },
     {
       "id": "current-closed-period",
-      "contract": "Lifecycle transitions preserve Created. Close records the current Closed period, Reopen clears it, and Reclose records a fresh instant. Updated and an optional reason Note share the event timestamp atomically; ordinary Closed edits preserve closure and rejected transitions preserve the record. Existing recorded closure remains a legacy approximation, absent closure remains unknown, and reads do not rewrite stale closure data. This covers rivets-1nhb only; date predicates, same-value content/resource suppression and relationship endpoint timestamps remain separate rivets-ffqs slices.",
+      "contract": "Lifecycle transitions preserve Created. Close records the current Closed period, Reopen clears it, and Reclose records a fresh instant. Updated and an optional reason Note share the event timestamp atomically; ordinary Closed edits preserve closure and rejected transitions preserve the record. Existing recorded closure remains a legacy approximation, absent closure remains unknown, and reads do not rewrite stale closure data.",
       "status": "conformant",
       "evidence": [
         "crates/rivets/tests/cli_tests.rs::test_cli_closed_period_reopens_recloses_and_preserves_closed_edits",

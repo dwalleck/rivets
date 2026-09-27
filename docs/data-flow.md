@@ -456,9 +456,7 @@ Ordinary edits to a Closed Issue update Updated without moving its closure.
 Loading retains historical values: a recorded closure is an accepted legacy
 approximation, missing closure remains unknown, and a stale closure on a
 non-Closed record does not trigger a read-time rewrite. Future transitions
-establish the current Closed period. This lifecycle behavior is implemented;
-date query predicates, same-value content/resource suppression and relationship
-endpoint timestamp changes are separate slices of `rivets-ffqs`.
+establish the current Closed period.
 
 Claim is a compare-and-set mutation. It requires an Open, unblocked Issue; an
 unassigned Issue becomes owned by the claimant, the current owner may repeat the

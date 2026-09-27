@@ -154,10 +154,7 @@ content edits while Closed preserve the closure instant; rejected transitions
 preserve the entire record.
 
 Compatibility loading preserves recorded timestamps, including unknown closure
-and stale legacy closure on non-Closed records, without backfill. This is the
-implemented lifecycle slice of `rivets-ffqs`; date predicates, general same-value
-content/resource update suppression and direct relationship-endpoint timestamp
-changes remain separate work.
+and stale legacy closure on non-Closed records, without backfill.
 
 ### 5. Storage Backends
 
